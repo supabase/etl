@@ -260,7 +260,8 @@ pub async fn load_table_schema_at_snapshot(
     let schema_name: String = first_row.get("schema_name");
     let table_name: String = first_row.get("table_name");
     let snapshot_id_str: String = first_row.get("snapshot_id");
-    let snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str);
+    let snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str)
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
     let mut table_schema = TableSchema::with_snapshot_id(
         table_id,
@@ -332,7 +333,8 @@ pub async fn load_table_schemas_at_snapshot(
         let schema_name: String = row.get("schema_name");
         let table_name: String = row.get("table_name");
         let snapshot_id_str: String = row.get("snapshot_id");
-        let row_snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str);
+        let row_snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str)
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
 
         let entry = table_schemas.entry(table_id).or_insert_with(|| {
             TableSchema::with_snapshot_id(

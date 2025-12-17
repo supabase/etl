@@ -54,6 +54,17 @@ impl ReplicationMasks {
         let guard = self.inner.read().await;
         guard.get(table_id).cloned()
     }
+
+    /// Removes the replication mask for a table.
+    ///
+    /// This is called after processing a DDL schema change message to invalidate the cached
+    /// mask. While PostgreSQL guarantees that a RELATION message will be sent before any DML
+    /// events after a schema change, we proactively invalidate the mask to ensure consistency.
+    /// The next RELATION message will rebuild the mask with the updated schema.
+    pub async fn remove(&self, table_id: &TableId) {
+        let mut guard = self.inner.write().await;
+        guard.remove(table_id);
+    }
 }
 
 #[cfg(test)]

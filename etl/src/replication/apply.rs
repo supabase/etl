@@ -1078,7 +1078,15 @@ where
             .await
         }
         LogicalReplicationMessage::Message(message_body) => {
-            handle_logical_message(state, start_lsn, message_body, hook, schema_store).await
+            handle_logical_message(
+                state,
+                start_lsn,
+                message_body,
+                hook,
+                schema_store,
+                replication_masks,
+            )
+            .await
         }
         message => {
             debug!("received unsupported message: {:?}", message);
@@ -1527,6 +1535,7 @@ async fn handle_logical_message<S, T>(
     message: &protocol::MessageBody,
     hook: &T,
     schema_store: &S,
+    replication_masks: &ReplicationMasks,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore,
@@ -1535,27 +1544,40 @@ where
     // If the prefix is unknown, we don't want to process it.
     let prefix = message.prefix()?;
     if prefix != DDL_MESSAGE_PREFIX {
+        info!(
+            prefix = %prefix,
+            "received logical message with unknown prefix, discarding"
+        );
+
         return Ok(HandleMessageResult::no_event());
     }
+
+    // DDL messages must be transactional (emitted with transactional=true in pg_logical_emit_message).
+    // This ensures they are part of a transaction and have a valid commit LSN for ordering.
+    let Some(remote_final_lsn) = state.remote_final_lsn else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Invalid transaction state",
+            "DDL schema change messages must be transactional (transactional=true). \
+             Received a DDL message outside of a transaction boundary."
+        );
+    };
 
     let content = message.content()?;
     let Ok(schema_change_message) = parse_schema_change_message(content) else {
         bail!(
-            ErrorKind::SourceConnectionFailed,
-            "PostgreSQL connection has been closed during the apply loop"
+            ErrorKind::InvalidData,
+            "Failed to parse DDL schema change message",
+            "Invalid JSON format in schema change message content"
         );
     };
 
     let table_id = TableId::new(schema_change_message.table_id as u32);
-    // TODO: check if this check is required or we can leverage the idempotency of schema writing and
-    //  we always unconditionally update the schema.
-    if let Some(remote_final_lsn) = state.remote_final_lsn {
-        if !hook
-            .should_apply_changes(table_id, remote_final_lsn)
-            .await?
-        {
-            return Ok(HandleMessageResult::no_event());
-        }
+    if !hook
+        .should_apply_changes(table_id, remote_final_lsn)
+        .await?
+    {
+        return Ok(HandleMessageResult::no_event());
     }
 
     info!(
@@ -1576,6 +1598,11 @@ where
 
     // Update the current schema snapshot in the state.
     state.update_schema_snapshot_id(snapshot_id);
+
+    // Invalidate the cached replication mask for this table. While PostgreSQL guarantees that
+    // a RELATION message will be sent before any DML events after a schema change, we
+    // proactively invalidate the mask to ensure consistency.
+    replication_masks.remove(&table_id).await;
 
     let table_id: u32 = table_id.into();
     info!(
