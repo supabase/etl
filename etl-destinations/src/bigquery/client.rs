@@ -308,7 +308,8 @@ impl BigQueryClient {
             "adding column `{column_name}` ({column_type}) to table {full_table_name} in BigQuery"
         );
 
-        // BigQuery requires new columns to be nullable (no NOT NULL constraint allowed).
+        // BigQuery requires new columns to be nullable (no NOT NULL constraint allowed). Also, we wouldn't
+        // be able to add it nonetheless since we don't have a way to set a default value for past columns.
         let query =
             format!("alter table {full_table_name} add column `{column_name}` {column_type}");
 
