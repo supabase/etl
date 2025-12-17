@@ -29,7 +29,7 @@ CREATE TABLE etl.destination_tables_metadata (
 );
 
 -- Backfill destination_tables_metadata from existing table_mappings and table_schemas.
--- For each mapped table, create metadata with snapshot_id = 0 (initial schema)
+-- For each mapped table, create metadata with snapshot_id = 0/0 (initial schema)
 -- and all columns marked as replicated.
 INSERT INTO etl.destination_tables_metadata (
     pipeline_id,

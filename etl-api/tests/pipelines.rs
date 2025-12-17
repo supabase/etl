@@ -1154,7 +1154,7 @@ async fn rollback_table_state_with_full_reset_succeeds() {
         .unwrap();
 
     // Insert destination metadata for this table
-    sqlx::query("INSERT INTO etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) VALUES ($1, $2, 'dest_test_users', 0, 'applied', '\\x01')")
+    sqlx::query("INSERT INTO etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) VALUES ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
         .bind(pipeline_id)
         .bind(table_oid)
         .execute(&source_db_pool)
@@ -1273,7 +1273,7 @@ async fn rollback_to_init_cleans_up_schemas_and_metadata() {
         .await
         .unwrap();
 
-    sqlx::query("INSERT INTO etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) VALUES ($1, $2, 'dest_test_users', 0, 'applied', '\\x01')")
+    sqlx::query("INSERT INTO etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) VALUES ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
         .bind(pipeline_id)
         .bind(table_oid)
         .execute(&source_db_pool)
@@ -1359,7 +1359,7 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
         .await
         .unwrap();
 
-    sqlx::query("INSERT INTO etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) VALUES ($1, $2, 'dest_test_users', 0, 'applied', '\\x01')")
+    sqlx::query("INSERT INTO etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) VALUES ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
         .bind(pipeline_id)
         .bind(table_oid)
         .execute(&source_db_pool)
