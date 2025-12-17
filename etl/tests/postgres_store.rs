@@ -977,7 +977,7 @@ async fn test_cleanup_deletes_state_schema_and_metadata_for_table() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_replication_mask_loads_correctly_from_bytea() {
+async fn test_replication_mask_loads_correctly_from_string_bytea() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
@@ -996,7 +996,7 @@ async fn test_replication_mask_loads_correctly_from_bytea() {
         r#"
         INSERT INTO etl.destination_tables_metadata
             (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
-        VALUES ($1, $2, 'test_dest_table', '0/0'::pg_lsn, 'applied', $3)
+        VALUES ($1, $2, 'test_dest_table', '0/0'::pg_lsn, 'applied', '\x0100010100')
         "#,
     )
     .bind(pipeline_id as i64)
