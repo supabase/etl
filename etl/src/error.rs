@@ -1034,12 +1034,8 @@ impl From<etl_postgres::types::SchemaError> for EtlError {
             etl_postgres::types::SchemaError::InvalidSnapshotId(lsn_str) => {
                 EtlError::from_components(
                     ErrorKind::CorruptedTableSchema,
-                    Cow::Borrowed("Invalid snapshot_id in database"),
-                    Some(Cow::Owned(format!(
-                        "Failed to parse snapshot_id '{lsn_str}' as pg_lsn.\n\n\
-                        Cause: This indicates data corruption in the etl.table_schemas table. \
-                        The snapshot_id column should contain valid pg_lsn values."
-                    ))),
+                    Cow::Borrowed("Invalid snapshot id"),
+                    Some(Cow::Owned(format!("Failed to parse snapshot '{lsn_str}' as PgLsn."))),
                     None,
                 )
             }
