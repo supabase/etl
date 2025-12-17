@@ -14,9 +14,8 @@ pub enum SchemaError {
     #[error("received columns during replication that are not in the stored table schema: {0:?}")]
     UnknownReplicatedColumns(Vec<String>),
 
-    /// A snapshot ID string from the database could not be parsed as a valid `pg_lsn`.
-    /// This indicates data corruption or a bug in the database layer.
-    #[error("invalid snapshot_id '{0}' from database: this indicates data corruption")]
+    /// A snapshot ID string could not be converted to the [`SnapshotId`] type.
+    #[error("invalid snapshot id '{0}'")]
     InvalidSnapshotId(String),
 }
 
@@ -57,18 +56,16 @@ impl SnapshotId {
         self.0.into()
     }
 
-    /// Converts to a `pg_lsn` string for database storage.
+    /// Converts to a `pg_lsn` string.
     pub fn to_pg_lsn_string(self) -> String {
         self.0.to_string()
     }
 
-    /// Parses a `pg_lsn` string from the database.
+    /// Parses a `pg_lsn` string.
     ///
     /// # Errors
     ///
     /// Returns [`SchemaError::InvalidSnapshotId`] if the string is not a valid `pg_lsn` format.
-    /// This indicates data corruption or a bug in the database layer, as all stored LSN values
-    /// should be valid.
     pub fn from_pg_lsn_string(s: &str) -> Result<Self, SchemaError> {
         s.parse::<PgLsn>()
             .map(Self)
