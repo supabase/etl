@@ -102,14 +102,20 @@ pub async fn load_destination_tables_metadata(
         let snapshot_id_str: String = row.get("snapshot_id");
         let previous_snapshot_id_str: Option<String> = row.get("previous_snapshot_id");
 
+        let snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str)
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        let previous_snapshot_id = previous_snapshot_id_str
+            .map(|s| SnapshotId::from_pg_lsn_string(&s))
+            .transpose()
+            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
         metadata.insert(
             table_id,
             DestinationTableMetadataRow {
                 table_id,
                 destination_table_id: row.get("destination_table_id"),
-                snapshot_id: SnapshotId::from_pg_lsn_string(&snapshot_id_str),
-                previous_snapshot_id: previous_snapshot_id_str
-                    .map(|s| SnapshotId::from_pg_lsn_string(&s)),
+                snapshot_id,
+                previous_snapshot_id,
                 schema_status: row.get("schema_status"),
                 replication_mask: row.get("replication_mask"),
             },
@@ -138,20 +144,30 @@ pub async fn get_destination_table_metadata(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| {
-        let table_id: SqlxTableId = r.get("table_id");
-        let snapshot_id_str: String = r.get("snapshot_id");
-        let previous_snapshot_id_str: Option<String> = r.get("previous_snapshot_id");
-        DestinationTableMetadataRow {
-            table_id: TableId::new(table_id.0),
-            destination_table_id: r.get("destination_table_id"),
-            snapshot_id: SnapshotId::from_pg_lsn_string(&snapshot_id_str),
-            previous_snapshot_id: previous_snapshot_id_str
-                .map(|s| SnapshotId::from_pg_lsn_string(&s)),
-            schema_status: r.get("schema_status"),
-            replication_mask: r.get("replication_mask"),
+    match row {
+        Some(r) => {
+            let table_id: SqlxTableId = r.get("table_id");
+            let snapshot_id_str: String = r.get("snapshot_id");
+            let previous_snapshot_id_str: Option<String> = r.get("previous_snapshot_id");
+
+            let snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str)
+                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+            let previous_snapshot_id = previous_snapshot_id_str
+                .map(|s| SnapshotId::from_pg_lsn_string(&s))
+                .transpose()
+                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+
+            Ok(Some(DestinationTableMetadataRow {
+                table_id: TableId::new(table_id.0),
+                destination_table_id: r.get("destination_table_id"),
+                snapshot_id,
+                previous_snapshot_id,
+                schema_status: r.get("schema_status"),
+                replication_mask: r.get("replication_mask"),
+            }))
         }
-    }))
+        None => Ok(None),
+    }
 }
 
 /// Deletes all destination table metadata for a pipeline.

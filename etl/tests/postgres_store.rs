@@ -975,3 +975,168 @@ async fn test_cleanup_deletes_state_schema_and_metadata_for_table() {
             .is_some()
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replication_mask_loads_correctly_from_bytea() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+    let table_id = TableId::new(12345);
+
+    let pool = connect_to_source_database(&database.config, 1, 1)
+        .await
+        .expect("Failed to connect to source database with sqlx");
+
+    // Manually insert a row with a specific replication mask bytea.
+    // The mask [1, 0, 1, 1, 0] represents columns: replicated, not replicated, replicated, replicated, not replicated.
+    let expected_mask_bytes: Vec<u8> = vec![1, 0, 1, 1, 0];
+
+    sqlx::query(
+        r#"
+        INSERT INTO etl.destination_tables_metadata
+            (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
+        VALUES ($1, $2, 'test_dest_table', '0/0'::pg_lsn, 'applied', $3)
+        "#,
+    )
+    .bind(pipeline_id as i64)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .bind(&expected_mask_bytes)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Load metadata using the store
+    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    store.load_destination_tables_metadata().await.unwrap();
+
+    // Verify the loaded replication mask matches what was inserted
+    let metadata = store
+        .get_destination_table_metadata(&table_id)
+        .await
+        .unwrap()
+        .expect("Metadata should exist");
+
+    assert_eq!(
+        metadata.replication_mask.as_slice(),
+        &expected_mask_bytes,
+        "Loaded replication mask should match inserted bytea"
+    );
+    assert_eq!(metadata.destination_table_id, "test_dest_table");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replication_mask_various_patterns() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+
+    let pool = connect_to_source_database(&database.config, 1, 1)
+        .await
+        .expect("Failed to connect to source database with sqlx");
+
+    // Test various mask patterns
+    let test_cases: Vec<(TableId, &str, Vec<u8>)> = vec![
+        // All columns replicated
+        (TableId::new(1001), "all_ones", vec![1, 1, 1, 1, 1]),
+        // No columns replicated
+        (TableId::new(1002), "all_zeros", vec![0, 0, 0, 0]),
+        // Single column replicated
+        (TableId::new(1003), "single_one", vec![1]),
+        // Alternating pattern
+        (TableId::new(1004), "alternating", vec![1, 0, 1, 0, 1, 0]),
+        // Large mask (20 columns)
+        (
+            TableId::new(1005),
+            "large",
+            vec![1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1],
+        ),
+        // Empty mask (table with no columns - edge case)
+        (TableId::new(1006), "empty", vec![]),
+    ];
+
+    // Insert all test cases
+    for (table_id, dest_name, mask_bytes) in &test_cases {
+        sqlx::query(
+            r#"
+            INSERT INTO etl.destination_tables_metadata
+                (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
+            VALUES ($1, $2, $3, '0/0'::pg_lsn, 'applied', $4)
+            "#,
+        )
+        .bind(pipeline_id as i64)
+        .bind(SqlxTableId(table_id.into_inner()))
+        .bind(*dest_name)
+        .bind(mask_bytes)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Load all metadata using the store
+    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    store.load_destination_tables_metadata().await.unwrap();
+
+    // Verify each test case
+    for (table_id, dest_name, expected_mask) in &test_cases {
+        let metadata = store
+            .get_destination_table_metadata(table_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("Metadata for {dest_name} should exist"));
+
+        assert_eq!(
+            metadata.replication_mask.as_slice(),
+            expected_mask.as_slice(),
+            "Mask mismatch for {}: expected {:?}, got {:?}",
+            dest_name,
+            expected_mask,
+            metadata.replication_mask.as_slice()
+        );
+        assert_eq!(
+            metadata.destination_table_id, *dest_name,
+            "Destination table ID mismatch"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replication_mask_roundtrip() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+    let table_id = TableId::new(54321);
+
+    // Create a store and save metadata with a specific mask
+    let original_mask = ReplicationMask::from_bytes(vec![1, 0, 1, 0, 1, 1, 0, 0]);
+    let metadata = DestinationTableMetadata::new_applied(
+        "roundtrip_table".to_string(),
+        SnapshotId::initial(),
+        original_mask.clone(),
+    );
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    store
+        .store_destination_table_metadata(table_id, metadata)
+        .await
+        .unwrap();
+
+    // Create a fresh store and load from database
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone());
+    new_store.load_destination_tables_metadata().await.unwrap();
+
+    // Verify the loaded mask matches the original
+    let loaded_metadata = new_store
+        .get_destination_table_metadata(&table_id)
+        .await
+        .unwrap()
+        .expect("Metadata should exist after loading");
+
+    assert_eq!(
+        loaded_metadata.replication_mask.as_slice(),
+        original_mask.as_slice(),
+        "Roundtrip should preserve replication mask exactly"
+    );
+}
