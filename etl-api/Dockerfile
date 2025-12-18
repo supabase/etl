@@ -37,9 +37,10 @@ ENV SQLX_OFFLINE=true
 RUN cargo build --release -p etl-api
 
 # Strip stage - creates stripped binary for production
-# The builder stage retains unstripped binary for debug symbol extraction
+# Saves unstripped binary for debug symbol extraction before stripping
 FROM builder AS stripper
-RUN strip target/release/etl-api
+RUN cp target/release/etl-api target/release/etl-api.debug && \
+    strip target/release/etl-api
 
 # Runtime stage with distroless for security
 FROM gcr.io/distroless/cc-debian12:nonroot
