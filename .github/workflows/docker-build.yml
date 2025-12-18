@@ -132,10 +132,29 @@ jobs:
             -t ${BINARY_NAME}-builder \
             ${{ inputs.context }}
 
+          # Debug: list the release directory contents
+          echo "Contents of /app/target/release/:"
+          docker run --rm ${BINARY_NAME}-builder ls -la /app/target/release/
+
           # Extract unstripped binary with debug symbols
           docker create --name ${BINARY_NAME}-container ${BINARY_NAME}-builder
-          docker cp ${BINARY_NAME}-container:/app/target/release/${BINARY_NAME} ./${BINARY_NAME}
+          docker cp ${BINARY_NAME}-container:/app/target/release/${BINARY_NAME} ./binary-temp
           docker rm ${BINARY_NAME}-container
+
+          # Handle docker cp behavior: it may copy as file or create directory
+          if [ -d "./binary-temp" ]; then
+            echo "docker cp created a directory, extracting binary from it"
+            ls -la ./binary-temp/
+            mv "./binary-temp/${BINARY_NAME}" "./${BINARY_NAME}"
+            rm -rf ./binary-temp
+          else
+            mv ./binary-temp "./${BINARY_NAME}"
+          fi
+
+          # Verify the binary was extracted correctly
+          echo "Extracted binary:"
+          ls -lh "./${BINARY_NAME}"
+          file "./${BINARY_NAME}"
 
       - name: Install debug symbol tools
         if: inputs.push == true && steps.sentry-config.outputs.enabled == 'true'
