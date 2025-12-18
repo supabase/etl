@@ -8,7 +8,7 @@ FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-# Build dependencies
+# Build dependencies and compile
 FROM chef AS builder
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -35,8 +35,12 @@ RUN cargo chef cook --release --recipe-path recipe.json
 # Build application with optimizations
 # The release profile in Cargo.toml handles: thin LTO, debug symbols, opt-level=3
 COPY . .
-RUN RUSTFLAGS="-C panic=abort" cargo build --release -p etl-replicator && \
-    strip target/release/etl-replicator
+RUN RUSTFLAGS="-C panic=abort" cargo build --release -p etl-replicator
+
+# Strip stage - creates stripped binary for production
+# The builder stage retains unstripped binary for debug symbol extraction
+FROM builder AS stripper
+RUN strip target/release/etl-replicator
 
 # Runtime stage with distroless for security
 FROM gcr.io/distroless/cc-debian12:nonroot
@@ -49,8 +53,8 @@ USER nonroot:nonroot
 # Use MALLOC_CONF env var to override at runtime if needed.
 # Example: MALLOC_CONF="narenas:4,dirty_decay_ms:5000"
 
-# Copy binary; configuration must be provided at runtime via mounted volume or environment overrides
-COPY --from=builder /app/target/release/etl-replicator ./etl-replicator
+# Copy stripped binary; configuration must be provided at runtime via mounted volume or environment overrides
+COPY --from=stripper /app/target/release/etl-replicator ./etl-replicator
 
 # Use exec form for proper signal handling
 ENTRYPOINT ["./etl-replicator"]

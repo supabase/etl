@@ -8,7 +8,7 @@ FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-# Build dependencies
+# Build dependencies and compile
 FROM chef AS builder
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -34,8 +34,12 @@ RUN cargo chef cook --release --recipe-path recipe.json
 # The release profile in Cargo.toml handles: thin LTO, debug symbols, opt-level=3
 COPY . .
 ENV SQLX_OFFLINE=true
-RUN cargo build --release -p etl-api && \
-    strip target/release/etl-api
+RUN cargo build --release -p etl-api
+
+# Strip stage - creates stripped binary for production
+# The builder stage retains unstripped binary for debug symbol extraction
+FROM builder AS stripper
+RUN strip target/release/etl-api
 
 # Runtime stage with distroless for security
 FROM gcr.io/distroless/cc-debian12:nonroot
@@ -44,8 +48,8 @@ WORKDIR /app
 # Create non-root user (distroless already has nonroot user)
 USER nonroot:nonroot
 
-# Copy binary; configuration must be provided at runtime via mounted volume or environment overrides
-COPY --from=builder /app/target/release/etl-api ./etl-api
+# Copy stripped binary; configuration must be provided at runtime via mounted volume or environment overrides
+COPY --from=stripper /app/target/release/etl-api ./etl-api
 
 # Use exec form for proper signal handling
 ENTRYPOINT ["./etl-api"]

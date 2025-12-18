@@ -15,7 +15,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  SQLX_OFFLINE: true
 
 jobs:
   resolve-ref:
@@ -45,7 +44,7 @@ jobs:
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
 
   # Build and upload debug symbols for each architecture
-  # Symbols are architecture-specific, so we need to build on native runners
+  # We build inside Docker (same environment as production) to ensure Build IDs match
   upload-debug-symbols:
     name: Upload Debug Symbols (${{ matrix.arch }})
     needs: resolve-ref
@@ -61,8 +60,10 @@ jobs:
         include:
           - arch: amd64
             runner: blacksmith-4vcpu-ubuntu-2404
+            platform: linux/amd64
           - arch: arm64
             runner: blacksmith-4vcpu-ubuntu-2404-arm
+            platform: linux/arm64
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -70,32 +71,38 @@ jobs:
         with:
           ref: ${{ needs.resolve-ref.outputs.ref }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.88.0"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Install build dependencies
+      - name: Build etl-api to builder stage and extract binary
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev protobuf-compiler clang lld
+          # Build to the builder stage (before strip) using the same Dockerfile
+          docker build \
+            --target builder \
+            --platform ${{ matrix.platform }} \
+            -f etl-api/Dockerfile \
+            -t etl-api-builder \
+            .
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.arch }}-cargo-release-
+          # Extract unstripped binary with debug symbols
+          docker create --name etl-api-container etl-api-builder
+          docker cp etl-api-container:/app/target/release/etl-api ./etl-api
+          docker rm etl-api-container
 
-      - name: Build binaries with debug symbols
+      - name: Build etl-replicator to builder stage and extract binary
         run: |
-          # Build both binaries in release mode (debug symbols enabled in Cargo.toml)
-          # Do NOT strip - we need the symbols for Sentry
-          cargo build --release -p etl-api -p etl-replicator
+          # Build to the builder stage (before strip) using the same Dockerfile
+          docker build \
+            --target builder \
+            --platform ${{ matrix.platform }} \
+            -f etl-replicator/Dockerfile \
+            -t etl-replicator-builder \
+            .
+
+          # Extract unstripped binary with debug symbols
+          docker create --name etl-replicator-container etl-replicator-builder
+          docker cp etl-replicator-container:/app/target/release/etl-replicator ./etl-replicator
+          docker rm etl-replicator-container
 
       - name: Install sentry-cli
         run: curl -sL https://sentry.io/get-cli/ | bash
@@ -111,13 +118,13 @@ jobs:
           # Upload etl-api symbols in background
           sentry-cli debug-files upload \
             --include-sources \
-            target/release/etl-api &
+            ./etl-api &
           PID_API=$!
 
           # Upload etl-replicator symbols in background
           sentry-cli debug-files upload \
             --include-sources \
-            target/release/etl-replicator &
+            ./etl-replicator &
           PID_REPLICATOR=$!
 
           # Wait for both uploads to complete
@@ -133,6 +140,6 @@ jobs:
           SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
         run: |
           # Verify both in parallel
-          sentry-cli debug-files check target/release/etl-api &
-          sentry-cli debug-files check target/release/etl-replicator &
+          sentry-cli debug-files check ./etl-api &
+          sentry-cli debug-files check ./etl-replicator &
           wait
