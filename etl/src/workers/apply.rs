@@ -203,41 +203,54 @@ async fn get_start_lsn<S: StateStore>(
     // is not in Init state, it means the table was synchronized based on another apply worker
     // lineage (different slot) which will break correctness.
     if let GetOrCreateSlotResult::CreateSlot(_) = &slot {
-        let table_states = store.get_table_replication_states().await?;
-        let non_init_tables: Vec<_> = table_states
-            .iter()
-            .filter(|(_, phase)| phase.as_type() != TableReplicationPhaseType::Init)
-            .map(|(table_id, phase)| (*table_id, phase.as_type()))
-            .collect();
-
-        if !non_init_tables.is_empty() {
-            // We need to delete the slot before failing, otherwise the system will be restarted, and
-            // since the slot will be already there, it will skip validation.
+        if let Err(err) = validate_tables_in_init_state(store).await {
+            // Delete the slot before failing, otherwise the system will restart and skip validation
+            // since the slot will already exist.
             replication_client.delete_slot(&slot_name).await?;
 
-            let table_details: Vec<String> = non_init_tables
-                .iter()
-                .map(|(id, phase)| format!("table {id} in state {phase}"))
-                .collect();
-
-            bail!(
-                ErrorKind::InvalidState,
-                "Cannot create apply worker slot when tables are not in Init state",
-                format!(
-                    "Creating a new apply worker replication slot requires all tables to be in Init state, \
-                    but found {} table(s) in non-Init states: {}. This indicates that tables were \
-                    synchronized based on a different apply worker lineage. To fix this, either restore \
-                    the original apply worker slot or reset all tables to Init state.",
-                    non_init_tables.len(),
-                    table_details.join(", ")
-                )
-            );
+            return Err(err);
         }
     }
 
-    let start_lsn = slot.get_start_lsn();
+    // We return the LSN from which we will start streaming events.
+    Ok(slot.get_start_lsn())
+}
 
-    Ok(start_lsn)
+/// Validates that all tables are in the Init state.
+///
+/// This validation is required when creating a new apply worker slot to ensure replication
+/// correctness. If any table has progressed beyond Init state, it indicates the table was
+/// synchronized based on a different apply worker lineage.
+async fn validate_tables_in_init_state<S: StateStore>(store: &S) -> EtlResult<()> {
+    let table_states = store.get_table_replication_states().await?;
+
+    let non_init_tables: Vec<_> = table_states
+        .iter()
+        .filter(|(_, phase)| phase.as_type() != TableReplicationPhaseType::Init)
+        .map(|(table_id, phase)| (*table_id, phase.as_type()))
+        .collect();
+
+    if non_init_tables.is_empty() {
+        return Ok(());
+    }
+
+    let table_details: Vec<String> = non_init_tables
+        .iter()
+        .map(|(id, phase)| format!("table {id} in state {phase}"))
+        .collect();
+
+    bail!(
+        ErrorKind::InvalidState,
+        "Cannot create apply worker slot when tables are not in Init state",
+        format!(
+            "Creating a new apply worker replication slot requires all tables to be in Init state, \
+            but found {} table(s) in non-Init states: {}. This indicates that tables were \
+            synchronized based on a different apply worker lineage. To fix this, either restore \
+            the original apply worker slot or reset all tables to Init state.",
+            non_init_tables.len(),
+            table_details.join(", ")
+        )
+    );
 }
 
 /// Internal coordination hook that implements apply loop integration with table sync workers.
