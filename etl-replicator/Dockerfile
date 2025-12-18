@@ -14,11 +14,6 @@ ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 RUN echo "Native build on $BUILDPLATFORM for $TARGETPLATFORM"
 
-# Sentry configuration for debug symbol uploads
-ARG SENTRY_AUTH_TOKEN
-ARG SENTRY_ORG
-ARG SENTRY_PROJECT
-
 # Install build dependencies including lld linker for faster linking
 # TODO: remove protobuf-compiler once the upstream gcp-bigquery-client removes it from its deps.
 RUN apt-get update && \
@@ -28,13 +23,8 @@ RUN apt-get update && \
     protobuf-compiler \
     clang \
     lld \
-    make \
-    curl \
-    ca-certificates && \
+    make && \
     rm -rf /var/lib/apt/lists/*
-
-# Install sentry-cli for debug symbol uploads
-RUN curl -sL https://sentry.io/get-cli/ | bash
 
 # Copy cargo config for build optimizations (lld linker, etc.)
 COPY .cargo/config.toml /app/.cargo/config.toml
@@ -45,24 +35,8 @@ RUN cargo chef cook --release --recipe-path recipe.json
 # Build application with optimizations
 # The release profile in Cargo.toml handles: thin LTO, debug symbols, opt-level=3
 COPY . .
-RUN RUSTFLAGS="-C panic=abort" cargo build --release -p etl-replicator
-
-# Upload debug symbols to Sentry (if configured)
-# --include-sources bundles source code for better stack traces
-RUN if [ -n "$SENTRY_AUTH_TOKEN" ] && [ -n "$SENTRY_ORG" ] && [ -n "$SENTRY_PROJECT" ]; then \
-        echo "Uploading debug symbols to Sentry..." && \
-        sentry-cli debug-files upload \
-            --auth-token "$SENTRY_AUTH_TOKEN" \
-            --org "$SENTRY_ORG" \
-            --project "$SENTRY_PROJECT" \
-            --include-sources \
-            target/release/etl-replicator; \
-    else \
-        echo "Sentry not configured, skipping debug symbol upload"; \
-    fi
-
-# Strip binary after uploading symbols
-RUN strip target/release/etl-replicator
+RUN RUSTFLAGS="-C panic=abort" cargo build --release -p etl-replicator && \
+    strip target/release/etl-replicator
 
 # Runtime stage with distroless for security
 FROM gcr.io/distroless/cc-debian12:nonroot
