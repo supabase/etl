@@ -99,14 +99,13 @@ If you prefer manual setup or have an existing PostgreSQL instance:
 
 #### Single Database Setup
 
-If using one database for both the API and replicator state:
+If using one database for both the API and etl state:
 
 ```bash
 export DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/DB
 
-# Run both migrations on the same database
-./etl-api/scripts/run_migrations.sh
-./etl-replicator/scripts/run_migrations.sh
+# Run all migrations on the same database
+./scripts/run_migrations.sh
 ```
 
 #### Separate Database Setup
@@ -116,16 +115,16 @@ If using separate databases (recommended for production):
 ```bash
 # API migrations on the control plane database
 export DATABASE_URL=postgres://USER:PASSWORD@API_HOST:PORT/API_DB
-./etl-api/scripts/run_migrations.sh
+./scripts/run_migrations.sh etl-api
 
-# Replicator migrations on the source database
+# ETL migrations on the source database
 export DATABASE_URL=postgres://USER:PASSWORD@SOURCE_HOST:PORT/SOURCE_DB
-./etl-replicator/scripts/run_migrations.sh
+./scripts/run_migrations.sh etl
 ```
 
 This separation allows you to:
 - Scale the control plane independently from replication workloads
-- Keep the replicator state close to the source data
+- Keep the etl state close to the source data
 - Isolate concerns between infrastructure management and data replication
 
 ## Database Migrations
@@ -140,7 +139,7 @@ Located in `etl-api/migrations/`, these create the control plane schema (`app` s
 
 ```bash
 # From project root
-./etl-api/scripts/run_migrations.sh
+./scripts/run_migrations.sh etl-api
 
 # Or manually with SQLx CLI
 sqlx migrate run --source etl-api/migrations
@@ -167,19 +166,19 @@ cd etl-api
 cargo sqlx prepare
 ```
 
-### ETL Replicator Migrations
+### ETL Migrations
 
-Located in `etl-replicator/migrations/`, these create the replicator's state store schema (`etl` schema) for tracking replication state, table schemas, and mappings.
+Located in `etl/migrations/`, these create the etl state store schema (`etl` schema) for tracking replication state, table schemas, and mappings.
 
-**Running replicator migrations:**
+**Running etl migrations:**
 
 ```bash
 # From project root
-./etl-replicator/scripts/run_migrations.sh
+./scripts/run_migrations.sh etl
 
 # Or manually with SQLx CLI (requires setting search_path)
 psql $DATABASE_URL -c "create schema if not exists etl;"
-sqlx migrate run --source etl-replicator/migrations --database-url "${DATABASE_URL}?options=-csearch_path%3Detl"
+sqlx migrate run --source etl/migrations --database-url "${DATABASE_URL}?options=-csearch_path%3Detl"
 ```
 
 **Important:** Migrations are run automatically when using the `etl-replicator` binary (see `etl-replicator/src/migrations.rs:16`). However, if you integrate the `etl` crate directly into your own application as a library, you should run these migrations manually before starting your pipeline. This design decision ensures:
@@ -193,10 +192,10 @@ sqlx migrate run --source etl-replicator/migrations --database-url "${DATABASE_U
 - Testing migrations independently
 - CI/CD pipelines that separate migration and deployment steps
 
-**Creating a new replicator migration:**
+**Creating a new etl migration:**
 
 ```bash
-cd etl-replicator
+cd etl
 sqlx migrate add <migration_name>
 ```
 
