@@ -103,6 +103,7 @@ jobs:
     uses: ./.github/workflows/docker-build.yml
     secrets:
       PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
     with:
       image: public.ecr.aws/supabase/${{ matrix.image }}
       context: .
@@ -112,3 +113,6 @@ jobs:
       experimental: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental || false }}
       # Build from the resolved ref: merge commit for PRs, or provided ref, fallback to current SHA.
       checkout_ref: ${{ needs.resolve-ref.outputs.ref }}
+      # Sentry configuration for debug symbol uploads (single project for both services)
+      sentry_org: ${{ vars.SENTRY_ORG }}
+      sentry_project: ${{ vars.SENTRY_PROJECT }}

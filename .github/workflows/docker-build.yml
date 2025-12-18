@@ -35,10 +35,21 @@ on:
         description: "Build experimental image (main branch excluded)"
         type: boolean
         default: false
+      sentry_org:
+        description: "Sentry organization slug for debug symbol uploads"
+        type: string
+        required: false
+      sentry_project:
+        description: "Sentry project slug for debug symbol uploads"
+        type: string
+        required: false
     secrets:
       PROD_AWS_ROLE:
         description: "AWS IAM role ARN for ECR push access"
         required: true
+      SENTRY_AUTH_TOKEN:
+        description: "Sentry auth token for debug symbol uploads"
+        required: false
 
 permissions:
   contents: read
@@ -107,6 +118,10 @@ jobs:
           platforms: ${{ matrix.platform }}
           provenance: false
           outputs: type=image,name=${{ inputs.image }},push-by-digest=true,name-canonical=true
+          build-args: |
+            SENTRY_AUTH_TOKEN=${{ secrets.SENTRY_AUTH_TOKEN }}
+            SENTRY_ORG=${{ inputs.sentry_org }}
+            SENTRY_PROJECT=${{ inputs.sentry_project }}
 
       - name: Export Digest
         id: export-digest

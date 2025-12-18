@@ -97,3 +97,8 @@ lto = "thin"
 codegen-units = 16
 # Maximum optimization level for best runtime performance
 opt-level = 3
+# Enable debug info for Sentry symbolication (uploaded separately, then stripped)
+debug = true
+# Generate split debug info for efficient symbol extraction
+# On Linux this creates .dwp files alongside the binary
+split-debuginfo = "packed"

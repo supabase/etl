@@ -14,6 +14,11 @@ ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 RUN echo "Native build on $BUILDPLATFORM for $TARGETPLATFORM"
 
+# Sentry configuration for debug symbol uploads
+ARG SENTRY_AUTH_TOKEN
+ARG SENTRY_ORG
+ARG SENTRY_PROJECT
+
 # Install build dependencies including lld linker for faster linking
 RUN apt-get update && \
     apt-get install -y \
@@ -21,8 +26,13 @@ RUN apt-get update && \
     libssl-dev \
     clang \
     lld \
-    make && \
+    make \
+    curl \
+    ca-certificates && \
     rm -rf /var/lib/apt/lists/*
+
+# Install sentry-cli for debug symbol uploads
+RUN curl -sL https://sentry.io/get-cli/ | bash
 
 # Copy cargo config for build optimizations (lld linker, etc.)
 COPY .cargo/config.toml /app/.cargo/config.toml
@@ -31,11 +41,27 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Build application with optimizations
-# The release profile in Cargo.toml handles: thin LTO, strip, opt-level=3
+# The release profile in Cargo.toml handles: thin LTO, debug symbols, opt-level=3
 COPY . .
 ENV SQLX_OFFLINE=true
-RUN cargo build --release -p etl-api && \
-    strip target/release/etl-api
+RUN cargo build --release -p etl-api
+
+# Upload debug symbols to Sentry (if configured)
+# --include-sources bundles source code for better stack traces
+RUN if [ -n "$SENTRY_AUTH_TOKEN" ] && [ -n "$SENTRY_ORG" ] && [ -n "$SENTRY_PROJECT" ]; then \
+        echo "Uploading debug symbols to Sentry..." && \
+        sentry-cli debug-files upload \
+            --auth-token "$SENTRY_AUTH_TOKEN" \
+            --org "$SENTRY_ORG" \
+            --project "$SENTRY_PROJECT" \
+            --include-sources \
+            target/release/etl-api; \
+    else \
+        echo "Sentry not configured, skipping debug symbol upload"; \
+    fi
+
+# Strip binary after uploading symbols
+RUN strip target/release/etl-api
 
 # Runtime stage with distroless for security
 FROM gcr.io/distroless/cc-debian12:nonroot
