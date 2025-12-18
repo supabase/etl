@@ -117,42 +117,32 @@ jobs:
         with:
           registry: public.ecr.aws
 
-      # Build and push the final image first - this caches all intermediate stages
-      - name: Build and Push Single-Platform Image
-        id: build
-        uses: useblacksmith/build-push-action@v2
-        with:
-          context: ${{ inputs.context }}
-          file: ${{ inputs.file }}
-          push: ${{ inputs.push }}
-          platforms: ${{ matrix.platform }}
-          provenance: false
-          outputs: type=image,name=${{ inputs.image }},push-by-digest=true,name-canonical=true
-
-      # Debug symbol extraction: extract from the stripper stage (same build, cached)
-      # The stripper stage has both .debug (unstripped) and stripped binaries
-      - name: Extract debug binary from cached build
+      # Build stripper stage FIRST and extract debug symbols
+      # This caches all the heavy compilation work (chef -> planner -> builder -> stripper)
+      # The final image build will then only need to add the thin final layer
+      - name: Build stripper stage and extract debug binary
         if: inputs.push == true && steps.sentry-config.outputs.enabled == 'true'
         id: extract-debug
         run: |
           set -euo pipefail
           BINARY_NAME="${{ steps.extract-name.outputs.name }}"
 
-          # Build to stripper stage - uses cached layers from the main build
-          docker build \
+          echo "Building to stripper stage (caches all compilation)..."
+
+          # Build to stripper stage and export filesystem
+          # This does the heavy lifting and caches all layers
+          mkdir -p ./build-output
+          docker buildx build \
             --target stripper \
             --platform ${{ matrix.platform }} \
+            --output type=local,dest=./build-output \
             -f ${{ inputs.file }} \
-            -t ${BINARY_NAME}-stripper \
             ${{ inputs.context }}
 
-          # Create container and extract binaries (with cleanup trap)
-          docker create --name ${BINARY_NAME}-container ${BINARY_NAME}-stripper
-          trap "docker rm -f ${BINARY_NAME}-container 2>/dev/null || true" EXIT
-
-          # Extract binaries
-          docker cp ${BINARY_NAME}-container:/app/target/release/${BINARY_NAME}.debug ./${BINARY_NAME}.debug
-          docker cp ${BINARY_NAME}-container:/app/target/release/${BINARY_NAME} ./${BINARY_NAME}.stripped
+          # Move binaries to working directory
+          mv ./build-output/app/target/release/${BINARY_NAME}.debug ./${BINARY_NAME}.debug
+          mv ./build-output/app/target/release/${BINARY_NAME} ./${BINARY_NAME}.stripped
+          rm -rf ./build-output
 
           # Get Build IDs for verification
           DEBUG_BUILD_ID=$(readelf -n "./${BINARY_NAME}.debug" 2>/dev/null | grep "Build ID" | awk '{print $3}' || echo "unknown")
@@ -206,6 +196,10 @@ jobs:
           echo "File size: $(du -h ./${BINARY_NAME}.debug | cut -f1)"
           echo "=========================================="
 
+          # Validate debug file before upload
+          echo "Validating debug file..."
+          sentry-cli debug-files check ./${BINARY_NAME}.debug
+
           # Bundle source context (optional, continue if fails)
           if ! sentry-cli difutil bundle-sources ./${BINARY_NAME}.debug; then
             echo "⚠️ Source bundling failed (non-fatal), continuing with upload..."
@@ -222,6 +216,18 @@ jobs:
 
           # Cleanup
           rm -f ./${BINARY_NAME}.debug ./${BINARY_NAME}.debug.src.zip 2>/dev/null || true
+
+      # Build and push final image - uses cached stripper stage, only adds thin final layer
+      - name: Build and Push Single-Platform Image
+        id: build
+        uses: useblacksmith/build-push-action@v2
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.file }}
+          push: ${{ inputs.push }}
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          outputs: type=image,name=${{ inputs.image }},push-by-digest=true,name-canonical=true
 
       - name: Export Digest
         id: export-digest
