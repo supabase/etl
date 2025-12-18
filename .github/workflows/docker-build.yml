@@ -39,6 +39,15 @@ on:
       PROD_AWS_ROLE:
         description: "AWS IAM role ARN for ECR push access"
         required: true
+      SENTRY_AUTH_TOKEN:
+        description: "Sentry authentication token for debug symbol upload"
+        required: false
+      SENTRY_ORG:
+        description: "Sentry organization slug"
+        required: false
+      SENTRY_PROJECT:
+        description: "Sentry project slug"
+        required: false
 
 permissions:
   contents: read
@@ -96,6 +105,64 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: public.ecr.aws
+
+      # Debug symbol extraction: build to builder stage, extract binary, process symbols
+      # Only run when pushing the image (i.e., releasing) and Sentry is configured
+      - name: Build to builder stage and extract binary
+        if: inputs.push == true && secrets.SENTRY_AUTH_TOKEN != ''
+        run: |
+          BINARY_NAME="${{ steps.extract-name.outputs.name }}"
+
+          # Build to the builder stage (before strip) - this will be cached for the main build
+          docker build \
+            --target builder \
+            --platform ${{ matrix.platform }} \
+            -f ${{ inputs.file }} \
+            -t ${BINARY_NAME}-builder \
+            ${{ inputs.context }}
+
+          # Extract unstripped binary with debug symbols
+          docker create --name ${BINARY_NAME}-container ${BINARY_NAME}-builder
+          docker cp ${BINARY_NAME}-container:/app/target/release/${BINARY_NAME} ./${BINARY_NAME}
+          docker rm ${BINARY_NAME}-container
+
+      - name: Install debug symbol tools
+        if: inputs.push == true && secrets.SENTRY_AUTH_TOKEN != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm
+          curl -sL https://sentry.io/get-cli/ | bash
+
+      - name: Extract and upload debug symbols to Sentry
+        if: inputs.push == true && secrets.SENTRY_AUTH_TOKEN != ''
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        run: |
+          BINARY_NAME="${{ steps.extract-name.outputs.name }}"
+
+          # Extract debug info to separate file
+          llvm-objcopy --only-keep-debug ./${BINARY_NAME} ./${BINARY_NAME}.debug
+          llvm-objcopy --strip-debug --strip-unneeded ./${BINARY_NAME}
+          llvm-objcopy --add-gnu-debuglink=./${BINARY_NAME}.debug ./${BINARY_NAME}
+
+          echo "Debug file created:"
+          ls -lh ./${BINARY_NAME}.debug
+
+          # Bundle source context
+          sentry-cli difutil bundle-sources ./${BINARY_NAME}.debug || true
+
+          # Upload debug symbols to Sentry
+          echo "Uploading ${{ matrix.arch }} debug symbols for ${BINARY_NAME} to Sentry..."
+          sentry-cli debug-files upload \
+            --include-sources \
+            ./${BINARY_NAME}.debug
+
+          echo "✅ Debug symbols uploaded for ${BINARY_NAME} (${{ matrix.arch }})"
+
+          # Cleanup
+          rm -f ./${BINARY_NAME} ./${BINARY_NAME}.debug ./${BINARY_NAME}.debug.src.zip 2>/dev/null || true
 
       - name: Build and Push Single-Platform Image
         id: build

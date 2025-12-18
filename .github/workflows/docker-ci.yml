@@ -103,6 +103,9 @@ jobs:
     uses: ./.github/workflows/docker-build.yml
     secrets:
       PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+      SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
     with:
       image: public.ecr.aws/supabase/${{ matrix.image }}
       context: .
