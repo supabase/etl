@@ -87,7 +87,7 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
         ))
         .await
         .unwrap();
-    let slot_exits = !database
+    let slot_exists = !database
         .replication_slot_exists(&apply_slot_name)
         .await
         .unwrap();
