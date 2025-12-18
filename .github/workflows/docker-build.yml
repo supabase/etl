@@ -80,6 +80,17 @@ jobs:
           NAME="${IMAGE##*/}"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
+      - name: Check Sentry configuration
+        id: sentry-config
+        run: |
+          if [ -n "$SENTRY_AUTH_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+
       - name: Checkout (specific ref)
         if: inputs.checkout_ref != ''
         uses: actions/checkout@v4
@@ -109,7 +120,7 @@ jobs:
       # Debug symbol extraction: build to builder stage, extract binary, process symbols
       # Only run when pushing the image (i.e., releasing) and Sentry is configured
       - name: Build to builder stage and extract binary
-        if: inputs.push == true && secrets.SENTRY_AUTH_TOKEN != ''
+        if: inputs.push == true && steps.sentry-config.outputs.enabled == 'true'
         run: |
           BINARY_NAME="${{ steps.extract-name.outputs.name }}"
 
@@ -127,14 +138,14 @@ jobs:
           docker rm ${BINARY_NAME}-container
 
       - name: Install debug symbol tools
-        if: inputs.push == true && secrets.SENTRY_AUTH_TOKEN != ''
+        if: inputs.push == true && steps.sentry-config.outputs.enabled == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y llvm
           curl -sL https://sentry.io/get-cli/ | bash
 
       - name: Extract and upload debug symbols to Sentry
-        if: inputs.push == true && secrets.SENTRY_AUTH_TOKEN != ''
+        if: inputs.push == true && steps.sentry-config.outputs.enabled == 'true'
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
