@@ -82,8 +82,7 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     // Delete the apply worker slot to simulate slot loss.
     database
         .run_sql(&format!(
-            "select pg_drop_replication_slot('{}')",
-            apply_slot_name
+            "select pg_drop_replication_slot('{apply_slot_name}')"
         ))
         .await
         .unwrap();
