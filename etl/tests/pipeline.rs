@@ -27,6 +27,106 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Wait for the table to finish syncing (not in Init state anymore).
+    let sync_done_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::SyncDone,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    sync_done_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify that the table is in SyncDone state (not Init).
+    let table_states = store.get_table_replication_states().await;
+    assert_eq!(
+        table_states
+            .get(&database_schema.users_schema().id)
+            .unwrap()
+            .as_type(),
+        TableReplicationPhaseType::SyncDone
+    );
+
+    // Verify that the replication slot for the apply worker exists.
+    let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
+        .try_into()
+        .unwrap();
+    let slot_exists = database
+        .replication_slot_exists(&apply_slot_name)
+        .await
+        .unwrap();
+    assert!(slot_exists, "Apply slot should exist after pipeline start");
+
+    // Delete the apply worker slot to simulate slot loss.
+    database
+        .run_sql(&format!(
+            "select pg_drop_replication_slot('{apply_slot_name}')"
+        ))
+        .await
+        .unwrap();
+    let slot_exists = !database
+        .replication_slot_exists(&apply_slot_name)
+        .await
+        .unwrap();
+    assert!(slot_exists, "Apply slot should not exist after deletion");
+
+    // Restart the pipeline - it should fail because tables are not in Init state.
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // The pipeline starts successfully (the actual work happens in a spawned task).
+    pipeline.start().await.unwrap();
+
+    // The error surfaces when we wait for the pipeline to complete.
+    let wait_result = pipeline.wait().await;
+    assert!(wait_result.is_err(), "Pipeline wait should fail");
+
+    let err = wait_result.unwrap_err();
+    assert!(
+        err.kinds().contains(&ErrorKind::InvalidState),
+        "Error should be InvalidState, got: {:?}",
+        err.kinds()
+    );
+
+    // Verify that the slot was cleaned up (deleted) after the validation failure.
+    let slot_exists = !database
+        .replication_slot_exists(&apply_slot_name)
+        .await
+        .unwrap();
+    assert!(
+        slot_exists,
+        "Apply slot should be deleted after validation failure"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_schema_copy_survives_pipeline_restarts() {
     init_test_tracing();
     let mut database = spawn_source_database().await;

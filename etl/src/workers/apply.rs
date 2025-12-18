@@ -9,6 +9,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::warn;
 use tracing::{Instrument, debug, error, info};
 
+use crate::bail;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::signal::create_signal;
@@ -16,7 +17,7 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::replication::apply::{ApplyLoopAction, ApplyLoopHook, start_apply_loop};
-use crate::replication::client::PgReplicationClient;
+use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient};
 use crate::replication::common::get_active_table_replication_states;
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -135,7 +136,8 @@ where
             publication_name = self.config.publication_name
         );
         let apply_worker = async move {
-            let start_lsn = get_start_lsn(self.pipeline_id, &self.replication_client).await?;
+            let start_lsn =
+                get_start_lsn(self.pipeline_id, &self.replication_client, &self.store).await?;
 
             // We create the signal used to notify the apply worker that it should force syncing tables.
             let (force_syncing_tables_tx, force_syncing_tables_rx) = create_signal();
@@ -181,25 +183,74 @@ where
 /// This function implements critical replication consistency logic by managing the apply worker's
 /// replication slot. The slot serves as a persistent marker in Postgres's WAL (Write-Ahead Log)
 /// that tracks the apply worker's progress and prevents WAL deletion of unreplicated data.
-async fn get_start_lsn(
+///
+/// When creating a new slot, this function validates that all tables are in the Init state.
+/// If any table is not in Init state when creating a new slot, it indicates that data was
+/// synchronized based on a different apply worker lineage, which would break replication
+/// correctness.
+async fn get_start_lsn<S: StateStore>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
+    store: &S,
 ) -> EtlResult<PgLsn> {
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
 
-    // TODO: validate that we only create the slot when we first start replication which
-    //  means when all tables are in the Init state. In any other case we should raise an
-    //  error because that means the apply slot was deleted and creating a fresh slot now
-    //  could cause inconsistent data to be read.
-    //  Addendum: this might be hard to detect in all cases. E.g. what if the apply worker
-    //  starts bunch of table sync workers and before creating a slot the process crashes?
-    //  In this case, the apply worker slot is missing not because someone deleted it but
-    //  because it was never created in the first place. The answer here might be to create
-    //  the apply worker slot as the first thing, before starting table sync workers.
+    // We try to get or create the slot. Both operations will return an LSN that we can use to start
+    // streaming events.
     let slot = replication_client.get_or_create_slot(&slot_name).await?;
-    let start_lsn = slot.get_start_lsn();
 
-    Ok(start_lsn)
+    // When creating a new apply worker slot, all tables must be in the `Init` state. If any table
+    // is not in Init state, it means the table was synchronized based on another apply worker
+    // lineage (different slot) which will break correctness.
+    if let GetOrCreateSlotResult::CreateSlot(_) = &slot {
+        if let Err(err) = validate_tables_in_init_state(store).await {
+            // Delete the slot before failing, otherwise the system will restart and skip validation
+            // since the slot will already exist.
+            replication_client.delete_slot(&slot_name).await?;
+
+            return Err(err);
+        }
+    }
+
+    // We return the LSN from which we will start streaming events.
+    Ok(slot.get_start_lsn())
+}
+
+/// Validates that all tables are in the Init state.
+///
+/// This validation is required when creating a new apply worker slot to ensure replication
+/// correctness. If any table has progressed beyond Init state, it indicates the table was
+/// synchronized based on a different apply worker lineage.
+async fn validate_tables_in_init_state<S: StateStore>(store: &S) -> EtlResult<()> {
+    let table_states = store.get_table_replication_states().await?;
+
+    let non_init_tables: Vec<_> = table_states
+        .iter()
+        .filter(|(_, phase)| phase.as_type() != TableReplicationPhaseType::Init)
+        .map(|(table_id, phase)| (*table_id, phase.as_type()))
+        .collect();
+
+    if non_init_tables.is_empty() {
+        return Ok(());
+    }
+
+    let table_details: Vec<String> = non_init_tables
+        .iter()
+        .map(|(id, phase)| format!("table {id} in state {phase}"))
+        .collect();
+
+    bail!(
+        ErrorKind::InvalidState,
+        "Cannot create apply worker slot when tables are not in Init state",
+        format!(
+            "Creating a new apply worker replication slot requires all tables to be in Init state, \
+            but found {} table(s) in non-Init states: {}. This indicates that tables were \
+            synchronized based on a different apply worker lineage. To fix this, either restore \
+            the original apply worker slot or reset all tables to Init state.",
+            non_init_tables.len(),
+            table_details.join(", ")
+        )
+    );
 }
 
 /// Internal coordination hook that implements apply loop integration with table sync workers.
