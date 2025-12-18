@@ -913,14 +913,14 @@ impl From<rustls::Error> for EtlError {
     }
 }
 
-/// Converts [`rustls::pki_types::pem::Error`] to [`EtlError`] with [`ErrorKind::EncryptionError`].
+/// Converts [`rustls::pki_types::pem::Error`] to [`EtlError`] with [`ErrorKind::ConfigError`].
 impl From<rustls::pki_types::pem::Error> for EtlError {
     #[track_caller]
     fn from(err: rustls::pki_types::pem::Error) -> EtlError {
         let detail = err.to_string();
         let source = Arc::new(err);
         EtlError::from_components(
-            ErrorKind::EncryptionError,
+            ErrorKind::ConfigError,
             Cow::Borrowed("PEM parsing failed"),
             Some(Cow::Owned(detail)),
             Some(source),
