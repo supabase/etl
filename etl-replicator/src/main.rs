@@ -131,8 +131,8 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
 
     // We start the replicator and catch any errors.
     if let Err(err) = start_replicator_with_config(replicator_config).await {
-        sentry::capture_error(&*err);
-        error!("an error occurred in the replicator: {err}");
+        sentry::integrations::anyhow::capture_anyhow(&err);
+        error!("{err}");
 
         // Send an error notification if a client is available.
         if let Some(client) = notification_client {
@@ -173,6 +173,7 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
             integrations: vec![Arc::new(
                 sentry::integrations::panic::PanicIntegration::new(),
             )],
+            attach_stacktrace: true,
             ..Default::default()
         });
 

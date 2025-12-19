@@ -320,54 +320,47 @@ impl fmt::Display for EtlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match &self.repr {
             ErrorRepr::Single(payload) => {
-                let location = payload.location;
-                write!(
-                    f,
-                    "[{:?}] {} @ {}:{}:{}",
-                    payload.kind,
-                    payload.description,
-                    location.file(),
-                    location.line(),
-                    location.column()
-                )?;
+                // Start with the human-readable description.
+                write!(f, "{}", payload.description)?;
 
-                write_detail(payload.detail.as_deref(), f, 1)?;
-                write_backtrace(payload.backtrace.as_ref(), f, 1)?;
+                // Add detail if present (most useful info for users).
+                if let Some(detail) = &payload.detail {
+                    if !detail.trim().is_empty() {
+                        // Flatten multiline details into a single line.
+                        write!(f, ": {}", detail.lines().collect::<Vec<_>>().join(" "))?;
+                    }
+                }
+
+                // Add technical info for developers at the end.
+                let location = payload.location;
+                let file = location
+                    .file()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(location.file());
+                write!(f, " [{:?} @ {}:{}]", payload.kind, file, location.line())?;
 
                 Ok(())
             }
             ErrorRepr::Many { errors, location } => {
                 let count = errors.len();
+                let file = location
+                    .file()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(location.file());
+
                 write!(
                     f,
-                    "[Many] {} error{} aggregated @ {}:{}:{}",
+                    "{} error{} occurred ({}:{})",
                     count,
                     if count == 1 { "" } else { "s" },
-                    location.file(),
-                    location.line(),
-                    location.column()
+                    file,
+                    location.line()
                 )?;
 
-                if errors.is_empty() {
-                    write!(f, "\n  (no inner errors provided)")?;
-                } else {
-                    for (index, error) in errors.iter().enumerate() {
-                        let rendered = format!("{error}");
-                        let mut lines = rendered.lines();
-                        if let Some(first_line) = lines.next() {
-                            write!(f, "\n  {}. {}", index + 1, first_line)?;
-                        } else {
-                            write!(f, "\n  {}.", index + 1)?;
-                        }
-
-                        for line in lines {
-                            if line.is_empty() {
-                                write!(f, "\n     ")?;
-                            } else {
-                                write!(f, "\n     {line}")?;
-                            }
-                        }
-                    }
+                for (index, error) in errors.iter().enumerate() {
+                    write!(f, "\n  {}. {}", index + 1, error)?;
                 }
 
                 Ok(())
@@ -389,50 +382,6 @@ impl error::Error for EtlError {
                 .map(|error| error as &(dyn error::Error + 'static)),
         }
     }
-}
-
-/// Writes the captured backtrace with indentation.
-fn write_backtrace(
-    backtrace: &Backtrace,
-    f: &mut fmt::Formatter<'_>,
-    indent: usize,
-) -> fmt::Result {
-    let indent_str = "  ".repeat(indent);
-
-    let rendered_backtrace = format!("{backtrace}");
-    if !rendered_backtrace.trim().is_empty() {
-        write!(f, "\n{indent_str}Backtrace:")?;
-        for line in rendered_backtrace.lines() {
-            if line.trim().is_empty() {
-                write!(f, "\n{indent_str}  ")?;
-            } else {
-                write!(f, "\n{indent_str}  {line}")?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Writes the detail block with indentation.
-fn write_detail(detail: Option<&str>, f: &mut fmt::Formatter<'_>, indent: usize) -> fmt::Result {
-    if let Some(detail) = detail {
-        let indent_str = "  ".repeat(indent);
-        if detail.trim().is_empty() {
-            write!(f, "\n{indent_str}Detail: <empty>")?;
-        } else {
-            write!(f, "\n{indent_str}Detail:")?;
-            for line in detail.lines() {
-                if line.trim().is_empty() {
-                    write!(f, "\n{indent_str}  ")?;
-                } else {
-                    write!(f, "\n{indent_str}  {line}")?;
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Creates an [`EtlError`] from an error kind and static description.
@@ -1135,9 +1084,10 @@ mod tests {
             "Database connection failed",
         ));
         let display_str = format!("{err}");
-        assert!(display_str.contains("ConnectionFailed"));
-        assert!(display_str.contains("Database connection failed"));
-        assert!(display_str.contains(" @ "));
+        // User-facing message first.
+        assert!(display_str.starts_with("Database connection failed"));
+        // Developer info in brackets at the end.
+        assert!(display_str.contains("[SourceConnectionFailed @ error.rs:"));
     }
 
     #[test]
@@ -1148,10 +1098,10 @@ mod tests {
             "Invalid table name".to_string(),
         ));
         let display_str = format!("{err}");
-        assert!(display_str.contains("QueryFailed"));
-        assert!(display_str.contains("SQL query failed"));
-        assert!(display_str.contains("Invalid table name"));
-        assert!(display_str.contains("\n  Detail:"));
+        // User-facing: description followed by detail.
+        assert!(display_str.starts_with("SQL query failed: Invalid table name"));
+        // Developer info at the end.
+        assert!(display_str.contains("[SourceQueryFailed @ error.rs:"));
     }
 
     #[test]
@@ -1162,8 +1112,8 @@ mod tests {
         ];
         let multi_err: EtlError = errors.into();
         let display_str = format!("{multi_err}");
-        assert!(display_str.contains("[Many] 2 errors aggregated @ "));
-        assert!(display_str.contains("1. [ValidationError] Invalid schema @ "));
+        assert!(display_str.contains("2 errors occurred"));
+        assert!(display_str.contains("1. Invalid schema"));
     }
 
     #[test]
@@ -1297,8 +1247,8 @@ mod tests {
 
         let rendered = format!("{outer_multi}");
         println!("{rendered}");
-        assert!(rendered.contains("[Many] 2 errors aggregated"));
-        assert!(rendered.contains("1. [Many]"));
+        assert!(rendered.contains("2 errors occurred"));
+        assert!(rendered.contains("1. 2 errors occurred"));
     }
 
     #[test]
