@@ -456,6 +456,9 @@ where
 }
 
 /// Creates an [`EtlError`] from a vector of errors for aggregation.
+///
+/// If the vector contains exactly one error, returns that error directly without wrapping
+/// it in the [`ErrorRepr::Many`] variant.
 impl<E> From<Vec<E>> for EtlError
 where
     E: Into<EtlError>,
@@ -464,7 +467,11 @@ where
     fn from(errors: Vec<E>) -> EtlError {
         let location = Location::caller();
 
-        let errors = errors.into_iter().map(Into::into).collect();
+        let mut errors: Vec<EtlError> = errors.into_iter().map(Into::into).collect();
+
+        if errors.len() == 1 {
+            return errors.pop().expect("just checked length is 1");
+        }
 
         EtlError {
             repr: ErrorRepr::Many { errors, location },
@@ -914,6 +921,21 @@ impl From<rustls::Error> for EtlError {
     }
 }
 
+/// Converts [`rustls::pki_types::pem::Error`] to [`EtlError`] with [`ErrorKind::ConfigError`].
+impl From<rustls::pki_types::pem::Error> for EtlError {
+    #[track_caller]
+    fn from(err: rustls::pki_types::pem::Error) -> EtlError {
+        let detail = err.to_string();
+        let source = Arc::new(err);
+        EtlError::from_components(
+            ErrorKind::ConfigError,
+            Cow::Borrowed("PEM parsing failed"),
+            Some(Cow::Owned(detail)),
+            Some(source),
+        )
+    }
+}
+
 /// Converts [`uuid::Error`] to [`EtlError`] with [`ErrorKind::InvalidData`].
 impl From<uuid::Error> for EtlError {
     #[track_caller]
@@ -1118,6 +1140,17 @@ mod tests {
         ];
         let multi_err = EtlError::from(errors);
         assert_eq!(multi_err.kinds().len(), 2);
+    }
+
+    #[test]
+    fn test_from_vector_single_error_not_wrapped() {
+        let error = EtlError::from((ErrorKind::ValidationError, "Single error"));
+        let errors = vec![error];
+        let result = EtlError::from(errors);
+
+        // Single error should not be wrapped in Many variant.
+        assert_eq!(result.kinds().len(), 1);
+        assert_eq!(result.kind(), ErrorKind::ValidationError);
     }
 
     #[test]
