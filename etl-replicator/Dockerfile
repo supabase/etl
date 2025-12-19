@@ -34,14 +34,24 @@ RUN cargo chef cook --release --recipe-path recipe.json
 
 # Build application with optimizations
 # The release profile in Cargo.toml handles: thin LTO, debug symbols, opt-level=3
+# --remap-path-prefix makes DWARF paths relative so source context works in CI
 COPY . .
-RUN RUSTFLAGS="-C panic=abort" cargo build --release -p etl-replicator
+RUN RUSTFLAGS="-C panic=abort --remap-path-prefix=/app=." cargo build --release -p etl-replicator
 
-# Strip stage - creates stripped binary for production
-# Saves unstripped binary for debug symbol extraction before stripping
+# Strip stage - creates stripped binary and split debug companion
+# Uses objcopy to create a proper debug file (smaller than full unstripped binary)
+# Both files share the same GNU build-id for Sentry matching
 FROM builder AS stripper
-RUN cp target/release/etl-replicator target/release/etl-replicator.debug && \
-    strip target/release/etl-replicator
+RUN apt-get update && apt-get install -y --no-install-recommends binutils && rm -rf /var/lib/apt/lists/* \
+    && objcopy --only-keep-debug target/release/etl-replicator target/release/etl-replicator.debug \
+    && strip --strip-unneeded target/release/etl-replicator \
+    && objcopy --add-gnu-debuglink=target/release/etl-replicator.debug target/release/etl-replicator
+
+# Debug symbols export stage - minimal stage containing only debug binary
+# Used by CI to extract debug symbols without copying entire filesystem
+FROM scratch AS debug-symbols
+COPY --from=stripper /app/target/release/etl-replicator.debug /etl-replicator.debug
+COPY --from=stripper /app/target/release/etl-replicator /etl-replicator
 
 # Runtime stage with distroless for security
 FROM gcr.io/distroless/cc-debian12:nonroot

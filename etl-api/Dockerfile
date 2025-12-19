@@ -32,15 +32,25 @@ RUN cargo chef cook --release --recipe-path recipe.json
 
 # Build application with optimizations
 # The release profile in Cargo.toml handles: thin LTO, debug symbols, opt-level=3
+# --remap-path-prefix makes DWARF paths relative so source context works in CI
 COPY . .
 ENV SQLX_OFFLINE=true
-RUN cargo build --release -p etl-api
+RUN RUSTFLAGS="--remap-path-prefix=/app=." cargo build --release -p etl-api
 
-# Strip stage - creates stripped binary for production
-# Saves unstripped binary for debug symbol extraction before stripping
+# Strip stage - creates stripped binary and split debug companion
+# Uses objcopy to create a proper debug file (smaller than full unstripped binary)
+# Both files share the same GNU build-id for Sentry matching
 FROM builder AS stripper
-RUN cp target/release/etl-api target/release/etl-api.debug && \
-    strip target/release/etl-api
+RUN apt-get update && apt-get install -y --no-install-recommends binutils && rm -rf /var/lib/apt/lists/* \
+    && objcopy --only-keep-debug target/release/etl-api target/release/etl-api.debug \
+    && strip --strip-unneeded target/release/etl-api \
+    && objcopy --add-gnu-debuglink=target/release/etl-api.debug target/release/etl-api
+
+# Debug symbols export stage - minimal stage containing only debug binary
+# Used by CI to extract debug symbols without copying entire filesystem
+FROM scratch AS debug-symbols
+COPY --from=stripper /app/target/release/etl-api.debug /etl-api.debug
+COPY --from=stripper /app/target/release/etl-api /etl-api
 
 # Runtime stage with distroless for security
 FROM gcr.io/distroless/cc-debian12:nonroot
