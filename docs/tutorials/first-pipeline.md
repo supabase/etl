@@ -162,7 +162,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-**Important:** Replace `"your_password"` with your Postgres password.
+**Important:** Update the fields in `PgConnectionConfig` so that they match the credentials of your Postgres server (e.g., host, name, username). For example, replace `"your_password"` with your Postgres password.
 
 ## Step 4: Start Your Pipeline
 
