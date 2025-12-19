@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let pg_connection_config = PgConnectionConfig {
         host: "localhost".to_string(),
         port: 5432,
-        name: "postgres".to_string(),
+        name: "etl_tutorial".to_string(),
         username: "postgres".to_string(),
         password: Some("your_password".to_string().into()),
         tls: TlsConfig {
