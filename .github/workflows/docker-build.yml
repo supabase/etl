@@ -79,8 +79,6 @@ jobs:
     outputs:
       digest-amd64: ${{ steps.export-digest.outputs.digest-amd64 }}
       digest-arm64: ${{ steps.export-digest.outputs.digest-arm64 }}
-      image-name: ${{ steps.extract-name.outputs.image-name }}
-      binary-name: ${{ steps.extract-name.outputs.binary-name }}
       git-sha: ${{ steps.git-sha.outputs.sha }}
     steps:
       - name: Extract Image and Binary Name
@@ -310,11 +308,18 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: inputs.push == true
     steps:
+      - name: Extract Image Name
+        id: extract-name
+        run: |
+          IMAGE="${{ inputs.image }}"
+          IMAGE_NAME="${IMAGE##*/}"
+          echo "image-name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+
       - name: Download Digests
         uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
-          pattern: digests-${{ needs.build-platform.outputs.image-name }}-*
+          pattern: digests-${{ steps.extract-name.outputs.image-name }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
