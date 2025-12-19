@@ -2,4 +2,5 @@
 version = 2
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "Disabling because it is not a real vulnerability. The crate paste is just unmaintained." },
+    { id = "RUSTSEC-2025-0134", reason = "Transitive dependency from yup-oauth2 via gcp-bigquery-client. Waiting for upstream to migrate to rustls-pki-types." },
 ]
