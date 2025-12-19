@@ -99,6 +99,6 @@ codegen-units = 16
 opt-level = 3
 # Enable debug info for Sentry symbolication (uploaded separately, then stripped)
 debug = true
-# Generate split debug info for efficient symbol extraction
-# On Linux this creates .dwp files alongside the binary
-split-debuginfo = "packed"
+# Keep debug info in the binary (not split to .dwp files)
+# This allows objcopy --only-keep-debug to create a proper GNU debug companion
+split-debuginfo = "off"
