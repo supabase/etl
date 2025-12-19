@@ -55,7 +55,7 @@ on:
 
 env:
   # Pin sentry-cli version for reproducibility
-  SENTRY_CLI_VERSION: "2.39.1"
+  SENTRY_CLI_VERSION: "3.0.1"
 
 permissions:
   contents: read
@@ -250,14 +250,11 @@ jobs:
           sentry-cli difutil check ./sentry-dif/${{ matrix.arch }}/${BINARY_NAME}
           sentry-cli difutil check ./sentry-dif/${{ matrix.arch }}/${BINARY_NAME}.debug
 
-          # Bundle source context (paths are remapped to ./ in Dockerfile via --remap-path-prefix)
-          echo "Bundling source context..."
-          sentry-cli difutil bundle-sources ./sentry-dif/${{ matrix.arch }}/${BINARY_NAME}.debug || echo "⚠️ Source bundling had warnings (non-fatal)"
-
           # Upload debug symbols to Sentry from directory (includes both stripped binary and debug companion)
           echo "Uploading debug symbols..."
           sentry-cli debug-files upload \
             --include-sources \
+            --wait \
             ./sentry-dif/${{ matrix.arch }}/
 
           echo "=========================================="
