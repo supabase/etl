@@ -159,6 +159,7 @@ jobs:
           set -euo pipefail
           BINARY_NAME="${{ steps.extract-name.outputs.binary-name }}"
           CACHE_SCOPE="${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }}"
+          CACHE_LOCAL="/tmp/.buildx-cache-${CACHE_SCOPE}"
 
           echo "Building to debug-symbols stage (caches all compilation)..."
 
@@ -169,7 +170,9 @@ jobs:
           docker buildx build \
             --target debug-symbols \
             --platform ${{ matrix.platform }} \
+            --cache-from type=local,src=${CACHE_LOCAL} \
             --cache-from type=gha,scope=$CACHE_SCOPE \
+            --cache-to type=local,dest=${CACHE_LOCAL},mode=max \
             --cache-to type=gha,scope=$CACHE_SCOPE,mode=max \
             --output type=local,dest=./debug-output \
             -f ${{ inputs.file }} \
@@ -275,8 +278,12 @@ jobs:
           platforms: ${{ matrix.platform }}
           provenance: false
           outputs: type=image,name=${{ inputs.image }},push-by-digest=true,name-canonical=true
-          cache-from: type=gha,scope=${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }}
-          cache-to: type=gha,scope=${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }},mode=max
+          cache-from: |
+            type=local,src=/tmp/.buildx-cache-${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }}
+            type=gha,scope=${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }}
+          cache-to: |
+            type=local,dest=/tmp/.buildx-cache-${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }},mode=max
+            type=gha,scope=${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }},mode=max
 
       - name: Export Digest
         id: export-digest

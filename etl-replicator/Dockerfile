@@ -30,13 +30,16 @@ RUN apt-get update && \
 COPY .cargo/config.toml /app/.cargo/config.toml
 
 COPY --from=planner /app/recipe.json recipe.json
+
+# IMPORTANT: RUSTFLAGS must match between cook and build, or cargo will recompile everything
+ENV RUSTFLAGS="-C panic=abort --remap-path-prefix=/app=."
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Build application with optimizations
 # The release profile in Cargo.toml handles: thin LTO, debug symbols, opt-level=3
-# --remap-path-prefix makes DWARF paths relative so source context works in CI
+# RUSTFLAGS inherited from ENV above (must match cook step)
 COPY . .
-RUN RUSTFLAGS="-C panic=abort --remap-path-prefix=/app=." cargo build --release -p etl-replicator
+RUN cargo build --release -p etl-replicator
 
 # Strip stage - creates stripped binary and split debug companion
 # Uses objcopy to create a proper debug file (smaller than full unstripped binary)
