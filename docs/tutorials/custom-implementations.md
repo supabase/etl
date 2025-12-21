@@ -364,7 +364,7 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use etl::destination::Destination;
-use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::error::{ErrorKind, EtlResult};
 use etl::types::{Event, TableId, TableRow};
 use etl::{bail, etl_error};
 
@@ -372,6 +372,7 @@ use etl::{bail, etl_error};
 const MAX_RETRIES: usize = 3;      // Try up to 3 times before giving up
 const BASE_BACKOFF_MS: u64 = 500;  // Start with 500ms delay, then exponential backoff
 
+#[derive(Debug, Clone)]
 pub struct HttpDestination {
     client: Client,        // HTTP client for making requests
     base_url: String,      // Base URL for the destination API (e.g., "https://api.example.com")
@@ -470,6 +471,9 @@ impl HttpDestination {
 
 // Implementation of ETL's Destination trait - this is what ETL calls to send data
 impl Destination for HttpDestination {
+    fn name() -> &'static str {
+        "http_destination"
+    }
     /// Called when ETL needs to clear all data from a table (e.g., during full refresh)
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         info!("Truncating destination table: {}", table_id.0);
