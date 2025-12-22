@@ -156,7 +156,7 @@ fn find_and_parse_stacktrace(error: &ReplicatorError) -> Option<Stacktrace> {
 fn type_name_from_debug(err: &dyn std::error::Error) -> String {
     let debug = format!("{err:?}");
     debug
-        .split(|c| c == '{' || c == '(' || c == ' ')
+        .split(['{', '(', ' '])
         .next()
         .filter(|s| !s.is_empty())
         .unwrap_or("Error")
