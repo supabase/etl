@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        select p.id,\n            p.tenant_id,\n            source_id,\n            s.name as source_name,\n            destination_id,\n            d.name as destination_name,\n            replicator_id,\n            p.config\n        from app.pipelines p\n        join app.sources s on p.source_id = s.id\n        join app.destinations d on p.destination_id = d.id\n        where p.tenant_id = $1\n            and p.source_id = $2\n            and p.config->>'publication_name' = $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "tenant_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "source_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "source_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "destination_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "destination_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "replicator_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "config",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8d3d991029f43c1ec0dd42bf7835e6e50de3ca5e59e8ce9d2bedebb50eab9b85"
+}

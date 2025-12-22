@@ -9,6 +9,7 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::db::pipelines::PipelinesDbError;
 use crate::db::publications::PublicationsDbError;
 use crate::routes::connect_to_source_database_with_defaults;
 use crate::{
@@ -25,6 +26,9 @@ enum PublicationError {
     #[error("The publication with name {0} was not found")]
     PublicationNotFound(String),
 
+    #[error("Cannot delete publication '{0}' - referenced by pipelines: {1}")]
+    PublicationInUse(String, String),
+
     #[error(transparent)]
     TenantId(#[from] TenantIdError),
 
@@ -33,6 +37,9 @@ enum PublicationError {
 
     #[error(transparent)]
     PublicationsDb(#[from] PublicationsDbError),
+
+    #[error(transparent)]
+    PipelinesDb(#[from] PipelinesDbError),
 
     #[error("Database connection error: {0}")]
     Database(#[from] sqlx::Error),
@@ -43,7 +50,8 @@ impl PublicationError {
         match self {
             // Do not expose internal database details in error messages
             PublicationError::SourcesDb(SourcesDbError::Database(_))
-            | PublicationError::PublicationsDb(PublicationsDbError::Database(_)) => {
+            | PublicationError::PublicationsDb(PublicationsDbError::Database(_))
+            | PublicationError::PipelinesDb(PipelinesDbError::Database(_)) => {
                 "internal server error".to_string()
             }
             // Every other message is ok, as they do not divulge sensitive information
@@ -57,10 +65,12 @@ impl ResponseError for PublicationError {
         match self {
             PublicationError::SourcesDb(_)
             | PublicationError::PublicationsDb(_)
+            | PublicationError::PipelinesDb(_)
             | PublicationError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PublicationError::SourceNotFound(_) | PublicationError::PublicationNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
+            PublicationError::PublicationInUse(_, _) => StatusCode::CONFLICT,
             PublicationError::TenantId(_) => StatusCode::BAD_REQUEST,
         }
     }
@@ -77,7 +87,7 @@ impl ResponseError for PublicationError {
     }
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct CreatePublicationRequest {
     #[schema(example = "my_publication", required = true)]
     #[serde(deserialize_with = "crate::utils::trim_string")]
@@ -86,7 +96,7 @@ pub struct CreatePublicationRequest {
     tables: Vec<Table>,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct UpdatePublicationRequest {
     #[schema(required = true)]
     tables: Vec<Table>,
@@ -95,6 +105,19 @@ pub struct UpdatePublicationRequest {
 #[derive(Serialize, ToSchema)]
 pub struct ReadPublicationsResponse {
     pub publications: Vec<Publication>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PipelineInfo {
+    #[schema(example = 1)]
+    pub id: i64,
+    #[schema(example = "Pipeline 1")]
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct ListPipelinesForPublicationResponse {
+    pub pipelines: Vec<PipelineInfo>,
 }
 
 #[utoipa::path(
@@ -230,6 +253,7 @@ pub async fn update_publication(
     responses(
         (status = 200, description = "Publication deleted successfully"),
         (status = 404, description = "Publication not found", body = ErrorMessage),
+        (status = 409, description = "Publication is referenced by pipelines", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     )
 )]
@@ -247,6 +271,22 @@ pub async fn delete_publication(
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
+
+    let pipelines = db::pipelines::find_pipelines_by_publication(
+        &**pool,
+        tenant_id,
+        source_id,
+        &publication_name,
+    )
+    .await?;
+
+    if !pipelines.is_empty() {
+        let pipeline_ids: Vec<String> = pipelines.iter().map(|p| p.id.to_string()).collect();
+        return Err(PublicationError::PublicationInUse(
+            publication_name,
+            pipeline_ids.join(", "),
+        ));
+    }
 
     let source_pool =
         connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
@@ -286,6 +326,58 @@ pub async fn read_all_publications(
         connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
     let publications = db::publications::read_all_publications(&source_pool).await?;
     let response = ReadPublicationsResponse { publications };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "List pipelines using a publication",
+    description = "Returns all pipelines that reference the specified publication.",
+    tag = "Publications",
+    params(
+        ("source_id" = i64, Path, description = "Unique ID of the source"),
+        ("publication_name" = String, Path, description = "Publication name within the source"),
+    ),
+    responses(
+        (status = 200, description = "Pipelines listed successfully", body = ListPipelinesForPublicationResponse),
+        (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    )
+)]
+#[get("/sources/{source_id}/publications/{publication_name}/pipelines")]
+pub async fn list_pipelines_for_publication(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    encryption_key: Data<EncryptionKey>,
+    source_id_and_pub_name: Path<(i64, String)>,
+) -> Result<impl Responder, PublicationError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let (source_id, publication_name) = source_id_and_pub_name.into_inner();
+
+    db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+        .await?
+        .map(|_| ())
+        .ok_or(PublicationError::SourceNotFound(source_id))?;
+
+    let pipelines = db::pipelines::find_pipelines_by_publication(
+        &**pool,
+        tenant_id,
+        source_id,
+        &publication_name,
+    )
+    .await?;
+
+    let pipeline_infos: Vec<PipelineInfo> = pipelines
+        .into_iter()
+        .map(|p| PipelineInfo {
+            id: p.id,
+            name: format!("{} -> {}", p.source_name, p.destination_name),
+        })
+        .collect();
+
+    let response = ListPipelinesForPublicationResponse {
+        pipelines: pipeline_infos,
+    };
 
     Ok(Json(response))
 }
