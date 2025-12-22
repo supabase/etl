@@ -1185,6 +1185,7 @@ pub async fn rollback_table_state(
     tag = "Pipelines"
 )]
 #[post("/pipelines/{pipeline_id}/version")]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_pipeline_version(
     req: HttpRequest,
     pool: Data<PgPool>,
