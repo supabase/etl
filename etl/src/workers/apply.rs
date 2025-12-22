@@ -10,7 +10,7 @@ use tracing::warn;
 use tracing::{Instrument, debug, error, info};
 
 use crate::bail;
-use crate::concurrency::shutdown::ShutdownRx;
+use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::signal::SignalTx;
 use crate::concurrency::signal::create_signal;
 use crate::destination::Destination;
@@ -396,9 +396,15 @@ where
                 table_id
             );
 
+            // We wait for the table to be in `SyncDone` or `Errored`. The reason for waiting for
+            // `Errored` is that if the table fails while streaming data, we don't want to stall progress
+            // of the apply worker.
             let result = table_sync_worker_state
                 .wait_for_phase_type(
-                    TableReplicationPhaseType::SyncDone,
+                    &[
+                        TableReplicationPhaseType::SyncDone,
+                        TableReplicationPhaseType::Errored,
+                    ],
                     self.shutdown_rx.clone(),
                 )
                 .await;
@@ -412,6 +418,18 @@ where
                 );
 
                 return Ok(ApplyLoopAction::Pause);
+            }
+
+            // If the table sync worker errored, we skip this table and continue with the next one.
+            if let ShutdownResult::Ok(inner) = &result {
+                if inner.replication_phase().as_type().is_errored() {
+                    info!(
+                        "the table sync worker {} errored, skipping table and continuing",
+                        table_id
+                    );
+
+                    return Ok(ApplyLoopAction::Continue);
+                }
             }
 
             info!("the table sync worker {} has finished syncing", table_id);
