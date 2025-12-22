@@ -17,7 +17,6 @@ Set up Postgres with the correct settings, and publications for ETL pipelines.
 After solving your immediate problem:
 
 - **Learn more concepts** → [Explanations](../explanation/index.md)
-- **Look up technical details** → [Reference](../reference/index.md)
 - **Build foundational knowledge** → [Tutorials](../tutorials/index.md)
 
 ## Need Help?

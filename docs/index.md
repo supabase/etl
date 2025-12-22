@@ -57,6 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         username: "postgres".into(),
         password: Some("password".into()),
         tls: TlsConfig { enabled: false, trusted_root_certs: String::new() },
+        keepalive: None,
     };
 
     let store = MemoryStore::new();
@@ -87,7 +88,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 - **First time using ETL?** → Start with [Build your first pipeline](tutorials/first-pipeline.md)
 - **Need Postgres setup help?** → Check [Configure Postgres for Replication](how-to/configure-postgres.md)
-- **Need technical details?** → Check the [Reference](reference/index.md)
 - **Want to understand the architecture?** → Read [ETL Architecture](explanation/architecture.md)
 
 ## Contributing

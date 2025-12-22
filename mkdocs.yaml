@@ -15,11 +15,11 @@ nav:
   - How-to Guides:
       - Overview: how-to/index.md
       - Configure Postgres: how-to/configure-postgres.md
-  - Reference:
-      - Overview: reference/index.md
   - Explanation:
       - Overview: explanation/index.md
       - Architecture: explanation/architecture.md
+      - Event Types: explanation/events.md
+      - Extension Points: explanation/traits.md
 
 theme:
   name: "material"

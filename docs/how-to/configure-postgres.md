@@ -101,6 +101,65 @@ wal_keep_size = 1GB
 - Provides recovery time if ETL pipelines temporarily disconnect
 - Balances disk usage with replication reliability
 
+## WAL Buildup and Disk Usage
+
+Replication slots prevent Postgres from deleting WAL files until all consumers have processed them. This can cause significant disk usage if the pipeline falls behind or encounters errors.
+
+### Common Causes of WAL Buildup
+
+**1. Tables in Errored State**
+
+When a table enters an errored state, ETL keeps its replication slot active to maintain data consistency. This prevents WAL cleanup for that slot, causing Postgres to accumulate WAL files. If you have tables stuck in an errored state, monitor your disk usage and consider:
+
+- Investigating and resolving the error cause
+- Manually removing the table from the publication if it's no longer needed
+- Increasing available disk space as a temporary measure
+
+**2. Slow Pipeline Performance**
+
+During normal operation, if your destination can't keep up with the rate of changes in Postgres, WAL will accumulate. This is especially common when:
+
+- The destination has high latency (network or processing)
+- Large transactions generate many changes at once
+- The destination is temporarily unavailable
+
+**3. Long-Running Initial Table Copies**
+
+During the initial sync phase, ETL creates a replication slot for each table being copied. If a table has millions of rows, the copy operation can take a long time. Meanwhile, Postgres continues accumulating WAL because the slot hasn't started streaming yet.
+
+**Warning:** If the copy takes too long and WAL grows beyond Postgres's configured limits, Postgres may terminate the replication slot. This is controlled by `max_slot_wal_keep_size`:
+
+```ini
+# Maximum WAL size to retain for replication slots (Postgres 13+)
+# -1 means unlimited (dangerous for disk space)
+# Set this based on your available disk space
+max_slot_wal_keep_size = 10GB
+```
+
+If a slot is terminated due to exceeding this limit, ETL will need to restart the table sync from scratch.
+
+### Monitoring WAL Usage
+
+```sql
+-- Check replication slot lag (how far behind each slot is)
+SELECT slot_name,
+       pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) AS lag_bytes,
+       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS lag_pretty,
+       active
+FROM pg_replication_slots;
+
+-- Check total WAL directory size
+SELECT pg_size_pretty(sum(size)) AS wal_size
+FROM pg_ls_waldir();
+```
+
+### Recommendations
+
+- **Set `max_slot_wal_keep_size`** to a reasonable limit based on your available disk space
+- **Monitor replication slot lag** and alert when it exceeds acceptable thresholds
+- **Address errored tables promptly** to prevent indefinite WAL accumulation
+- **Size initial sync workers appropriately** (`max_table_sync_workers`) to balance parallelism with resource usage
+
 ## Publications
 
 Publications define which tables and operations to replicate.
@@ -191,11 +250,11 @@ PostgreSQL 14 supports table-level publication filtering only. Column-level and 
 
 | Feature | PostgreSQL 14 | PostgreSQL 15+ |
 |---------|--------------|----------------|
-| Table-level publication | ✅ | ✅ |
-| Column-level filtering | ❌ | ✅ |
-| Row-level filtering | ❌ | ✅ |
-| `FOR ALL TABLES IN SCHEMA` | ❌ | ✅ |
-| Partitioned table support | ✅ | ✅ |
+| Table-level publication | Yes | Yes |
+| Column-level filtering | No | Yes |
+| Row-level filtering | No | Yes |
+| `FOR ALL TABLES IN SCHEMA` | No | Yes |
+| Partitioned table support | Yes | Yes |
 
 ## Complete Configuration Example
 
@@ -237,4 +296,3 @@ After editing the configuration:
 
 - [Build Your First ETL Pipeline](../tutorials/first-pipeline.md) - Hands-on tutorial using these settings
 - [ETL Architecture](../explanation/architecture.md) - Understanding how ETL uses these settings
-- [API Reference](../reference/index.md) - All available connection options
