@@ -38,13 +38,11 @@ use crate::config::load_replicator_config;
 use crate::core::start_replicator_with_config;
 use crate::error::{ReplicatorError, ReplicatorResult};
 use crate::notification::ErrorNotificationClient;
-use crate::sentry_capture::capture_replicator_error;
-use etl_config::Environment;
+
 use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
 use secrecy::ExposeSecret;
-use std::sync::Arc;
 use tracing::{error, info, warn};
 
 mod config;
@@ -55,7 +53,7 @@ mod feature_flags;
 mod jemalloc_metrics;
 mod migrations;
 mod notification;
-mod sentry_capture;
+mod sentry;
 
 /// The name of the environment variable which contains version information for this replicator.
 const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
@@ -63,7 +61,7 @@ const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
 /// Entry point for the replicator service.
 ///
 /// Loads configuration, initializes tracing and Sentry, starts the async runtime,
-/// and launches the replicator pipeline. Handles all errors and ensures proper
+/// and launches the replicator pipeline. Handles all errors and ensures a proper
 /// service initialization sequence.
 fn main() -> ReplicatorResult<()> {
     // Load replicator config
@@ -78,7 +76,7 @@ fn main() -> ReplicatorResult<()> {
     .map_err(ReplicatorError::config)?;
 
     // Initialize Sentry before the async runtime starts
-    let _sentry_guard = init_sentry()?;
+    let _sentry_guard = sentry::init()?;
 
     // Initialize metrics collection
     init_metrics(replicator_config.project_ref()).map_err(ReplicatorError::config)?;
@@ -136,7 +134,7 @@ async fn async_main(replicator_config: ReplicatorConfig) -> ReplicatorResult<()>
     // We start the replicator and catch any errors.
     if let Err(err) = start_replicator_with_config(replicator_config).await {
         // Capture to Sentry with proper backtrace handling.
-        capture_replicator_error(&err);
+        sentry::capture_error(&err);
         error!("{err}");
 
         // Send an error notification if a client is available.
@@ -158,50 +156,4 @@ async fn async_main(replicator_config: ReplicatorConfig) -> ReplicatorResult<()>
     }
 
     Ok(())
-}
-
-/// Initializes Sentry with replicator-specific configuration.
-///
-/// Loads configuration and sets up Sentry if a DSN is provided in the config.
-/// Tags all errors with the "replicator" service identifier and configures
-/// panic handling to automatically capture and send panics to Sentry.
-fn init_sentry() -> ReplicatorResult<Option<sentry::ClientInitGuard>> {
-    if let Ok(config) = load_replicator_config()
-        && let Some(sentry_config) = &config.sentry
-    {
-        info!("initializing sentry with supplied dsn");
-
-        let environment = Environment::load().map_err(ReplicatorError::config)?;
-        let dsn = sentry_config
-            .dsn
-            .expose_secret()
-            .parse()
-            .map_err(ReplicatorError::config)?;
-        let guard = sentry::init(sentry::ClientOptions {
-            dsn: Some(dsn),
-            environment: Some(environment.to_string().into()),
-            integrations: vec![Arc::new(
-                sentry::integrations::panic::PanicIntegration::new(),
-            )],
-            attach_stacktrace: true,
-            ..Default::default()
-        });
-
-        // We load the version of the replicator which is specified via environment variable.
-        let version = std::env::var(APP_VERSION_ENV_NAME);
-
-        // Set service tag to differentiate replicator from other services
-        sentry::configure_scope(|scope| {
-            scope.set_tag("service", "replicator");
-            if let Ok(version) = version {
-                scope.set_tag("version", version);
-            }
-        });
-
-        return Ok(Some(guard));
-    }
-
-    info!("sentry not configured for replicator, skipping initialization");
-
-    Ok(None)
 }

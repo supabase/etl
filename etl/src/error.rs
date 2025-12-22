@@ -188,6 +188,16 @@ impl EtlError {
         }
     }
 
+    /// Returns the individual errors contained in this error.
+    ///
+    /// For single errors, returns `None`. For multiple errors, returns a slice of all contained errors.
+    pub fn errors(&self) -> Option<&[EtlError]> {
+        match self.repr {
+            ErrorRepr::Single(_) => None,
+            ErrorRepr::Many { ref errors, .. } => Some(errors),
+        }
+    }
+
     /// Returns the detailed error information if available.
     ///
     /// For multiple errors, returns the detail of the first error that has one.
@@ -203,10 +213,13 @@ impl EtlError {
     }
 
     /// Returns the captured backtrace for this error.
+    ///
+    /// For multiple errors, returns the first backtrace found by recursively
+    /// searching contained errors.
     pub fn backtrace(&self) -> Option<&Backtrace> {
         match self.repr {
             ErrorRepr::Single(ref payload) => Some(payload.backtrace.as_ref()),
-            ErrorRepr::Many { .. } => None,
+            ErrorRepr::Many { ref errors, .. } => errors.iter().find_map(|e| e.backtrace()),
         }
     }
 
@@ -323,7 +336,7 @@ impl fmt::Display for EtlError {
                 // Start with the human-readable description.
                 write!(f, "{}", payload.description)?;
 
-                // Add detail if present (most useful info for users).
+                // Add detail if present (the most useful info for users).
                 if let Some(detail) = &payload.detail {
                     if !detail.trim().is_empty() {
                         // Flatten multiline details into a single line.
@@ -331,32 +344,19 @@ impl fmt::Display for EtlError {
                     }
                 }
 
-                // Add technical info for developers at the end.
-                let location = payload.location;
-                let file = location
-                    .file()
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(location.file());
-                write!(f, " [{:?} @ {}:{}]", payload.kind, file, location.line())?;
+                // Add an error kind for categorization.
+                write!(f, " [{:?}]", payload.kind)?;
 
                 Ok(())
             }
-            ErrorRepr::Many { errors, location } => {
+            ErrorRepr::Many { errors, .. } => {
                 let count = errors.len();
-                let file = location
-                    .file()
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(location.file());
 
                 write!(
                     f,
-                    "{} error{} occurred ({}:{})",
+                    "{} error{} occurred",
                     count,
                     if count == 1 { "" } else { "s" },
-                    file,
-                    location.line()
                 )?;
 
                 for (index, error) in errors.iter().enumerate() {
@@ -1087,7 +1087,7 @@ mod tests {
         // User-facing message first.
         assert!(display_str.starts_with("Database connection failed"));
         // Developer info in brackets at the end.
-        assert!(display_str.contains("[SourceConnectionFailed @ error.rs:"));
+        assert!(display_str.contains("[SourceConnectionFailed]"));
     }
 
     #[test]
@@ -1101,7 +1101,7 @@ mod tests {
         // User-facing: description followed by detail.
         assert!(display_str.starts_with("SQL query failed: Invalid table name"));
         // Developer info at the end.
-        assert!(display_str.contains("[SourceQueryFailed @ error.rs:"));
+        assert!(display_str.contains("[SourceQueryFailed]"));
     }
 
     #[test]

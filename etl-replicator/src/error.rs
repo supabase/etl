@@ -26,7 +26,7 @@ impl fmt::Debug for CapturedBacktrace {
 /// Wraps [`EtlError`] for pipeline errors and provides variants for
 /// infrastructure errors (config, migrations, etc.). All variants capture
 /// backtraces at creation time for debugging.
-#[derive(Error)]
+#[derive(Debug, Error)]
 pub enum ReplicatorError {
     /// Pipeline or ETL-related error.
     #[error(transparent)]
@@ -46,18 +46,6 @@ pub enum ReplicatorError {
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[source] std::io::Error, CapturedBacktrace),
-}
-
-impl fmt::Debug for ReplicatorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{self}")?;
-
-        if let Some(bt) = self.backtrace() {
-            writeln!(f, "\nBacktrace:\n{bt}")?;
-        }
-
-        Ok(())
-    }
 }
 
 impl ReplicatorError {
