@@ -8,7 +8,11 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use etl_config::shared::TlsConfig;
+
+use crate::config::ApiConfig;
 use crate::db::tables::TablesDbError;
+use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
 use crate::routes::connect_to_source_database_with_defaults;
 use crate::{
     configs::encryption::EncryptionKey,
@@ -32,6 +36,9 @@ enum TableError {
 
     #[error("Database connection error: {0}")]
     Database(#[from] sqlx::Error),
+
+    #[error(transparent)]
+    TrustedRootCerts(#[from] TrustedRootCertsError),
 }
 
 impl TableError {
@@ -57,9 +64,10 @@ pub struct ReadTablesResponse {
 impl ResponseError for TableError {
     fn status_code(&self) -> StatusCode {
         match self {
-            TableError::SourcesDb(_) | TableError::TablesDb(_) | TableError::Database(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            TableError::SourcesDb(_)
+            | TableError::TablesDb(_)
+            | TableError::Database(_)
+            | TableError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
             TableError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             TableError::TenantId(_) => StatusCode::BAD_REQUEST,
         }
@@ -93,19 +101,34 @@ impl ResponseError for TableError {
 pub async fn read_table_names(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     source_id: Path<i64>,
 ) -> Result<impl Responder, TableError> {
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
 
-    let config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(TableError::SourceNotFound(source_id))?;
 
+    let tls_config = if api_config.source_tls_enabled {
+        let trusted_root_certs = trusted_root_certs_cache.get().await?;
+        TlsConfig {
+            enabled: true,
+            trusted_root_certs,
+        }
+    } else {
+        TlsConfig {
+            enabled: false,
+            trusted_root_certs: String::new(),
+        }
+    };
     let source_pool =
-        connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
+        connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
+            .await?;
     let tables = db::tables::get_tables(&source_pool).await?;
     let response = ReadTablesResponse { tables };
 

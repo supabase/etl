@@ -11,7 +11,6 @@ use crate::db::images::Image;
 use crate::db::pipelines::Pipeline;
 use crate::db::replicators::Replicator;
 use crate::db::sources::Source;
-use crate::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
 use crate::k8s::{DestinationType, K8sClient, ReplicatorConfigMapFile};
 use crate::routes::pipelines::PipelineError;
 
@@ -59,6 +58,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     source: Source,
     destination: Destination,
     supabase_api_url: Option<&str>,
+    trusted_root_certs: &str,
 ) -> Result<(), PipelineError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
@@ -75,8 +75,11 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
 
     let log_level = pipeline.config.log_level.clone().unwrap_or_default();
 
+    let tls_config = TlsConfig {
+        enabled: true,
+        trusted_root_certs: trusted_root_certs.to_owned(),
+    };
     let replicator_config = build_replicator_config_without_secrets(
-        k8s_client,
         // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
         // around, and we won't have two different values map to the same u64, since the domain size
         // is the same.
@@ -85,8 +88,8 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
         destination.config,
         pipeline.config,
         supabase_config,
-    )
-    .await?;
+        tls_config,
+    );
 
     create_or_update_dynamic_replicator_secrets(k8s_client, &prefix, secrets).await?;
     create_or_update_replicator_config(k8s_client, &prefix, replicator_config, environment).await?;
@@ -169,39 +172,25 @@ fn build_secrets_from_configs(
 /// Builds a replicator configuration with credentials omitted.
 ///
 /// This function constructs a [`ReplicatorConfigWithoutSecrets`] by combining pipeline,
-/// source, and destination configurations. It fetches trusted root certificates from
-/// Kubernetes and configures TLS for the PostgreSQL connection. Secrets are managed
-/// separately through Kubernetes secret resources.
-async fn build_replicator_config_without_secrets(
-    k8s_client: &dyn K8sClient,
+/// source, and destination configurations. It uses the provided trusted root certificates
+/// for TLS configuration. Secrets are managed separately through Kubernetes secret resources.
+fn build_replicator_config_without_secrets(
     pipeline_id: u64,
     source_config: StoredSourceConfig,
     destination_config: StoredDestinationConfig,
     pipeline_config: StoredPipelineConfig,
     supabase_config: SupabaseConfigWithoutSecrets,
-) -> Result<ReplicatorConfigWithoutSecrets, PipelineError> {
-    let trusted_root_certs = k8s_client
-        .get_config_map(TRUSTED_ROOT_CERT_CONFIG_MAP_NAME)
-        .await?
-        .data
-        .ok_or(PipelineError::TrustedRootCertsConfigMissing)?
-        .get(TRUSTED_ROOT_CERT_KEY_NAME)
-        .ok_or(PipelineError::TrustedRootCertsConfigMissing)?
-        .clone();
-    let pg_connection_config = source_config.into_connection_config_with_tls(TlsConfig {
-        trusted_root_certs,
-        enabled: true,
-    });
+    tls_config: TlsConfig,
+) -> ReplicatorConfigWithoutSecrets {
+    let pg_connection_config = source_config.into_connection_config(tls_config);
 
-    let config = ReplicatorConfigWithoutSecrets {
+    ReplicatorConfigWithoutSecrets {
         destination: destination_config.into_etl_config().into(),
         pipeline: pipeline_config
             .into_etl_config(pipeline_id, pg_connection_config)
             .into(),
         supabase: Some(supabase_config),
-    };
-
-    Ok(config)
+    }
 }
 
 /// Creates a consistent naming prefix for Kubernetes resources.

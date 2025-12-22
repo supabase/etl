@@ -185,7 +185,7 @@ impl From<PgConnectionConfig> for PgConnectionConfigWithoutSecrets {
 /// TLS configuration for secure Postgres connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsConfig {
-    /// PEM-encoded trusted root certificates. Sensitive and redacted in debug output.
+    /// PEM-encoded trusted root certificates.
     pub trusted_root_certs: String,
     /// Whether TLS is enabled for the connection.
     pub enabled: bool,

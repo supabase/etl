@@ -13,7 +13,9 @@
 //! See [`base`] for errors, pod phase mapping, and the client trait.
 
 mod base;
+pub mod cache;
 pub mod core;
 pub mod http;
 
 pub use base::*;
+pub use cache::{TrustedRootCertsCache, TrustedRootCertsError};

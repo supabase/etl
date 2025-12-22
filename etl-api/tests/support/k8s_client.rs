@@ -53,10 +53,15 @@ impl K8sClient for MockK8sClient {
 
     async fn get_config_map(&self, config_map_name: &str) -> Result<ConfigMap, K8sError> {
         // For tests to pass the TRUSTED_ROOT_CERT_CONFIG_MAP_NAME config map expects
-        // a key named TRUSTED_ROOT_CERT_KEY_NAME to be present
+        // a key named TRUSTED_ROOT_CERT_KEY_NAME to be present with non-empty certs
         if config_map_name == TRUSTED_ROOT_CERT_CONFIG_MAP_NAME {
             let mut map = BTreeMap::new();
-            map.insert(TRUSTED_ROOT_CERT_KEY_NAME.to_string(), String::new());
+            // Use a dummy certificate for tests - the actual TLS connection won't use this
+            // since test postgres doesn't have TLS enabled
+            map.insert(
+                TRUSTED_ROOT_CERT_KEY_NAME.to_string(),
+                "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
+            );
             let cm = ConfigMap {
                 data: Some(map),
                 ..ConfigMap::default()
