@@ -173,6 +173,6 @@ Use `Arc<Mutex<_>>` or similar patterns for shared state.
 
 ## Next Steps
 
-- [Custom Stores and Destinations](../tutorials/custom-implementations.md) - Implement these traits
-- [Event Types](events.md) - Events received by `write_events()`
-- [Architecture](architecture.md) - How these components fit together
+- [Custom Stores and Destinations](../guides/custom-implementations.md): Implement these traits
+- [Event Types](events.md): Events received by `write_events()`
+- [Architecture](architecture.md): How these components fit together

@@ -73,9 +73,11 @@ pub trait Destination {
 }
 ```
 
-- `truncate_table()`: Clears a table before bulk loading
-- `write_table_rows()`: Receives rows during initial copy
-- `write_events()`: Receives streaming changes (inserts, updates, deletes, transaction markers)
+| Method | When called | Purpose |
+|--------|-------------|---------|
+| `truncate_table()` | Before initial copy | Clear destination table |
+| `write_table_rows()` | During initial copy | Receive bulk rows |
+| `write_events()` | After initial copy | Receive streaming changes |
 
 ### Store
 
@@ -124,8 +126,7 @@ Each table progresses through these phases:
 
 ## Next Steps
 
-- [Extension Points](traits.md) - Full documentation for Destination, SchemaStore, StateStore, CleanupStore
-- [Event Types](events.md) - All events delivered to destinations
-- [First Pipeline](../tutorials/first-pipeline.md) - Hands-on tutorial
-- [Custom Components](../tutorials/custom-implementations.md) - Build your own stores and destinations
-- [Configure Postgres](../how-to/configure-postgres.md) - Database setup
+- [Extension Points](traits.md): Implement custom stores and destinations
+- [Event Types](events.md): Understand event data
+- [First Pipeline](../guides/first-pipeline.md): Build something
+- [Configure Postgres](../guides/configure-postgres.md): Database setup

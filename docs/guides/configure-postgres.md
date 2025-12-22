@@ -21,14 +21,14 @@ Postgres's Write-Ahead Log (WAL) is the foundation of logical replication. When 
 - Allows external tools to decode and stream these changes
 
 ```ini
-# Enable logical replication in Postgres.conf
+# Enable logical replication in postgresql.conf
 wal_level = logical
 ```
 
 **Restart Postgres** after changing this setting:
 
 ```bash
-sudo systemctl restart Postgres
+sudo systemctl restart postgresql
 ```
 
 ## Replication Slots
@@ -258,7 +258,7 @@ PostgreSQL 14 supports table-level publication filtering only. Column-level and 
 
 ## Complete Configuration Example
 
-Here's a minimal `Postgres.conf` setup:
+Here's a minimal `postgresql.conf` setup:
 
 ```ini
 # Enable logical replication
@@ -289,10 +289,6 @@ After editing the configuration:
 
 ## Next Steps
 
-- **Build your first pipeline** → [Build Your First ETL Pipeline](../tutorials/first-pipeline.md)
-- **Build custom implementations** → [Custom Stores and Destinations](../tutorials/custom-implementations.md)
-
-## See Also
-
-- [Build Your First ETL Pipeline](../tutorials/first-pipeline.md) - Hands-on tutorial using these settings
-- [ETL Architecture](../explanation/architecture.md) - Understanding how ETL uses these settings
+- [Your First Pipeline](first-pipeline.md): Hands-on tutorial using these settings
+- [Custom Stores and Destinations](custom-implementations.md): Build your own components
+- [ETL Architecture](../explanation/architecture.md): How ETL uses these settings

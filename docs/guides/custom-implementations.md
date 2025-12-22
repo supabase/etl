@@ -1,12 +1,8 @@
 # Build Custom Stores and Destinations
 
-**Implement your own ETL components with proper patterns**
+**30 minutes**: Implement your own stores and destinations.
 
-| | |
-|---|---|
-| **Time** | 30 minutes |
-| **Difficulty** | Advanced |
-| **Prerequisites** | Rust, running Postgres |
+**Prerequisites:** Completed [Your First Pipeline](first-pipeline.md) or familiar with ETL basics.
 
 ## Understanding the Destination Trait
 
@@ -386,7 +382,7 @@ The pipeline will connect to Postgres and start replicating. You'll see your cus
 
 ## Next Steps
 
-- [Extension Points](../explanation/traits.md) - Full trait documentation
-- [Event Types](../explanation/events.md) - All events your destination receives
-- [Configure Postgres](../how-to/configure-postgres.md) - Production database setup
-- [Architecture](../explanation/architecture.md) - How ETL works internally
+- [Extension Points](../explanation/traits.md): Full trait documentation
+- [Event Types](../explanation/events.md): All events your destination receives
+- [Configure Postgres](configure-postgres.md): Production database setup
+- [Architecture](../explanation/architecture.md): How ETL works internally

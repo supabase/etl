@@ -1,11 +1,6 @@
 # Build Your First ETL Pipeline
 
-**Learn the fundamentals by building a working pipeline in 15 minutes**
-
-| | |
-|---|---|
-| **Time** | 15 minutes |
-| **Difficulty** | Beginner |
+**15 minutes**: Learn the fundamentals by building a working pipeline.
 
 By the end of this tutorial, you'll have a complete ETL pipeline that streams data changes from Postgres to a memory destination in real-time.
 
@@ -22,6 +17,8 @@ A real-time data pipeline that:
 - Rust installed (1.75+)
 - Postgres server running locally
 - Basic familiarity with Rust and SQL
+
+New to Postgres logical replication? Read [Postgres Replication Concepts](../explanation/concepts.md) first.
 
 ## Step 1: Create the Project
 
@@ -169,6 +166,6 @@ DROP DATABASE etl_tutorial;
 
 ## Next Steps
 
-- [Custom Stores and Destinations](custom-implementations.md) - Build your own components
-- [Configure Postgres](../how-to/configure-postgres.md) - Production Postgres setup
-- [Architecture](../explanation/architecture.md) - How ETL works internally
+- [Custom Stores and Destinations](custom-implementations.md): Build your own components
+- [Configure Postgres](configure-postgres.md): Production Postgres setup
+- [Architecture](../explanation/architecture.md): How ETL works internally

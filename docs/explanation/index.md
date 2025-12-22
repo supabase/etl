@@ -1,30 +1,23 @@
 # Explanations
 
-**Deep dives into ETL concepts and design**
+**Understand how ETL works and why**
 
-## Topics
+## Where to Start
 
-### [Architecture](architecture.md)
+**New to Postgres logical replication?** Start with [Postgres Replication Concepts](concepts.md). It explains WAL, publications, replication slots, and why ETL works the way it does.
 
-How ETL replicates data from Postgres to destinations. Covers the two-phase approach (initial copy + streaming), workers, and component interactions.
+**Already familiar with replication?** Jump to [Architecture](architecture.md) to understand ETL's two-phase approach and delivery guarantees.
 
-### [Event Types](events.md)
+## All Topics
 
-All events delivered to your destination: Insert, Update, Delete, Begin, Commit, Relation, Truncate. Includes LSN field explanations and Begin/Commit behavior during initial copy.
+1. **[Postgres Replication Concepts](concepts.md)**: The fundamentals - WAL, publications, slots, pgoutput, and why two phases.
 
-### [Extension Points](traits.md)
+2. **[Architecture](architecture.md)**: How ETL works - initial copy, streaming, workers, and delivery guarantees.
 
-The four traits you implement to customize ETL: Destination, SchemaStore, StateStore, CleanupStore. Full method documentation and implementation patterns.
+3. **[Event Types](events.md)**: All events your destination receives - Insert, Update, Delete, Begin, Commit, and their fields.
 
-## Reading Guide
-
-| Goal | Start Here |
-|------|------------|
-| Understand how ETL works | [Architecture](architecture.md) |
-| Build a custom destination | [Extension Points](traits.md), [Event Types](events.md) |
-| Build a custom store | [Extension Points](traits.md) |
+4. **[Extension Points](traits.md)**: The traits you implement - Destination, SchemaStore, StateStore, CleanupStore.
 
 ## Next Steps
 
-- [Tutorials](../tutorials/index.md) - Build something
-- [How-To Guides](../how-to/index.md) - Solve specific problems
+When you're ready to build, head to the [Guides](../guides/index.md).

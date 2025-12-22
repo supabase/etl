@@ -216,5 +216,5 @@ Events within the same table maintain their original order. Events for different
 
 ## Next Steps
 
-- [Custom Destinations](../tutorials/custom-implementations.md) - Implement your own event handling
-- [Architecture](architecture.md) - How events flow through ETL
+- [Custom Destinations](../guides/custom-implementations.md): Implement your own event handling
+- [Architecture](architecture.md): How events flow through ETL
