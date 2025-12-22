@@ -9,8 +9,6 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use etl_config::shared::TlsConfig;
-
 use crate::config::ApiConfig;
 use crate::db::publications::PublicationsDbError;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
@@ -136,18 +134,9 @@ pub async fn create_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = if api_config.source_tls_enabled {
-        let trusted_root_certs = trusted_root_certs_cache.get().await?;
-        TlsConfig {
-            enabled: true,
-            trusted_root_certs,
-        }
-    } else {
-        TlsConfig {
-            enabled: false,
-            trusted_root_certs: String::new(),
-        }
-    };
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
         connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
             .await?;
@@ -192,18 +181,9 @@ pub async fn read_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = if api_config.source_tls_enabled {
-        let trusted_root_certs = trusted_root_certs_cache.get().await?;
-        TlsConfig {
-            enabled: true,
-            trusted_root_certs,
-        }
-    } else {
-        TlsConfig {
-            enabled: false,
-            trusted_root_certs: String::new(),
-        }
-    };
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
         connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
             .await?;
@@ -247,18 +227,9 @@ pub async fn update_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = if api_config.source_tls_enabled {
-        let trusted_root_certs = trusted_root_certs_cache.get().await?;
-        TlsConfig {
-            enabled: true,
-            trusted_root_certs,
-        }
-    } else {
-        TlsConfig {
-            enabled: false,
-            trusted_root_certs: String::new(),
-        }
-    };
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
         connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
             .await?;
@@ -303,18 +274,9 @@ pub async fn delete_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = if api_config.source_tls_enabled {
-        let trusted_root_certs = trusted_root_certs_cache.get().await?;
-        TlsConfig {
-            enabled: true,
-            trusted_root_certs,
-        }
-    } else {
-        TlsConfig {
-            enabled: false,
-            trusted_root_certs: String::new(),
-        }
-    };
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
         connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
             .await?;
@@ -352,18 +314,9 @@ pub async fn read_all_publications(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = if api_config.source_tls_enabled {
-        let trusted_root_certs = trusted_root_certs_cache.get().await?;
-        TlsConfig {
-            enabled: true,
-            trusted_root_certs,
-        }
-    } else {
-        TlsConfig {
-            enabled: false,
-            trusted_root_certs: String::new(),
-        }
-    };
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
         connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
             .await?;

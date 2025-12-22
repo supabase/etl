@@ -25,7 +25,6 @@ use crate::db::pipelines::{
 use crate::db::sources::{SourcesDbError, source_exists};
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
-use etl_config::shared::TlsConfig;
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -407,18 +406,9 @@ pub async fn delete_destination_and_pipeline(
     .await?
     .ok_or(DestinationPipelineError::SourceNotFound(pipeline.source_id))?;
 
-    let tls_config = if api_config.source_tls_enabled {
-        let trusted_root_certs = trusted_root_certs_cache.get().await?;
-        TlsConfig {
-            enabled: true,
-            trusted_root_certs,
-        }
-    } else {
-        TlsConfig {
-            enabled: false,
-            trusted_root_certs: String::new(),
-        }
-    };
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     db::pipelines::delete_pipeline_cascading(
         txn,
         tenant_id,

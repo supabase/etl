@@ -33,7 +33,6 @@ use crate::routes::{
 };
 use crate::utils::parse_docker_image_tag;
 use crate::{config::ApiConfig, k8s::PodStatus};
-use etl_config::shared::TlsConfig;
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
@@ -653,18 +652,9 @@ pub async fn delete_pipeline(
     .await?
     .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
-    let tls_config = if api_config.source_tls_enabled {
-        let trusted_root_certs = trusted_root_certs_cache.get().await?;
-        TlsConfig {
-            enabled: true,
-            trusted_root_certs,
-        }
-    } else {
-        TlsConfig {
-            enabled: false,
-            trusted_root_certs: String::new(),
-        }
-    };
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     db::pipelines::delete_pipeline_cascading(txn, tenant_id, &pipeline, &source, None, tls_config)
         .await?;
 
@@ -741,15 +731,9 @@ pub async fn start_pipeline(
     let (pipeline, replicator, image, source, destination) =
         read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
-    let tls_config = if api_config.source_tls_enabled {
-        let trusted_root_certs = trusted_root_certs_cache.get().await?;
-        TlsConfig {
-            enabled: true,
-            trusted_root_certs,
-        }
-    } else {
-        TlsConfig::disabled()
-    };
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
 
     // We update the pipeline in K8s.
     create_or_update_pipeline_resources_in_k8s(
@@ -984,18 +968,9 @@ pub async fn get_pipeline_replication_status(
     txn.commit().await?;
 
     // Connect to the source database to read the necessary state
-    let tls_config = if api_config.source_tls_enabled {
-        let trusted_root_certs = trusted_root_certs_cache.get().await?;
-        TlsConfig {
-            enabled: true,
-            trusted_root_certs,
-        }
-    } else {
-        TlsConfig {
-            enabled: false,
-            trusted_root_certs: String::new(),
-        }
-    };
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
         connect_to_source_database_with_defaults(&source.config.into_connection_config(tls_config))
             .await?;
@@ -1099,18 +1074,9 @@ pub async fn rollback_table_state(
     txn.commit().await?;
 
     // Connect to the source database to perform rollback
-    let tls_config = if api_config.source_tls_enabled {
-        let trusted_root_certs = trusted_root_certs_cache.get().await?;
-        TlsConfig {
-            enabled: true,
-            trusted_root_certs,
-        }
-    } else {
-        TlsConfig {
-            enabled: false,
-            trusted_root_certs: String::new(),
-        }
-    };
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
         connect_to_source_database_with_defaults(&source.config.into_connection_config(tls_config))
             .await?;
@@ -1245,15 +1211,9 @@ pub async fn update_pipeline_version(
         return Ok(HttpResponse::Ok().finish());
     }
 
-    let tls_config = if api_config.source_tls_enabled {
-        let trusted_root_certs = trusted_root_certs_cache.get().await?;
-        TlsConfig {
-            enabled: true,
-            trusted_root_certs,
-        }
-    } else {
-        TlsConfig::disabled()
-    };
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
 
     // We update the pipeline in K8s if client is available.
     create_or_update_pipeline_resources_in_k8s(

@@ -5,6 +5,8 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::debug;
 
+use etl_config::shared::TlsConfig;
+
 use crate::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
 use crate::k8s::{K8sClient, K8sError};
 
@@ -49,6 +51,26 @@ impl TrustedRootCertsCache {
         Self {
             k8s_client,
             cache: RwLock::new(None),
+        }
+    }
+
+    /// Returns a [`TlsConfig`] based on whether TLS is enabled.
+    ///
+    /// When `tls_enabled` is `true`, fetches trusted root certificates from the cache
+    /// and returns an enabled TLS config. When `false`, returns a disabled TLS config
+    /// without fetching certificates.
+    pub async fn get_tls_config(
+        &self,
+        tls_enabled: bool,
+    ) -> Result<TlsConfig, TrustedRootCertsError> {
+        if tls_enabled {
+            let trusted_root_certs = self.get().await?;
+            Ok(TlsConfig {
+                enabled: true,
+                trusted_root_certs,
+            })
+        } else {
+            Ok(TlsConfig::disabled())
         }
     }
 
