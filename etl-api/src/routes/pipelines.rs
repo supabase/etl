@@ -741,8 +741,15 @@ pub async fn start_pipeline(
     let (pipeline, replicator, image, source, destination) =
         read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
-    // Get trusted root certs from cache
-    let trusted_root_certs = trusted_root_certs_cache.get().await?;
+    let tls_config = if api_config.source_tls_enabled {
+        let trusted_root_certs = trusted_root_certs_cache.get().await?;
+        TlsConfig {
+            enabled: true,
+            trusted_root_certs,
+        }
+    } else {
+        TlsConfig::disabled()
+    };
 
     // We update the pipeline in K8s.
     create_or_update_pipeline_resources_in_k8s(
@@ -754,7 +761,7 @@ pub async fn start_pipeline(
         source,
         destination,
         api_config.supabase_api_url.as_deref(),
-        &trusted_root_certs,
+        tls_config,
     )
     .await?;
     txn.commit().await?;
@@ -1238,8 +1245,15 @@ pub async fn update_pipeline_version(
         return Ok(HttpResponse::Ok().finish());
     }
 
-    // Get trusted root certs from cache
-    let trusted_root_certs = trusted_root_certs_cache.get().await?;
+    let tls_config = if api_config.source_tls_enabled {
+        let trusted_root_certs = trusted_root_certs_cache.get().await?;
+        TlsConfig {
+            enabled: true,
+            trusted_root_certs,
+        }
+    } else {
+        TlsConfig::disabled()
+    };
 
     // We update the pipeline in K8s if client is available.
     create_or_update_pipeline_resources_in_k8s(
@@ -1251,7 +1265,7 @@ pub async fn update_pipeline_version(
         source,
         destination,
         api_config.supabase_api_url.as_deref(),
-        &trusted_root_certs,
+        tls_config,
     )
     .await?;
     txn.commit().await?;

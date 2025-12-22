@@ -58,7 +58,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     source: Source,
     destination: Destination,
     supabase_api_url: Option<&str>,
-    trusted_root_certs: &str,
+    tls_config: TlsConfig,
 ) -> Result<(), PipelineError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
@@ -74,11 +74,6 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     };
 
     let log_level = pipeline.config.log_level.clone().unwrap_or_default();
-
-    let tls_config = TlsConfig {
-        enabled: true,
-        trusted_root_certs: trusted_root_certs.to_owned(),
-    };
     let replicator_config = build_replicator_config_without_secrets(
         // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
         // around, and we won't have two different values map to the same u64, since the domain size

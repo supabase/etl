@@ -43,7 +43,9 @@ pub struct ApiConfig {
     /// Whether TLS is enabled for source database connections.
     ///
     /// When `true`, the API fetches trusted root certificates from Kubernetes
-    /// and uses them to establish TLS connections to source databases.
+    /// and uses them to establish TLS connections to source databases. This
+    /// applies both to direct API connections (e.g., listing tables, managing
+    /// publications) and to replicator pods deployed in Kubernetes.
     /// Defaults to `true` for production environments.
     #[serde(default = "default_source_tls_enabled")]
     pub source_tls_enabled: bool,

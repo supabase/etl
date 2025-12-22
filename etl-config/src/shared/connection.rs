@@ -192,9 +192,21 @@ pub struct TlsConfig {
 }
 
 impl TlsConfig {
+    /// Returns a TLS configuration that disables TLS.
+    pub fn disabled() -> Self {
+        Self {
+            trusted_root_certs: "".to_string(),
+            enabled: false,
+        }
+    }
+
     /// Validates TLS configuration consistency.
     ///
     /// Ensures that when TLS is enabled, trusted root certificates are provided.
+    /// This validation is required because the TLS implementation uses `rustls`,
+    /// which does not automatically fall back to system CA certificates. An empty
+    /// root certificate store would cause all TLS handshakes to fail since no
+    /// server certificates would be trusted.
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.enabled && self.trusted_root_certs.is_empty() {
             return Err(ValidationError::MissingTrustedRootCerts);
