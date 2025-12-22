@@ -12,6 +12,8 @@ use crate::db::replicators::{Replicator, ReplicatorsDbError, create_replicator};
 use crate::db::sources::Source;
 use crate::routes::connect_to_source_database_with_defaults;
 use crate::routes::pipelines::PipelineError;
+
+use etl_config::shared::TlsConfig;
 use etl_postgres::replication::{destination_metadata, health, schema, slots, state};
 use sqlx::{PgExecutor, PgTransaction};
 use std::ops::DerefMut;
@@ -218,10 +220,12 @@ pub async fn delete_pipeline_cascading(
     pipeline: &Pipeline,
     source: &Source,
     destination: Option<&Destination>,
+    tls_config: TlsConfig,
 ) -> Result<(), PipelinesDbError> {
-    let source_pool =
-        connect_to_source_database_with_defaults(&source.config.clone().into_connection_config())
-            .await?;
+    let source_pool = connect_to_source_database_with_defaults(
+        &source.config.clone().into_connection_config(tls_config),
+    )
+    .await?;
 
     // We start a transaction in the source database while the other transaction is active in the
     // api database so that in case of failures when deleting the state, we also rollback the transaction

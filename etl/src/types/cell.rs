@@ -168,6 +168,14 @@ impl ArrayCell {
     }
 }
 
+/// Represents a database cell value with non-nullable array elements.
+///
+/// [`CellNonOptional`] is a variant of [`Cell`] designed for destinations that do not
+/// support NULL values within arrays. The conversion from [`Cell`] to [`CellNonOptional`]
+/// will fail if any array contains NULL elements.
+///
+/// This type is typically used when writing to destinations like BigQuery that require
+/// all array elements to be non-null.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CellNonOptional {
     Null,
@@ -221,6 +229,7 @@ impl TryFrom<Cell> for CellNonOptional {
 }
 
 impl CellNonOptional {
+    /// Clears the cell value to its default state.
     pub fn clear(&mut self) {
         match self {
             CellNonOptional::Null => {}
@@ -247,6 +256,14 @@ impl CellNonOptional {
     }
 }
 
+/// Represents array data with non-nullable elements.
+///
+/// [`ArrayCellNonOptional`] is the non-nullable counterpart to [`ArrayCell`]. It is used
+/// for destinations that do not support NULL values within arrays. The conversion from
+/// [`ArrayCell`] will fail with [`ErrorKind::NullValuesNotSupportedInArrayInDestination`]
+/// if any element is NULL.
+///
+/// Each variant corresponds to a Postgres array type with guaranteed non-null elements.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArrayCellNonOptional {
     Bool(Vec<bool>),
@@ -293,6 +310,7 @@ impl TryFrom<ArrayCell> for ArrayCellNonOptional {
 }
 
 impl ArrayCellNonOptional {
+    /// Clears all elements from the array while preserving the variant type.
     fn clear(&mut self) {
         match self {
             ArrayCellNonOptional::Bool(vec) => vec.clear(),

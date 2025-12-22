@@ -15,7 +15,7 @@ const API_KEY_LENGTH_IN_BYTES: usize = 32;
 /// server settings, encryption, authentication, and optional monitoring.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiConfig {
-    /// Database connection configuration.
+    /// Database connection configuration for the API database.
     pub database: PgConnectionConfig,
     /// Application server settings.
     pub application: ApplicationSettings,
@@ -40,6 +40,19 @@ pub struct ApiConfig {
     /// If `None`, the API operates without feature flag support.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configcat_sdk_key: Option<String>,
+    /// Whether TLS is enabled for source database connections.
+    ///
+    /// When `true`, the API fetches trusted root certificates from Kubernetes
+    /// and uses them to establish TLS connections to source databases. This
+    /// applies both to direct API connections (e.g., listing tables, managing
+    /// publications) and to replicator pods deployed in Kubernetes.
+    /// Defaults to `true` for production environments.
+    #[serde(default = "default_source_tls_enabled")]
+    pub source_tls_enabled: bool,
+}
+
+fn default_source_tls_enabled() -> bool {
+    true
 }
 
 impl Config for ApiConfig {

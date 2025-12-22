@@ -1138,10 +1138,8 @@ mod tests {
                     name: "postgres".to_string(),
                     username: "postgres".to_string(),
                     password: Some("password".into()),
-                    tls: TlsConfig {
-                        trusted_root_certs: "".to_string(),
-                        enabled: false,
-                    },
+                    tls: TlsConfig::disabled(),
+                    keepalive: None,
                 },
                 batch: BatchConfig {
                     max_size: 10_000,

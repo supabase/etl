@@ -214,7 +214,7 @@ impl TableSyncWorkerState {
 
     /// Waits for the table to reach a specific replication phase type.
     ///
-    /// This method blocks until either the table reaches the desired phase or
+    /// This method blocks until either the table reaches one of the desired phases or
     /// a shutdown signal is received. It uses an efficient notification system
     /// to avoid polling and provides immediate response to state changes.
     ///
@@ -222,7 +222,7 @@ impl TableSyncWorkerState {
     /// completed successfully or was interrupted by shutdown.
     pub async fn wait_for_phase_type(
         &self,
-        phase_type: TableReplicationPhaseType,
+        phase_types: &[TableReplicationPhaseType],
         mut shutdown_rx: ShutdownRx,
     ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
         let table_id = {
@@ -231,7 +231,7 @@ impl TableSyncWorkerState {
         };
         info!(
             "waiting for table replication phase '{:?}' for table {:?}",
-            phase_type, table_id
+            phase_types, table_id
         );
 
         loop {
@@ -240,13 +240,13 @@ impl TableSyncWorkerState {
 
                 // Shutdown signal received, exit loop.
                 _ = shutdown_rx.changed() => {
-                    info!("shutdown signal received, cancelling the wait for phase type {:?}", phase_type);
+                    info!("shutdown signal received, cancelling the wait for phase types {:?}", phase_types);
 
                     return ShutdownResult::Shutdown(());
                 }
 
                 // Try to wait for the phase type.
-                acquired = self.wait(phase_type) => {
+                acquired = self.wait(phase_types) => {
                     if let Some(acquired) = acquired {
                         return ShutdownResult::Ok(acquired);
                     }
@@ -263,16 +263,17 @@ impl TableSyncWorkerState {
     /// transition detection.
     async fn wait(
         &self,
-        phase_type: TableReplicationPhaseType,
+        phase_types: &[TableReplicationPhaseType],
     ) -> Option<MutexGuard<'_, TableSyncWorkerStateInner>> {
         // We grab hold of the phase change notify in case we don't immediately have the state
         // that we want.
         let phase_change = {
             let inner = self.inner.lock().await;
-            if inner.table_replication_phase.as_type() == phase_type {
+            let current_phase = inner.table_replication_phase.as_type();
+            if phase_types.contains(&current_phase) {
                 info!(
                     "table replication phase '{:?}' was already set, no need to wait",
-                    phase_type
+                    current_phase
                 );
                 return Some(inner);
             }
@@ -286,10 +287,11 @@ impl TableSyncWorkerState {
 
         // We read the state and return the lock to the state.
         let inner = self.inner.lock().await;
-        if inner.table_replication_phase.as_type() == phase_type {
+        let current_phase = inner.table_replication_phase.as_type();
+        if phase_types.contains(&current_phase) {
             info!(
                 "table replication phase '{:?}' was reached for table {:?}",
-                phase_type, inner.table_id
+                current_phase, inner.table_id
             );
             return Some(inner);
         }

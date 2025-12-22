@@ -41,6 +41,7 @@ fn local_pg_connection_config() -> PgConnectionConfig {
             trusted_root_certs: String::new(),
             enabled: false,
         },
+        keepalive: None,
     }
 }
 

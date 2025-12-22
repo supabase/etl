@@ -396,7 +396,7 @@ where
 
     // We also wait to be signaled to catch up with the main apply worker up to a specific lsn.
     let result = table_sync_worker_state
-        .wait_for_phase_type(TableReplicationPhaseType::Catchup, shutdown_rx.clone())
+        .wait_for_phase_type(&[TableReplicationPhaseType::Catchup], shutdown_rx.clone())
         .await;
 
     // If we are told to shut down while waiting for a phase change, we will signal this to

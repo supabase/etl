@@ -11,6 +11,7 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use super::{ErrorMessage, TenantIdError, destinations::DestinationError, extract_tenant_id};
+use crate::config::ApiConfig;
 use crate::configs::destination::FullApiDestinationConfig;
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::FullApiPipelineConfig;
@@ -23,6 +24,7 @@ use crate::db::pipelines::{
 };
 use crate::db::sources::{SourcesDbError, source_exists};
 use crate::feature_flags::get_max_pipelines_per_tenant;
+use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -70,6 +72,9 @@ enum DestinationPipelineError {
 
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
+
+    #[error(transparent)]
+    TrustedRootCerts(#[from] TrustedRootCertsError),
 }
 
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
@@ -113,7 +118,8 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::ImagesDb(_)
             | DestinationPipelineError::SourcesDb(_)
             | DestinationPipelineError::PipelinesDb(_)
-            | DestinationPipelineError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | DestinationPipelineError::Database(_)
+            | DestinationPipelineError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationPipelineError::TenantId(_)
             | DestinationPipelineError::SourceNotFound(_)
             | DestinationPipelineError::DestinationNotFound(_)
@@ -359,7 +365,9 @@ pub async fn update_destination_and_pipeline(
 pub async fn delete_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
 ) -> Result<impl Responder, DestinationPipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
@@ -398,12 +406,16 @@ pub async fn delete_destination_and_pipeline(
     .await?
     .ok_or(DestinationPipelineError::SourceNotFound(pipeline.source_id))?;
 
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     db::pipelines::delete_pipeline_cascading(
         txn,
         tenant_id,
         &pipeline,
         &source,
         Some(&destination),
+        tls_config,
     )
     .await?;
 
