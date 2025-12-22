@@ -155,6 +155,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
             trusted_root_certs: String::new(),
             enabled: false, // Set to true and provide certs for production
         },
+        keepalive: None,
     };
 
     // Create in-memory store for tracking table replication states and table schemas
