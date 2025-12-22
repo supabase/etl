@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use etl_api::k8s::K8sClient;
+use etl_api::k8s::{K8sClient, TrustedRootCertsCache};
 use etl_api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
 use etl_api::routes::destinations_pipelines::{
     CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
@@ -540,14 +540,19 @@ pub async fn spawn_test_app() -> TestApp {
     let api_key_index = random_range(0..config.api_keys.len());
     let api_key = config.api_keys[api_key_index].clone();
 
-    let k8s_client = Some(Arc::new(MockK8sClient) as Arc<dyn K8sClient>);
+    let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient);
+    let trusted_root_certs_cache = TrustedRootCertsCache::new(k8s_client.clone());
+
+    // Disable TLS for tests since local postgres doesn't have TLS configured
+    config.source_tls_enabled = false;
 
     let server = run(
         config.clone(),
         listener,
         api_db_pool,
         encryption_key,
-        k8s_client,
+        Some(k8s_client),
+        Some(trusted_root_certs_cache),
         None,
     )
     .await

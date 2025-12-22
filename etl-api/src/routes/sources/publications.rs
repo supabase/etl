@@ -9,7 +9,9 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::config::ApiConfig;
 use crate::db::publications::PublicationsDbError;
+use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
 use crate::routes::connect_to_source_database_with_defaults;
 use crate::{
     configs::encryption::EncryptionKey,
@@ -36,6 +38,9 @@ enum PublicationError {
 
     #[error("Database connection error: {0}")]
     Database(#[from] sqlx::Error),
+
+    #[error(transparent)]
+    TrustedRootCerts(#[from] TrustedRootCertsError),
 }
 
 impl PublicationError {
@@ -57,7 +62,8 @@ impl ResponseError for PublicationError {
         match self {
             PublicationError::SourcesDb(_)
             | PublicationError::PublicationsDb(_)
-            | PublicationError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | PublicationError::Database(_)
+            | PublicationError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PublicationError::SourceNotFound(_) | PublicationError::PublicationNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -114,20 +120,26 @@ pub struct ReadPublicationsResponse {
 pub async fn create_publication(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     source_id: Path<i64>,
     publication: Json<CreatePublicationRequest>,
 ) -> Result<impl Responder, PublicationError> {
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
 
-    let config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
+        connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
+            .await?;
     let publication = publication.0;
     let publication = Publication {
         name: publication.name,
@@ -156,19 +168,25 @@ pub async fn create_publication(
 pub async fn read_publication(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     source_id_and_pub_name: Path<(i64, String)>,
 ) -> Result<impl Responder, PublicationError> {
     let tenant_id = extract_tenant_id(&req)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    let config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
+        connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
+            .await?;
     let publications = db::publications::read_publication(&publication_name, &source_pool)
         .await?
         .ok_or(PublicationError::PublicationNotFound(publication_name))?;
@@ -195,20 +213,26 @@ pub async fn read_publication(
 pub async fn update_publication(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     source_id_and_pub_name: Path<(i64, String)>,
     publication: Json<UpdatePublicationRequest>,
 ) -> Result<impl Responder, PublicationError> {
     let tenant_id = extract_tenant_id(&req)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    let config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
+        connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
+            .await?;
     let publication = publication.0;
     let publication = Publication {
         name: publication_name,
@@ -237,19 +261,25 @@ pub async fn update_publication(
 pub async fn delete_publication(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     source_id_and_pub_name: Path<(i64, String)>,
 ) -> Result<impl Responder, PublicationError> {
     let tenant_id = extract_tenant_id(&req)?;
     let (source_id, publication_name) = source_id_and_pub_name.into_inner();
 
-    let config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
+        connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
+            .await?;
     db::publications::drop_publication(&publication_name, &source_pool).await?;
 
     Ok(HttpResponse::Ok().finish())
@@ -271,19 +301,25 @@ pub async fn delete_publication(
 pub async fn read_all_publications(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     source_id: Path<i64>,
 ) -> Result<impl Responder, PublicationError> {
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
 
-    let config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
+    let source_config = db::sources::read_source(&**pool, tenant_id, source_id, &encryption_key)
         .await?
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&config.into_connection_config()).await?;
+        connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
+            .await?;
     let publications = db::publications::read_all_publications(&source_pool).await?;
     let response = ReadPublicationsResponse { publications };
 

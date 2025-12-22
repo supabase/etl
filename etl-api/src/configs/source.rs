@@ -10,9 +10,6 @@ use crate::configs::encryption::{
 };
 use crate::configs::store::Store;
 
-const DEFAULT_TLS_TRUSTED_ROOT_CERTS: &str = "";
-const DEFAULT_TLS_ENABLED: bool = false;
-
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct FullApiSourceConfig {
@@ -78,30 +75,15 @@ pub struct StoredSourceConfig {
 }
 
 impl StoredSourceConfig {
-    pub fn into_connection_config(self) -> PgConnectionConfig {
+    /// Converts the stored source config into a Postgres connection config with TLS settings.
+    pub fn into_connection_config(self, tls_config: TlsConfig) -> PgConnectionConfig {
         PgConnectionConfig {
             host: self.host,
             port: self.port,
             name: self.name,
             username: self.username,
             password: self.password.map(|p| p.into()),
-            // TODO: enable TLS
-            tls: TlsConfig {
-                trusted_root_certs: DEFAULT_TLS_TRUSTED_ROOT_CERTS.to_string(),
-                enabled: DEFAULT_TLS_ENABLED,
-            },
-            keepalive: None,
-        }
-    }
-
-    pub fn into_connection_config_with_tls(self, tls: TlsConfig) -> PgConnectionConfig {
-        PgConnectionConfig {
-            host: self.host,
-            port: self.port,
-            name: self.name,
-            username: self.username,
-            password: self.password.map(|p| p.into()),
-            tls,
+            tls: tls_config,
             keepalive: None,
         }
     }

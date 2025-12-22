@@ -17,7 +17,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::feature_flags::init_feature_flags;
 use crate::k8s::http::HttpK8sClient;
-use crate::k8s::{K8sClient, K8sError};
+use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache};
 use crate::{
     authentication::auth_validator,
     config::ApiConfig,
@@ -132,12 +132,15 @@ impl Application {
 
         let feature_flags_client = init_feature_flags(config.configcat_sdk_key.as_deref())?;
 
+        let trusted_root_certs_cache = k8s_client.clone().map(TrustedRootCertsCache::new);
+
         let server = run(
             config,
             listener,
             connection_pool,
             encryption_key,
             k8s_client,
+            trusted_root_certs_cache,
             feature_flags_client,
         )
         .await?;
@@ -194,20 +197,22 @@ pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
 /// Creates and configures the HTTP server with all routes and middleware.
 ///
 /// Sets up authentication, tracing, Swagger UI, and all API endpoints.
-/// The Kubernetes client is optional to support testing scenarios.
+/// The Kubernetes client and trusted root certs cache are optional to support testing scenarios.
 pub async fn run(
     config: ApiConfig,
     listener: TcpListener,
     connection_pool: PgPool,
     encryption_key: encryption::EncryptionKey,
-    http_k8s_client: Option<Arc<dyn K8sClient>>,
+    k8s_client: Option<Arc<dyn K8sClient>>,
+    trusted_root_certs_cache: Option<TrustedRootCertsCache>,
     feature_flags_client: Option<configcat::Client>,
 ) -> Result<Server, anyhow::Error> {
     let prometheus_handle = web::ThinData(init_metrics_handle()?);
     let config = web::Data::new(config);
     let connection_pool = web::Data::new(connection_pool);
     let encryption_key = web::Data::new(encryption_key);
-    let k8s_client: Option<web::Data<dyn K8sClient>> = http_k8s_client.map(Into::into);
+    let k8s_client: Option<web::Data<dyn K8sClient>> = k8s_client.map(Into::into);
+    let trusted_root_certs_cache = trusted_root_certs_cache.map(web::Data::new);
     let feature_flags_client = feature_flags_client.map(web::Data::new);
 
     #[derive(OpenApi)]
@@ -395,13 +400,19 @@ pub async fn run(
             .app_data(encryption_key.clone());
 
         let app = if let Some(k8s_client) = k8s_client.clone() {
-            app.app_data(k8s_client.clone())
+            app.app_data(k8s_client)
+        } else {
+            app
+        };
+
+        let app = if let Some(trusted_root_certs_cache) = trusted_root_certs_cache.clone() {
+            app.app_data(trusted_root_certs_cache)
         } else {
             app
         };
 
         if let Some(feature_flags_client) = feature_flags_client.clone() {
-            app.app_data(feature_flags_client.clone())
+            app.app_data(feature_flags_client)
         } else {
             app
         }

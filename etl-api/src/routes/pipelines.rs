@@ -27,7 +27,7 @@ use crate::k8s::core::{
     create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
     delete_pipeline_resources_in_k8s,
 };
-use crate::k8s::{K8sClient, K8sError};
+use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache, TrustedRootCertsError};
 use crate::routes::{
     ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
 };
@@ -110,6 +110,9 @@ pub enum PipelineError {
 
     #[error("Could not load app environment")]
     MissingEnvironment,
+
+    #[error(transparent)]
+    TrustedRootCerts(#[from] TrustedRootCertsError),
 }
 
 impl From<PipelinesDbError> for PipelineError {
@@ -155,6 +158,7 @@ impl ResponseError for PipelineError {
             | PipelineError::ImagesDb(_)
             | PipelineError::K8s(_)
             | PipelineError::TrustedRootCertsConfigMissing
+            | PipelineError::TrustedRootCerts(_)
             | PipelineError::Database(_)
             | PipelineError::TableLookup(_)
             | PipelineError::InvalidTableReplicationState(_)
@@ -625,7 +629,9 @@ pub async fn update_pipeline(
 pub async fn delete_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
@@ -646,7 +652,11 @@ pub async fn delete_pipeline(
     .await?
     .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
-    db::pipelines::delete_pipeline_cascading(txn, tenant_id, &pipeline, &source, None).await?;
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
+    db::pipelines::delete_pipeline_cascading(txn, tenant_id, &pipeline, &source, None, tls_config)
+        .await?;
 
     Ok(HttpResponse::Ok().finish())
 }
@@ -709,6 +719,7 @@ pub async fn start_pipeline(
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
     k8s_client: Data<dyn K8sClient>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     api_config: Data<ApiConfig>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
@@ -720,6 +731,10 @@ pub async fn start_pipeline(
     let (pipeline, replicator, image, source, destination) =
         read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
+
     // We update the pipeline in K8s.
     create_or_update_pipeline_resources_in_k8s(
         k8s_client.as_ref(),
@@ -730,6 +745,7 @@ pub async fn start_pipeline(
         source,
         destination,
         api_config.supabase_api_url.as_deref(),
+        tls_config,
     )
     .await?;
     txn.commit().await?;
@@ -924,7 +940,9 @@ pub async fn get_pipeline_status(
 pub async fn get_pipeline_replication_status(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
@@ -950,8 +968,12 @@ pub async fn get_pipeline_replication_status(
     txn.commit().await?;
 
     // Connect to the source database to read the necessary state
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
+        connect_to_source_database_with_defaults(&source.config.into_connection_config(tls_config))
+            .await?;
 
     // Ensure ETL tables exist in the source DB
     if !health::etl_tables_present(&source_pool).await? {
@@ -1021,7 +1043,9 @@ pub async fn get_pipeline_replication_status(
 pub async fn rollback_table_state(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     pipeline_id: Path<i64>,
     rollback_request: Json<RollbackTableStateRequest>,
 ) -> Result<impl Responder, PipelineError> {
@@ -1050,8 +1074,12 @@ pub async fn rollback_table_state(
     txn.commit().await?;
 
     // Connect to the source database to perform rollback
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&source.config.into_connection_config()).await?;
+        connect_to_source_database_with_defaults(&source.config.into_connection_config(tls_config))
+            .await?;
 
     // Ensure ETL tables exist in the source DB
     if !health::etl_tables_present(&source_pool).await? {
@@ -1130,11 +1158,13 @@ pub async fn rollback_table_state(
     tag = "Pipelines"
 )]
 #[post("/pipelines/{pipeline_id}/version")]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_pipeline_version(
     req: HttpRequest,
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
     k8s_client: Data<dyn K8sClient>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     api_config: Data<ApiConfig>,
     pipeline_id: Path<i64>,
     update_request: Json<UpdatePipelineVersionRequest>,
@@ -1181,6 +1211,10 @@ pub async fn update_pipeline_version(
         return Ok(HttpResponse::Ok().finish());
     }
 
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
+
     // We update the pipeline in K8s if client is available.
     create_or_update_pipeline_resources_in_k8s(
         k8s_client.as_ref(),
@@ -1191,6 +1225,7 @@ pub async fn update_pipeline_version(
         source,
         destination,
         api_config.supabase_api_url.as_deref(),
+        tls_config,
     )
     .await?;
     txn.commit().await?;
