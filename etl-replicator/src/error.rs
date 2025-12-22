@@ -52,7 +52,7 @@ impl ReplicatorError {
     /// Returns the backtrace for this error.
     pub fn backtrace(&self) -> Option<&Backtrace> {
         match self {
-            ReplicatorError::Etl(e) => e.backtrace(),
+            ReplicatorError::Etl(err) => err.backtrace(),
             ReplicatorError::Config(_, cb) => Some(&cb.0),
             ReplicatorError::Migration(_, cb) => Some(&cb.0),
             ReplicatorError::Io(_, cb) => Some(&cb.0),
@@ -62,7 +62,7 @@ impl ReplicatorError {
     /// Returns the inner [`EtlError`] if this is an ETL error.
     pub fn as_etl_error(&self) -> Option<&EtlError> {
         match self {
-            ReplicatorError::Etl(e) => Some(e),
+            ReplicatorError::Etl(err) => Some(err),
             _ => None,
         }
     }

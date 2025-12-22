@@ -15,7 +15,7 @@ use crate::error::{ReplicatorError, ReplicatorResult};
 ///
 /// Loads DSN from configuration and sets up panic integration to automatically
 /// capture panics. Tags all events with `service=replicator` and optionally
-/// the app version from environment. Returns [`None`] if no Sentry config is
+/// the app version from the environment. Returns [`None`] if no Sentry config is
 /// present, allowing the replicator to run without error tracking.
 pub fn init() -> ReplicatorResult<Option<sentry::ClientInitGuard>> {
     if let Ok(config) = load_replicator_config()
@@ -61,7 +61,7 @@ pub fn init() -> ReplicatorResult<Option<sentry::ClientInitGuard>> {
 
 /// Captures a [`ReplicatorError`] to Sentry and returns the event ID.
 ///
-/// Builds a Sentry event with exception chain and stacktrace attached. For
+/// Builds a Sentry event with an exception chain and stacktrace attached. For
 /// [`EtlError`] Many variants, expands all contained errors into separate
 /// exceptions. Searches recursively for the first captured backtrace.
 pub fn capture_error(err: &ReplicatorError) -> Uuid {
@@ -73,36 +73,35 @@ pub fn capture_error(err: &ReplicatorError) -> Uuid {
 ///
 /// For ETL errors, expands Many variants and uses [`ErrorKind`] as the
 /// exception type. For other errors, walks the source chain and reverses
-/// to put root cause first. Attaches the first captured backtrace to the
+/// to put the root cause first. Attaches the first captured backtrace to the
 /// last exception in the list.
 fn event_from_replicator_error(err: &ReplicatorError) -> Event<'static> {
     let mut exceptions = Vec::new();
 
-    // Build exception list based on error type.
+    // Build exception list based on the error type.
     match err {
         ReplicatorError::Etl(etl_err) => {
-            // For ETL errors, collect all errors (expanding Many variants).
-            // These are kept in original order since Many errors are parallel, not chained.
+            // For ETL errors, collect all errors (expanding Many variants recursively).
             collect_etl_exceptions(etl_err, &mut exceptions);
         }
         _ => {
             // For non-ETL errors, walk the standard error chain (reversed: root cause first).
             let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
-            while let Some(e) = current {
+            while let Some(err) = current {
                 exceptions.push(Exception {
-                    ty: type_name_from_debug(e),
-                    value: Some(e.to_string()),
+                    ty: type_name_from_debug(err),
+                    value: Some(err.to_string()),
                     ..Default::default()
                 });
-                current = e.source();
+                current = err.source();
             }
-            // Reverse so root cause is first (Sentry convention for error chains).
+            // Reverse so the root cause is first (Sentry convention for error chains).
             exceptions.reverse();
         }
     }
 
     // Attach the first captured backtrace to the first exception (they correspond).
-    if let Some(stacktrace) = find_first_captured_backtrace(err) {
+    if let Some(stacktrace) = find_and_parse_stacktrace(err) {
         if let Some(exception) = exceptions.first_mut() {
             exception.stacktrace = Some(stacktrace);
         }
@@ -122,7 +121,7 @@ fn event_from_replicator_error(err: &ReplicatorError) -> Event<'static> {
 /// order since Many errors represent parallel failures, not a causal chain.
 fn collect_etl_exceptions(error: &EtlError, exceptions: &mut Vec<Exception>) {
     if let Some(errors) = error.errors() {
-        // Many variant: collect each individual error.
+        // Many variant: collect each error.
         for error in errors {
             collect_etl_exceptions(error, exceptions);
         }
@@ -140,7 +139,7 @@ fn collect_etl_exceptions(error: &EtlError, exceptions: &mut Vec<Exception>) {
 ///
 /// Delegates to [`ReplicatorError::backtrace`] which handles recursion for ETL
 /// Many variants. Returns [`None`] if no backtrace was captured or parsing fails.
-fn find_first_captured_backtrace(error: &ReplicatorError) -> Option<Stacktrace> {
+fn find_and_parse_stacktrace(error: &ReplicatorError) -> Option<Stacktrace> {
     let backtrace = error.backtrace()?;
     if backtrace.status() != BacktraceStatus::Captured {
         return None;

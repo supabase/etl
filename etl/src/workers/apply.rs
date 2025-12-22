@@ -136,20 +136,6 @@ where
             publication_name = self.config.publication_name
         );
         let apply_worker = async move {
-            let errors = vec![
-                etl_error!(
-                    ErrorKind::InvalidState,
-                    "apply worker failed to start",
-                    "long description"
-                ),
-                etl_error!(
-                    ErrorKind::ApplyWorkerPanic,
-                    "apply worker panicked",
-                    "long description"
-                ),
-            ];
-            return Err(errors.into());
-
             let start_lsn =
                 get_start_lsn(self.pipeline_id, &self.replication_client, &self.store).await?;
 
