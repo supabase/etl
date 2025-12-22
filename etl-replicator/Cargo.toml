@@ -14,7 +14,6 @@ etl-destinations = { workspace = true, features = ["bigquery", "iceberg"] }
 etl-telemetry = { workspace = true }
 
 configcat = { workspace = true }
-thiserror = { workspace = true }
 metrics = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
 secrecy = { workspace = true }
@@ -26,6 +25,7 @@ sqlx = { workspace = true, features = [
     "postgres",
     "migrate",
 ] }
+thiserror = { workspace = true }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing = { workspace = true, default-features = true }
