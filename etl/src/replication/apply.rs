@@ -27,8 +27,8 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-    ETL_EVENTS_PROCESSED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_EVENTS_TOTAL,
-    ETL_TRANSACTIONS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+    ETL_EVENTS_PROCESSED_TOTAL, ETL_TRANSACTIONS_TOTAL, ETL_TRANSACTION_DURATION_SECONDS,
+    ETL_TRANSACTION_SIZE, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
@@ -1159,11 +1159,11 @@ where
         .increment(1);
 
         // We do - 1 since we exclude this COMMIT event from the count.
-        counter!(
-            ETL_TRANSACTION_EVENTS_TOTAL,
+        histogram!(
+            ETL_TRANSACTION_SIZE,
             PIPELINE_ID_LABEL => pipeline_id.to_string()
         )
-        .increment(state.current_tx_events - 1);
+        .record((state.current_tx_events - 1) as f64);
 
         state.current_tx_events = 0;
     }
