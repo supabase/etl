@@ -106,6 +106,7 @@ fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
             integrations: vec![Arc::new(
                 sentry::integrations::panic::PanicIntegration::new(),
             )],
+            attach_stacktrace: true,
             ..Default::default()
         });
 
