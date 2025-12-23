@@ -16,6 +16,10 @@ expression: container_environment
     "value": "info"
   },
   {
+    "name": "RUST_BACKTRACE",
+    "value": "1"
+  },
+  {
     "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
     "valueFrom": {
       "secretKeyRef": {
