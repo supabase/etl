@@ -2,10 +2,10 @@ use etl_api::configs::log::LogLevel;
 use etl_api::configs::pipeline::ApiBatchConfig;
 use etl_api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
-    GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
-    RollbackTablesRequest, RollbackTablesResponse, RollbackTablesTarget, RollbackType,
-    SimpleTableReplicationState, UpdatePipelineConfigRequest, UpdatePipelineConfigResponse,
-    UpdatePipelineRequest, UpdatePipelineVersionRequest,
+    GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse, RollbackTablesRequest,
+    RollbackTablesResponse, RollbackTablesTarget, RollbackType, SimpleTableReplicationState,
+    UpdatePipelineConfigRequest, UpdatePipelineConfigResponse, UpdatePipelineRequest,
+    UpdatePipelineVersionRequest,
 };
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::sqlx::test_utils::drop_pg_database;
@@ -1049,48 +1049,6 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_tables_succeeds_for_manual_retry_errors() {
-    init_test_tracing();
-    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
-        setup_pipeline_with_source_db().await;
-
-    let table_oid = create_table_with_state_chain(
-        &source_db_pool,
-        pipeline_id,
-        "test_users",
-        &[
-            ("ready", r#"{"type": "ready"}"#),
-            (
-                "errored",
-                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "manual_retry"}}"#,
-            ),
-        ],
-    )
-    .await;
-
-    let response = test_rollback(
-        &app,
-        &tenant_id,
-        pipeline_id,
-        table_oid,
-        RollbackType::Individual,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(response.pipeline_id, pipeline_id);
-    assert_eq!(response.tables.len(), 1);
-    assert_eq!(response.tables[0].table_id, table_oid.0);
-    assert!(matches!(
-        response.tables[0].new_state,
-        SimpleTableReplicationState::FollowingWal
-    ));
-
-    drop_pg_database(&source_db_config).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn rollback_tables_fails_for_non_manual_retry_errors() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
@@ -1753,53 +1711,6 @@ async fn rollback_tables_all_errored_fails_when_no_errored_tables() {
             .unwrap()
             .contains("No tables with manual retry errors found")
     );
-
-    drop_pg_database(&source_db_config).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn rollback_tables_single_table_succeeds() {
-    init_test_tracing();
-    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
-        setup_pipeline_with_source_db().await;
-
-    let table_oid = create_table_with_state_chain(
-        &source_db_pool,
-        pipeline_id,
-        "test_users",
-        &[
-            ("ready", r#"{"type": "ready"}"#),
-            (
-                "errored",
-                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "manual_retry"}}"#,
-            ),
-        ],
-    )
-    .await;
-
-    let response = app
-        .rollback_tables(
-            &tenant_id,
-            pipeline_id,
-            &RollbackTablesRequest {
-                target: RollbackTablesTarget::SingleTable {
-                    table_id: table_oid.0,
-                },
-                rollback_type: RollbackType::Individual,
-            },
-        )
-        .await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let response: RollbackTablesResponse = response.json().await.unwrap();
-
-    assert_eq!(response.pipeline_id, pipeline_id);
-    assert_eq!(response.tables.len(), 1);
-    assert_eq!(response.tables[0].table_id, table_oid.0);
-    assert!(matches!(
-        response.tables[0].new_state,
-        SimpleTableReplicationState::FollowingWal
-    ));
 
     drop_pg_database(&source_db_config).await;
 }

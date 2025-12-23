@@ -1136,10 +1136,13 @@ pub async fn rollback_table_state(
         ));
     }
 
+    // Wrap rollback operations in a transaction
+    let mut source_txn = source_pool.begin().await?;
+
     let new_state_row = match rollback_type {
         RollbackType::Individual => {
             let Some(new_state_row) = state::rollback_replication_state(
-                &source_pool,
+                source_txn.deref_mut(),
                 pipeline_id,
                 TableId::new(table_id),
             )
@@ -1153,10 +1156,16 @@ pub async fn rollback_table_state(
             new_state_row
         }
         RollbackType::Full => {
-            state::reset_replication_state(&source_pool, pipeline_id, TableId::new(table_id))
-                .await?
+            state::reset_replication_state(
+                source_txn.deref_mut(),
+                pipeline_id,
+                TableId::new(table_id),
+            )
+            .await?
         }
     };
+
+    source_txn.commit().await?;
 
     // We extract the state from the metadata of the row
     let new_state = new_state_row
@@ -1241,7 +1250,7 @@ pub async fn rollback_tables(
     // Determine which tables to rollback based on target
     let target_table_ids: Vec<u32> = match &rollback_request.target {
         RollbackTablesTarget::SingleTable { table_id } => {
-            // Single table mode - validate the table exists and is rollbackable
+            // Single table mode, validate the table exists and is rollbackable
             let current_row = state_rows
                 .iter()
                 .find(|row| row.table_id.0 == *table_id)
@@ -1261,7 +1270,7 @@ pub async fn rollback_tables(
             vec![*table_id]
         }
         RollbackTablesTarget::AllErroredTables => {
-            // All errored tables mode - find all tables with ManualRetry policy
+            // All errored tables mode, find all tables with ManualRetry policy
             let mut errored_table_ids = Vec::new();
             for row in &state_rows {
                 if let Ok(Some(state)) = row.deserialize_metadata() {
@@ -1281,13 +1290,15 @@ pub async fn rollback_tables(
         }
     };
 
-    // Rollback each target table
+    // Rollback all target tables within a single transaction
+    let mut source_txn = source_pool.begin().await?;
+
     let mut rolled_back_tables = Vec::new();
     for table_id in target_table_ids {
         let new_state_row = match rollback_type {
             RollbackType::Individual => {
                 let Some(new_state_row) = state::rollback_replication_state(
-                    &source_pool,
+                    source_txn.deref_mut(),
                     pipeline_id,
                     TableId::new(table_id),
                 )
@@ -1302,8 +1313,12 @@ pub async fn rollback_tables(
                 new_state_row
             }
             RollbackType::Full => {
-                state::reset_replication_state(&source_pool, pipeline_id, TableId::new(table_id))
-                    .await?
+                state::reset_replication_state(
+                    source_txn.deref_mut(),
+                    pipeline_id,
+                    TableId::new(table_id),
+                )
+                .await?
             }
         };
 
@@ -1317,6 +1332,8 @@ pub async fn rollback_tables(
             new_state: new_state.into(),
         });
     }
+
+    source_txn.commit().await?;
 
     let response = RollbackTablesResponse {
         pipeline_id,
