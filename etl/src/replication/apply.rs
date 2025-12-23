@@ -632,7 +632,8 @@ where
                         .send_status_update(
                             state.write_lsn(),
                             state.flush_lsn(),
-                            false
+                            false,
+                            pipeline_id,
                         )
                         .await?;
                     state.mark_status_update_sent();
@@ -680,7 +681,8 @@ where
                     .send_status_update(
                         state.write_lsn(),
                         state.flush_lsn(),
-                        false
+                        false,
+                        pipeline_id,
                     )
                     .await?;
 
@@ -971,7 +973,7 @@ where
 
             events_stream
                 .get_inner()
-                .send_status_update(state.write_lsn(), state.flush_lsn(), message.reply() == 1)
+                .send_status_update(state.write_lsn(), state.flush_lsn(), message.reply() == 1, pipeline_id)
                 .await?;
 
             state.mark_status_update_sent();

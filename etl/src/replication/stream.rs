@@ -14,7 +14,10 @@ use tracing::debug;
 use crate::conversions::table_row::parse_table_row_from_postgres_copy_bytes;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
-use crate::metrics::{ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL, PIPELINE_ID_LABEL};
+use crate::metrics::{
+    ETL_BYTES_PROCESSED_TOTAL, ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL,
+    PIPELINE_ID_LABEL,
+};
 use crate::types::{PipelineId, TableRow};
 use metrics::counter;
 
@@ -127,6 +130,7 @@ impl EventsStream {
         write_lsn: PgLsn,
         mut flush_lsn: PgLsn,
         force: bool,
+        pipeline_id: PipelineId,
     ) -> EtlResult<()> {
         let this = self.project();
 
@@ -178,6 +182,13 @@ impl EventsStream {
         this.stream
             .standby_status_update(write_lsn, flush_lsn, flush_lsn, ts, 0)
             .await?;
+
+        counter!(
+            ETL_STATUS_UPDATES_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+            FORCED_LABEL => force.to_string(),
+        )
+        .increment(1);
 
         debug!(
             "status update successfully sent (write_lsn = {}, flush_lsn = {}, apply_lsn = {})",

@@ -12,6 +12,7 @@ pub const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
 pub const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
 pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
+pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
@@ -25,6 +26,8 @@ pub const DESTINATION_LABEL: &str = "destination";
 pub const PIPELINE_ID_LABEL: &str = "pipeline_id";
 /// Label key for event type (copy, insert, update, delete).
 pub const EVENT_TYPE_LABEL: &str = "event_type";
+/// Label key for whether the status update was forced.
+pub const FORCED_LABEL: &str = "forced";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaranteed to register the
@@ -77,6 +80,12 @@ pub(crate) fn register_metrics() {
             ETL_BYTES_PROCESSED_TOTAL,
             Unit::Bytes,
             "Total bytes processed by the pipeline, labeled by pipeline_id and event_type"
+        );
+
+        describe_counter!(
+            ETL_STATUS_UPDATES_TOTAL,
+            Unit::Count,
+            "Total number of status updates sent to Postgres, labeled by pipeline_id and forced"
         );
     });
 }
