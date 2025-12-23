@@ -1026,13 +1026,37 @@ where
             handle_relation_message(state, start_lsn, relation_body, schema_store, hook).await
         }
         LogicalReplicationMessage::Insert(insert_body) => {
-            handle_insert_message(state, start_lsn, insert_body, hook, schema_store).await
+            handle_insert_message(
+                state,
+                start_lsn,
+                insert_body,
+                hook,
+                schema_store,
+                pipeline_id,
+            )
+            .await
         }
         LogicalReplicationMessage::Update(update_body) => {
-            handle_update_message(state, start_lsn, update_body, hook, schema_store).await
+            handle_update_message(
+                state,
+                start_lsn,
+                update_body,
+                hook,
+                schema_store,
+                pipeline_id,
+            )
+            .await
         }
         LogicalReplicationMessage::Delete(delete_body) => {
-            handle_delete_message(state, start_lsn, delete_body, hook, schema_store).await
+            handle_delete_message(
+                state,
+                start_lsn,
+                delete_body,
+                hook,
+                schema_store,
+                pipeline_id,
+            )
+            .await
         }
         LogicalReplicationMessage::Truncate(truncate_body) => {
             handle_truncate_message(state, start_lsn, truncate_body, hook).await
@@ -1265,6 +1289,7 @@ async fn handle_insert_message<S, T>(
     message: &protocol::InsertBody,
     hook: &T,
     schema_store: &S,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1286,8 +1311,14 @@ where
     }
 
     // Convert event from the protocol message.
-    let event =
-        parse_event_from_insert_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+    let event = parse_event_from_insert_message(
+        schema_store,
+        start_lsn,
+        remote_final_lsn,
+        message,
+        pipeline_id,
+    )
+    .await?;
 
     Ok(HandleMessageResult::return_event(Event::Insert(event)))
 }
@@ -1299,6 +1330,7 @@ async fn handle_update_message<S, T>(
     message: &protocol::UpdateBody,
     hook: &T,
     schema_store: &S,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1320,8 +1352,14 @@ where
     }
 
     // Convert event from the protocol message.
-    let event =
-        parse_event_from_update_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+    let event = parse_event_from_update_message(
+        schema_store,
+        start_lsn,
+        remote_final_lsn,
+        message,
+        pipeline_id,
+    )
+    .await?;
 
     Ok(HandleMessageResult::return_event(Event::Update(event)))
 }
@@ -1333,6 +1371,7 @@ async fn handle_delete_message<S, T>(
     message: &protocol::DeleteBody,
     hook: &T,
     schema_store: &S,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1354,8 +1393,14 @@ where
     }
 
     // Convert event from the protocol message.
-    let event =
-        parse_event_from_delete_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+    let event = parse_event_from_delete_message(
+        schema_store,
+        start_lsn,
+        remote_final_lsn,
+        message,
+        pipeline_id,
+    )
+    .await?;
 
     Ok(HandleMessageResult::return_event(Event::Delete(event)))
 }

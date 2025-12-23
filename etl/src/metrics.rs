@@ -8,8 +8,8 @@ pub const ETL_TABLES_TOTAL: &str = "etl_tables_total";
 pub const ETL_BATCH_ITEMS_SEND_DURATION_SECONDS: &str = "etl_batch_items_send_duration_seconds";
 pub const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_duration_seconds";
 pub const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
-pub const ETL_COPIED_TABLE_ROW_SIZE_BYTES: &str = "etl_copied_table_row_size_bytes";
 pub const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
+pub const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
 pub const ETL_EVENTS_RECEIVED_TOTAL: &str = "etl_events_received_total";
 pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 
@@ -23,6 +23,8 @@ pub const ACTION_LABEL: &str = "action";
 pub const DESTINATION_LABEL: &str = "destination";
 /// Label key for pipeline id.
 pub const PIPELINE_ID_LABEL: &str = "pipeline_id";
+/// Label key for event type (copy, insert, update, delete).
+pub const EVENT_TYPE_LABEL: &str = "event_type";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaranteed to register the
@@ -54,12 +56,6 @@ pub(crate) fn register_metrics() {
         );
 
         describe_histogram!(
-            ETL_COPIED_TABLE_ROW_SIZE_BYTES,
-            Unit::Bytes,
-            "Approximate size in bytes of a row copied during table sync"
-        );
-
-        describe_histogram!(
             ETL_TABLE_COPY_DURATION_SECONDS,
             Unit::Seconds,
             "Duration in seconds to complete initial table copy from DataSync to FinishedCopy phase"
@@ -75,6 +71,12 @@ pub(crate) fn register_metrics() {
             ETL_EVENTS_PROCESSED_TOTAL,
             Unit::Count,
             "Total number of events successfully processed (stored), labeled by worker_type, action, pipeline_id, and destination"
+        );
+
+        describe_counter!(
+            ETL_BYTES_PROCESSED_TOTAL,
+            Unit::Bytes,
+            "Total bytes processed by the pipeline, labeled by pipeline_id and event_type"
         );
     });
 }
