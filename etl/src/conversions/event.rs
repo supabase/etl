@@ -1,18 +1,21 @@
 use core::str;
-use std::collections::HashSet;
-
 use etl_postgres::types::{
     ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
     convert_type_oid_to_type,
 };
+use metrics::counter;
 use postgres_replication::protocol;
 use serde::Deserialize;
+use std::collections::HashSet;
+use std::str::FromStr;
 use tokio_postgres::types::PgLsn;
 
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::metrics::{ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL, PIPELINE_ID_LABEL};
 use crate::types::{
-    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow, TruncateEvent, UpdateEvent,
+    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, PipelineId, TableRow, TruncateEvent,
+    UpdateEvent,
 };
 use crate::{bail, etl_error};
 
@@ -74,6 +77,20 @@ impl SchemaChangeMessage {
     }
 }
 
+impl FromStr for SchemaChangeMessage {
+    type Err = EtlError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(s).map_err(|e| {
+            etl_error!(
+                ErrorKind::ConversionError,
+                "Failed to parse schema change message",
+                format!("Invalid JSON in schema change message: {}", e)
+            )
+        })
+    }
+}
+
 /// Represents a column schema in a schema change message.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +107,19 @@ pub struct ColumnSchemaMessage {
     pub primary_key_ordinal_position: Option<i32>,
     /// Whether the column can contain NULL values.
     pub nullable: bool,
+}
+
+/// Calculates the total byte size of tuple data from a replication message.
+fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
+    tuple_data
+        .iter()
+        .map(|data| match data {
+            protocol::TupleData::Null => 0,
+            protocol::TupleData::UnchangedToast => 0,
+            protocol::TupleData::Text(bytes) => bytes.len() as u64,
+            protocol::TupleData::Binary(bytes) => bytes.len() as u64,
+        })
+        .sum()
 }
 
 /// Creates a [`BeginEvent`] from Postgres protocol data.
@@ -156,10 +186,19 @@ pub fn parse_event_from_insert_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     insert_body: &protocol::InsertBody,
+    pipeline_id: PipelineId,
 ) -> EtlResult<InsertEvent> {
+    let tuple_data = insert_body.tuple().tuple_data();
+    counter!(
+        ETL_BYTES_PROCESSED_TOTAL,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        EVENT_TYPE_LABEL => "insert"
+    )
+    .increment(calculate_tuple_bytes(tuple_data));
+
     let table_row = convert_tuple_to_row(
         replicated_table_schema.column_schemas(),
-        insert_body.tuple().tuple_data(),
+        tuple_data,
         &mut None,
         false,
     )?;
@@ -183,11 +222,26 @@ pub fn parse_event_from_update_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     update_body: &protocol::UpdateBody,
+    pipeline_id: PipelineId,
 ) -> EtlResult<UpdateEvent> {
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = update_body.old_tuple().is_none();
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
+
+    // Calculate total bytes from both old and new tuple data.
+    let new_tuple_data = update_body.new_tuple().tuple_data();
+    let mut total_bytes = calculate_tuple_bytes(new_tuple_data);
+    if let Some(identity) = &old_tuple {
+        total_bytes += calculate_tuple_bytes(identity.tuple_data());
+    }
+    counter!(
+        ETL_BYTES_PROCESSED_TOTAL,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        EVENT_TYPE_LABEL => "update"
+    )
+    .increment(total_bytes);
+
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
             replicated_table_schema.column_schemas(),
@@ -201,7 +255,7 @@ pub fn parse_event_from_update_message(
     let mut old_table_row_mut = old_table_row;
     let table_row = convert_tuple_to_row(
         replicated_table_schema.column_schemas(),
-        update_body.new_tuple().tuple_data(),
+        new_tuple_data,
         &mut old_table_row_mut,
         false,
     )?;
@@ -228,11 +282,22 @@ pub fn parse_event_from_delete_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     delete_body: &protocol::DeleteBody,
+    pipeline_id: PipelineId,
 ) -> EtlResult<DeleteEvent> {
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = delete_body.old_tuple().is_none();
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
+
+    if let Some(identity) = &old_tuple {
+        counter!(
+            ETL_BYTES_PROCESSED_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+            EVENT_TYPE_LABEL => "delete"
+        )
+        .increment(calculate_tuple_bytes(identity.tuple_data()));
+    }
+
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
             replicated_table_schema.column_schemas(),
@@ -347,17 +412,4 @@ pub fn convert_tuple_to_row<'a>(
     }
 
     Ok(TableRow { values })
-}
-
-/// Parses a DDL schema change message from its JSON content.
-///
-/// Returns the parsed message if successful, or an error if the JSON is malformed.
-pub fn parse_schema_change_message(content: &str) -> EtlResult<SchemaChangeMessage> {
-    serde_json::from_str(content).map_err(|e| {
-        etl_error!(
-            ErrorKind::ConversionError,
-            "Failed to parse schema change message",
-            format!("Invalid JSON in schema change message: {}", e)
-        )
-    })
 }

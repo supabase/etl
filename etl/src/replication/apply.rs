@@ -1,41 +1,43 @@
-use crate::bail;
-use crate::concurrency::shutdown::ShutdownRx;
-use crate::concurrency::signal::SignalRx;
-use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
-use crate::conversions::event::{
-    DDL_MESSAGE_PREFIX, parse_event_from_begin_message, parse_event_from_commit_message,
-    parse_event_from_delete_message, parse_event_from_insert_message,
-    parse_event_from_truncate_message, parse_event_from_update_message,
-    parse_replicated_column_names, parse_schema_change_message,
-};
-use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlResult};
-use crate::metrics::{
-    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-    ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS,
-    ETL_TRANSACTION_SIZE, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
-};
-use crate::replication::client::PgReplicationClient;
-use crate::replication::masks::ReplicationMasks;
-use crate::replication::stream::EventsStream;
-use crate::store::schema::SchemaStore;
-use crate::types::{Event, PipelineId, RelationEvent};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::{
     ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
 };
 use futures::StreamExt;
-use metrics::histogram;
+use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info, warn};
+
+use crate::bail;
+use crate::concurrency::shutdown::ShutdownRx;
+use crate::concurrency::signal::SignalRx;
+use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
+use crate::conversions::event::{
+    DDL_MESSAGE_PREFIX, SchemaChangeMessage, parse_event_from_begin_message,
+    parse_event_from_commit_message, parse_event_from_delete_message,
+    parse_event_from_insert_message, parse_event_from_truncate_message,
+    parse_event_from_update_message, parse_replicated_column_names,
+};
+use crate::destination::Destination;
+use crate::error::{ErrorKind, EtlResult};
+use crate::metrics::{
+    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+    ETL_EVENTS_PROCESSED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
+    ETL_TRANSACTIONS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+};
+use crate::replication::client::PgReplicationClient;
+use crate::replication::masks::ReplicationMasks;
+use crate::replication::stream::EventsStream;
+use crate::store::schema::SchemaStore;
+use crate::types::{Event, PipelineId, RelationEvent};
 
 /// The minimum interval (in milliseconds) between consecutive status updates.
 ///
@@ -723,15 +725,6 @@ where
             {
                 state.events_batch.push(event);
                 state.update_last_commit_end_lsn(result.end_lsn);
-
-                metrics::counter!(
-                    ETL_EVENTS_RECEIVED_TOTAL,
-                    WORKER_TYPE_LABEL => "apply",
-                    ACTION_LABEL => "table_streaming",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                    DESTINATION_LABEL => D::name(),
-                )
-                .increment(1);
             }
 
             // TODO: check if this is what we want.
@@ -1041,6 +1034,7 @@ where
                 hook,
                 schema_store,
                 replication_masks,
+                pipeline_id,
             )
             .await
         }
@@ -1052,6 +1046,7 @@ where
                 hook,
                 schema_store,
                 replication_masks,
+                pipeline_id,
             )
             .await
         }
@@ -1063,6 +1058,7 @@ where
                 hook,
                 schema_store,
                 replication_masks,
+                pipeline_id,
             )
             .await
         }
@@ -1182,12 +1178,20 @@ where
             PIPELINE_ID_LABEL => pipeline_id.to_string()
         )
         .record(duration_seconds);
+
+        counter!(
+            ETL_TRANSACTIONS_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string()
+        )
+        .increment(1);
+
         // We do - 1 since we exclude this COMMIT event from the count.
         histogram!(
             ETL_TRANSACTION_SIZE,
             PIPELINE_ID_LABEL => pipeline_id.to_string()
         )
         .record((state.current_tx_events - 1) as f64);
+
         state.current_tx_events = 0;
     }
 
@@ -1327,6 +1331,7 @@ async fn handle_insert_message<S, T>(
     hook: &T,
     schema_store: &S,
     replication_masks: &ReplicationMasks,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1363,6 +1368,7 @@ where
         start_lsn,
         remote_final_lsn,
         message,
+        pipeline_id,
     )?;
 
     Ok(HandleMessageResult::return_event(Event::Insert(event)))
@@ -1376,6 +1382,7 @@ async fn handle_update_message<S, T>(
     hook: &T,
     schema_store: &S,
     replication_masks: &ReplicationMasks,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1412,6 +1419,7 @@ where
         start_lsn,
         remote_final_lsn,
         message,
+        pipeline_id,
     )?;
 
     Ok(HandleMessageResult::return_event(Event::Update(event)))
@@ -1425,6 +1433,7 @@ async fn handle_delete_message<S, T>(
     hook: &T,
     schema_store: &S,
     replication_masks: &ReplicationMasks,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1461,6 +1470,7 @@ where
         start_lsn,
         remote_final_lsn,
         message,
+        pipeline_id,
     )?;
 
     Ok(HandleMessageResult::return_event(Event::Delete(event)))
@@ -1564,7 +1574,7 @@ where
     };
 
     let content = message.content()?;
-    let Ok(schema_change_message) = parse_schema_change_message(content) else {
+    let Ok(schema_change_message) = SchemaChangeMessage::from_str(content) else {
         bail!(
             ErrorKind::InvalidData,
             "Failed to parse DDL schema change message",

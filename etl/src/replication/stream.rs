@@ -18,9 +18,9 @@ use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
-use crate::metrics::{ETL_COPIED_TABLE_ROW_SIZE_BYTES, PIPELINE_ID_LABEL};
+use crate::metrics::{ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL, PIPELINE_ID_LABEL};
 use crate::types::{PipelineId, TableRow};
-use metrics::histogram;
+use metrics::counter;
 
 /// The amount of milliseconds between two consecutive status updates in case no forced update
 /// is requested.
@@ -69,12 +69,12 @@ where
         match ready!(this.stream.poll_next(cx)) {
             // TODO: allow pluggable table row conversion based on if the data is in text or binary format.
             Some(Ok(row)) => {
-                // Emit raw row size in bytes. This is a low-effort way to estimate table rows size.
-                histogram!(
-                    ETL_COPIED_TABLE_ROW_SIZE_BYTES,
-                    PIPELINE_ID_LABEL => this.pipeline_id.to_string()
+                counter!(
+                    ETL_BYTES_PROCESSED_TOTAL,
+                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
+                    EVENT_TYPE_LABEL => "copy"
                 )
-                .record(row.len() as f64);
+                .increment(row.len() as u64);
 
                 // CONVERSION PHASE: Transform raw bytes into structured TableRow
                 // This is where most errors occur due to data format or type issues
