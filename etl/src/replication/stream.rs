@@ -118,6 +118,7 @@ impl EventsStream {
         Self {
             stream,
             last_update: None,
+            last_write_lsn: None,
             last_flush_lsn: None,
             pipeline_id,
         }
