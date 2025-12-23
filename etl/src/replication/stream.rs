@@ -107,16 +107,18 @@ pin_project! {
         stream: LogicalReplicationStream,
         last_update: Option<Instant>,
         last_flush_lsn: Option<PgLsn>,
+        pipeline_id: PipelineId,
     }
 }
 
 impl EventsStream {
     /// Creates a new [`EventsStream`] from a [`LogicalReplicationStream`].
-    pub fn wrap(stream: LogicalReplicationStream) -> Self {
+    pub fn wrap(stream: LogicalReplicationStream, pipeline_id: PipelineId) -> Self {
         Self {
             stream,
             last_update: None,
             last_flush_lsn: None,
+            pipeline_id,
         }
     }
 
@@ -130,9 +132,9 @@ impl EventsStream {
         write_lsn: PgLsn,
         mut flush_lsn: PgLsn,
         force: bool,
-        pipeline_id: PipelineId,
     ) -> EtlResult<()> {
         let this = self.project();
+        let pipeline_id = *this.pipeline_id;
 
         // If the new LSN is less than the last one, we can safely ignore it, since we only want
         // to report monotonically increasing LSN values.
