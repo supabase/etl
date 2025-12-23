@@ -1070,7 +1070,6 @@ pub async fn get_pipeline_replication_status(
     ),
     tag = "Pipelines"
 )]
-#[deprecated(note = "Use rollback_tables endpoint instead")]
 #[post("/pipelines/{pipeline_id}/rollback-table-state")]
 pub async fn rollback_table_state(
     req: HttpRequest,
@@ -1305,8 +1304,7 @@ pub async fn rollback_tables(
                 .await?
                 else {
                     return Err(PipelineError::NotRollbackable(format!(
-                        "No previous state to rollback to for table {}",
-                        table_id
+                        "No previous state to rollback to for table {table_id}",
                     )));
                 };
 

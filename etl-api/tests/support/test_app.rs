@@ -7,8 +7,8 @@ use etl_api::routes::destinations_pipelines::{
 };
 use etl_api::routes::images::{CreateImageRequest, UpdateImageRequest};
 use etl_api::routes::pipelines::{
-    CreatePipelineRequest, RollbackTableStateRequest, RollbackTablesRequest,
-    UpdatePipelineConfigRequest, UpdatePipelineRequest, UpdatePipelineVersionRequest,
+    CreatePipelineRequest, RollbackTablesRequest, UpdatePipelineConfigRequest,
+    UpdatePipelineRequest, UpdatePipelineVersionRequest,
 };
 use etl_api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
 use etl_api::routes::tenants::{
@@ -475,23 +475,6 @@ impl TestApp {
             &self.address, pipeline_id
         ))
         .header("tenant_id", tenant_id)
-        .send()
-        .await
-        .expect("failed to execute request")
-    }
-
-    pub async fn rollback_table_state(
-        &self,
-        tenant_id: &str,
-        pipeline_id: i64,
-        rollback_request: &RollbackTableStateRequest,
-    ) -> reqwest::Response {
-        self.post_authenticated(format!(
-            "{}/v1/pipelines/{}/rollback-table-state",
-            &self.address, pipeline_id
-        ))
-        .header("tenant_id", tenant_id)
-        .json(rollback_request)
         .send()
         .await
         .expect("failed to execute request")

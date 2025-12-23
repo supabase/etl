@@ -215,7 +215,7 @@ pub async fn update_replication_state_raw(
 /// Restores the previous state by updating the current flags in the database,
 /// returning the restored state if successful.
 pub async fn rollback_replication_state(
-    connection: &mut sqlx::PgConnection,
+    conn: &mut sqlx::PgConnection,
     pipeline_id: i64,
     table_id: TableId,
 ) -> sqlx::Result<Option<TableReplicationStateRow>> {
@@ -228,7 +228,7 @@ pub async fn rollback_replication_state(
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .fetch_optional(&mut *connection)
+    .fetch_optional(&mut *conn)
     .await?;
 
     if let Some((current_id, Some(prev_id))) = current_row {
@@ -242,7 +242,7 @@ pub async fn rollback_replication_state(
             "#,
         )
         .bind(current_id)
-        .execute(&mut *connection)
+        .execute(&mut *conn)
         .await?;
 
         // Set previous row to current
@@ -254,7 +254,7 @@ pub async fn rollback_replication_state(
             "#,
         )
         .bind(prev_id)
-        .execute(&mut *connection)
+        .execute(&mut *conn)
         .await?;
 
         // Fetch the restored row
@@ -266,7 +266,7 @@ pub async fn rollback_replication_state(
             "#,
         )
         .bind(prev_id)
-        .fetch_one(&mut *connection)
+        .fetch_one(&mut *conn)
         .await?;
 
         // If the rollback goes to `Init` or `DataSync`, we also want to clean up the table schema
@@ -275,8 +275,8 @@ pub async fn rollback_replication_state(
             restored_row.state,
             TableReplicationStateType::Init | TableReplicationStateType::DataSync
         ) {
-            delete_table_mappings_for_table(&mut *connection, pipeline_id, &table_id).await?;
-            delete_table_schema_for_table(&mut *connection, pipeline_id, table_id).await?;
+            delete_table_mappings_for_table(&mut *conn, pipeline_id, &table_id).await?;
+            delete_table_schema_for_table(&mut *conn, pipeline_id, table_id).await?;
         }
 
         return Ok(Some(restored_row));
@@ -291,7 +291,7 @@ pub async fn rollback_replication_state(
 /// and table schema, and creates a new [`TableReplicationState::Init`] entry,
 /// effectively restarting replication.
 pub async fn reset_replication_state(
-    connection: &mut sqlx::PgConnection,
+    conn: &mut sqlx::PgConnection,
     pipeline_id: i64,
     table_id: TableId,
 ) -> sqlx::Result<TableReplicationStateRow> {
@@ -304,12 +304,12 @@ pub async fn reset_replication_state(
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .execute(&mut *connection)
+    .execute(&mut *conn)
     .await?;
 
     // We want to clean up the table schema and table mappings to start fresh.
-    delete_table_mappings_for_table(&mut *connection, pipeline_id, &table_id).await?;
-    delete_table_schema_for_table(&mut *connection, pipeline_id, table_id).await?;
+    delete_table_mappings_for_table(&mut *conn, pipeline_id, &table_id).await?;
+    delete_table_schema_for_table(&mut *conn, pipeline_id, table_id).await?;
 
     // Insert a new `Init` state entry and return it
     let (state_type, metadata) = TableReplicationState::Init
@@ -326,7 +326,7 @@ pub async fn reset_replication_state(
     .bind(SqlxTableId(table_id.into_inner()))
     .bind(state_type)
     .bind(metadata)
-    .fetch_one(&mut *connection)
+    .fetch_one(&mut *conn)
     .await?;
 
     Ok(row)
