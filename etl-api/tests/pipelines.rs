@@ -3,7 +3,7 @@ use etl_api::configs::pipeline::ApiBatchConfig;
 use etl_api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
     GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
-    RollbackTableStateRequest, RollbackTableStateResponse, RollbackType,
+    RollbackTablesRequest, RollbackTablesResponse, RollbackTablesTarget, RollbackType,
     SimpleTableReplicationState, UpdatePipelineConfigRequest, UpdatePipelineConfigResponse,
     UpdatePipelineRequest, UpdatePipelineVersionRequest,
 };
@@ -151,13 +151,15 @@ async fn test_rollback(
     table_oid: Oid,
     rollback_type: RollbackType,
     expected_status: StatusCode,
-) -> Option<RollbackTableStateResponse> {
+) -> Option<RollbackTablesResponse> {
     let response = app
-        .rollback_table_state(
+        .rollback_tables(
             tenant_id,
             pipeline_id,
-            &RollbackTableStateRequest {
-                table_id: table_oid.0,
+            &RollbackTablesRequest {
+                target: RollbackTablesTarget::SingleTable {
+                    table_id: table_oid.0,
+                },
                 rollback_type,
             },
         )
@@ -1047,7 +1049,7 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_table_state_succeeds_for_manual_retry_errors() {
+async fn rollback_tables_succeeds_for_manual_retry_errors() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1078,9 +1080,10 @@ async fn rollback_table_state_succeeds_for_manual_retry_errors() {
     .unwrap();
 
     assert_eq!(response.pipeline_id, pipeline_id);
-    assert_eq!(response.table_id, table_oid.0);
+    assert_eq!(response.tables.len(), 1);
+    assert_eq!(response.tables[0].table_id, table_oid.0);
     assert!(matches!(
-        response.new_state,
+        response.tables[0].new_state,
         SimpleTableReplicationState::FollowingWal
     ));
 
@@ -1088,7 +1091,7 @@ async fn rollback_table_state_succeeds_for_manual_retry_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_table_state_fails_for_non_manual_retry_errors() {
+async fn rollback_tables_fails_for_non_manual_retry_errors() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1118,7 +1121,7 @@ async fn rollback_table_state_fails_for_non_manual_retry_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_table_state_with_full_reset_succeeds() {
+async fn rollback_tables_with_full_reset_succeeds() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1194,9 +1197,10 @@ async fn rollback_table_state_with_full_reset_succeeds() {
     .unwrap();
 
     assert_eq!(response.pipeline_id, pipeline_id);
-    assert_eq!(response.table_id, table_oid.0);
+    assert_eq!(response.tables.len(), 1);
+    assert_eq!(response.tables[0].table_id, table_oid.0);
     assert!(matches!(
-        response.new_state,
+        response.tables[0].new_state,
         SimpleTableReplicationState::Queued
     ));
 
@@ -1292,8 +1296,9 @@ async fn rollback_to_init_cleans_up_schemas_and_mappings() {
     .await
     .unwrap();
 
+    assert_eq!(response.tables.len(), 1);
     assert!(matches!(
-        response.new_state,
+        response.tables[0].new_state,
         SimpleTableReplicationState::Queued
     ));
 
@@ -1378,8 +1383,9 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_mappings() {
     .await
     .unwrap();
 
+    assert_eq!(response.tables.len(), 1);
     assert!(matches!(
-        response.new_state,
+        response.tables[0].new_state,
         SimpleTableReplicationState::FollowingWal
     ));
 
@@ -1599,4 +1605,201 @@ async fn pipeline_version_includes_new_default_version_when_available() {
         .expect("expected new_version to be present");
     assert_eq!(new_version.id, default_image_id);
     assert_eq!(new_version.name, "1.3.0");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_tables_all_errored_succeeds() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+
+    // Create multiple tables with different states
+    // table1: errored with manual_retry (should be rolled back)
+    let table1_oid = create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_users",
+        &[
+            ("ready", r#"{"type": "ready"}"#),
+            (
+                "errored",
+                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "manual_retry"}}"#,
+            ),
+        ],
+    )
+    .await;
+
+    // table2: errored with manual_retry (should be rolled back)
+    let table2_oid = create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_orders",
+        &[
+            ("data_sync", r#"{"type": "data_sync"}"#),
+            (
+                "errored",
+                r#"{"type": "errored", "reason": "schema mismatch", "retry_policy": {"type": "manual_retry"}}"#,
+            ),
+        ],
+    )
+    .await;
+
+    // table3: ready state (should NOT be rolled back)
+    create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_products",
+        &[("ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+
+    // table4: errored with no_retry (should NOT be rolled back)
+    create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_inventory",
+        &[(
+            "errored",
+            r#"{"type": "errored", "reason": "permanent failure", "retry_policy": {"type": "no_retry"}}"#,
+        )],
+    )
+    .await;
+
+    // Call rollback with all_errored_tables
+    let response = app
+        .rollback_tables(
+            &tenant_id,
+            pipeline_id,
+            &RollbackTablesRequest {
+                target: RollbackTablesTarget::AllErroredTables,
+                rollback_type: RollbackType::Individual,
+            },
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: RollbackTablesResponse = response.json().await.unwrap();
+
+    assert_eq!(response.pipeline_id, pipeline_id);
+    assert_eq!(response.tables.len(), 2);
+
+    // Verify both errored tables with manual_retry were rolled back
+    let table1_result = response
+        .tables
+        .iter()
+        .find(|t| t.table_id == table1_oid.0)
+        .expect("table1 should be in response");
+    assert!(matches!(
+        table1_result.new_state,
+        SimpleTableReplicationState::FollowingWal
+    ));
+
+    let table2_result = response
+        .tables
+        .iter()
+        .find(|t| t.table_id == table2_oid.0)
+        .expect("table2 should be in response");
+    assert!(matches!(
+        table2_result.new_state,
+        SimpleTableReplicationState::CopyingTable
+    ));
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_tables_all_errored_fails_when_no_errored_tables() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+
+    // Create tables without manual retry errors
+    create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_users",
+        &[("ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+
+    create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_orders",
+        &[(
+            "errored",
+            r#"{"type": "errored", "reason": "permanent failure", "retry_policy": {"type": "no_retry"}}"#,
+        )],
+    )
+    .await;
+
+    // Call rollback with all_errored_tables - should fail since no manual_retry errors
+    let response = app
+        .rollback_tables(
+            &tenant_id,
+            pipeline_id,
+            &RollbackTablesRequest {
+                target: RollbackTablesTarget::AllErroredTables,
+                rollback_type: RollbackType::Individual,
+            },
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("No tables with manual retry errors found")
+    );
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_tables_single_table_succeeds() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+
+    let table_oid = create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_users",
+        &[
+            ("ready", r#"{"type": "ready"}"#),
+            (
+                "errored",
+                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "manual_retry"}}"#,
+            ),
+        ],
+    )
+    .await;
+
+    let response = app
+        .rollback_tables(
+            &tenant_id,
+            pipeline_id,
+            &RollbackTablesRequest {
+                target: RollbackTablesTarget::SingleTable {
+                    table_id: table_oid.0,
+                },
+                rollback_type: RollbackType::Individual,
+            },
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: RollbackTablesResponse = response.json().await.unwrap();
+
+    assert_eq!(response.pipeline_id, pipeline_id);
+    assert_eq!(response.tables.len(), 1);
+    assert_eq!(response.tables[0].table_id, table_oid.0);
+    assert!(matches!(
+        response.tables[0].new_state,
+        SimpleTableReplicationState::FollowingWal
+    ));
+
+    drop_pg_database(&source_db_config).await;
 }
