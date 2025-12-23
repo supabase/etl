@@ -1190,7 +1190,7 @@ pub async fn rollback_table_state(
 
 #[utoipa::path(
     summary = "Roll back tables",
-    description = "Rolls back the replication state of tables in the pipeline. Supports rolling back a single table or all tables with manual retry errors.",
+    description = "Rolls back the replication state of tables in the pipeline. Supports rolling back a single table, all errored tables or all tables.",
     request_body = RollbackTablesRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
