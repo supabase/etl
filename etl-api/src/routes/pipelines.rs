@@ -1006,14 +1006,19 @@ pub async fn get_pipeline_replication_status(
         connect_to_source_database_with_defaults(&source.config.into_connection_config(tls_config))
             .await?;
 
+    // Start transaction for all source database operations
+    let mut source_txn = source_pool.begin().await?;
+
     // Ensure ETL tables exist in the source DB
-    if !health::etl_tables_present(&source_pool).await? {
+    if !health::etl_tables_present(source_txn.deref_mut()).await? {
         return Err(PipelineError::EtlStateNotInitialized);
     }
 
     // Fetch replication state for all tables in this pipeline
-    let state_rows = state::get_table_replication_state_rows(&source_pool, pipeline_id).await?;
-    let mut lag_metrics = lag::get_pipeline_lag_metrics(&source_pool, pipeline_id as u64).await?;
+    let state_rows =
+        state::get_table_replication_state_rows(source_txn.deref_mut(), pipeline_id).await?;
+    let mut lag_metrics =
+        lag::get_pipeline_lag_metrics(source_txn.deref_mut(), pipeline_id as u64).await?;
     let apply_lag = lag_metrics.apply.map(Into::into);
 
     // Collect all table IDs and fetch their names in a single batch query
@@ -1021,7 +1026,7 @@ pub async fn get_pipeline_replication_status(
         .iter()
         .map(|row| TableId::new(row.table_id.0))
         .collect();
-    let table_names = get_table_names_from_table_ids(&source_pool, &table_ids).await?;
+    let table_names = get_table_names_from_table_ids(source_txn.deref_mut(), &table_ids).await?;
 
     // Convert database states to UI-friendly format
     let mut tables: Vec<TableReplicationStatus> = Vec::new();
@@ -1112,13 +1117,17 @@ pub async fn rollback_table_state(
         connect_to_source_database_with_defaults(&source.config.into_connection_config(tls_config))
             .await?;
 
+    // Start transaction for all source database operations
+    let mut source_txn = source_pool.begin().await?;
+
     // Ensure ETL tables exist in the source DB
-    if !health::etl_tables_present(&source_pool).await? {
+    if !health::etl_tables_present(source_txn.deref_mut()).await? {
         return Err(PipelineError::EtlStateNotInitialized);
     }
 
     // First, check current state to ensure it's rollbackable (manual retry policy)
-    let state_rows = state::get_table_replication_state_rows(&source_pool, pipeline_id).await?;
+    let state_rows =
+        state::get_table_replication_state_rows(source_txn.deref_mut(), pipeline_id).await?;
     let current_row = state_rows
         .into_iter()
         .find(|row| row.table_id.0 == table_id)
@@ -1134,9 +1143,6 @@ pub async fn rollback_table_state(
             "Only manual retry errors can be rolled back".to_string(),
         ));
     }
-
-    // Wrap rollback operations in a transaction
-    let mut source_txn = source_pool.begin().await?;
 
     let new_state_row = match rollback_type {
         RollbackType::Individual => {
@@ -1238,13 +1244,17 @@ pub async fn rollback_tables(
         connect_to_source_database_with_defaults(&source.config.into_connection_config(tls_config))
             .await?;
 
+    // Start transaction for all source database operations
+    let mut source_txn = source_pool.begin().await?;
+
     // Ensure ETL tables exist in the source DB
-    if !health::etl_tables_present(&source_pool).await? {
+    if !health::etl_tables_present(source_txn.deref_mut()).await? {
         return Err(PipelineError::EtlStateNotInitialized);
     }
 
     // Get all table states for this pipeline
-    let state_rows = state::get_table_replication_state_rows(&source_pool, pipeline_id).await?;
+    let state_rows =
+        state::get_table_replication_state_rows(source_txn.deref_mut(), pipeline_id).await?;
 
     // Determine which tables to rollback based on target
     let target_table_ids: Vec<u32> = match &rollback_request.target {
@@ -1288,9 +1298,6 @@ pub async fn rollback_tables(
             errored_table_ids
         }
     };
-
-    // Rollback all target tables within a single transaction
-    let mut source_txn = source_pool.begin().await?;
 
     let mut rolled_back_tables = Vec::new();
     for table_id in target_table_ids {

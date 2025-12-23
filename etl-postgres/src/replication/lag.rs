@@ -1,4 +1,4 @@
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgExecutor};
 use std::collections::BTreeMap;
 
 use crate::replication::slots::EtlReplicationSlot;
@@ -44,10 +44,13 @@ struct SlotLagRow {
 /// Returns aggregated lag metrics for the apply worker slot and each table sync slot associated
 /// with the pipeline. Slots that are not currently active in `pg_stat_replication` still report
 /// their WAL metrics, while the write and flush lag values remain `None`.
-pub async fn get_pipeline_lag_metrics(
-    pool: &PgPool,
+pub async fn get_pipeline_lag_metrics<'c, E>(
+    executor: E,
     pipeline_id: u64,
-) -> sqlx::Result<PipelineLagMetrics> {
+) -> sqlx::Result<PipelineLagMetrics>
+where
+    E: PgExecutor<'c>,
+{
     let Ok(apply_prefix) = EtlReplicationSlot::apply_prefix(pipeline_id) else {
         return Ok(PipelineLagMetrics::default());
     };
@@ -72,7 +75,7 @@ pub async fn get_pipeline_lag_metrics(
     )
     .bind(apply_prefix)
     .bind(format!("{table_sync_prefix}%"))
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     let mut metrics = PipelineLagMetrics::default();

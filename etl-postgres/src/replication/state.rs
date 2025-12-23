@@ -117,10 +117,13 @@ impl TableReplicationStateRow {
 /// Fetches current replication state rows for a pipeline.
 ///
 /// Retrieves the current replication state records of all tables of a pipeline.
-pub async fn get_table_replication_state_rows(
-    pool: &PgPool,
+pub async fn get_table_replication_state_rows<'c, E>(
+    executor: E,
     pipeline_id: i64,
-) -> sqlx::Result<Vec<TableReplicationStateRow>> {
+) -> sqlx::Result<Vec<TableReplicationStateRow>>
+where
+    E: PgExecutor<'c>,
+{
     let states: Vec<TableReplicationStateRow> = sqlx::query_as(
         r#"
         select id, pipeline_id, table_id, state, metadata, prev, is_current
@@ -129,7 +132,7 @@ pub async fn get_table_replication_state_rows(
         "#,
     )
     .bind(pipeline_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     Ok(states)
