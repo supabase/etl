@@ -13,6 +13,7 @@ pub const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_secon
 pub const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
 pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
+pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
 
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
@@ -86,6 +87,12 @@ pub(crate) fn register_metrics() {
             ETL_STATUS_UPDATES_TOTAL,
             Unit::Count,
             "Total number of status updates sent to Postgres, labeled by pipeline_id and forced"
+        );
+
+        describe_counter!(
+            ETL_STATUS_UPDATES_SKIPPED_TOTAL,
+            Unit::Count,
+            "Total number of status updates skipped due to throttling, labeled by pipeline_id"
         );
     });
 }
