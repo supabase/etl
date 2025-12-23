@@ -22,8 +22,8 @@ use crate::failpoints::{
 };
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-    ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL, ETL_TABLE_COPY_DURATION_SECONDS,
-    PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+    ETL_EVENTS_PROCESSED_TOTAL, ETL_TABLE_COPY_DURATION_SECONDS, PIPELINE_ID_LABEL,
+    WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::TableCopyStream;
@@ -241,15 +241,6 @@ where
                         let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
                         let table_rows_copied_batch = table_rows.len();
                         total_rows_copied += table_rows_copied_batch;
-
-                        metrics::counter!(
-                            ETL_EVENTS_RECEIVED_TOTAL,
-                            WORKER_TYPE_LABEL => "table_sync",
-                            ACTION_LABEL => "table_copy",
-                            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                            DESTINATION_LABEL => D::name(),
-                        )
-                        .increment(table_rows_copied_batch as u64);
 
                         let before_sending = Instant::now();
 

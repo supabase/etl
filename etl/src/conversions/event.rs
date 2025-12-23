@@ -2,18 +2,33 @@ use core::str;
 use etl_postgres::types::{
     ColumnSchema, TableId, TableName, TableSchema, convert_type_oid_to_type,
 };
+use metrics::counter;
 use postgres_replication::protocol;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 use crate::error::{ErrorKind, EtlResult};
+use crate::metrics::{ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL, PIPELINE_ID_LABEL};
 use crate::store::schema::SchemaStore;
 use crate::types::{
-    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, RelationEvent, TableRow,
+    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, PipelineId, RelationEvent, TableRow,
     TruncateEvent, UpdateEvent,
 };
 use crate::{bail, etl_error};
+
+/// Calculates the total byte size of tuple data from a replication message.
+fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
+    tuple_data
+        .iter()
+        .map(|data| match data {
+            protocol::TupleData::Null => 0,
+            protocol::TupleData::UnchangedToast => 0,
+            protocol::TupleData::Text(bytes) => bytes.len() as u64,
+            protocol::TupleData::Binary(bytes) => bytes.len() as u64,
+        })
+        .sum()
+}
 
 /// Creates a [`BeginEvent`] from Postgres protocol data.
 ///
@@ -91,6 +106,7 @@ pub async fn parse_event_from_insert_message<S>(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     insert_body: &protocol::InsertBody,
+    pipeline_id: PipelineId,
 ) -> EtlResult<InsertEvent>
 where
     S: SchemaStore,
@@ -98,12 +114,16 @@ where
     let table_id = insert_body.rel_id();
     let table_schema = get_table_schema(schema_store, TableId::new(table_id)).await?;
 
-    let table_row = convert_tuple_to_row(
-        &table_schema.column_schemas,
-        insert_body.tuple().tuple_data(),
-        &mut None,
-        false,
-    )?;
+    let tuple_data = insert_body.tuple().tuple_data();
+    counter!(
+        ETL_BYTES_PROCESSED_TOTAL,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        EVENT_TYPE_LABEL => "insert"
+    )
+    .increment(calculate_tuple_bytes(tuple_data));
+
+    let table_row =
+        convert_tuple_to_row(&table_schema.column_schemas, tuple_data, &mut None, false)?;
 
     Ok(InsertEvent {
         start_lsn,
@@ -124,6 +144,7 @@ pub async fn parse_event_from_update_message<S>(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     update_body: &protocol::UpdateBody,
+    pipeline_id: PipelineId,
 ) -> EtlResult<UpdateEvent>
 where
     S: SchemaStore,
@@ -135,6 +156,20 @@ where
     // tuple.
     let is_key = update_body.old_tuple().is_none();
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
+
+    // Calculate total bytes from both old and new tuple data.
+    let new_tuple_data = update_body.new_tuple().tuple_data();
+    let mut total_bytes = calculate_tuple_bytes(new_tuple_data);
+    if let Some(identity) = &old_tuple {
+        total_bytes += calculate_tuple_bytes(identity.tuple_data());
+    }
+    counter!(
+        ETL_BYTES_PROCESSED_TOTAL,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        EVENT_TYPE_LABEL => "update"
+    )
+    .increment(total_bytes);
+
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
             &table_schema.column_schemas,
@@ -148,7 +183,7 @@ where
     let mut old_table_row_mut = old_table_row;
     let table_row = convert_tuple_to_row(
         &table_schema.column_schemas,
-        update_body.new_tuple().tuple_data(),
+        new_tuple_data,
         &mut old_table_row_mut,
         false,
     )?;
@@ -175,6 +210,7 @@ pub async fn parse_event_from_delete_message<S>(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     delete_body: &protocol::DeleteBody,
+    pipeline_id: PipelineId,
 ) -> EtlResult<DeleteEvent>
 where
     S: SchemaStore,
@@ -186,6 +222,16 @@ where
     // tuple.
     let is_key = delete_body.old_tuple().is_none();
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
+
+    if let Some(identity) = &old_tuple {
+        counter!(
+            ETL_BYTES_PROCESSED_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+            EVENT_TYPE_LABEL => "delete"
+        )
+        .increment(calculate_tuple_bytes(identity.tuple_data()));
+    }
+
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
             &table_schema.column_schemas,

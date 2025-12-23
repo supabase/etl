@@ -2,7 +2,7 @@ use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use futures::StreamExt;
-use metrics::histogram;
+use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use std::future::Future;
@@ -27,8 +27,8 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-    ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS,
-    ETL_TRANSACTION_SIZE, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+    ETL_EVENTS_PROCESSED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
+    ETL_TRANSACTIONS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
@@ -734,15 +734,6 @@ where
             {
                 state.events_batch.push(event);
                 state.update_last_commit_end_lsn(result.end_lsn);
-
-                metrics::counter!(
-                    ETL_EVENTS_RECEIVED_TOTAL,
-                    WORKER_TYPE_LABEL => "apply",
-                    ACTION_LABEL => "table_streaming",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                    DESTINATION_LABEL => D::name(),
-                )
-                .increment(1);
             }
 
             // TODO: check if this is what we want.
@@ -1026,13 +1017,37 @@ where
             handle_relation_message(state, start_lsn, relation_body, schema_store, hook).await
         }
         LogicalReplicationMessage::Insert(insert_body) => {
-            handle_insert_message(state, start_lsn, insert_body, hook, schema_store).await
+            handle_insert_message(
+                state,
+                start_lsn,
+                insert_body,
+                hook,
+                schema_store,
+                pipeline_id,
+            )
+            .await
         }
         LogicalReplicationMessage::Update(update_body) => {
-            handle_update_message(state, start_lsn, update_body, hook, schema_store).await
+            handle_update_message(
+                state,
+                start_lsn,
+                update_body,
+                hook,
+                schema_store,
+                pipeline_id,
+            )
+            .await
         }
         LogicalReplicationMessage::Delete(delete_body) => {
-            handle_delete_message(state, start_lsn, delete_body, hook, schema_store).await
+            handle_delete_message(
+                state,
+                start_lsn,
+                delete_body,
+                hook,
+                schema_store,
+                pipeline_id,
+            )
+            .await
         }
         LogicalReplicationMessage::Truncate(truncate_body) => {
             handle_truncate_message(state, start_lsn, truncate_body, hook).await
@@ -1136,12 +1151,20 @@ where
             PIPELINE_ID_LABEL => pipeline_id.to_string()
         )
         .record(duration_seconds);
+
+        counter!(
+            ETL_TRANSACTIONS_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string()
+        )
+        .increment(1);
+
         // We do - 1 since we exclude this COMMIT event from the count.
         histogram!(
             ETL_TRANSACTION_SIZE,
             PIPELINE_ID_LABEL => pipeline_id.to_string()
         )
         .record((state.current_tx_events - 1) as f64);
+
         state.current_tx_events = 0;
     }
 
@@ -1265,6 +1288,7 @@ async fn handle_insert_message<S, T>(
     message: &protocol::InsertBody,
     hook: &T,
     schema_store: &S,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1286,8 +1310,14 @@ where
     }
 
     // Convert event from the protocol message.
-    let event =
-        parse_event_from_insert_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+    let event = parse_event_from_insert_message(
+        schema_store,
+        start_lsn,
+        remote_final_lsn,
+        message,
+        pipeline_id,
+    )
+    .await?;
 
     Ok(HandleMessageResult::return_event(Event::Insert(event)))
 }
@@ -1299,6 +1329,7 @@ async fn handle_update_message<S, T>(
     message: &protocol::UpdateBody,
     hook: &T,
     schema_store: &S,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1320,8 +1351,14 @@ where
     }
 
     // Convert event from the protocol message.
-    let event =
-        parse_event_from_update_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+    let event = parse_event_from_update_message(
+        schema_store,
+        start_lsn,
+        remote_final_lsn,
+        message,
+        pipeline_id,
+    )
+    .await?;
 
     Ok(HandleMessageResult::return_event(Event::Update(event)))
 }
@@ -1333,6 +1370,7 @@ async fn handle_delete_message<S, T>(
     message: &protocol::DeleteBody,
     hook: &T,
     schema_store: &S,
+    pipeline_id: PipelineId,
 ) -> EtlResult<HandleMessageResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -1354,8 +1392,14 @@ where
     }
 
     // Convert event from the protocol message.
-    let event =
-        parse_event_from_delete_message(schema_store, start_lsn, remote_final_lsn, message).await?;
+    let event = parse_event_from_delete_message(
+        schema_store,
+        start_lsn,
+        remote_final_lsn,
+        message,
+        pipeline_id,
+    )
+    .await?;
 
     Ok(HandleMessageResult::return_event(Event::Delete(event)))
 }
