@@ -7,19 +7,18 @@ repo_url: https://github.com/supabase/etl
 edit_uri: edit/main/docs/
 
 nav:
-  - Home: index.md
-  - Tutorials:
-      - Overview: tutorials/index.md
-      - Your First Pipeline: tutorials/first-pipeline.md
-      - Custom Stores and Destinations: tutorials/custom-implementations.md
-  - How-to Guides:
-      - Overview: how-to/index.md
-      - Configure Postgres: how-to/configure-postgres.md
-  - Reference:
-      - Overview: reference/index.md
-  - Explanation:
+  - Overview: index.md
+  - Guides:
+      - Overview: guides/index.md
+      - Configure Postgres: guides/configure-postgres.md
+      - Your First Pipeline: guides/first-pipeline.md
+      - Custom Stores and Destinations: guides/custom-implementations.md
+  - Explanations:
       - Overview: explanation/index.md
+      - Postgres Replication Concepts: explanation/concepts.md
       - Architecture: explanation/architecture.md
+      - Event Types: explanation/events.md
+      - Extension Points: explanation/traits.md
 
 theme:
   name: "material"

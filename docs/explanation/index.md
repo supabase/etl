@@ -1,36 +1,23 @@
 # Explanations
 
-**Deep dives into ETL concepts, architecture, and design decisions**
+**Understand how ETL works and why**
 
-Explanations help you build mental models of how ETL works and why it's designed the way it is. These topics provide background knowledge, compare alternatives, and explore the reasoning behind key architectural choices.
+## Where to Start
 
-## Core Concepts
+**New to Postgres logical replication?** Start with [Postgres Replication Concepts](concepts.md). It explains WAL, publications, replication slots, and why ETL works the way it does.
 
-### [ETL Architecture Overview](architecture.md)
+**Already familiar with replication?** Jump to [Architecture](architecture.md) to understand ETL's two-phase approach and delivery guarantees.
 
-**The big picture of how ETL components work together**
+## All Topics
 
-Understand the relationship between pipelines, destinations, stores, and the Postgres replication protocol. Learn how data flows through the system and where extension points exist.
+1. **[Postgres Replication Concepts](concepts.md)**: The fundamentals - WAL, publications, slots, pgoutput, and why two phases.
 
-_Topics covered:_ Component architecture, data flow, extension patterns, scalability considerations.
+2. **[Architecture](architecture.md)**: How ETL works - initial copy, streaming, workers, and delivery guarantees.
 
-## Reading Guide
+3. **[Event Types](events.md)**: All events your destination receives - Insert, Update, Delete, Begin, Commit, and their fields.
 
-**New to ETL?** Start with the [ETL Architecture](architecture.md) to understand how the system works.
-
-**Planning a production deployment?** Read [Architecture](architecture.md) to understand system behavior.
-
-**Building extensions?** Check out the [Custom Implementations Tutorial](../tutorials/custom-implementations.md).
+4. **[Extension Points](traits.md)**: The traits you implement - Destination, SchemaStore, StateStore, CleanupStore.
 
 ## Next Steps
 
-After building a conceptual understanding:
-
-- **Start building** → [Tutorials](../tutorials/index.md)
-- **Solve specific problems** → [How-To Guides](../how-to/index.md)
-- **Look up technical details** → [Reference](../reference/index.md)
-
-## Contributing to Explanations
-
-Found gaps in these explanations? See something that could be clearer?
-[Open an issue](https://github.com/supabase/etl/issues/new) or contribute improvements to help other users build better mental models of ETL.
+When you're ready to build, head to the [Guides](../guides/index.md).
