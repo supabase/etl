@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, PgPool, Type, postgres::types::Oid as SqlxTableId, prelude::FromRow};
 use tokio_postgres::types::PgLsn;
 
+use crate::replication::destination_metadata::delete_destination_table_metadata;
 use crate::replication::schema::delete_table_schema_for_table;
-use crate::replication::table_mappings::delete_table_mappings_for_table;
 use crate::types::TableId;
 
 /// Replication state of a table during the ETL process.
@@ -278,12 +278,12 @@ pub async fn rollback_replication_state(
         .await?;
 
         // If the rollback goes to `Init` or `DataSync`, we also want to clean up the table schema
-        // and table mappings; this way the rollback starts clean.
+        // and destination metadata; this way the rollback starts clean.
         if matches!(
             restored_row.state,
             TableReplicationStateType::Init | TableReplicationStateType::DataSync
         ) {
-            delete_table_mappings_for_table(&mut *conn, pipeline_id, &table_id).await?;
+            delete_destination_table_metadata(&mut *conn, pipeline_id, table_id).await?;
             delete_table_schema_for_table(&mut *conn, pipeline_id, table_id).await?;
         }
 
@@ -315,8 +315,8 @@ pub async fn reset_replication_state(
     .execute(&mut *conn)
     .await?;
 
-    // We want to clean up the table schema and table mappings to start fresh.
-    delete_table_mappings_for_table(&mut *conn, pipeline_id, &table_id).await?;
+    // We want to clean up the table schema and destination metadata to start fresh.
+    delete_destination_table_metadata(&mut *conn, pipeline_id, table_id).await?;
     delete_table_schema_for_table(&mut *conn, pipeline_id, table_id).await?;
 
     // Insert a new `Init` state entry and return it

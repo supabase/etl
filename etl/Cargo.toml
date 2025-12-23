@@ -26,10 +26,12 @@ metrics = { workspace = true }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
+rand = { workspace = true, features = ["thread_rng"] }
 ring = { workspace = true, default-features = false }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
-sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-postgres = { workspace = true, features = [
     "runtime",
@@ -49,5 +51,3 @@ etl-postgres = { workspace = true, features = [
     "test-utils",
 ] }
 etl-telemetry = { workspace = true }
-
-rand = { workspace = true, features = ["thread_rng"] }

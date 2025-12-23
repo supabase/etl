@@ -148,6 +148,12 @@ impl TableReplicationError {
                 "Check replication slot status and database configuration.",
                 RetryPolicy::ManualRetry,
             ),
+            ErrorKind::CorruptedTableSchema => Self::with_solution(
+                table_id,
+                error,
+                "Reset the table state and restart the replication.",
+                RetryPolicy::ManualRetry,
+            ),
 
             // Special handling for error kinds used during failure injection.
             #[cfg(feature = "failpoints")]

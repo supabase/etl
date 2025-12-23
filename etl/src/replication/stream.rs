@@ -10,10 +10,14 @@ use std::time::{Duration, Instant};
 use tokio_postgres::CopyOutStream;
 use tokio_postgres::types::PgLsn;
 use tracing::debug;
+#[cfg(feature = "failpoints")]
+use tracing::warn;
 
 use crate::conversions::table_row::parse_table_row_from_postgres_copy_bytes;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
+#[cfg(feature = "failpoints")]
+use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::metrics::{ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL, PIPELINE_ID_LABEL};
 use crate::types::{PipelineId, TableRow};
 use metrics::counter;
@@ -29,23 +33,19 @@ pin_project! {
     /// using the provided column schemas. The conversion process handles both text and
     /// binary format data.
     #[must_use = "streams do nothing unless polled"]
-    pub struct TableCopyStream<'a> {
+    pub struct TableCopyStream<I> {
         #[pin]
         stream: CopyOutStream,
-        column_schemas: &'a [ColumnSchema],
+        column_schemas: I,
         pipeline_id: PipelineId,
     }
 }
 
-impl<'a> TableCopyStream<'a> {
+impl<I> TableCopyStream<I> {
     /// Creates a new [`TableCopyStream`] from a [`CopyOutStream`] and column schemas.
     ///
     /// The column schemas are used to convert the raw Postgres data into [`TableRow`]s.
-    pub fn wrap(
-        stream: CopyOutStream,
-        column_schemas: &'a [ColumnSchema],
-        pipeline_id: PipelineId,
-    ) -> Self {
+    pub fn wrap(stream: CopyOutStream, column_schemas: I, pipeline_id: PipelineId) -> Self {
         Self {
             stream,
             column_schemas,
@@ -54,7 +54,10 @@ impl<'a> TableCopyStream<'a> {
     }
 }
 
-impl<'a> Stream for TableCopyStream<'a> {
+impl<'a, I> Stream for TableCopyStream<I>
+where
+    I: Iterator<Item = &'a ColumnSchema> + Clone,
+{
     type Item = EtlResult<TableRow>;
 
     /// Polls the stream for the next converted table row with comprehensive error handling.
@@ -75,7 +78,7 @@ impl<'a> Stream for TableCopyStream<'a> {
 
                 // CONVERSION PHASE: Transform raw bytes into structured TableRow
                 // This is where most errors occur due to data format or type issues
-                match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas) {
+                match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.clone()) {
                     Ok(row) => Poll::Ready(Some(Ok(row))),
                     Err(err) => {
                         // CONVERSION ERROR: Preserve full error context for debugging
@@ -128,6 +131,15 @@ impl EventsStream {
         mut flush_lsn: PgLsn,
         force: bool,
     ) -> EtlResult<()> {
+        // If the failpoint is active, we do not send any status update. This is useful for testing
+        // the system when we want to check what happens when no status updates are sent.
+        #[cfg(feature = "failpoints")]
+        if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
+            warn!("not sending status update due to active failpoint");
+
+            return Ok(());
+        }
+
         let this = self.project();
 
         // If the new LSN is less than the last one, we can safely ignore it, since we only want
