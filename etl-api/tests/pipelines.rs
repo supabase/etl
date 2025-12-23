@@ -1049,31 +1049,45 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_tables_fails_for_non_manual_retry_errors() {
+async fn rollback_tables_succeeds_for_any_error_type() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
+    // Create a state chain with a previous state so rollback has something to rollback to
     let table_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
         "test_users",
-        &[(
-            "errored",
-            r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "no_retry"}}"#,
-        )],
+        &[
+            ("ready", r#"{"type": "ready"}"#),
+            (
+                "errored",
+                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "no_retry"}}"#,
+            ),
+        ],
     )
     .await;
 
-    test_rollback(
+    // Rollback should succeed even for no_retry errors
+    let response = test_rollback(
         &app,
         &tenant_id,
         pipeline_id,
         table_oid,
         RollbackType::Individual,
-        StatusCode::BAD_REQUEST,
+        StatusCode::OK,
     )
-    .await;
+    .await
+    .unwrap();
+
+    // Verify we rolled back to the ready state (maps to FollowingWal)
+    assert_eq!(response.tables.len(), 1);
+    assert_eq!(response.tables[0].table_id, table_oid.0);
+    assert!(matches!(
+        response.tables[0].new_state,
+        SimpleTableReplicationState::FollowingWal
+    ));
 
     drop_pg_database(&source_db_config).await;
 }
@@ -1602,7 +1616,7 @@ async fn rollback_tables_all_errored_succeeds() {
     )
     .await;
 
-    // table3: ready state (should NOT be rolled back)
+    // table3: ready state (should NOT be rolled back - not errored)
     create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
@@ -1611,15 +1625,18 @@ async fn rollback_tables_all_errored_succeeds() {
     )
     .await;
 
-    // table4: errored with no_retry (should NOT be rolled back)
-    create_table_with_state_chain(
+    // table4: errored with no_retry (should be rolled back - all errored tables are now included)
+    let table4_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
         "test_inventory",
-        &[(
-            "errored",
-            r#"{"type": "errored", "reason": "permanent failure", "retry_policy": {"type": "no_retry"}}"#,
-        )],
+        &[
+            ("init", r#"{"type": "init"}"#),
+            (
+                "errored",
+                r#"{"type": "errored", "reason": "permanent failure", "retry_policy": {"type": "no_retry"}}"#,
+            ),
+        ],
     )
     .await;
 
@@ -1639,9 +1656,10 @@ async fn rollback_tables_all_errored_succeeds() {
     let response: RollbackTablesResponse = response.json().await.unwrap();
 
     assert_eq!(response.pipeline_id, pipeline_id);
-    assert_eq!(response.tables.len(), 2);
+    // Now all 3 errored tables should be rolled back (including no_retry)
+    assert_eq!(response.tables.len(), 3);
 
-    // Verify both errored tables with manual_retry were rolled back
+    // Verify all errored tables were rolled back
     let table1_result = response
         .tables
         .iter()
@@ -1662,6 +1680,16 @@ async fn rollback_tables_all_errored_succeeds() {
         SimpleTableReplicationState::CopyingTable
     ));
 
+    let table4_result = response
+        .tables
+        .iter()
+        .find(|t| t.table_id == table4_oid.0)
+        .expect("table4 should be in response");
+    assert!(matches!(
+        table4_result.new_state,
+        SimpleTableReplicationState::Queued
+    ));
+
     drop_pg_database(&source_db_config).await;
 }
 
@@ -1671,7 +1699,7 @@ async fn rollback_tables_all_errored_fails_when_no_errored_tables() {
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
-    // Create tables without manual retry errors
+    // Create tables without any errored states
     create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
@@ -1684,14 +1712,11 @@ async fn rollback_tables_all_errored_fails_when_no_errored_tables() {
         &source_db_pool,
         pipeline_id,
         "test_orders",
-        &[(
-            "errored",
-            r#"{"type": "errored", "reason": "permanent failure", "retry_policy": {"type": "no_retry"}}"#,
-        )],
+        &[("ready", r#"{"type": "ready"}"#)],
     )
     .await;
 
-    // Call rollback with all_errored_tables - should fail since no manual_retry errors
+    // Call rollback with all_errored_tables - should fail since no errored tables
     let response = app
         .rollback_tables(
             &tenant_id,
@@ -1709,8 +1734,103 @@ async fn rollback_tables_all_errored_fails_when_no_errored_tables() {
             .text()
             .await
             .unwrap()
-            .contains("No tables with manual retry errors found")
+            .contains("No errored tables found")
     );
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_tables_all_tables_succeeds() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+
+    // Create multiple tables with different states - all should be rolled back
+    let table1_oid = create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_users",
+        &[
+            ("init", r#"{"type": "init"}"#),
+            ("ready", r#"{"type": "ready"}"#),
+        ],
+    )
+    .await;
+
+    let table2_oid = create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_orders",
+        &[
+            ("data_sync", r#"{"type": "data_sync"}"#),
+            (
+                "errored",
+                r#"{"type": "errored", "reason": "schema mismatch", "retry_policy": {"type": "manual_retry"}}"#,
+            ),
+        ],
+    )
+    .await;
+
+    let table3_oid = create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_products",
+        &[
+            ("init", r#"{"type": "init"}"#),
+            ("data_sync", r#"{"type": "data_sync"}"#),
+        ],
+    )
+    .await;
+
+    // Call rollback with all_tables - all tables should be rolled back regardless of state
+    let response = app
+        .rollback_tables(
+            &tenant_id,
+            pipeline_id,
+            &RollbackTablesRequest {
+                target: RollbackTablesTarget::AllTables,
+                rollback_type: RollbackType::Individual,
+            },
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: RollbackTablesResponse = response.json().await.unwrap();
+
+    assert_eq!(response.pipeline_id, pipeline_id);
+    assert_eq!(response.tables.len(), 3);
+
+    // Verify all tables were rolled back
+    let table1_result = response
+        .tables
+        .iter()
+        .find(|t| t.table_id == table1_oid.0)
+        .expect("table1 should be in response");
+    assert!(matches!(
+        table1_result.new_state,
+        SimpleTableReplicationState::Queued
+    ));
+
+    let table2_result = response
+        .tables
+        .iter()
+        .find(|t| t.table_id == table2_oid.0)
+        .expect("table2 should be in response");
+    assert!(matches!(
+        table2_result.new_state,
+        SimpleTableReplicationState::CopyingTable
+    ));
+
+    let table3_result = response
+        .tables
+        .iter()
+        .find(|t| t.table_id == table3_oid.0)
+        .expect("table3 should be in response");
+    assert!(matches!(
+        table3_result.new_state,
+        SimpleTableReplicationState::Queued
+    ));
 
     drop_pg_database(&source_db_config).await;
 }

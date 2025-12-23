@@ -416,6 +416,7 @@ pub enum RollbackTablesTarget {
         table_id: u32,
     },
     AllErroredTables,
+    AllTables,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -1259,31 +1260,19 @@ pub async fn rollback_tables(
     // Determine which tables to rollback based on target
     let target_table_ids: Vec<u32> = match &rollback_request.target {
         RollbackTablesTarget::SingleTable { table_id } => {
-            // Single table mode, validate the table exists and is rollbackable
-            let current_row = state_rows
-                .iter()
-                .find(|row| row.table_id.0 == *table_id)
-                .ok_or(PipelineError::MissingTableReplicationState)?;
-
-            let current_state = current_row
-                .deserialize_metadata()
-                .map_err(PipelineError::InvalidTableReplicationState)?
-                .ok_or(PipelineError::MissingTableReplicationState)?;
-
-            if !current_state.supports_manual_retry() {
-                return Err(PipelineError::NotRollbackable(
-                    "Only manual retry errors can be rolled back".to_string(),
-                ));
+            // Single table mode, validate the table exists
+            if !state_rows.iter().any(|row| row.table_id.0 == *table_id) {
+                return Err(PipelineError::MissingTableReplicationState);
             }
 
             vec![*table_id]
         }
         RollbackTablesTarget::AllErroredTables => {
-            // All errored tables mode, find all tables with ManualRetry policy
+            // All errored tables mode, find all tables in errored state
             let mut errored_table_ids = Vec::new();
             for row in &state_rows {
                 if let Ok(Some(state)) = row.deserialize_metadata() {
-                    if state.supports_manual_retry() {
+                    if state.is_errored() {
                         errored_table_ids.push(row.table_id.0);
                     }
                 }
@@ -1291,11 +1280,23 @@ pub async fn rollback_tables(
 
             if errored_table_ids.is_empty() {
                 return Err(PipelineError::NotRollbackable(
-                    "No tables with manual retry errors found".to_string(),
+                    "No errored tables found".to_string(),
                 ));
             }
 
             errored_table_ids
+        }
+        RollbackTablesTarget::AllTables => {
+            // All tables mode, collect all table IDs
+            let table_ids: Vec<u32> = state_rows.iter().map(|row| row.table_id.0).collect();
+
+            if table_ids.is_empty() {
+                return Err(PipelineError::NotRollbackable(
+                    "No tables found for this pipeline".to_string(),
+                ));
+            }
+
+            table_ids
         }
     };
 

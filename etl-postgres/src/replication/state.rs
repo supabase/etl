@@ -59,6 +59,11 @@ impl TableReplicationState {
             }
         )
     }
+
+    /// Returns whether this state is in an errored state.
+    pub fn is_errored(&self) -> bool {
+        matches!(self, TableReplicationState::Errored { .. })
+    }
 }
 
 /// Retry policy for handling table replication errors.
