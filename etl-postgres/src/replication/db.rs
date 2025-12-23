@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::num::NonZeroI32;
 
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
-use sqlx::{PgPool, Row, postgres::PgPoolOptions};
+use sqlx::{PgExecutor, PgPool, Row, postgres::PgPoolOptions};
 use thiserror::Error;
 
 use crate::types::{TableId, TableName};
@@ -43,10 +43,13 @@ pub async fn connect_to_source_database(
 /// Looks up the schema and table names for all given table OIDs using Postgres's
 /// pg_class and pg_namespace system tables. Returns a HashMap mapping each TableId
 /// to its corresponding TableName.
-pub async fn get_table_names_from_table_ids(
-    pool: &PgPool,
+pub async fn get_table_names_from_table_ids<'c, E>(
+    executor: E,
     table_ids: &[TableId],
-) -> Result<HashMap<TableId, TableName>, TableLookupError> {
+) -> Result<HashMap<TableId, TableName>, TableLookupError>
+where
+    E: PgExecutor<'c>,
+{
     if table_ids.is_empty() {
         return Ok(HashMap::new());
     }
@@ -58,7 +61,7 @@ pub async fn get_table_names_from_table_ids(
     ";
 
     let oids: Vec<i32> = table_ids.iter().map(|id| id.into_inner() as i32).collect();
-    let rows = sqlx::query(query).bind(&oids).fetch_all(pool).await?;
+    let rows = sqlx::query(query).bind(&oids).fetch_all(executor).await?;
 
     let mut result = HashMap::with_capacity(rows.len());
     for row in rows {

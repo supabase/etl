@@ -1,10 +1,10 @@
-use std::{collections::HashMap, sync::Arc};
-
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::replication::{connect_to_source_database, destination_metadata, schema, state};
 use etl_postgres::types::{ReplicationMask, SnapshotId, TableId, TableSchema};
 use metrics::gauge;
 use sqlx::PgPool;
+use std::ops::DerefMut;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -444,7 +444,10 @@ impl StateStore for PostgresStore {
 
         // Here we perform locking for the same reasons stated in `update_table_replication_state`.
         let mut inner = self.inner.lock().await;
-        match state::rollback_replication_state(&pool, self.pipeline_id as i64, table_id).await? {
+        let mut conn = pool.acquire().await?;
+        match state::rollback_replication_state(conn.deref_mut(), self.pipeline_id as i64, table_id)
+            .await?
+        {
             Some(restored_row) => {
                 // Compute which phases need to be increment and decremented to
                 // keep table metrics updated

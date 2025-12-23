@@ -59,6 +59,11 @@ impl TableReplicationState {
             }
         )
     }
+
+    /// Returns whether this state is in an errored state.
+    pub fn is_errored(&self) -> bool {
+        matches!(self, TableReplicationState::Errored { .. })
+    }
 }
 
 /// Retry policy for handling table replication errors.
@@ -117,10 +122,13 @@ impl TableReplicationStateRow {
 /// Fetches current replication state rows for a pipeline.
 ///
 /// Retrieves the current replication state records of all tables of a pipeline.
-pub async fn get_table_replication_state_rows(
-    pool: &PgPool,
+pub async fn get_table_replication_state_rows<'c, E>(
+    executor: E,
     pipeline_id: i64,
-) -> sqlx::Result<Vec<TableReplicationStateRow>> {
+) -> sqlx::Result<Vec<TableReplicationStateRow>>
+where
+    E: PgExecutor<'c>,
+{
     let states: Vec<TableReplicationStateRow> = sqlx::query_as(
         r#"
         select id, pipeline_id, table_id, state, metadata, prev, is_current
@@ -129,7 +137,7 @@ pub async fn get_table_replication_state_rows(
         "#,
     )
     .bind(pipeline_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     Ok(states)
@@ -215,22 +223,20 @@ pub async fn update_replication_state_raw(
 /// Restores the previous state by updating the current flags in the database,
 /// returning the restored state if successful.
 pub async fn rollback_replication_state(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     pipeline_id: i64,
     table_id: TableId,
 ) -> sqlx::Result<Option<TableReplicationStateRow>> {
-    let mut tx = pool.begin().await?;
-
     // Get current row and its prev id
     let current_row: Option<(i64, Option<i64>)> = sqlx::query_as(
         r#"
-        select id, prev from etl.replication_state 
+        select id, prev from etl.replication_state
         where pipeline_id = $1 and table_id = $2 and is_current = true
         "#,
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
 
     if let Some((current_id, Some(prev_id))) = current_row {
@@ -244,7 +250,7 @@ pub async fn rollback_replication_state(
             "#,
         )
         .bind(current_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
 
         // Set previous row to current
@@ -256,7 +262,7 @@ pub async fn rollback_replication_state(
             "#,
         )
         .bind(prev_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
 
         // Fetch the restored row
@@ -268,7 +274,7 @@ pub async fn rollback_replication_state(
             "#,
         )
         .bind(prev_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?;
 
         // If the rollback goes to `Init` or `DataSync`, we also want to clean up the table schema
@@ -277,16 +283,12 @@ pub async fn rollback_replication_state(
             restored_row.state,
             TableReplicationStateType::Init | TableReplicationStateType::DataSync
         ) {
-            delete_destination_table_metadata(&mut *tx, pipeline_id, table_id).await?;
-            delete_table_schema_for_table(&mut *tx, pipeline_id, table_id).await?;
+            delete_destination_table_metadata(&mut *conn, pipeline_id, table_id).await?;
+            delete_table_schema_for_table(&mut *conn, pipeline_id, table_id).await?;
         }
-
-        tx.commit().await?;
 
         return Ok(Some(restored_row));
     }
-
-    tx.rollback().await?;
 
     Ok(None)
 }
@@ -295,15 +297,12 @@ pub async fn rollback_replication_state(
 ///
 /// Removes all existing state entries for the table, clears the table mapping
 /// and table schema, and creates a new [`TableReplicationState::Init`] entry,
-/// effectively restarting replication. All operations are performed within a
-/// single transaction to ensure consistency.
+/// effectively restarting replication.
 pub async fn reset_replication_state(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     pipeline_id: i64,
     table_id: TableId,
 ) -> sqlx::Result<TableReplicationStateRow> {
-    let mut tx = pool.begin().await?;
-
     // Delete all existing entries for this pipeline and table
     sqlx::query(
         r#"
@@ -313,14 +312,14 @@ pub async fn reset_replication_state(
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
 
     // We want to clean up the table schema and destination metadata to start fresh.
-    delete_destination_table_metadata(&mut *tx, pipeline_id, table_id).await?;
-    delete_table_schema_for_table(&mut *tx, pipeline_id, table_id).await?;
+    delete_destination_table_metadata(&mut *conn, pipeline_id, table_id).await?;
+    delete_table_schema_for_table(&mut *conn, pipeline_id, table_id).await?;
 
-    // Insert a new ` Init ` state entry and return it
+    // Insert a new `Init` state entry and return it
     let (state_type, metadata) = TableReplicationState::Init
         .to_storage_format()
         .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
@@ -335,10 +334,8 @@ pub async fn reset_replication_state(
     .bind(SqlxTableId(table_id.into_inner()))
     .bind(state_type)
     .bind(metadata)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
-
-    tx.commit().await?;
 
     Ok(row)
 }

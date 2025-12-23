@@ -687,6 +687,13 @@ fn create_container_environment_json(
         }),
     ];
 
+    if matches!(environment, Environment::Dev | Environment::Staging) {
+        container_environment.push(json!({
+            "name": "RUST_BACKTRACE",
+            "value": "1"
+        }));
+    }
+
     match environment {
         Environment::Dev => {
             // We do not configure sentry for dev environments
