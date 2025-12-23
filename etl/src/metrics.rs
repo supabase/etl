@@ -7,10 +7,10 @@ static REGISTER_METRICS: Once = Once::new();
 pub const ETL_TABLES_TOTAL: &str = "etl_tables_total";
 pub const ETL_BATCH_ITEMS_SEND_DURATION_SECONDS: &str = "etl_batch_items_send_duration_seconds";
 pub const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_duration_seconds";
-pub const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
+pub const ETL_TRANSACTIONS_TOTAL: &str = "etl_transactions_total";
+pub const ETL_TRANSACTION_EVENTS_TOTAL: &str = "etl_transaction_events_total";
 pub const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
 pub const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
-pub const ETL_EVENTS_RECEIVED_TOTAL: &str = "etl_events_received_total";
 pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 
 /// Label key for replication phase (used by table state metrics).
@@ -49,22 +49,22 @@ pub(crate) fn register_metrics() {
             "Duration in seconds between BEGIN and COMMIT for a transaction"
         );
 
-        describe_histogram!(
-            ETL_TRANSACTION_SIZE,
+        describe_counter!(
+            ETL_TRANSACTIONS_TOTAL,
             Unit::Count,
-            "Number of events contained in a single transaction"
+            "Total number of transactions seen, labeled by pipeline_id"
+        );
+
+        describe_counter!(
+            ETL_TRANSACTION_EVENTS_TOTAL,
+            Unit::Count,
+            "Total number of events inside transactions, labeled by pipeline_id"
         );
 
         describe_histogram!(
             ETL_TABLE_COPY_DURATION_SECONDS,
             Unit::Seconds,
             "Duration in seconds to complete initial table copy from DataSync to FinishedCopy phase"
-        );
-
-        describe_counter!(
-            ETL_EVENTS_RECEIVED_TOTAL,
-            Unit::Count,
-            "Total number of events received, labeled by worker_type, action, and pipeline_id"
         );
 
         describe_counter!(

@@ -2,7 +2,7 @@ use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use futures::StreamExt;
-use metrics::histogram;
+use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use std::future::Future;
@@ -27,8 +27,8 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-    ETL_EVENTS_PROCESSED_TOTAL, ETL_EVENTS_RECEIVED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS,
-    ETL_TRANSACTION_SIZE, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+    ETL_EVENTS_PROCESSED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_EVENTS_TOTAL,
+    ETL_TRANSACTIONS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::stream::EventsStream;
@@ -734,15 +734,6 @@ where
             {
                 state.events_batch.push(event);
                 state.update_last_commit_end_lsn(result.end_lsn);
-
-                metrics::counter!(
-                    ETL_EVENTS_RECEIVED_TOTAL,
-                    WORKER_TYPE_LABEL => "apply",
-                    ACTION_LABEL => "table_streaming",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                    DESTINATION_LABEL => D::name(),
-                )
-                .increment(1);
             }
 
             // TODO: check if this is what we want.
@@ -1160,12 +1151,20 @@ where
             PIPELINE_ID_LABEL => pipeline_id.to_string()
         )
         .record(duration_seconds);
-        // We do - 1 since we exclude this COMMIT event from the count.
-        histogram!(
-            ETL_TRANSACTION_SIZE,
+
+        counter!(
+            ETL_TRANSACTIONS_TOTAL,
             PIPELINE_ID_LABEL => pipeline_id.to_string()
         )
-        .record((state.current_tx_events - 1) as f64);
+        .increment(1);
+
+        // We do - 1 since we exclude this COMMIT event from the count.
+        counter!(
+            ETL_TRANSACTION_EVENTS_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string()
+        )
+        .increment(state.current_tx_events - 1);
+
         state.current_tx_events = 0;
     }
 
