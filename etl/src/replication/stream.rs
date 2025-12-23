@@ -160,6 +160,12 @@ impl EventsStream {
             // when they are not requested, simply because the `write_lsn` is updated for every
             // incoming message in the apply loop.
             if flush_lsn == *last_flush && last_update.elapsed() < STATUS_UPDATE_INTERVAL {
+                debug!(
+                    last_flush = %flush_lsn,
+                    last_update_elapsed_secs = last_update.elapsed().as_secs(),
+                    "skipping status update due to unforced reply and recent update"
+                );
+
                 return Ok(());
             }
         }
@@ -193,8 +199,11 @@ impl EventsStream {
         .increment(1);
 
         debug!(
-            "status update successfully sent (write_lsn = {}, flush_lsn = {}, apply_lsn = {})",
-            write_lsn, flush_lsn, flush_lsn
+            force = force,
+            write_lsn = %write_lsn,
+            flush_lsn = %flush_lsn,
+            apply_lsn = %flush_lsn,
+            "status update successfully sent"
         );
 
         // Update the state after successful send.
