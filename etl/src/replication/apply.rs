@@ -629,7 +629,7 @@ where
                     logical_replication_stream
                         .as_mut()
                         .get_inner()
-                        .send_status_update(state.write_lsn(), state.flush_lsn(), false)
+                        .send_status_update(state.write_lsn(), state.flush_lsn(), true)
                         .await?;
                     state.mark_status_update_sent();
                 }
@@ -673,7 +673,7 @@ where
                 logical_replication_stream
                     .as_mut()
                     .get_inner()
-                    .send_status_update(state.write_lsn(), state.flush_lsn(), false)
+                    .send_status_update(state.write_lsn(), state.flush_lsn(), true)
                     .await?;
 
                 state.mark_status_update_sent();
