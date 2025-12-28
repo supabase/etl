@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use crate::shared::{
     PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError, batch::BatchConfig,
 };
-
 /// Configuration for an ETL pipeline.
 ///
 /// Contains all settings required to run a replication pipeline including
@@ -20,6 +19,8 @@ pub struct PipelineConfig {
     pub id: u64,
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
+    /// Whether to use a temporary replication slot
+    pub replication_slot: ReplicationSlotConfig,
     /// The connection configuration for the Postgres instance to which the pipeline connects for
     /// replication.
     pub pg_connection: PgConnectionConfig,
@@ -64,6 +65,8 @@ pub struct PipelineConfigWithoutSecrets {
     pub id: u64,
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
+    /// Whether to use a temporary replication slot
+    pub replication_slot: ReplicationSlotConfig,
     /// The connection configuration for the Postgres instance to which the pipeline connects for
     /// replication.
     pub pg_connection: PgConnectionConfigWithoutSecrets,
@@ -82,6 +85,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
         PipelineConfigWithoutSecrets {
             id: value.id,
             publication_name: value.publication_name,
+            replication_slot: value.replication_slot,
             pg_connection: value.pg_connection.into(),
             batch: value.batch,
             table_error_retry_delay_ms: value.table_error_retry_delay_ms,
@@ -89,4 +93,10 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             max_table_sync_workers: value.max_table_sync_workers,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub enum ReplicationSlotConfig {
+    Temporary,
+    Permanent,
 }

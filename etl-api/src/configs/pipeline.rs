@@ -1,4 +1,4 @@
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
+use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, ReplicationSlotConfig};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -31,6 +31,7 @@ pub struct FullApiPipelineConfig {
     #[schema(example = "my_publication")]
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub publication_name: String,
+    pub temporary_replication_slot: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<ApiBatchConfig>,
     #[schema(example = 1000)]
@@ -49,6 +50,10 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
     fn from(value: StoredPipelineConfig) -> Self {
         Self {
             publication_name: value.publication_name,
+            temporary_replication_slot: match value.replication_slot {
+                ReplicationSlotConfig::Temporary => true,
+                ReplicationSlotConfig::Permanent => false,
+            },
             batch: Some(ApiBatchConfig {
                 max_size: Some(value.batch.max_size),
                 max_fill_ms: Some(value.batch.max_fill_ms),
@@ -89,6 +94,7 @@ pub struct PartialApiPipelineConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredPipelineConfig {
     pub publication_name: String,
+    pub replication_slot: ReplicationSlotConfig,
     pub batch: BatchConfig,
     pub table_error_retry_delay_ms: u64,
     #[serde(default = "default_table_error_retry_max_attempts")]
@@ -106,6 +112,7 @@ impl StoredPipelineConfig {
         PipelineConfig {
             id: pipeline_id,
             publication_name: self.publication_name,
+            replication_slot: self.replication_slot,
             pg_connection: pg_connection_config,
             batch: self.batch,
             table_error_retry_delay_ms: self.table_error_retry_delay_ms,
@@ -161,6 +168,11 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
 
         Self {
             publication_name: value.publication_name,
+            replication_slot: if value.temporary_replication_slot {
+                ReplicationSlotConfig::Temporary
+            } else {
+                ReplicationSlotConfig::Permanent
+            },
             batch,
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
@@ -185,6 +197,7 @@ mod tests {
     fn test_stored_pipeline_config_serialization() {
         let config = StoredPipelineConfig {
             publication_name: "test_publication".to_string(),
+            replication_slot: ReplicationSlotConfig::Permanent,
             batch: BatchConfig {
                 max_size: 1000,
                 max_fill_ms: 5000,
@@ -223,6 +236,7 @@ mod tests {
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
             log_level: Some(LogLevel::Debug),
+            temporary_replication_slot: false,
         };
 
         let stored: StoredPipelineConfig = full_config.clone().into();
@@ -235,6 +249,7 @@ mod tests {
     fn test_full_api_pipeline_config_defaults() {
         let full_config = FullApiPipelineConfig {
             publication_name: "test_publication".to_string(),
+            temporary_replication_slot: false,
             batch: None,
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
@@ -264,6 +279,7 @@ mod tests {
     fn test_partial_api_pipeline_config_merge() {
         let mut stored = StoredPipelineConfig {
             publication_name: "old_publication".to_string(),
+            replication_slot: ReplicationSlotConfig::Permanent,
             batch: BatchConfig {
                 max_size: 500,
                 max_fill_ms: 2000,

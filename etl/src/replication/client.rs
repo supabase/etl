@@ -1,7 +1,7 @@
 use crate::error::{ErrorKind, EtlResult};
 use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
-use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_config::shared::{IntoConnectOptions, PgConnectionConfig, ReplicationSlotConfig};
 use etl_postgres::replication::extract_server_version;
 use etl_postgres::types::convert_type_oid_to_type;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
@@ -261,18 +261,23 @@ impl PgReplicationClient {
     pub async fn create_slot_with_transaction(
         &self,
         slot_name: &str,
+        config: ReplicationSlotConfig,
     ) -> EtlResult<(PgReplicationSlotTransaction, CreateSlotResult)> {
         // TODO: check if we want to consume the client and return it on commit to avoid any other
         //  operations on a connection that has started a transaction.
         let transaction = PgReplicationSlotTransaction::new(self.clone()).await?;
-        let slot = self.create_slot_internal(slot_name, true).await?;
+        let slot = self.create_slot_internal(slot_name, true, config).await?;
 
         Ok((transaction, slot))
     }
 
     /// Creates a new logical replication slot with the specified name and no snapshot.
-    pub async fn create_slot(&self, slot_name: &str) -> EtlResult<CreateSlotResult> {
-        self.create_slot_internal(slot_name, false).await
+    pub async fn create_slot(
+        &self,
+        slot_name: &str,
+        config: ReplicationSlotConfig,
+    ) -> EtlResult<CreateSlotResult> {
+        self.create_slot_internal(slot_name, false, config).await
     }
 
     /// Gets the slot by `slot_name`.
@@ -317,7 +322,11 @@ impl PgReplicationClient {
     /// - A boolean indicating whether the slot was created (true) or already existed (false)
     /// - The slot result containing either the confirmed_flush_lsn (for existing slots)
     ///   or the consistent_point (for newly created slots)
-    pub async fn get_or_create_slot(&self, slot_name: &str) -> EtlResult<GetOrCreateSlotResult> {
+    pub async fn get_or_create_slot(
+        &self,
+        slot_name: &str,
+        config: ReplicationSlotConfig,
+    ) -> EtlResult<GetOrCreateSlotResult> {
         match self.get_slot(slot_name).await {
             Ok(slot) => {
                 info!("using existing replication slot '{}'", slot_name);
@@ -327,7 +336,7 @@ impl PgReplicationClient {
             Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
                 info!("creating new replication slot '{}'", slot_name);
 
-                let create_result = self.create_slot_internal(slot_name, false).await?;
+                let create_result = self.create_slot_internal(slot_name, false, config).await?;
 
                 Ok(GetOrCreateSlotResult::CreateSlot(create_result))
             }
@@ -591,6 +600,7 @@ impl PgReplicationClient {
         &self,
         slot_name: &str,
         use_snapshot: bool,
+        config: ReplicationSlotConfig,
     ) -> EtlResult<CreateSlotResult> {
         // Do not convert the query or the options to lowercase, since the lexer for
         // replication commands (repl_scanner.l) in Postgres code expects the commands
@@ -601,9 +611,14 @@ impl PgReplicationClient {
         } else {
             "NOEXPORT_SNAPSHOT"
         };
+        let temporary = match config {
+            ReplicationSlotConfig::Temporary => " TEMPORARY ",
+            ReplicationSlotConfig::Permanent => " ",
+        };
         let query = format!(
-            r#"CREATE_REPLICATION_SLOT {} LOGICAL pgoutput {}"#,
+            r#"CREATE_REPLICATION_SLOT {}{}LOGICAL pgoutput {}"#,
             quote_identifier(slot_name),
+            temporary,
             snapshot_option
         );
         match self.client.simple_query(&query).await {

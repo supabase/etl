@@ -1,4 +1,4 @@
-use etl_config::shared::PipelineConfig;
+use etl_config::shared::{PipelineConfig, ReplicationSlotConfig};
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
@@ -136,8 +136,13 @@ where
             publication_name = self.config.publication_name
         );
         let apply_worker = async move {
-            let start_lsn =
-                get_start_lsn(self.pipeline_id, &self.replication_client, &self.store).await?;
+            let start_lsn = get_start_lsn(
+                self.pipeline_id,
+                &self.replication_client,
+                &self.store,
+                self.config.replication_slot,
+            )
+            .await?;
 
             // We create the signal used to notify the apply worker that it should force syncing tables.
             let (force_syncing_tables_tx, force_syncing_tables_rx) = create_signal();
@@ -192,12 +197,15 @@ async fn get_start_lsn<S: StateStore>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
     store: &S,
+    replication_slot: ReplicationSlotConfig,
 ) -> EtlResult<PgLsn> {
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
 
     // We try to get or create the slot. Both operations will return an LSN that we can use to start
     // streaming events.
-    let slot = replication_client.get_or_create_slot(&slot_name).await?;
+    let slot = replication_client
+        .get_or_create_slot(&slot_name, replication_slot)
+        .await?;
 
     // When creating a new apply worker slot, all tables must be in the `Init` state. If any table
     // is not in Init state, it means the table was synchronized based on another apply worker

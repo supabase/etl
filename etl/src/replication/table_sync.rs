@@ -1,4 +1,4 @@
-use etl_config::shared::PipelineConfig;
+use etl_config::shared::{PipelineConfig, ReplicationSlotConfig};
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::types::TableId;
 use futures::StreamExt;
@@ -183,7 +183,7 @@ where
             // If a slot already exists at this point, we could delete it and try to recover, but it means
             // that the state was somehow reset without the slot being deleted, and we want to surface this.
             let (transaction, slot) = replication_client
-                .create_slot_with_transaction(&slot_name)
+                .create_slot_with_transaction(&slot_name, ReplicationSlotConfig::Permanent)
                 .await?;
 
             // We copy the table schema and write it both to the state store and destination.

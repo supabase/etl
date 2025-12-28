@@ -1,4 +1,4 @@
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
+use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, ReplicationSlotConfig};
 use uuid::Uuid;
 
 use crate::destination::Destination;
@@ -39,6 +39,7 @@ where
         table_error_retry_delay_ms: 1000,
         table_error_retry_max_attempts: 2,
         max_table_sync_workers: 1,
+        replication_slot: ReplicationSlotConfig::Permanent,
     };
 
     Pipeline::new(config, store, destination)
@@ -64,6 +65,7 @@ where
     let config = PipelineConfig {
         id: pipeline_id,
         publication_name,
+        replication_slot: ReplicationSlotConfig::Permanent,
         pg_connection: pg_connection_config.clone(),
         batch,
         table_error_retry_delay_ms: 1000,
