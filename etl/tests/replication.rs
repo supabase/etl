@@ -230,11 +230,11 @@ async fn test_replication_client_permanent_slot_persisted_on_disconnect() {
         })
     ));
 
-    // Dropping the client should close the connection, causing our replication
-    // slot to be cleaned up
+    // Dropping the client should close the connection. Since we use a persisted replication slot
+    // it should still be present when we start a fresh connection
     drop(client);
 
-    // This means that we should be able to execute the exact same sequence again, and the slot should still exist
+    // This means that we should be able to execute the exact same sequence again, and the slot should still exist (i.e., we fail to create a new one)
     let client = PgReplicationClient::connect(database.config.clone())
         .await
         .unwrap();
