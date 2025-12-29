@@ -17,7 +17,7 @@ use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 use crate::metrics::{
     ETL_BYTES_PROCESSED_TOTAL, ETL_STATUS_UPDATES_SKIPPED_TOTAL, ETL_STATUS_UPDATES_TOTAL,
-    EVENT_TYPE_LABEL, FORCED_LABEL, PIPELINE_ID_LABEL,
+    EVENT_TYPE_LABEL, FORCED_LABEL, PIPELINE_ID_LABEL, STATUS_UPDATE_TYPE_LABEL,
 };
 use crate::types::{PipelineId, TableRow};
 use metrics::counter;
@@ -195,6 +195,7 @@ impl EventsStream {
                 counter!(
                     ETL_STATUS_UPDATES_SKIPPED_TOTAL,
                     PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                    STATUS_UPDATE_TYPE_LABEL => status_update_type.to_string(),
                 )
                 .increment(1);
 
@@ -234,6 +235,7 @@ impl EventsStream {
             ETL_STATUS_UPDATES_TOTAL,
             PIPELINE_ID_LABEL => pipeline_id.to_string(),
             FORCED_LABEL => force.to_string(),
+            STATUS_UPDATE_TYPE_LABEL => status_update_type.to_string(),
         )
         .increment(1);
 
