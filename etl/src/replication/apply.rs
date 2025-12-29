@@ -35,7 +35,7 @@ use crate::metrics::{
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::masks::ReplicationMasks;
-use crate::replication::stream::EventsStream;
+use crate::replication::stream::{EventsStream, StatusUpdateType};
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId, RelationEvent};
 
@@ -528,7 +528,7 @@ where
     // - EventsStream -> used to expose special status updates methods on the stream.
     // - TimeoutStream -> adds a timeout mechanism that detects when no data has been going through
     //   the stream for a while, and returns a special marker to signal that.
-    let logical_replication_stream = EventsStream::wrap(logical_replication_stream);
+    let logical_replication_stream = EventsStream::wrap(logical_replication_stream, pipeline_id);
     let logical_replication_stream =
         TimeoutStream::wrap(logical_replication_stream, max_batch_fill_duration);
 
@@ -618,11 +618,7 @@ where
                     logical_replication_stream
                         .as_mut()
                         .get_inner()
-                        .send_status_update(
-                            state.write_lsn(),
-                            state.flush_lsn(),
-                            false
-                        )
+                        .send_status_update(state.write_lsn(), state.flush_lsn(), true, StatusUpdateType::Timeout)
                         .await?;
                     state.mark_status_update_sent();
                 }
@@ -666,11 +662,7 @@ where
                 logical_replication_stream
                     .as_mut()
                     .get_inner()
-                    .send_status_update(
-                        state.write_lsn(),
-                        state.flush_lsn(),
-                        false
-                    )
+                    .send_status_update(state.write_lsn(), state.flush_lsn(), true, StatusUpdateType::Timeout)
                     .await?;
 
                 state.mark_status_update_sent();
@@ -972,7 +964,12 @@ where
 
             events_stream
                 .get_inner()
-                .send_status_update(state.write_lsn(), state.flush_lsn(), message.reply() == 1)
+                .send_status_update(
+                    state.write_lsn(),
+                    state.flush_lsn(),
+                    message.reply() == 1,
+                    StatusUpdateType::KeepAlive,
+                )
                 .await?;
 
             state.mark_status_update_sent();
