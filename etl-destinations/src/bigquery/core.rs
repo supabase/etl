@@ -3,7 +3,9 @@ use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_number};
-use etl::{bail, etl_error};
+use etl::{bail, egress_info, etl_error};
+
+use crate::egress::ETL_PROCESS_BYTES;
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -506,16 +508,12 @@ where
                 .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
                 .await?;
 
-            // Logs with egress_metric = true can be used to identify egress logs.
-            // This can e.g. be used to send egress logs to a location different
-            // than the other logs. These logs should also have bytes_sent set to
-            // the number of bytes sent to the destination.
-            info!(
+            egress_info!(
+                ETL_PROCESS_BYTES,
                 bytes_sent,
                 bytes_received,
-                phase = "table_copy",
-                egress_metric = true,
-                "wrote table rows to bigquery"
+                destination_type = "bigquery",
+                phase = "table_copy"
             );
         }
 
@@ -613,16 +611,12 @@ where
                         .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
                         .await?;
 
-                    // Logs with egress_metric = true can be used to identify egress logs.
-                    // This can e.g. be used to send egress logs to a location different
-                    // than the other logs. These logs should also have bytes_sent set to
-                    // the number of bytes sent to the destination.
-                    info!(
+                    egress_info!(
+                        ETL_PROCESS_BYTES,
                         bytes_sent,
                         bytes_received,
-                        phase = "apply",
-                        egress_metric = true,
-                        "wrote cdc events to bigquery"
+                        destination_type = "bigquery",
+                        phase = "apply"
                     );
                 }
             }

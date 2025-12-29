@@ -103,6 +103,7 @@ mod concurrency;
 pub mod config;
 mod conversions;
 pub mod destination;
+pub mod egress;
 pub mod error;
 #[cfg(feature = "failpoints")]
 pub mod failpoints;

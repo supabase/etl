@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::egress::ETL_PROCESS_BYTES;
 use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
 use etl::destination::Destination;
@@ -14,7 +15,7 @@ use etl::types::{
     Cell, ColumnSchema, Event, TableId, TableName, TableRow, TableSchema, Type,
     generate_sequence_number,
 };
-use etl::{bail, etl_error};
+use etl::{bail, egress_info, etl_error};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::log::warn;
@@ -278,15 +279,11 @@ where
                 .insert_rows(namespace, iceberg_table_name, table_rows)
                 .await?;
 
-            // Logs with egress_metric = true can be used to identify egress logs.
-            // This can e.g. be used to send egress logs to a location different
-            // than the other logs. These logs should also have bytes_sent set to
-            // the number of bytes sent to the destination.
-            info!(
+            egress_info!(
+                ETL_PROCESS_BYTES,
                 bytes_sent,
-                phase = "table_copy",
-                egress_metric = true,
-                "wrote table rows to iceberg"
+                destination_type = Self::name(),
+                phase = "table_copy"
             );
         }
 
@@ -391,15 +388,11 @@ where
                         .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
                 }
 
-                // Logs with egress_metric = true can be used to identify egress logs.
-                // This can e.g. be used to send egress logs to a location different
-                // than the other logs. These logs should also have bytes_sent set to
-                // the number of bytes sent to the destination.
-                info!(
+                egress_info!(
+                    ETL_PROCESS_BYTES,
                     bytes_sent,
-                    phase = "apply",
-                    egress_metric = true,
-                    "wrote cdc events to iceberg"
+                    destination_type = Self::name(),
+                    phase = "apply"
                 );
             }
 
