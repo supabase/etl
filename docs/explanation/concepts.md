@@ -21,14 +21,16 @@ ETL uses logical replication to stream changes to destinations like BigQuery, Ic
 
 Before Postgres modifies data on disk, it first writes the change to the **Write-Ahead Log (WAL)**. This guarantees durability - if Postgres crashes, it can replay the WAL to recover.
 
-```
-Transaction commits → Written to WAL → Later flushed to data files
+```mermaid
+flowchart LR
+    A[Transaction commits] --> B[Written to WAL] --> C[Later flushed to data files]
 ```
 
 For logical replication, Postgres decodes the WAL back into logical changes:
 
-```
-WAL bytes → Decoder (pgoutput) → INSERT/UPDATE/DELETE events
+```mermaid
+flowchart LR
+    A[WAL bytes] --> B["Decoder (pgoutput)"] --> C[INSERT/UPDATE/DELETE events]
 ```
 
 ETL receives these decoded events and forwards them to your destination.
@@ -97,6 +99,7 @@ The Apply Worker uses one persistent slot. Table Sync Workers create temporary s
 Slots prevent WAL cleanup. If ETL stops consuming (crashes, network issues, slow destination), WAL files accumulate on disk. This can fill your disk.
 
 Mitigations:
+
 - Monitor slot lag with `pg_replication_slots`
 - Set `max_slot_wal_keep_size` to limit WAL retention
 - Alert when slots fall behind
@@ -131,11 +134,9 @@ Logical replication only captures **changes**. It doesn't know about data that e
 
 So ETL first copies all existing rows using Postgres's `COPY` command:
 
-```
 1. Create replication slot (captures consistent snapshot point)
 2. COPY all rows from table to destination
 3. Start streaming changes from the snapshot point
-```
 
 The slot ensures no changes are lost between the snapshot and when streaming begins.
 
@@ -143,8 +144,9 @@ The slot ensures no changes are lost between the snapshot and when streaming beg
 
 After initial copy, ETL streams ongoing changes in real-time:
 
-```
-Postgres WAL → Decoder → ETL → Destination
+```mermaid
+flowchart LR
+    A[Postgres WAL] --> B[Decoder] --> C[ETL] --> D[Destination]
 ```
 
 Each change is delivered as an event (Insert, Update, Delete) to your destination's `write_events()` method.
@@ -152,6 +154,7 @@ Each change is delivered as an event (Insert, Update, Delete) to your destinatio
 ### Why This Matters
 
 Understanding the two phases helps you:
+
 - Know that initial copy can take time for large tables
 - Understand why `write_table_rows()` and `write_events()` are separate methods
 - Debug issues where data exists but changes aren't appearing (or vice versa)
@@ -206,15 +209,9 @@ ETL events include two LSN fields:
 | Field | Meaning |
 |-------|---------|
 | `start_lsn` | Where this event was recorded in the WAL |
-| `commit_lsn` | Where the containing transaction commits |
+| `commit_lsn` | LSN of the commit message in the WAL |
 
 Multiple events in the same transaction share the same `commit_lsn` but have different `start_lsn` values.
-
-### Using LSNs
-
-- **Ordering**: Events are ordered by `start_lsn` within a transaction
-- **Recovery**: Store the highest `commit_lsn` processed; resume from there after restart
-- **Deduplication**: Same `start_lsn` twice means duplicate event
 
 ## Why Persist State?
 
@@ -223,6 +220,7 @@ ETL persists replication state (schemas, progress, mappings) for recovery.
 ### Without Persistence
 
 If ETL crashes and has no state:
+
 - It doesn't know which tables were already copied
 - It doesn't know where in the WAL to resume
 - It would have to start from scratch, potentially duplicating data
@@ -230,6 +228,7 @@ If ETL crashes and has no state:
 ### With Persistence
 
 ETL stores:
+
 - **Replication phase** per table (Init, DataSync, Ready, etc.)
 - **Table schemas** (column definitions)
 - **Table mappings** (source table ID → destination name)
@@ -241,7 +240,6 @@ On restart, ETL loads this state and resumes from where it left off.
 | State | Purpose |
 |-------|---------|
 | Replication phase | Know whether to copy or stream for each table |
-| Last processed LSN | Resume streaming from correct position |
 | Table schemas | Validate incoming data against expected schema |
 | Table mappings | Route events to correct destination tables |
 
@@ -251,8 +249,7 @@ The built-in `PostgresStore` persists to your Postgres database. `MemoryStore` i
 
 Here's the complete flow:
 
-```
-1. You configure Postgres (wal_level=logical)
+1. You configure Postgres (`wal_level=logical`)
 2. You create a publication for tables you want to replicate
 3. ETL creates a replication slot to track progress
 4. ETL copies existing data (Phase 1: Initial Copy)
@@ -261,7 +258,6 @@ Here's the complete flow:
 7. ETL receives events and sends them to your destination
 8. ETL reports progress back to Postgres (so WAL can be cleaned up)
 9. State is persisted for crash recovery
-```
 
 ## Next Steps
 

@@ -367,19 +367,6 @@ The pipeline will connect to Postgres and start replicating. You'll see your cus
 - **HTTP Destination** - Sends data via HTTP with retry logic
 - **Working Pipeline** - Combines your components with ETL's core
 
-## Key Patterns
-
-**Store traits:**
-
-- `SchemaStore` - Cache table schemas for fast lookup
-- `StateStore` - Track replication progress per table
-- `CleanupStore` - Clean up when tables are removed
-
-**Destination methods:**
-
-- `write_table_rows()` - Optimize for bulk inserts (initial copy)
-- `write_events()` - Handle streaming changes (may include repeated Begin/Commit)
-
 ## Next Steps
 
 - [Extension Points](../explanation/traits.md): Full trait documentation

@@ -81,16 +81,13 @@ pub trait Destination {
 
 ### Store
 
-Persists pipeline state so it can resume after restarts. Two traits work together:
+Persists pipeline state so it can resume after restarts. Three traits work together:
 
 - **StateStore**: Tracks replication progress and table mappings
 - **SchemaStore**: Stores table schema information
+- **CleanupStore**: Handles cleanup when tables are removed from a publication
 
-Both use a cache-first pattern for performance with dual-write to persistent storage.
-
-### CleanupStore
-
-Handles cleanup when tables are removed from a publication. Removes ETL metadata without touching destination tables.
+StateStore and SchemaStore use a cache-first pattern for performance with dual-write to persistent storage.
 
 ## Delivery Guarantees
 

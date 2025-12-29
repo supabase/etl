@@ -15,21 +15,13 @@ ETL is a Rust framework for building change data capture (CDC) pipelines on Post
 
 ## Why ETL?
 
-| Feature | Description |
-|---------|-------------|
-| **Real-time** | Changes stream as they happen, not in batches |
-| **Reliable** | At-least-once delivery with automatic retries |
-| **Extensible** | Implement four traits to add any destination |
-| **Fast** | Parallel initial copy, configurable batching |
-| **Type-safe** | Rust API with compile-time guarantees |
+- **Real-time**: Changes stream as they happen, not in batches
+- **Reliable**: At-least-once delivery with automatic retries
+- **Extensible**: Implement four traits to add any destination
+- **Fast**: Parallel initial copy, configurable batching
+- **Type-safe**: Rust API with compile-time guarantees
 
 ## How It Works
-
-```
-Postgres WAL → ETL Pipeline → Your Destination
-                    ↓
-                  Store
-```
 
 1. **Initial copy**: ETL copies existing table data to your destination
 2. **Streaming**: ETL streams [events](explanation/events.md) (Insert, Update, Delete, and more) in real-time

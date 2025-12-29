@@ -25,11 +25,7 @@ Postgres's Write-Ahead Log (WAL) is the foundation of logical replication. When 
 wal_level = logical
 ```
 
-**Restart Postgres** after changing this setting:
-
-```bash
-sudo systemctl restart postgresql
-```
+Restart Postgres after changing this setting.
 
 ## Replication Slots
 
@@ -63,7 +59,7 @@ FROM pg_replication_slots;
 SELECT pg_drop_replication_slot('my_slot');
 ```
 
-**Warning:** Only delete slots when you're sure they're not in use. Deleting an active slot can cause data loss.
+**Warning:** Only delete slots when you're sure they're not in use. Deleting an active slot will fail replication.
 
 ## Max Replication Slots
 

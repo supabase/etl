@@ -28,7 +28,7 @@ A new row was added to a table.
 ```rust
 pub struct InsertEvent {
     pub start_lsn: PgLsn,      // LSN where event started
-    pub commit_lsn: PgLsn,     // LSN where transaction commits
+    pub commit_lsn: PgLsn,     // LSN of the commit message in the WAL
     pub table_id: TableId,     // Which table
     pub table_row: TableRow,   // The new row data
 }
@@ -97,7 +97,7 @@ Marks the start of a transaction.
 ```rust
 pub struct BeginEvent {
     pub start_lsn: PgLsn,   // Where transaction started
-    pub commit_lsn: PgLsn,  // Where it will commit
+    pub commit_lsn: PgLsn,  // LSN of the commit message in the WAL
     pub timestamp: i64,     // Transaction start time
     pub xid: u32,           // Transaction ID
 }
@@ -144,7 +144,7 @@ During the initial copy phase, `Begin` and `Commit` events may be delivered **mu
 Your destination should handle this by:
 
 - **Option 1:** Track LSNs to detect duplicate Begin/Commit events
-- **Option 2:** Ignore Begin/Commit entirely if your destination doesn't support transactions (e.g., BigQuery, most data warehouses)
+- **Option 2:** Ignore Begin/Commit entirely if your destination doesn't support transactions
 
 Example handling:
 
@@ -179,7 +179,7 @@ An LSN is a pointer to a position in Postgres's Write-Ahead Log (WAL). It's a mo
 | Field | Meaning | Use Case |
 |-------|---------|----------|
 | `start_lsn` | Where this specific event was recorded in the WAL | Deduplication, ordering within transaction |
-| `commit_lsn` | Where the containing transaction commits | Transaction grouping, recovery checkpoints |
+| `commit_lsn` | LSN of the commit message in the WAL | Transaction grouping, recovery checkpoints |
 
 **Key insight:** Multiple events can share the same `commit_lsn` (they're in the same transaction) but each has a unique `start_lsn`.
 
