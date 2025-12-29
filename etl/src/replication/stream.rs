@@ -102,9 +102,12 @@ impl<'a> Stream for TableCopyStream<'a> {
     }
 }
 
+/// The status update type when sending a status update message back to Postgres.
 #[derive(Debug)]
 pub enum StatusUpdateType {
+    /// Represents an update requested by Postgres.
     KeepAlive,
+    /// Represents an update sent by ETL on its own.
     Timeout,
 }
 
@@ -118,6 +121,8 @@ impl Display for StatusUpdateType {
 }
 
 pin_project! {
+    /// A stream that yields replication events from a Postgres logical replication stream and keeps
+    /// track of last sent status updates.
     pub struct EventsStream {
         #[pin]
         stream: LogicalReplicationStream,
