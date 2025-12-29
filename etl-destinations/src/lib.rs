@@ -5,6 +5,7 @@
 
 #[cfg(feature = "bigquery")]
 pub mod bigquery;
+#[cfg(feature = "egress")]
 pub mod egress;
 pub mod encryption;
 #[cfg(feature = "iceberg")]

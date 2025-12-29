@@ -3,9 +3,12 @@ use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_number};
-use etl::{bail, egress_info, etl_error};
+use etl::{bail, etl_error};
 
-use crate::egress::ETL_PROCESS_BYTES;
+#[cfg(feature = "egress")]
+use crate::egress::ETL_PROCESSED_BYTES;
+#[cfg(feature = "egress")]
+use etl::egress_info;
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -179,7 +182,7 @@ pub struct BigQueryDestination<S> {
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore,
+    S: StateStore + SchemaStore + Send + Sync,
 {
     /// Creates a new [`BigQueryDestination`] using a service account key file path.
     ///
@@ -503,16 +506,18 @@ where
 
         // Stream all the batches concurrently.
         if !table_batches.is_empty() {
+            #[allow(unused_variables)]
             let (bytes_sent, bytes_received) = self
                 .client
                 .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
                 .await?;
 
+            #[cfg(feature = "egress")]
             egress_info!(
-                ETL_PROCESS_BYTES,
+                ETL_PROCESSED_BYTES,
                 bytes_sent,
                 bytes_received,
-                destination_type = "bigquery",
+                destination_type = Self::name(),
                 phase = "table_copy"
             );
         }
@@ -606,16 +611,18 @@ where
                 }
 
                 if !table_batches.is_empty() {
+                    #[allow(unused_variables)]
                     let (bytes_sent, bytes_received) = self
                         .client
                         .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
                         .await?;
 
+                    #[cfg(feature = "egress")]
                     egress_info!(
-                        ETL_PROCESS_BYTES,
+                        ETL_PROCESSED_BYTES,
                         bytes_sent,
                         bytes_received,
-                        destination_type = "bigquery",
+                        destination_type = Self::name(),
                         phase = "apply"
                     );
                 }

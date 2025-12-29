@@ -4,4 +4,4 @@
 //! Use these with the [`etl::egress_info!`] macro for consistent billing logs.
 
 /// Log message for bytes processed and sent to a destination.
-pub const ETL_PROCESS_BYTES: &str = "etl_process_bytes";
+pub const ETL_PROCESSED_BYTES: &str = "etl_processed_bytes";

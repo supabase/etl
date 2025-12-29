@@ -4,10 +4,13 @@ use std::{
     sync::Arc,
 };
 
-use crate::egress::ETL_PROCESS_BYTES;
+#[cfg(feature = "egress")]
+use crate::egress::ETL_PROCESSED_BYTES;
 use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
 use etl::destination::Destination;
+#[cfg(feature = "egress")]
+use etl::egress_info;
 use etl::error::{ErrorKind, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
@@ -15,7 +18,7 @@ use etl::types::{
     Cell, ColumnSchema, Event, TableId, TableName, TableRow, TableSchema, Type,
     generate_sequence_number,
 };
-use etl::{bail, egress_info, etl_error};
+use etl::{bail, etl_error};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::log::warn;
@@ -274,13 +277,15 @@ where
         }
 
         if !table_rows.is_empty() {
+            #[allow(unused_variables)]
             let bytes_sent = self
                 .client
                 .insert_rows(namespace, iceberg_table_name, table_rows)
                 .await?;
 
+            #[cfg(feature = "egress")]
             egress_info!(
-                ETL_PROCESS_BYTES,
+                ETL_PROCESSED_BYTES,
                 bytes_sent,
                 destination_type = Self::name(),
                 phase = "table_copy"
@@ -382,14 +387,16 @@ where
                     });
                 }
 
+                #[allow(unused_mut, unused_variables)]
                 let mut bytes_sent = 0;
                 while let Some(insert_result) = join_set.join_next().await {
                     bytes_sent += insert_result
                         .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
                 }
 
+                #[cfg(feature = "egress")]
                 egress_info!(
-                    ETL_PROCESS_BYTES,
+                    ETL_PROCESSED_BYTES,
                     bytes_sent,
                     destination_type = Self::name(),
                     phase = "apply"

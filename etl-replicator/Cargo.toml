@@ -8,9 +8,9 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-etl = { workspace = true }
+etl = { workspace = true, features = ["egress"] }
 etl-config = { workspace = true }
-etl-destinations = { workspace = true, features = ["bigquery", "iceberg"] }
+etl-destinations = { workspace = true, features = ["bigquery", "iceberg", "egress"] }
 etl-telemetry = { workspace = true }
 
 anyhow = { workspace = true, features = ["std"] }
