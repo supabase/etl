@@ -17,7 +17,7 @@ ETL is a Rust framework for building change data capture (CDC) pipelines on Post
 
 - **Real-time**: Changes stream as they happen, not in batches
 - **Reliable**: At-least-once delivery with automatic retries
-- **Extensible**: Implement four traits to add any destination
+- **Extensible**: Implement one trait to add any destination
 - **Fast**: Parallel initial copy, configurable batching
 - **Type-safe**: Rust API with compile-time guarantees
 
@@ -42,25 +42,29 @@ tokio = { version = "1.0", features = ["full"] }
 Create a pipeline:
 
 ```rust
-use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
-use etl::destination::memory::MemoryDestination;
-use etl::pipeline::Pipeline;
-use etl::store::both::memory::MemoryStore;
+use etl::{
+    config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig},
+    destination::memory::MemoryDestination,
+    pipeline::Pipeline,
+    store::both::memory::MemoryStore,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pg_config = PgConnectionConfig {
+        host: "localhost".to_string(),
+        port: 5432,
+        name: "mydb".to_string(),
+        username: "postgres".to_string(),
+        password: Some("password".to_string().into()),
+        tls: TlsConfig { enabled: false, trusted_root_certs: String::new() },
+        keepalive: None,
+    };
+
     let config = PipelineConfig {
         id: 1,
-        publication_name: "my_publication".into(),
-        pg_connection: PgConnectionConfig {
-            host: "localhost".into(),
-            port: 5432,
-            name: "mydb".into(),
-            username: "postgres".into(),
-            password: Some("password".into()),
-            tls: TlsConfig { enabled: false, trusted_root_certs: String::new() },
-            keepalive: None,
-        },
+        publication_name: "my_publication".to_string(),
+        pg_connection: pg_config,
         batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
         table_error_retry_delay_ms: 10_000,
         table_error_retry_max_attempts: 5,
@@ -87,6 +91,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Contributing
 
-We welcome pull requests and issues on [GitHub](https://github.com/supabase/etl).
+Pull requests and issues welcome on [GitHub](https://github.com/supabase/etl).
 
-We currently cannot accept new destinations unless there is significant community demand, as each carries long-term maintenance cost. If you need an unsupported destination, open an issue to gauge interest before implementing.
+**New destinations**: Open an issue first to gauge interest. Each built-in destination carries long-term maintenance cost, so we only accept those with significant community demand.

@@ -7,21 +7,17 @@ This guide covers the essential Postgres concepts and configuration needed for l
 ## Prerequisites
 
 - **PostgreSQL 14, 15, 16, or 17** (officially supported and tested versions)
-  - PostgreSQL 15+ is recommended for advanced publication filtering features (column-level and row-level filters, `FOR ALL TABLES IN SCHEMA` syntax)
-  - PostgreSQL 14 is supported but has limited publication filtering capabilities
+  - PostgreSQL 15+ recommended for advanced publication filtering (column-level, row-level, `FOR ALL TABLES IN SCHEMA`)
+  - PostgreSQL 14 supported with table-level filtering only
 - Superuser access to the Postgres server
-- Ability to restart Postgres server (for configuration changes)
+- Ability to restart Postgres (required for `wal_level` changes)
 
-## Understanding WAL Logical
+## Enable Logical WAL
 
-Postgres's Write-Ahead Log (WAL) is the foundation of logical replication. When `wal_level = logical`, Postgres:
-
-- Records detailed information about data changes (not just physical changes)
-- Includes enough metadata to reconstruct logical changes
-- Allows external tools to decode and stream these changes
+Set `wal_level = logical` to enable Postgres to record logical change data in the WAL, which external tools can then decode and stream.
 
 ```ini
-# Enable logical replication in postgresql.conf
+# postgresql.conf
 wal_level = logical
 ```
 
@@ -29,13 +25,11 @@ Restart Postgres after changing this setting.
 
 ## Replication Slots
 
-Replication slots ensure that Postgres retains WAL data for logical replication consumers, even if they disconnect temporarily.
+Replication slots ensure Postgres retains WAL data for replication consumers, even if they disconnect temporarily. They are:
 
-### What are Replication Slots?
-
-- **Persistent markers** in Postgres that track replication progress
-- **Prevent WAL cleanup** until the consumer catches up
-- **Guarantee data consistency** across disconnections
+- **Persistent markers** that track replication progress
+- **WAL retention mechanisms** that prevent cleanup until consumers catch up
+- **Consistency guarantees** across disconnections
 
 ### Creating Replication Slots
 
@@ -59,36 +53,45 @@ FROM pg_replication_slots;
 SELECT pg_drop_replication_slot('my_slot');
 ```
 
-**Warning:** Only delete slots when you're sure they're not in use. Deleting an active slot will fail replication.
+**Warning:** Only delete slots when you are sure they are not in use. Deleting an active slot will break replication.
 
 ## Max Replication Slots
 
 Controls how many replication slots Postgres can maintain simultaneously.
 
 ```ini
-# Increase max replication slots (default is 10)
+# postgresql.conf (default is 10)
 max_replication_slots = 20
 ```
 
-ETL uses a **single replication slot** for its main apply worker. However, additional slots may be created for parallel table
-copies when the pipeline is initialized or when a new table is added to the publication. The `max_table_sync_workers` parameter
-controls the number of these parallel copies, ensuring that the total replication slots used by ETL never exceed `max_table_sync_workers + 1`.
+ETL uses a **single replication slot** for its main apply worker. Additional slots are created for parallel table copies during initial sync or when new tables are added to the publication. The `max_table_sync_workers` pipeline parameter controls parallel copies, so total slots used by ETL never exceed `max_table_sync_workers + 1`.
 
 **When to increase:**
 
-- Running multiple ETL pipelines
-- Development/testing with frequent slot creation
+- Running multiple ETL pipelines against the same database
+- Development/testing environments with frequent slot creation
+
+## Max WAL Senders
+
+Controls the maximum number of concurrent connections for streaming replication. Each replication slot uses one WAL sender connection.
+
+```ini
+# postgresql.conf (default is 10)
+max_wal_senders = 20
+```
+
+Set this to at least `max_replication_slots` to ensure all slots can connect.
 
 ## WAL Keep Size
 
 Determines how much WAL data to retain on disk, providing a safety buffer for replication consumers.
 
 ```ini
-# Keep 1GB of WAL data
+# postgresql.conf
 wal_keep_size = 1GB
 ```
 
-**Purpose:**
+This setting:
 
 - Prevents WAL deletion when replication consumers fall behind
 - Provides recovery time if ETL pipelines temporarily disconnect
@@ -102,34 +105,33 @@ Replication slots prevent Postgres from deleting WAL files until all consumers h
 
 **1. Tables in Errored State**
 
-When a table enters an errored state, ETL keeps its replication slot active to maintain data consistency. This prevents WAL cleanup for that slot, causing Postgres to accumulate WAL files. If you have tables stuck in an errored state, monitor your disk usage and consider:
+When a table enters an errored state, ETL keeps its replication slot active to maintain data consistency. This prevents WAL cleanup for that slot, causing Postgres to accumulate WAL files. If you have tables stuck in an errored state:
 
-- Investigating and resolving the error cause
-- Manually removing the table from the publication if it's no longer needed
-- Increasing available disk space as a temporary measure
+- Investigate and resolve the error cause
+- Remove the table from the publication if no longer needed
+- Increase available disk space as a temporary measure
 
 **2. Slow Pipeline Performance**
 
-During normal operation, if your destination can't keep up with the rate of changes in Postgres, WAL will accumulate. This is especially common when:
+If your destination cannot keep up with the rate of changes in Postgres, WAL will accumulate. Common scenarios:
 
-- The destination has high latency (network or processing)
-- Large transactions generate many changes at once
-- The destination is temporarily unavailable
+- High destination latency (network or processing)
+- Large transactions generating many changes at once
+- Destination temporarily unavailable
 
 **3. Long-Running Initial Table Copies**
 
-During the initial sync phase, ETL creates a replication slot for each table being copied. If a table has millions of rows, the copy operation can take a long time. Meanwhile, Postgres continues accumulating WAL because the slot hasn't started streaming yet.
+During initial sync, ETL creates a replication slot for each table being copied. Large tables with millions of rows can take significant time to copy, during which Postgres continues accumulating WAL.
 
-**Warning:** If the copy takes too long and WAL grows beyond Postgres's configured limits, Postgres may terminate the replication slot. This is controlled by `max_slot_wal_keep_size`:
+**Warning:** If WAL grows beyond the configured limit, Postgres will terminate the replication slot. Control this with `max_slot_wal_keep_size`:
 
 ```ini
-# Maximum WAL size to retain for replication slots
-# -1 means unlimited (dangerous for disk space)
-# Set this based on your available disk space
+# postgresql.conf
+# -1 = unlimited (dangerous for disk space)
 max_slot_wal_keep_size = 10GB
 ```
 
-If a slot is terminated due to exceeding this limit, ETL will need to restart the table sync from scratch.
+If a slot is terminated due to exceeding this limit, ETL will restart the table sync from scratch.
 
 ### Monitoring WAL Usage
 
@@ -148,10 +150,10 @@ FROM pg_ls_waldir();
 
 ### Recommendations
 
-- **Set `max_slot_wal_keep_size`** to a reasonable limit based on your available disk space
-- **Monitor replication slot lag** and alert when it exceeds acceptable thresholds
-- **Address errored tables promptly** to prevent indefinite WAL accumulation
-- **Size initial sync workers appropriately** (`max_table_sync_workers`) to balance parallelism with resource usage
+- Set `max_slot_wal_keep_size` to a reasonable limit based on available disk space
+- Monitor replication slot lag and alert when it exceeds acceptable thresholds
+- Address errored tables promptly to prevent indefinite WAL accumulation
+- Size initial sync workers appropriately (`max_table_sync_workers`) to balance parallelism with resource usage
 
 ## Publications
 
@@ -172,7 +174,7 @@ CREATE PUBLICATION inserts_only FOR TABLE users WITH (publish = 'insert');
 
 #### Partitioned Tables
 
-If you want to replicate partitioned tables, you must use `publish_via_partition_root = true` when creating your publication. This option tells Postgres to treat the [partitioned table as a single table](https://www.postgresql.org/docs/current/sql-createpublication.html#SQL-CREATEPUBLICATION-PARAMS-WITH-PUBLISH-VIA-PARTITION-ROOT) from the replication perspective, rather than replicating each partition individually. All changes to any partition will be published as changes to the parent table:
+To replicate partitioned tables, use `publish_via_partition_root = true`. This tells Postgres to treat the [partitioned table as a single table](https://www.postgresql.org/docs/current/sql-createpublication.html#SQL-CREATEPUBLICATION-PARAMS-WITH-PUBLISH-VIA-PARTITION-ROOT) for replication purposes. All changes to any partition are published as changes to the parent table:
 
 ```sql
 -- Create publication with partitioned table support
@@ -182,7 +184,7 @@ CREATE PUBLICATION my_publication FOR TABLE users, orders WITH (publish_via_part
 CREATE PUBLICATION all_tables FOR ALL TABLES WITH (publish_via_partition_root = true);
 ```
 
-**Limitation:** If this option is enabled, `TRUNCATE` operations performed directly on individual partitions are not replicated. To replicate a truncate operation, you must execute it on the parent table instead:
+**Limitation:** With this option enabled, `TRUNCATE` operations on individual partitions are not replicated. Execute truncates on the parent table instead:
 
 ```sql
 -- This will NOT be replicated
@@ -218,18 +220,21 @@ ETL supports PostgreSQL versions 14 through 17, with enhanced features available
 ### PostgreSQL 15+ Features
 
 **Column-Level Filtering:**
+
 ```sql
 -- Replicate only specific columns from a table
 CREATE PUBLICATION user_basics FOR TABLE users (id, email, created_at);
 ```
 
 **Row-Level Filtering:**
+
 ```sql
 -- Replicate only rows that match a condition
 CREATE PUBLICATION active_users FOR TABLE users WHERE (status = 'active');
 ```
 
 **Schema-Level Publications:**
+
 ```sql
 -- Replicate all tables in a schema
 CREATE PUBLICATION schema_pub FOR ALL TABLES IN SCHEMA public;
@@ -237,7 +242,7 @@ CREATE PUBLICATION schema_pub FOR ALL TABLES IN SCHEMA public;
 
 ### PostgreSQL 14 Limitations
 
-PostgreSQL 14 supports table-level publication filtering only. Column-level and row-level filters are not available. When using PostgreSQL 14, you'll need to filter data at the application level if selective replication is required.
+PostgreSQL 14 supports table-level publication filtering only. Column-level and row-level filters are not available. Filter data at the application level if selective replication is required.
 
 ### Feature Compatibility Matrix
 
@@ -251,28 +256,31 @@ PostgreSQL 14 supports table-level publication filtering only. Column-level and 
 
 ## Complete Configuration Example
 
-Here's a minimal `postgresql.conf` setup:
+Minimal `postgresql.conf` setup:
 
 ```ini
 # Enable logical replication
 wal_level = logical
 
-# Increase replication capacity
+# Replication capacity
 max_replication_slots = 20
 max_wal_senders = 20
 
-# Keep WAL data for safety
+# WAL retention
 wal_keep_size = 1GB
+
+# Limit WAL retention per slot (optional but recommended)
+max_slot_wal_keep_size = 10GB
 ```
 
 After editing the configuration:
 
-1. **Restart Postgres**
-2. **Create your publication**:
+1. Restart Postgres
+2. Create your publication:
    ```sql
    CREATE PUBLICATION etl_publication FOR TABLE your_table;
    ```
-3. **Verify the setup**:
+3. Verify the setup:
    ```sql
    SHOW wal_level;
    SHOW max_replication_slots;

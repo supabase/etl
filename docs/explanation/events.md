@@ -27,8 +27,8 @@ A new row was added to a table.
 
 ```rust
 pub struct InsertEvent {
-    pub start_lsn: PgLsn,      // LSN where event started
-    pub commit_lsn: PgLsn,     // LSN of the commit message in the WAL
+    pub start_lsn: PgLsn,      // Position where event was recorded
+    pub commit_lsn: PgLsn,     // Position where transaction commits
     pub table_id: TableId,     // Which table
     pub table_row: TableRow,   // The new row data
 }
@@ -43,8 +43,8 @@ pub struct UpdateEvent {
     pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
     pub table_id: TableId,
-    pub table_row: TableRow,                    // New row data
-    pub old_table_row: Option<(bool, TableRow)>, // Previous row data
+    pub table_row: TableRow,                     // New row data
+    pub old_table_row: Option<(bool, TableRow)>, // Previous row (see below)
 }
 ```
 
@@ -64,12 +64,12 @@ A row was removed from a table.
 pub struct DeleteEvent {
     pub start_lsn: PgLsn,
     pub commit_lsn: PgLsn,
-    pub table_id: TableId,
+    pub table_id: TableId,                       // Which table
     pub old_table_row: Option<(bool, TableRow)>, // Deleted row data
 }
 ```
 
-Same `REPLICA IDENTITY` rules apply as Update.
+Same `REPLICA IDENTITY` rules apply as for Update.
 
 ### Truncate
 
@@ -96,8 +96,8 @@ Marks the start of a transaction.
 
 ```rust
 pub struct BeginEvent {
-    pub start_lsn: PgLsn,   // Where transaction started
-    pub commit_lsn: PgLsn,  // LSN of the commit message in the WAL
+    pub start_lsn: PgLsn,   // Position where transaction started
+    pub commit_lsn: PgLsn,  // Position where transaction will commit
     pub timestamp: i64,     // Transaction start time
     pub xid: u32,           // Transaction ID
 }
@@ -131,22 +131,13 @@ pub struct RelationEvent {
 }
 ```
 
-## Important: Begin/Commit Behavior
+## Begin/Commit Behavior
 
-During the initial copy phase, `Begin` and `Commit` events may be delivered **multiple times**. This happens because:
+During initial copy, `Begin` and `Commit` events may be delivered **multiple times** due to parallel Table Sync Workers creating separate replication slots. Row data (Insert, Update, Delete) is delivered exactly once.
 
-1. ETL uses parallel Table Sync Workers to copy tables concurrently
-2. Each worker creates its own replication slot
-3. Transaction markers from the main replication stream are delivered alongside table copy operations
-
-**This does not cause data duplication.** Only transaction markers repeat - the actual row data (Insert, Update, Delete) is delivered exactly once.
-
-Your destination should handle this by:
-
-- **Option 1:** Track LSNs to detect duplicate Begin/Commit events
-- **Option 2:** Ignore Begin/Commit entirely if your destination doesn't support transactions
-
-Example handling:
+Handle this by either:
+- Tracking LSNs to detect duplicate Begin/Commit events
+- Ignoring Begin/Commit if your destination does not require transactions
 
 ```rust
 async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
@@ -178,10 +169,10 @@ An LSN is a pointer to a position in Postgres's Write-Ahead Log (WAL). It's a mo
 
 | Field | Meaning | Use Case |
 |-------|---------|----------|
-| `start_lsn` | Where this specific event was recorded in the WAL | Deduplication, ordering within transaction |
-| `commit_lsn` | LSN of the commit message in the WAL | Transaction grouping, recovery checkpoints |
+| `start_lsn` | Position where this event was recorded in the WAL | Deduplication, ordering within transaction |
+| `commit_lsn` | Position where the transaction will commit | Transaction grouping, recovery checkpoints |
 
-**Key insight:** Multiple events can share the same `commit_lsn` (they're in the same transaction) but each has a unique `start_lsn`.
+**Key insight:** Multiple events share the same `commit_lsn` (same transaction) but each has a unique `start_lsn`.
 
 ### Example
 
@@ -206,13 +197,9 @@ Both inserts have the same `commit_lsn` (they commit together) but different `st
 
 ## Event Batching
 
-ETL batches events before calling `write_events()`. A single batch may contain:
+ETL batches events before calling `write_events()`. A batch may contain events from multiple tables, multiple transactions, and mixed event types.
 
-- Events from multiple tables
-- Events from multiple transactions
-- A mix of event types
-
-Events affecting the same row (identified by primary key) must be processed in order. Events for different rows or different tables can be processed concurrently. The destination is responsible for implementing parallelization strategies.
+**Ordering requirement:** Events affecting the same row (by primary key) must be processed in order. Events for different rows can be processed concurrently.
 
 ## Next Steps
 

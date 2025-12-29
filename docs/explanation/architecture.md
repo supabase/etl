@@ -2,7 +2,7 @@
 
 **How ETL replicates data from Postgres to your destinations**
 
-ETL uses Postgres logical replication to stream database changes in real-time. This document explains how the system works.
+ETL uses Postgres logical replication to stream database changes in real-time.
 
 ## Overview
 
@@ -67,6 +67,7 @@ Where replicated data goes. Implement the `Destination` trait to send data anywh
 
 ```rust
 pub trait Destination {
+    fn name() -> &'static str;
     fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_table_rows(&self, table_id: TableId, rows: Vec<TableRow>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
@@ -75,19 +76,20 @@ pub trait Destination {
 
 | Method | When called | Purpose |
 |--------|-------------|---------|
+| `name()` | On initialization | Identify the destination |
 | `truncate_table()` | Before initial copy | Clear destination table |
 | `write_table_rows()` | During initial copy | Receive bulk rows |
 | `write_events()` | After initial copy | Receive streaming changes |
 
 ### Store
 
-Persists pipeline state so it can resume after restarts. Three traits work together:
+Persists pipeline state so replication can resume after restarts. Three traits work together:
 
-- **StateStore**: Tracks replication progress and table mappings
-- **SchemaStore**: Stores table schema information
-- **CleanupStore**: Handles cleanup when tables are removed from a publication
+- **StateStore**: Tracks replication phase per table and source-to-destination table mappings
+- **SchemaStore**: Stores table schema information (columns, types, primary keys)
+- **CleanupStore**: Removes stored state when a table is dropped from the publication
 
-StateStore and SchemaStore use a cache-first pattern for performance with dual-write to persistent storage.
+`StateStore` and `SchemaStore` use a cache-first pattern: reads hit an in-memory cache, writes go to both the cache and persistent storage.
 
 ## Delivery Guarantees
 
@@ -104,22 +106,22 @@ Exactly-once delivery requires distributed transactions between Postgres and the
 
 Destinations should use **primary keys** to deduplicate. When writing to the destination, upsert on the primary key instead of inserting - duplicates naturally overwrite with the same data.
 
-The `start_lsn` and `commit_lsn` fields on events are useful for **ordering**, not deduplication. For example, BigQuery destinations use these to maintain correct event order in the destination tables.
+The `start_lsn` and `commit_lsn` fields on events are useful for **ordering and checkpointing**. For example, BigQuery destinations use these to maintain correct event order in destination tables. See [Event Types](events.md#understanding-lsn-fields) for details on LSN semantics.
 
 ## Table Replication Phases
 
 Each table progresses through these phases:
 
-| Phase | Description |
-|-------|-------------|
-| **Init** | Table discovered, ready to copy |
-| **DataSync** | Copying initial data |
-| **FinishedCopy** | Copy complete, waiting to sync with Apply Worker |
-| **SyncWait** | Signaling Apply Worker to pause |
-| **Catchup** | Catching up to Apply Worker's position |
-| **SyncDone** | Caught up, ready for handoff |
-| **Ready** | Apply Worker now handles this table |
-| **Errored** | Error occurred, excluded until rollback |
+| Phase | Set By | Description |
+|-------|--------|-------------|
+| **Init** | Pipeline | Table discovered, ready for initial copy |
+| **DataSync** | Table Sync Worker | Initial table copy in progress |
+| **FinishedCopy** | Table Sync Worker | Initial copy complete |
+| **SyncWait** | Table Sync Worker | Waiting for Apply Worker to pause (in-memory only) |
+| **Catchup** | Apply Worker | Apply Worker paused; Table Sync Worker catching up to its LSN (in-memory only) |
+| **SyncDone** | Table Sync Worker | Catch-up complete, ready for handoff |
+| **Ready** | Apply Worker | Apply Worker now handles this table exclusively |
+| **Errored** | Either | Error occurred; contains reason, solution hint, and retry policy |
 
 ## Next Steps
 

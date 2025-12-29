@@ -14,8 +14,8 @@ A real-time data pipeline that:
 
 ## Prerequisites
 
-- Rust installed (1.75+)
-- Postgres server running locally
+- Rust toolchain (1.75 or later)
+- Postgres 14+ with logical replication enabled (`wal_level = logical` in `postgresql.conf`)
 - Basic familiarity with Rust and SQL
 
 New to Postgres logical replication? Read [Postgres Replication Concepts](../explanation/concepts.md) first.
@@ -32,10 +32,11 @@ Add dependencies to `Cargo.toml`:
 ```toml
 [dependencies]
 etl = { git = "https://github.com/supabase/etl" }
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ```
 
-**Verify:** `cargo check` compiles successfully.
+**Verify:** Run `cargo check` and confirm it compiles without errors.
 
 ## Step 2: Set Up Postgres
 
@@ -71,6 +72,7 @@ use etl::destination::memory::MemoryDestination;
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
 use std::error::Error;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -107,13 +109,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let dest_clone = destination.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            println!("\n--- Destination Contents ---");
-            for (table_id, rows) in dest_clone.table_rows().await {
-                println!("Table {:?}: {} rows", table_id, rows.len());
-            }
-            for event in dest_clone.events().await {
-                println!("Event: {:?}", event);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let rows = dest_clone.table_rows().await;
+            let events = dest_clone.events().await;
+            println!("\n--- Destination State ---");
+            println!("Tables: {}, Events: {}", rows.len(), events.len());
+            for (table_id, table_rows) in &rows {
+                println!("  Table {}: {} rows", table_id.0, table_rows.len());
             }
         }
     });
@@ -127,15 +129,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 ```
 
-**Note:** Update `password` to match your Postgres credentials.
+**Note:** Update the `password` field to match your Postgres credentials.
 
 ## Step 4: Run the Pipeline
 
 ```bash
-cargo run
+RUST_LOG=info cargo run
 ```
 
-You should see the initial table data being copied, then the pipeline waiting for changes.
+You should see the initial table data being copied (the two users from Step 2), then the pipeline continues running, waiting for changes.
 
 ## Step 5: Test Real-Time Replication
 
@@ -153,16 +155,20 @@ Your pipeline terminal should show these changes being captured in real-time.
 
 ## Cleanup
 
+Stop the pipeline with `Ctrl+C`, then clean up the database:
+
 ```sql
+-- Connect to a different database first (e.g., postgres)
+\c postgres
 DROP DATABASE etl_tutorial;
 ```
 
 ## What You Learned
 
-- **Publications** define which tables to replicate
-- **Pipeline configuration** controls batching and error handling
-- **Memory destinations** are useful for testing
-- Changes are streamed in real-time after initial copy
+- **Publications** define which tables to replicate via Postgres logical replication
+- **Pipeline configuration** controls batching behavior and error retry policies
+- **Memory destinations** store data in-memory, useful for testing and development
+- The pipeline performs an initial table copy, then streams changes in real-time
 
 ## Next Steps
 

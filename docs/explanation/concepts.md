@@ -96,9 +96,9 @@ The Apply Worker uses one persistent slot. Table Sync Workers create temporary s
 
 ### Slot Risks
 
-Slots prevent WAL cleanup. If ETL stops consuming (crashes, network issues, slow destination), WAL files accumulate on disk. This can fill your disk.
+Slots prevent WAL cleanup. If ETL stops consuming (due to crashes, network issues, or a slow destination), WAL files accumulate on disk. This can fill your disk.
 
-Mitigations:
+To mitigate this risk:
 
 - Monitor slot lag with `pg_replication_slots`
 - Set `max_slot_wal_keep_size` to limit WAL retention
@@ -170,8 +170,8 @@ When a row is updated or deleted, what identifies which row changed? By default,
 ### Settings
 
 ```sql
--- See current setting
-SELECT relreplident FROM pg_class WHERE relname = 'your_table';
+-- See current setting (d=default, f=full, n=nothing, i=index)
+SELECT relname, relreplident FROM pg_class WHERE relname = 'your_table';
 
 -- Change setting
 ALTER TABLE your_table REPLICA IDENTITY FULL;
@@ -186,11 +186,11 @@ ALTER TABLE your_table REPLICA IDENTITY FULL;
 
 ### Impact on ETL
 
-In your destination's `write_events()`, Update and Delete events have an `old_table_row` field:
+In your destination's `write_events()`, Update and Delete events have an `old_table_row` field of type `Option<(bool, TableRow)>`:
 
-- With `DEFAULT`: Contains only primary key columns
-- With `FULL`: Contains all columns with their previous values
-- With `NOTHING`: Field is `None`
+- With `DEFAULT`: Contains `Some((true, row))` where `row` has only primary key columns
+- With `FULL`: Contains `Some((false, row))` where `row` has all columns with previous values
+- With `NOTHING`: Contains `None`
 
 If you need old values for auditing or comparison, set `REPLICA IDENTITY FULL` on those tables.
 

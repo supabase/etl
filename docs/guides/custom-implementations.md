@@ -13,7 +13,7 @@ ETL delivers data to destinations in two phases:
 | Initial Copy | `write_table_rows()` | Startup | `Vec<TableRow>` |
 | Streaming | `write_events()` | After copy | `Vec<Event>` |
 
-**Important:** During initial copy, `Begin` and `Commit` events may be delivered multiple times because parallel workers consume separate replication slots. This doesn't cause data duplication - only transaction markers repeat.
+**Note:** During initial copy, parallel table sync workers each process their own replication slot, so `Begin` and `Commit` transaction markers may appear multiple times. This does not duplicate actual row data.
 
 ## Step 1: Create the Project
 
@@ -47,11 +47,11 @@ tracing-subscriber = "0.3"
 
 ## Step 2: Implement a Custom Store
 
-Create `src/custom_store.rs`. A store must implement three traits:
+Create `src/custom_store.rs`. A store must implement three traits (see [Extension Points](../explanation/traits.md) for full details):
 
-- `SchemaStore` - Table schema information
-- `StateStore` - Replication progress tracking
-- `CleanupStore` - Cleanup when tables are removed
+- `SchemaStore` - Table schema storage and retrieval
+- `StateStore` - Replication progress and table mapping tracking
+- `CleanupStore` - Metadata cleanup when tables leave the publication
 
 ```rust
 use std::collections::HashMap;
@@ -192,11 +192,12 @@ impl CleanupStore for CustomStore {
 
 ## Step 3: Implement a Custom Destination
 
-Create `src/http_destination.rs`. A destination receives data via three methods:
+Create `src/http_destination.rs`. A destination implements the `Destination` trait with four methods:
 
-- `truncate_table()` - Clear table before bulk load
-- `write_table_rows()` - Receive rows during initial copy
-- `write_events()` - Receive streaming changes
+- `name()` - Return an identifier for logging
+- `truncate_table()` - Clear table before bulk load (called even if table does not exist)
+- `write_table_rows()` - Receive rows during initial copy (may receive empty vec for table creation)
+- `write_events()` - Receive streaming changes (batches may span multiple tables)
 
 ```rust
 use reqwest::Client;
@@ -220,7 +221,7 @@ impl HttpDestination {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|e| etl_error!(ErrorKind::Unknown, "HTTP client error", e))?;
+            .map_err(|e| etl_error!(ErrorKind::Unknown, "HTTP client error", source: e))?;
         Ok(Self { client, base_url })
     }
 
@@ -231,7 +232,7 @@ impl HttpDestination {
             match self.client.post(&url).json(&body).send().await {
                 Ok(resp) if resp.status().is_success() => return Ok(()),
                 Ok(resp) if resp.status().is_client_error() => {
-                    bail!(ErrorKind::Unknown, "Client error", resp.status().to_string());
+                    bail!(ErrorKind::Unknown, "Client error", resp.status());
                 }
                 Ok(resp) => warn!("Attempt {}/3: status {}", attempt, resp.status()),
                 Err(e) => warn!("Attempt {}/3: {}", attempt, e),
@@ -240,7 +241,7 @@ impl HttpDestination {
                 tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
             }
         }
-        bail!(ErrorKind::Unknown, "Request failed after retries", "");
+        bail!(ErrorKind::Unknown, "Request failed after retries");
     }
 }
 
@@ -284,7 +285,9 @@ impl Destination for HttpDestination {
                     Event::Delete(d) => json!({"type": "delete", "table": d.table_id.0}),
                     Event::Begin(_) => json!({"type": "begin"}),
                     Event::Commit(_) => json!({"type": "commit"}),
-                    _ => json!({"type": "other"}),
+                    Event::Relation(r) => json!({"type": "relation", "table": r.table_schema.id.0}),
+                    Event::Truncate(t) => json!({"type": "truncate", "tables": t.rel_ids}),
+                    Event::Unsupported => json!({"type": "unsupported"}),
                 }
             }).collect::<Vec<_>>()
         });
@@ -308,15 +311,14 @@ use custom_store::CustomStore;
 use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
 use etl::pipeline::Pipeline;
 use http_destination::HttpDestination;
-use tracing::info;
-use tracing_subscriber::FmtSubscriber;
+use std::error::Error;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    FmtSubscriber::builder().init();
+async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt::init();
 
     let store = CustomStore::new();
-    let destination = HttpDestination::new("https://httpbin.org/post".to_string())?;
+    let destination = HttpDestination::new("https://your-endpoint.example.com".to_string())?;
 
     let config = PipelineConfig {
         id: 1,
@@ -324,9 +326,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pg_connection: PgConnectionConfig {
             host: "localhost".to_string(),
             port: 5432,
-            name: "postgres".to_string(),
+            name: "your_database".to_string(),
             username: "postgres".to_string(),
-            password: Some("postgres".to_string().into()),
+            password: Some("your_password".to_string().into()),
             tls: TlsConfig {
                 enabled: false,
                 trusted_root_certs: String::new(),
@@ -334,15 +336,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             keepalive: None,
         },
         batch: BatchConfig {
-            max_size: 100,
+            max_size: 1000,
             max_fill_ms: 5000,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
-        max_table_sync_workers: 2,
+        max_table_sync_workers: 4,
     };
 
-    info!("Starting pipeline");
+    println!("Starting pipeline...");
     let mut pipeline = Pipeline::new(config, store, destination);
     pipeline.start().await?;
     pipeline.wait().await?;
@@ -351,7 +353,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-**Note:** Update the Postgres credentials to match your setup.
+**Note:** Update the database name, password, and HTTP endpoint to match your setup.
 
 ## Step 5: Test
 
@@ -363,13 +365,13 @@ The pipeline will connect to Postgres and start replicating. You'll see your cus
 
 ## What You Built
 
-- **Custom Store** - In-memory implementation of all three store traits
-- **HTTP Destination** - Sends data via HTTP with retry logic
-- **Working Pipeline** - Combines your components with ETL's core
+- **Custom Store** - In-memory implementation of `SchemaStore`, `StateStore`, and `CleanupStore`
+- **HTTP Destination** - Forwards replicated data via HTTP POST with retry logic
+- **Working Pipeline** - Connects your custom components to the ETL core
 
 ## Next Steps
 
-- [Extension Points](../explanation/traits.md): Full trait documentation
-- [Event Types](../explanation/events.md): All events your destination receives
-- [Configure Postgres](configure-postgres.md): Production database setup
-- [Architecture](../explanation/architecture.md): How ETL works internally
+- [Extension Points](../explanation/traits.md) - Full trait API documentation
+- [Event Types](../explanation/events.md) - Details on all events your destination receives
+- [Configure Postgres](configure-postgres.md) - Production database setup
+- [Architecture](../explanation/architecture.md) - How ETL works internally

@@ -12,40 +12,8 @@ Receives replicated data. This is the primary extension point for sending data t
 pub trait Destination {
     fn name() -> &'static str;
     fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
-    fn write_table_rows(&self, table_id: TableId, rows: Vec<TableRow>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_table_rows(&self, table_id: TableId, table_rows: Vec<TableRow>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
-}
-```
-
-### Methods
-
-| Method | When Called | Purpose |
-|--------|-------------|---------|
-| `name()` | Startup | Return destination identifier for logging |
-| `truncate_table()` | Before initial copy | Clear table before bulk loading |
-| `write_table_rows()` | During initial copy | Receive rows from source table |
-| `write_events()` | After initial copy | Receive streaming changes |
-
-### Implementation Notes
-
-- `truncate_table()` is called unconditionally before copying, even if the table doesn't exist yet
-- `write_table_rows()` may be called with an empty vector to signal table creation
-- `write_events()` receives batches that may span multiple tables
-- Operations should be idempotent when possible (ETL may retry on failure)
-- Handle concurrent calls safely (parallel table sync workers)
-
-See [Event Types](events.md) for details on the events received by `write_events()`.
-
-## SchemaStore
-
-Stores table schema information (column names, types, etc.).
-
-```rust
-pub trait SchemaStore {
-    fn get_table_schema(&self, table_id: &TableId) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
-    fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
-    fn load_table_schemas(&self) -> impl Future<Output = EtlResult<usize>> + Send;
-    fn store_table_schema(&self, schema: TableSchema) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
@@ -53,10 +21,40 @@ pub trait SchemaStore {
 
 | Method | Purpose |
 |--------|---------|
-| `get_table_schema()` | Get schema for one table from cache |
-| `get_table_schemas()` | Get all cached schemas |
-| `load_table_schemas()` | Load schemas from persistent storage into cache (called at startup) |
-| `store_table_schema()` | Save schema to both cache and persistent storage |
+| `name()` | Returns identifier for logging and diagnostics |
+| `truncate_table()` | Clears table data before initial sync. Called unconditionally, even if the table does not exist |
+| `write_table_rows()` | Writes rows during initial table copy. May receive an empty vector for tables with no data |
+| `write_events()` | Processes streaming replication events (inserts, updates, deletes). Batches may span multiple tables |
+
+### Implementation Notes
+
+- Operations should be idempotent when possible (ETL may retry on failure)
+- Handle concurrent calls safely (parallel table sync workers)
+- Process events in order to maintain data consistency
+
+See [Event Types](events.md) for details on the events received by `write_events()`.
+
+## SchemaStore
+
+Stores table schema information (column names, types, primary keys).
+
+```rust
+pub trait SchemaStore {
+    fn get_table_schema(&self, table_id: &TableId) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
+    fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
+    fn load_table_schemas(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+    fn store_table_schema(&self, table_schema: TableSchema) -> impl Future<Output = EtlResult<()>> + Send;
+}
+```
+
+### Methods
+
+| Method | Purpose |
+|--------|---------|
+| `get_table_schema()` | Returns schema for a table from cache. Does not load from persistent storage |
+| `get_table_schemas()` | Returns all cached schemas |
+| `load_table_schemas()` | Loads schemas from persistent storage into cache. Call once at startup. Returns the number of schemas loaded |
+| `store_table_schema()` | Saves schema to both cache and persistent storage |
 
 ## StateStore
 
@@ -83,11 +81,11 @@ pub trait StateStore {
 
 | Method | Purpose |
 |--------|---------|
-| `get_table_replication_state()` | Get current phase for one table |
-| `get_table_replication_states()` | Get phases for all tables |
-| `load_table_replication_states()` | Load from persistent storage (startup) |
-| `update_table_replication_state()` | Update phase (cache + persistent) |
-| `rollback_table_replication_state()` | Revert to previous phase |
+| `get_table_replication_state()` | Returns current phase for a table from cache |
+| `get_table_replication_states()` | Returns phases for all tables from cache |
+| `load_table_replication_states()` | Loads phases from persistent storage into cache. Call once at startup. Returns the number of states loaded |
+| `update_table_replication_state()` | Updates phase in both cache and persistent storage |
+| `rollback_table_replication_state()` | Reverts table to previous phase. Returns the phase after rollback |
 
 ### Table Mapping Methods
 
@@ -95,29 +93,29 @@ Table mappings connect source table IDs to destination table names.
 
 | Method | Purpose |
 |--------|---------|
-| `get_table_mapping()` | Get destination name for source table |
-| `get_table_mappings()` | Get all mappings |
-| `load_table_mappings()` | Load from persistent storage |
-| `store_table_mapping()` | Save mapping (cache + persistent) |
+| `get_table_mapping()` | Returns destination table name for a source table from cache |
+| `get_table_mappings()` | Returns all mappings from cache |
+| `load_table_mappings()` | Loads mappings from persistent storage into cache. Can be called lazily when needed |
+| `store_table_mapping()` | Saves mapping to both cache and persistent storage |
 
 ### Table Replication Phases
 
 Tables progress through these phases:
 
-| Phase | Description |
-|-------|-------------|
-| `Init` | Table discovered, ready to start |
-| `DataSync` | Initial data being copied |
-| `FinishedCopy` | Copy done, waiting for coordination |
-| `SyncWait` | Signaling apply worker to pause |
-| `Catchup` | Catching up to apply worker position |
-| `SyncDone` | Caught up, ready for handoff |
-| `Ready` | Streaming normally |
-| `Errored` | Error occurred, excluded until rollback |
+| Phase | Persisted | Description |
+|-------|-----------|-------------|
+| `Init` | Yes | Table discovered, ready to start |
+| `DataSync` | Yes | Initial data being copied |
+| `FinishedCopy` | Yes | Copy complete, waiting for coordination |
+| `SyncWait` | No | Table sync worker signaling apply worker to pause |
+| `Catchup { lsn }` | No | Apply worker paused, table sync worker catching up to LSN |
+| `SyncDone { lsn }` | Yes | Caught up to LSN, ready for handoff |
+| `Ready` | Yes | Streaming changes via apply worker |
+| `Errored { reason, solution, retry_policy }` | Yes | Error occurred, excluded until rollback |
 
 ## CleanupStore
 
-Removes ETL metadata when tables leave the publication.
+Removes ETL metadata when tables are removed from the publication.
 
 ```rust
 pub trait CleanupStore {
@@ -127,7 +125,7 @@ pub trait CleanupStore {
 
 | Method | Purpose |
 |--------|---------|
-| `cleanup_table_state()` | Remove all ETL metadata for a table (state, schema, mappings) |
+| `cleanup_table_state()` | Deletes all stored state for a table: replication state, schema, and mappings. Does not modify destination tables |
 
 ## Combining Traits
 
@@ -141,17 +139,20 @@ impl StateStore for MyStore { /* ... */ }
 impl CleanupStore for MyStore { /* ... */ }
 ```
 
-ETL provides `MemoryStore` (in-memory, non-persistent) and `PostgresStore` (persistent to Postgres) as built-in implementations.
+ETL provides two built-in implementations:
+
+- `MemoryStore`: In-memory storage, not persistent across restarts
+- `PostgresStore`: Persistent storage backed by PostgreSQL
 
 ## Thread Safety
 
-All trait implementations must be thread-safe. ETL calls these methods from:
+All trait implementations must be thread-safe. ETL calls these methods concurrently from:
 
 - Multiple table sync workers (parallel initial copy)
 - Apply worker (streaming changes)
 - Pipeline coordination
 
-Use `Arc<Mutex<_>>` or similar patterns for shared state.
+Use `Arc<Mutex<_>>`, `RwLock`, or similar synchronization primitives for shared state.
 
 ## Next Steps
 
