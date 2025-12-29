@@ -4,6 +4,7 @@ use futures::{Stream, ready};
 use pin_project_lite::pin_project;
 use postgres_replication::LogicalReplicationStream;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use std::fmt::{Display, Formatter};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -101,7 +102,27 @@ impl<'a> Stream for TableCopyStream<'a> {
     }
 }
 
+/// The status update type when sending a status update message back to Postgres.
+#[derive(Debug)]
+pub enum StatusUpdateType {
+    /// Represents an update requested by Postgres.
+    KeepAlive,
+    /// Represents an update sent by ETL on its own.
+    Timeout,
+}
+
+impl Display for StatusUpdateType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KeepAlive => write!(f, "keep_alive"),
+            Self::Timeout => write!(f, "timeout"),
+        }
+    }
+}
+
 pin_project! {
+    /// A stream that yields replication events from a Postgres logical replication stream and keeps
+    /// track of last sent status updates.
     pub struct EventsStream {
         #[pin]
         stream: LogicalReplicationStream,
@@ -134,6 +155,7 @@ impl EventsStream {
         mut write_lsn: PgLsn,
         mut flush_lsn: PgLsn,
         force: bool,
+        status_update_type: StatusUpdateType,
     ) -> EtlResult<()> {
         let this = self.project();
         let pipeline_id = *this.pipeline_id;
@@ -179,6 +201,7 @@ impl EventsStream {
                 debug!(
                     last_flush = %flush_lsn,
                     last_update_elapsed_secs = last_update.elapsed().as_secs(),
+                    status_update_type = %status_update_type,
                     "skipping status update due to unforced reply and recent update"
                 );
 
@@ -215,10 +238,11 @@ impl EventsStream {
         .increment(1);
 
         debug!(
-            force = force,
             write_lsn = %write_lsn,
             flush_lsn = %flush_lsn,
             apply_lsn = %flush_lsn,
+            force = force,
+            status_update_type = %status_update_type,
             "status update successfully sent"
         );
 

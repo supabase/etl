@@ -31,7 +31,7 @@ use crate::metrics::{
     ETL_TRANSACTIONS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::PgReplicationClient;
-use crate::replication::stream::EventsStream;
+use crate::replication::stream::{EventsStream, StatusUpdateType};
 use crate::state::table::{RetryPolicy, TableReplicationError};
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
@@ -629,7 +629,7 @@ where
                     logical_replication_stream
                         .as_mut()
                         .get_inner()
-                        .send_status_update(state.write_lsn(), state.flush_lsn(), true)
+                        .send_status_update(state.write_lsn(), state.flush_lsn(), true, StatusUpdateType::Timeout)
                         .await?;
                     state.mark_status_update_sent();
                 }
@@ -673,7 +673,7 @@ where
                 logical_replication_stream
                     .as_mut()
                     .get_inner()
-                    .send_status_update(state.write_lsn(), state.flush_lsn(), true)
+                    .send_status_update(state.write_lsn(), state.flush_lsn(), true, StatusUpdateType::Timeout)
                     .await?;
 
                 state.mark_status_update_sent();
@@ -963,7 +963,12 @@ where
 
             events_stream
                 .get_inner()
-                .send_status_update(state.write_lsn(), state.flush_lsn(), message.reply() == 1)
+                .send_status_update(
+                    state.write_lsn(),
+                    state.flush_lsn(),
+                    message.reply() == 1,
+                    StatusUpdateType::KeepAlive,
+                )
                 .await?;
 
             state.mark_status_update_sent();
