@@ -212,7 +212,7 @@ ETL batches events before calling `write_events()`. A single batch may contain:
 - Events from multiple transactions
 - A mix of event types
 
-Events within the same table maintain their original order. Events for different tables can be processed concurrently.
+Events affecting the same row (identified by primary key) must be processed in order. Events for different rows or different tables can be processed concurrently. The destination is responsible for implementing parallelization strategies.
 
 ## Next Steps
 

@@ -229,19 +229,13 @@ If ETL crashes and has no state:
 
 ETL stores:
 
-- **Replication phase** per table (Init, DataSync, Ready, etc.)
-- **Table schemas** (column definitions)
-- **Table mappings** (source table ID → destination name)
-
-On restart, ETL loads this state and resumes from where it left off.
-
-### What Gets Persisted
-
 | State | Purpose |
 |-------|---------|
 | Replication phase | Know whether to copy or stream for each table |
 | Table schemas | Validate incoming data against expected schema |
 | Table mappings | Route events to correct destination tables |
+
+On restart, ETL loads this state and resumes from where it left off.
 
 The built-in `PostgresStore` persists to your Postgres database. `MemoryStore` is for testing only - state is lost on restart.
 

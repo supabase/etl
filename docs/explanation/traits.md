@@ -58,14 +58,6 @@ pub trait SchemaStore {
 | `load_table_schemas()` | Load schemas from persistent storage into cache (called at startup) |
 | `store_table_schema()` | Save schema to both cache and persistent storage |
 
-### Implementation Pattern
-
-Use a cache-first approach:
-
-1. `load_table_schemas()` populates the cache at startup
-2. `get_*` methods read only from cache (fast)
-3. `store_table_schema()` writes to both cache and persistent storage (dual-write)
-
 ## StateStore
 
 Tracks replication progress and table mappings.
@@ -133,19 +125,9 @@ pub trait CleanupStore {
 }
 ```
 
-### Method
-
 | Method | Purpose |
 |--------|---------|
-| `cleanup_table_state()` | Remove all ETL metadata for a table |
-
-This removes:
-
-- Replication state and history
-- Table schema
-- Table mappings
-
-It does **not** drop or modify the destination table.
+| `cleanup_table_state()` | Remove all ETL metadata for a table (state, schema, mappings) |
 
 ## Combining Traits
 

@@ -84,11 +84,8 @@ controls the number of these parallel copies, ensuring that the total replicatio
 Determines how much WAL data to retain on disk, providing a safety buffer for replication consumers.
 
 ```ini
-# Keep 1GB of WAL data (Postgres 13+)
+# Keep 1GB of WAL data
 wal_keep_size = 1GB
-
-# For Postgres 12 and earlier, use:
-# wal_keep_segments = 256  # Each segment is typically 16MB
 ```
 
 **Purpose:**
@@ -126,7 +123,7 @@ During the initial sync phase, ETL creates a replication slot for each table bei
 **Warning:** If the copy takes too long and WAL grows beyond Postgres's configured limits, Postgres may terminate the replication slot. This is controlled by `max_slot_wal_keep_size`:
 
 ```ini
-# Maximum WAL size to retain for replication slots (Postgres 13+)
+# Maximum WAL size to retain for replication slots
 # -1 means unlimited (dangerous for disk space)
 # Set this based on your available disk space
 max_slot_wal_keep_size = 10GB
@@ -265,8 +262,7 @@ max_replication_slots = 20
 max_wal_senders = 20
 
 # Keep WAL data for safety
-wal_keep_size = 1GB  # Postgres 13+
-# wal_keep_segments = 64  # Postgres 12 and earlier
+wal_keep_size = 1GB
 ```
 
 After editing the configuration:
