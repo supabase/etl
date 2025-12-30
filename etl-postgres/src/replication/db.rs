@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::num::NonZeroI32;
+use std::time::Duration;
 
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
 use sqlx::{PgExecutor, PgPool, Row, postgres::PgPoolOptions};
@@ -36,6 +37,30 @@ pub async fn connect_to_source_database(
         .await?;
 
     Ok(pool)
+}
+
+/// Creates a lazily-connected pool with automatic idle connection cleanup.
+///
+/// Unlike [`connect_to_source_database`], this function returns immediately without
+/// establishing any connections. Connections are created on-demand when queries are
+/// executed and automatically closed after being idle for the specified duration.
+///
+/// This is ideal for workloads with intermittent database access where you want to
+/// avoid connection establishment overhead during active periods while not holding
+/// connections open indefinitely during idle periods.
+#[cfg(feature = "replication")]
+pub fn create_source_database_pool(
+    config: &PgConnectionConfig,
+    max_connections: u32,
+    idle_timeout: Duration,
+) -> PgPool {
+    let options = config.with_db();
+
+    PgPoolOptions::new()
+        .min_connections(0)
+        .max_connections(max_connections)
+        .idle_timeout(Some(idle_timeout))
+        .connect_lazy_with(options)
 }
 
 /// Retrieves table names for multiple table ids in a single query.

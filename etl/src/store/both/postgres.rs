@@ -1,10 +1,12 @@
+use std::ops::DerefMut;
+use std::time::Duration;
+use std::{collections::HashMap, sync::Arc};
+
 use etl_config::shared::PgConnectionConfig;
-use etl_postgres::replication::{connect_to_source_database, schema, state, table_mappings};
+use etl_postgres::replication::{create_source_database_pool, schema, state, table_mappings};
 use etl_postgres::types::{TableId, TableSchema};
 use metrics::gauge;
 use sqlx::PgPool;
-use std::ops::DerefMut;
-use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -17,7 +19,14 @@ use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::{bail, etl_error};
 
-const NUM_POOL_CONNECTIONS: u32 = 1;
+/// Maximum number of connections in the pool.
+///
+/// Set to 2 to allow some concurrency since database operations are performed
+/// before acquiring the cache lock.
+const MAX_POOL_CONNECTIONS: u32 = 2;
+
+/// Duration after which idle connections are closed.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Converts ETL table replication phases to Postgres database state format.
 ///
@@ -161,21 +170,21 @@ impl Inner {
 /// consistency of the pipeline state across restarts.
 ///
 /// The store maintains both in-memory cache and persistent database storage,
-/// connecting to the source database as needed for state updates while
-/// providing fast cached access for read operations.
+/// using a connection pool with automatic idle timeout to balance performance
+/// and resource usage.
 #[derive(Debug, Clone)]
 pub struct PostgresStore {
     pipeline_id: PipelineId,
-    source_config: PgConnectionConfig,
+    pool: PgPool,
     inner: Arc<Mutex<Inner>>,
 }
 
 impl PostgresStore {
     /// Creates a new Postgres-backed store for the given pipeline.
     ///
-    /// The store will use the provided connection configuration to access
-    /// the source Postgres database for persistent storage operations.
-    /// The pipeline ID ensures isolation between different pipeline instances.
+    /// The store uses a lazily-connected pool with automatic idle timeout.
+    /// Connections are established on first use and automatically closed
+    /// after [`IDLE_TIMEOUT`] of inactivity.
     pub fn new(pipeline_id: PipelineId, source_config: PgConnectionConfig) -> Self {
         let inner = Inner {
             phase_counts: HashMap::new(),
@@ -184,31 +193,18 @@ impl PostgresStore {
             table_mappings: HashMap::new(),
         };
 
+        let pool = create_source_database_pool(&source_config, MAX_POOL_CONNECTIONS, IDLE_TIMEOUT);
+
         Self {
             pipeline_id,
-            source_config,
+            pool,
             inner: Arc::new(Mutex::new(inner)),
         }
     }
 
-    /// Establishes a connection to the source Postgres database.
-    ///
-    /// This method creates a new connection pool each time it's called rather
-    /// than maintaining persistent connections. This approach trades connection
-    /// setup overhead for reduced resource usage during periods of low activity.
-    async fn connect_to_source(&self) -> Result<PgPool, sqlx::Error> {
-        // We connect to source database each time we update because we assume that
-        // these updates will be infrequent. It has some overhead to establish a
-        // connection, but it's better than holding a connection open for long periods
-        // when there's little activity on it.
-        let pool = connect_to_source_database(
-            &self.source_config,
-            NUM_POOL_CONNECTIONS,
-            NUM_POOL_CONNECTIONS,
-        )
-        .await?;
-
-        Ok(pool)
+    /// Returns a reference to the connection pool.
+    fn pool(&self) -> &PgPool {
+        &self.pool
     }
 }
 
@@ -267,10 +263,8 @@ impl StateStore for PostgresStore {
     async fn load_table_replication_states(&self) -> EtlResult<usize> {
         debug!("loading table replication states from postgres state store");
 
-        let pool = self.connect_to_source().await?;
-
         let replication_state_rows =
-            state::get_table_replication_state_rows(&pool, self.pipeline_id as i64).await?;
+            state::get_table_replication_state_rows(self.pool(), self.pipeline_id as i64).await?;
 
         let mut table_states: HashMap<TableId, TableReplicationPhase> = HashMap::new();
         for row in replication_state_rows {
@@ -309,10 +303,10 @@ impl StateStore for PostgresStore {
 
     /// Updates a table's replication state in both database and cache.
     ///
-    /// This method performs atomic updates by first acquiring the cache lock,
-    /// then updating the database, and finally updating the cache. This ordering
-    /// prevents inconsistencies that could occur from concurrent access during
-    /// the update process.
+    /// We rely on database transaction isolation for correctness during concurrent writes.
+    /// The application-level lock is only held for the brief cache update, minimizing
+    /// the critical section. If we crash after the DB write but before cache update,
+    /// the correct state will be reloaded from DB on restart.
     async fn update_table_replication_state(
         &self,
         table_id: TableId,
@@ -320,13 +314,12 @@ impl StateStore for PostgresStore {
     ) -> EtlResult<()> {
         let db_state: state::TableReplicationState = state.clone().try_into()?;
 
-        let pool = self.connect_to_source().await?;
+        // DB write first - relies on database isolation for concurrent writes
+        state::update_replication_state(self.pool(), self.pipeline_id as i64, table_id, db_state)
+            .await?;
 
-        // We lock the inner state before updating the state in the database, to make sure we are
-        // consistent. If we were to lock the states only after the db state is modified, we might
-        // be inconsistent since there are some interleaved executions that lead to a wrong state.
+        // Application lock only for cache update
         let mut inner = self.inner.lock().await;
-        state::update_replication_state(&pool, self.pipeline_id as i64, table_id, db_state).await?;
 
         // Compute which phases need to be increment and decremented to
         // keep table metrics updated
@@ -355,9 +348,10 @@ impl StateStore for PostgresStore {
 
     /// Rolls back a table's replication state to the previous version.
     ///
-    /// This method restores the table to its previous replication state by
-    /// querying the database for the prior state entry. It updates both the
-    /// persistent storage and in-memory cache to reflect the rollback.
+    /// We rely on database transaction isolation for correctness during concurrent writes.
+    /// The application-level lock is only held for the brief cache update, minimizing
+    /// the critical section. If we crash after the DB write but before cache update,
+    /// the correct state will be reloaded from DB on restart.
     ///
     /// Returns the restored state on success, or an error if no previous
     /// state exists for rollback.
@@ -365,46 +359,46 @@ impl StateStore for PostgresStore {
         &self,
         table_id: TableId,
     ) -> EtlResult<TableReplicationPhase> {
-        let pool = self.connect_to_source().await?;
+        // DB write first - relies on database isolation for concurrent writes
+        let mut conn = self.pool().acquire().await?;
+        let restored_row =
+            state::rollback_replication_state(conn.deref_mut(), self.pipeline_id as i64, table_id)
+                .await?
+                .ok_or_else(|| {
+                    etl_error!(
+                        ErrorKind::StateRollbackError,
+                        "Previous table state not found",
+                        "No previous state available to roll back to for this table"
+                    )
+                })?;
 
-        // Here we perform locking for the same reasons stated in `update_table_replication_state`.
+        let restored_phase: TableReplicationPhase = restored_row.try_into()?;
+
+        // Application lock only for cache update
         let mut inner = self.inner.lock().await;
-        let mut conn = pool.acquire().await?;
-        match state::rollback_replication_state(conn.deref_mut(), self.pipeline_id as i64, table_id)
-            .await?
-        {
-            Some(restored_row) => {
-                // Compute which phases need to be increment and decremented to
-                // keep table metrics updated
-                let phase_to_decrement = inner
-                    .table_states
-                    .get(&table_id)
-                    .map(|table_state| table_state.as_type().as_static_str());
-                let restored_phase: TableReplicationPhase = restored_row.try_into()?;
-                let phase_to_increment = restored_phase.as_type().as_static_str();
 
-                inner.table_states.insert(table_id, restored_phase.clone());
+        // Compute which phases need to be incremented and decremented
+        let phase_to_decrement = inner
+            .table_states
+            .get(&table_id)
+            .map(|table_state| table_state.as_type().as_static_str());
+        let phase_to_increment = restored_phase.as_type().as_static_str();
 
-                // Update the metrics and emit the latest values
-                if let Some(phase_to_decrement) = phase_to_decrement {
-                    inner.decrement_phase_count(phase_to_decrement);
-                }
-                inner.increment_phase_count(phase_to_increment);
+        inner.table_states.insert(table_id, restored_phase.clone());
 
-                emit_table_metrics(
-                    self.pipeline_id,
-                    inner.table_states.keys().len(),
-                    &inner.phase_counts,
-                );
-
-                Ok(restored_phase)
-            }
-            None => Err(etl_error!(
-                ErrorKind::StateRollbackError,
-                "Previous table state not found",
-                "No previous state available to roll back to for this table"
-            )),
+        // Update the metrics and emit the latest values
+        if let Some(phase_to_decrement) = phase_to_decrement {
+            inner.decrement_phase_count(phase_to_decrement);
         }
+        inner.increment_phase_count(phase_to_increment);
+
+        emit_table_metrics(
+            self.pipeline_id,
+            inner.table_states.keys().len(),
+            &inner.phase_counts,
+        );
+
+        Ok(restored_phase)
     }
 
     /// Retrieves a table mapping from source table ID to destination name.
@@ -438,9 +432,7 @@ impl StateStore for PostgresStore {
     async fn load_table_mappings(&self) -> EtlResult<usize> {
         debug!("loading table mappings from postgres state store");
 
-        let pool = self.connect_to_source().await?;
-
-        let table_mappings = table_mappings::load_table_mappings(&pool, self.pipeline_id as i64)
+        let table_mappings = table_mappings::load_table_mappings(self.pool(), self.pipeline_id as i64)
             .await
             .map_err(|err| {
                 etl_error!(
@@ -464,10 +456,10 @@ impl StateStore for PostgresStore {
 
     /// Stores a table mapping in both database and cache.
     ///
-    /// This method persists a table mapping from source table ID to destination
-    /// table name in the database and updates the in-memory cache atomically.
-    /// Used when establishing or updating the mapping configuration between
-    /// source and destination systems.
+    /// We rely on database transaction isolation for correctness during concurrent writes.
+    /// The application-level lock is only held for the brief cache update, minimizing
+    /// the critical section. If we crash after the DB write but before cache update,
+    /// the correct state will be reloaded from DB on restart.
     async fn store_table_mapping(
         &self,
         source_table_id: TableId,
@@ -478,11 +470,9 @@ impl StateStore for PostgresStore {
             source_table_id, destination_table_id
         );
 
-        let pool = self.connect_to_source().await?;
-
-        let mut inner = self.inner.lock().await;
+        // DB write first - relies on database isolation for concurrent writes
         table_mappings::store_table_mapping(
-            &pool,
+            self.pool(),
             self.pipeline_id as i64,
             &source_table_id,
             &destination_table_id,
@@ -495,6 +485,9 @@ impl StateStore for PostgresStore {
                 format!("Failed to store table mapping in PostgreSQL: {}", err)
             )
         })?;
+
+        // Application lock only for cache update
+        let mut inner = self.inner.lock().await;
         inner
             .table_mappings
             .insert(source_table_id, destination_table_id);
@@ -535,9 +528,7 @@ impl SchemaStore for PostgresStore {
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         debug!("loading table schemas from postgres state store");
 
-        let pool = self.connect_to_source().await?;
-
-        let table_schemas = schema::load_table_schemas(&pool, self.pipeline_id as i64)
+        let table_schemas = schema::load_table_schemas(self.pool(), self.pipeline_id as i64)
             .await
             .map_err(|err| {
                 etl_error!(
@@ -568,17 +559,15 @@ impl SchemaStore for PostgresStore {
 
     /// Stores a table schema in both database and cache.
     ///
-    /// This method persists a table schema to the database and updates the
-    /// in-memory cache atomically. Used when new tables are discovered during
-    /// replication or when schema definitions need to be updated.
+    /// We rely on database transaction isolation for correctness during concurrent writes.
+    /// The application-level lock is only held for the brief cache update, minimizing
+    /// the critical section. If we crash after the DB write but before cache update,
+    /// the correct state will be reloaded from DB on restart.
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         debug!("storing table schema for table '{}'", table_schema.name);
 
-        let pool = self.connect_to_source().await?;
-
-        // We also lock the entire section to be consistent.
-        let mut inner = self.inner.lock().await;
-        schema::store_table_schema(&pool, self.pipeline_id as i64, &table_schema)
+        // DB write first - relies on database isolation for concurrent writes
+        schema::store_table_schema(self.pool(), self.pipeline_id as i64, &table_schema)
             .await
             .map_err(|err| {
                 etl_error!(
@@ -587,6 +576,9 @@ impl SchemaStore for PostgresStore {
                     format!("Failed to store table schema in PostgreSQL: {}", err)
                 )
             })?;
+
+        // Application lock only for cache update
+        let mut inner = self.inner.lock().await;
         inner
             .table_schemas
             .insert(table_schema.id, Arc::new(table_schema));
@@ -596,11 +588,15 @@ impl SchemaStore for PostgresStore {
 }
 
 impl CleanupStore for PostgresStore {
+    /// Removes all state for a table from both database and cache.
+    ///
+    /// We rely on database transaction isolation for correctness during concurrent writes.
+    /// The application-level lock is only held for the brief cache update, minimizing
+    /// the critical section. If we crash after the DB write but before cache update,
+    /// the correct state will be reloaded from DB on restart.
     async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
-        let pool = self.connect_to_source().await?;
-
-        // Use a single DB transaction to keep persistent state consistent.
-        let mut tx = pool.begin().await?;
+        // DB transaction first - relies on database isolation for concurrent writes
+        let mut tx = self.pool().begin().await?;
 
         table_mappings::delete_table_mappings_for_table(
             &mut *tx,
@@ -631,7 +627,7 @@ impl CleanupStore for PostgresStore {
 
         tx.commit().await?;
 
-        // Update in-memory caches and metrics.
+        // Application lock only for cache update
         let mut inner = self.inner.lock().await;
 
         inner.table_states.remove(&table_id);
