@@ -115,6 +115,8 @@ jobs:
       tag_with_version: true
       version: ${{ needs.version.outputs.version }}
       checkout_ref: refs/tags/${{ needs.version.outputs.tag }}
+      build_args: |
+        ENABLE_EGRESS=true
     secrets:
       PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}
 

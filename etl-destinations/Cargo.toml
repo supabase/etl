@@ -30,6 +30,7 @@ iceberg = [
     "dep:serde",
     "dep:serde_json",
 ]
+egress = ["etl/egress"]
 
 [dependencies]
 etl = { workspace = true }

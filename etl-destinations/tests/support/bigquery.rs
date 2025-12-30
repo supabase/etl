@@ -111,7 +111,7 @@ impl BigQueryDatabase {
     /// zero staleness to ensure immediate consistency for testing.
     pub async fn build_destination<S>(&self, schema_store: S) -> BigQueryDestination<S>
     where
-        S: StateStore + SchemaStore,
+        S: StateStore + SchemaStore + Send + Sync,
     {
         BigQueryDestination::new_with_key_path(
             self.project_id.clone(),

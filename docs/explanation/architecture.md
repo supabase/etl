@@ -1,259 +1,131 @@
-# ETL Architecture Overview
+# ETL Architecture
 
-**Understanding how ETL components work together to replicate data from Postgres**
+**How ETL replicates data from Postgres to your destinations**
 
-ETL's architecture centers around five core abstractions that work together to provide reliable, high-performance data replication: `Pipeline`, `Destination`, `SchemaStore`, `StateStore`, and `CleanupStore`. This document explains how these components interact and coordinate data flow from Postgres logical replication to target systems.
+ETL uses Postgres logical replication to stream database changes in real-time.
 
-A diagram of the overall architecture is shown below:
+## Overview
 
 ```mermaid
 flowchart LR
     subgraph Postgres
-        A["WAL Stream<br>Publications<br>Replication Slots"]
+        WAL["WAL + Publication"]
     end
 
-    subgraph ETL_Pipeline[ETL Pipeline]
-        subgraph ApplyWorker[Apply Worker]
-            B1["CDC Events Processing and Tables Synchronization"]
-        end
-
-        subgraph TableSyncWorkers[Table Sync Workers]
-            B2["Table 1 Sync + CDC"]
-            B3["Table 2 Sync + CDC"]
-            B4["Table N Sync + CDC"]
-        end
+    subgraph Pipeline
+        Apply["Apply Worker"]
+        Sync["Table Sync Workers"]
     end
 
-    subgraph Destination[Destination]
-        Dest["BigQuery<br>Apache Iceberg<br>Custom"]
+    subgraph Storage
+        Store["Store<br>(State + Schema)"]
     end
 
-    subgraph Store[Store]
-        subgraph StateStore[State Store]
-            D1["Memory<br>Postgres"]
-        end
-
-        subgraph SchemaStore[Schema Store]
-            D2["Memory<br>Postgres"]
-        end
-
-        subgraph CleanupStore[Cleanup Store]
-            D3["Memory<br>Postgres"]
-        end
+    subgraph Target
+        Dest["Destination<br>(BigQuery, Iceberg, Custom)"]
     end
 
-    A --> ApplyWorker
-    ApplyWorker --> TableSyncWorkers
-
-    ApplyWorker --> Destination
-    TableSyncWorkers --> Destination
-
-    ApplyWorker --> Store
-    TableSyncWorkers --> Store
+    WAL --> Apply
+    Apply --> Sync
+    Apply --> Dest
+    Sync --> Dest
+    Apply --> Store
+    Sync --> Store
 ```
 
-## Core Abstractions
+## How It Works
+
+ETL operates in two phases:
+
+### Phase 1: Initial Copy
+
+When a pipeline starts, it copies all existing data from each table in the publication. Multiple **Table Sync Workers** run in parallel to copy tables concurrently. Each worker:
+
+1. Creates a replication slot to capture a consistent snapshot
+2. Copies all rows using Postgres `COPY`
+3. Sends rows to the destination via `write_table_rows()`
+
+**Note:** During this phase, `Begin` and `Commit` events may be delivered multiple times because workers consume slots in parallel. This is expected and does not cause data duplication - only transaction markers are repeated.
+
+### Phase 2: Continuous Replication
+
+Once tables are copied, the **Apply Worker** streams ongoing changes from the Postgres WAL. It:
+
+1. Receives change events (inserts, updates, deletes)
+2. Batches events for efficiency
+3. Sends batches to the destination via `write_events()`
+
+## Core Components
 
 ### Pipeline
 
-The Pipeline is ETL's central component that orchestrates all replication activity. It manages worker lifecycles, coordinates data flow, and handles error recovery.
-
-**Key responsibilities:**
-
-- Initializes the state of the pipeline
-- Spawns the apply worker and table sync workers pool
-- Tracks workers handles to wait for their termination
-- Exposes the shutdown mechanism for gracefully terminating the pipeline
+The central orchestrator that manages the entire replication process. It spawns workers, coordinates state transitions, and handles shutdown.
 
 ### Destination
 
-The `Destination` trait defines how replicated data is delivered to target systems:
+Where replicated data goes. Implement the `Destination` trait to send data anywhere:
 
 ```rust
 pub trait Destination {
+    fn name() -> &'static str;
     fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
-
-    fn write_table_rows(
-        &self,
-        table_id: TableId,
-        table_rows: Vec<TableRow>,
-    ) -> impl Future<Output = EtlResult<()>> + Send;
-
+    fn write_table_rows(&self, table_id: TableId, rows: Vec<TableRow>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
-The trait provides three operations:
+| Method | When called | Purpose |
+|--------|-------------|---------|
+| `name()` | On initialization | Identify the destination |
+| `truncate_table()` | Before initial copy | Clear destination table |
+| `write_table_rows()` | During initial copy | Receive bulk rows |
+| `write_events()` | After initial copy | Receive streaming changes |
 
-- `truncate_table`: clears destination tables before bulk loading.
-- `write_table_rows`: handles bulk data insertion during initial synchronization.
-- `write_events`: processes streaming replication changes.
+### Store
 
-### SchemaStore
+Persists pipeline state so replication can resume after restarts. Three traits work together:
 
-The `SchemaStore` trait manages table schema information:
+- **StateStore**: Tracks replication phase per table and source-to-destination table mappings
+- **SchemaStore**: Stores table schema information (columns, types, primary keys)
+- **CleanupStore**: Removes stored state when a table is dropped from the publication
 
-```rust
-pub trait SchemaStore {
-    fn get_table_schema(
-        &self,
-        table_id: &TableId,
-    ) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
+`StateStore` and `SchemaStore` use a cache-first pattern: reads hit an in-memory cache, writes go to both the cache and persistent storage.
 
-    fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
+## Delivery Guarantees
 
-    fn load_table_schemas(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+ETL provides **at-least-once delivery**. If restarts occur, some events may be delivered more than once. This is a deliberate design choice.
 
-    fn store_table_schema(
-        &self,
-        table_schema: TableSchema,
-    ) -> impl Future<Output = EtlResult<()>> + Send;
-}
-```
+### Why Not Exactly-Once?
 
-The store follows a cache-first pattern: `load_table_schemas` populates an in-memory cache at startup, while `get_table_schemas` methods read only from cache for performance. `store_table_schema` implements dual-write to both persistent storage and cache.
+Exactly-once delivery requires distributed transactions between Postgres and the destination, adding complexity and latency. Instead, ETL optimizes for throughput and simplicity while minimizing duplicates through:
 
-### StateStore
+- **Controlled shutdown**: The pipeline gracefully drains in-flight events before stopping
+- **Frequent status updates**: Progress is reported to Postgres regularly, reducing the replay window after restarts
 
-The `StateStore` trait manages replication state and table mappings:
+### Handling Duplicates
 
-```rust
-pub trait StateStore {
-    fn get_table_replication_state(
-        &self,
-        table_id: TableId,
-    ) -> impl Future<Output = EtlResult<Option<TableReplicationPhase>>> + Send;
+Destinations should use **primary keys** to deduplicate. When writing to the destination, upsert on the primary key instead of inserting - duplicates naturally overwrite with the same data.
 
-    fn get_table_replication_states(
-        &self,
-    ) -> impl Future<Output = EtlResult<HashMap<TableId, TableReplicationPhase>>> + Send;
+The `start_lsn` and `commit_lsn` fields on events are useful for **ordering and checkpointing**. For example, BigQuery destinations use these to maintain correct event order in destination tables. See [Event Types](events.md#understanding-lsn-fields) for details on LSN semantics.
 
-    fn load_table_replication_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+## Table Replication Phases
 
-    fn update_table_replication_state(
-        &self,
-        table_id: TableId,
-        state: TableReplicationPhase,
-    ) -> impl Future<Output = EtlResult<()>> + Send;
+Each table progresses through these phases:
 
-    fn rollback_table_replication_state(
-        &self,
-        table_id: TableId,
-    ) -> impl Future<Output = EtlResult<TableReplicationPhase>> + Send;
-
-    fn get_table_mapping(
-        &self,
-        source_table_id: &TableId,
-    ) -> impl Future<Output = EtlResult<Option<String>>> + Send;
-
-    fn get_table_mappings(
-        &self,
-    ) -> impl Future<Output = EtlResult<HashMap<TableId, String>>> + Send;
-
-    fn load_table_mappings(&self) -> impl Future<Output = EtlResult<usize>> + Send;
-
-    fn store_table_mapping(
-        &self,
-        source_table_id: TableId,
-        destination_table_id: String,
-    ) -> impl Future<Output = EtlResult<()>> + Send;
-}
-```
-
-Like `SchemaStore`, `StateStore` uses cache-first reads with `load_*` methods for startup population and dual-write patterns for updates.
-
-The store tracks both replication progress through `TableReplicationPhase` and source-to-destination table name mappings.
-
-### CleanupStore
-
-The `CleanupStore` trait provides atomic, table-scoped maintenance operations that affect both schema and state storage. The pipeline calls these primitives when tables are removed from a publication.
-
-```rust
-pub trait CleanupStore {
-    /// Deletes all stored state for `table_id` for the current pipeline.
-    ///
-    /// Removes replication state (including history), table schemas, and
-    /// table mappings. This must NOT drop or modify the actual destination table.
-    ///
-    /// Intended for use when a table is removed from the publication.
-    fn cleanup_table_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
-}
-```
-
-Implementations must ensure the operation is consistent across in-memory caches and persistent storage, and must be idempotent. Cleanup only removes ETL-maintained metadata and state; it never touches destination tables.
-
-## Data Flow Architecture
-
-### Worker Coordination
-
-ETL's data flow is orchestrated through two types of workers.
-
-#### Apply Worker
-
-- Processes Postgres logical replication stream
-- Spawns table sync workers when new table are discovered
-- Coordinates with table sync workers through shared state
-- Handles final event processing for tables in `Ready` state
-
-#### Table Sync Workers
-
-- Perform bulk copying of existing table data
-- Coordinate handoff to apply worker when synchronization completes
-- Multiple table sync workers run in parallel, limited by configured semaphore to bound number of connections
-
-### Worker Startup Sequence
-
-The Pipeline follows this startup sequence:
-
-1. **Pipeline Initialization**: Establishes Postgres connection and loads cached state
-2. **Apply Worker Launch**: Creates and starts the primary apply worker first
-3. **Table Discovery**: Apply worker identifies tables requiring synchronization
-4. **Table Sync Spawning**: Apply worker spawns table sync workers for tables in `Init` state
-5. **Coordination**: Workers communicate through shared state store
-6. **Streaming**: Apply worker starts streaming replication events of table in `Ready` state and at every commit point
-   checks for new tables to synchronize
-
-_The apply worker always starts first because it coordinates the overall replication process and spawns table sync workers on demand._
-
-### Table Replication Phases
-
-Each table progresses through distinct phases during replication:
-
-```rust
-pub enum TableReplicationPhase {
-    Init,
-    DataSync,
-    FinishedCopy,
-    SyncWait,
-    Catchup { lsn: PgLsn },
-    SyncDone { lsn: PgLsn },
-    Ready,
-    Errored { reason: String, solution: Option<String>, retry_policy: RetryPolicy },
-}
-```
-
-**Phase Ownership and Transitions:**
-
-- **Init**: The table is discovered and ready to be copied
-- **DataSync**: The table copy has started and is in progress
-- **FinishedCopy**: The table has been fully copied and is ready to start CDC streaming
-- **SyncWait**: The table is ready to start CDC streaming and is waiting for the apply worker to tell which LSN to catchup
-- **Catchup**: The table is catching up to the the LSN specified by the apply worker
-- **SyncDone**: The table has caught up to the LSN specified by the apply worker
-- **Ready**: The table is now copied and caught up with the apply worker, now all events are processed by the apply worker for this table
-- **Errored**: The table has encountered an error and is excluded from replication until a rollback is performed
+| Phase | Set By | Description |
+|-------|--------|-------------|
+| **Init** | Pipeline | Table discovered, ready for initial copy |
+| **DataSync** | Table Sync Worker | Initial table copy in progress |
+| **FinishedCopy** | Table Sync Worker | Initial copy complete |
+| **SyncWait** | Table Sync Worker | Waiting for Apply Worker to pause (in-memory only) |
+| **Catchup** | Apply Worker | Apply Worker paused; Table Sync Worker catching up to its LSN (in-memory only) |
+| **SyncDone** | Table Sync Worker | Catch-up complete, ready for handoff |
+| **Ready** | Apply Worker | Apply Worker now handles this table exclusively |
+| **Errored** | Either | Error occurred; contains reason, solution hint, and retry policy |
 
 ## Next Steps
 
-Now that you understand ETL's architecture:
-
-- **Build your first pipeline** → [First Pipeline Tutorial](../tutorials/first-pipeline.md)
-- **Implement custom components** → [Custom Stores and Destinations](../tutorials/custom-implementations.md)
-- **Configure Postgres properly** → [Configure Postgres for Replication](../how-to/configure-postgres.md)
-
-## See Also
-
-- [Build Your First ETL Pipeline](../tutorials/first-pipeline.md) - Hands-on tutorial using these components
-- [Custom Stores and Destinations](../tutorials/custom-implementations.md) - Implement your own stores and destinations
-- [API Reference](../reference/index.md) - Complete trait documentation
-- [Configure Postgres for Replication](../how-to/configure-postgres.md) - Set up the source database
+- [Extension Points](traits.md): Implement custom stores and destinations
+- [Event Types](events.md): Understand event data
+- [First Pipeline](../guides/first-pipeline.md): Build something
+- [Configure Postgres](../guides/configure-postgres.md): Database setup

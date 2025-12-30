@@ -9,7 +9,6 @@ use etl::types::{
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::{TableBatch, TableDescriptor};
 
-use crate::bigquery::encoding::BigQueryTableRow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
@@ -21,7 +20,10 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use crate::bigquery::encoding::BigQueryTableRow;
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
+#[cfg(feature = "egress")]
+use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
@@ -192,7 +194,7 @@ pub struct BigQueryDestination<S> {
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore,
+    S: StateStore + SchemaStore + Send + Sync,
 {
     /// Creates a new [`BigQueryDestination`] using a service account key file path.
     ///
@@ -517,19 +519,16 @@ where
         }
 
         // Stream with schema mismatch retry.
+        #[allow(unused_variables)]
         let (bytes_sent, bytes_received) = self.stream_with_retry(&table_batches).await?;
 
         if bytes_sent > 0 {
-            // Logs with egress_metric = true can be used to identify egress logs.
-            // This can e.g. be used to send egress logs to a location different
-            // than the other logs. These logs should also have bytes_sent set to
-            // the number of bytes sent to the destination.
-            info!(
-                bytes_sent,
-                bytes_received,
-                phase = "table_copy",
-                egress_metric = true,
-                "wrote table rows to bigquery"
+            #[cfg(feature = "egress")]
+            log_processed_bytes(
+                Self::name(),
+                PROCESSING_TYPE_TABLE_COPY,
+                bytes_sent as u64,
+                bytes_received as u64,
             );
         }
 
@@ -922,19 +921,16 @@ where
                 }
 
                 // Stream with schema mismatch retry.
+                #[allow(unused_variables)]
                 let (bytes_sent, bytes_received) = self.stream_with_retry(&table_batches).await?;
 
                 if bytes_sent > 0 {
-                    // Logs with egress_metric = true can be used to identify egress logs.
-                    // This can e.g. be used to send egress logs to a location different
-                    // than the other logs. These logs should also have bytes_sent set to
-                    // the number of bytes sent to the destination.
-                    info!(
-                        bytes_sent,
-                        bytes_received,
-                        phase = "apply",
-                        egress_metric = true,
-                        "wrote cdc events to bigquery"
+                    #[cfg(feature = "egress")]
+                    log_processed_bytes(
+                        Self::name(),
+                        PROCESSING_TYPE_STREAMING,
+                        bytes_sent as u64,
+                        bytes_received as u64,
                     );
                 }
             }

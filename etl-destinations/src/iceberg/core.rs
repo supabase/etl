@@ -4,6 +4,8 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "egress")]
+use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
 use etl::destination::Destination;
@@ -246,21 +248,14 @@ where
         }
 
         if !table_rows.is_empty() {
+            #[allow(unused_variables)]
             let bytes_sent = self
                 .client
                 .insert_rows(namespace, iceberg_table_name, table_rows)
                 .await?;
 
-            // Logs with egress_metric = true can be used to identify egress logs.
-            // This can e.g., be used to send egress logs to a location different
-            // from the other logs. These logs should also have bytes_sent set to
-            // the number of bytes sent to the destination.
-            info!(
-                bytes_sent,
-                phase = "table_copy",
-                egress_metric = true,
-                "wrote table rows to iceberg"
-            );
+            #[cfg(feature = "egress")]
+            log_processed_bytes(Self::name(), PROCESSING_TYPE_TABLE_COPY, bytes_sent, 0);
         }
 
         Ok(())
@@ -394,22 +389,15 @@ where
                     });
                 }
 
+                #[allow(unused_mut, unused_variables)]
                 let mut bytes_sent = 0;
                 while let Some(insert_result) = join_set.join_next().await {
                     bytes_sent += insert_result
                         .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
                 }
 
-                // Logs with egress_metric = true can be used to identify egress logs.
-                // This can e.g. be used to send egress logs to a location different
-                // than the other logs. These logs should also have bytes_sent set to
-                // the number of bytes sent to the destination.
-                info!(
-                    bytes_sent,
-                    phase = "apply",
-                    egress_metric = true,
-                    "wrote cdc events to iceberg"
-                );
+                #[cfg(feature = "egress")]
+                log_processed_bytes(Self::name(), PROCESSING_TYPE_STREAMING, bytes_sent, 0);
             }
 
             // Collect and deduplicate schemas from all truncate events.

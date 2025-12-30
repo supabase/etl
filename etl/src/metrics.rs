@@ -29,6 +29,8 @@ pub const PIPELINE_ID_LABEL: &str = "pipeline_id";
 pub const EVENT_TYPE_LABEL: &str = "event_type";
 /// Label key for whether the status update was forced.
 pub const FORCED_LABEL: &str = "forced";
+/// Label key for the status update type.
+pub const STATUS_UPDATE_TYPE_LABEL: &str = "status_update_type";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaranteed to register the
