@@ -34,8 +34,12 @@ RUN cargo chef cook --release --recipe-path recipe.json
 
 # Build application with optimizations
 # The release profile in Cargo.toml handles: thin LTO, strip, opt-level=3
+# ENABLE_EGRESS: set to "true" to enable egress metrics logging
+ARG ENABLE_EGRESS="false"
 COPY . .
-RUN RUSTFLAGS="-C panic=abort" cargo build --release -p etl-replicator && \
+RUN FEATURES=""; \
+    if [ "$ENABLE_EGRESS" = "true" ]; then FEATURES="--features egress"; fi && \
+    RUSTFLAGS="-C panic=abort" cargo build --release -p etl-replicator $FEATURES && \
     strip target/release/etl-replicator
 
 # Runtime stage with distroless for security

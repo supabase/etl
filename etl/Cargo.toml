@@ -10,6 +10,7 @@ homepage.workspace = true
 [features]
 test-utils = ["etl-postgres/test-utils"]
 failpoints = ["fail/failpoints"]
+egress = []
 default = []
 
 [dependencies]

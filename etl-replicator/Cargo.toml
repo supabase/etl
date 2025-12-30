@@ -7,6 +7,10 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+default = []
+egress = ["etl/egress", "etl-destinations/egress"]
+
 [dependencies]
 etl = { workspace = true }
 etl-config = { workspace = true }

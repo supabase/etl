@@ -4,6 +4,9 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_number};
 use etl::{bail, etl_error};
+
+#[cfg(feature = "egress")]
+use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -177,7 +180,7 @@ pub struct BigQueryDestination<S> {
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore,
+    S: StateStore + SchemaStore + Send + Sync,
 {
     /// Creates a new [`BigQueryDestination`] using a service account key file path.
     ///
@@ -501,21 +504,18 @@ where
 
         // Stream all the batches concurrently.
         if !table_batches.is_empty() {
+            #[allow(unused_variables)]
             let (bytes_sent, bytes_received) = self
                 .client
                 .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
                 .await?;
 
-            // Logs with egress_metric = true can be used to identify egress logs.
-            // This can e.g. be used to send egress logs to a location different
-            // than the other logs. These logs should also have bytes_sent set to
-            // the number of bytes sent to the destination.
-            info!(
-                bytes_sent,
-                bytes_received,
-                phase = "table_copy",
-                egress_metric = true,
-                "wrote table rows to bigquery"
+            #[cfg(feature = "egress")]
+            log_processed_bytes(
+                Self::name(),
+                PROCESSING_TYPE_TABLE_COPY,
+                bytes_sent as u64,
+                bytes_received as u64,
             );
         }
 
@@ -608,21 +608,18 @@ where
                 }
 
                 if !table_batches.is_empty() {
+                    #[allow(unused_variables)]
                     let (bytes_sent, bytes_received) = self
                         .client
                         .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
                         .await?;
 
-                    // Logs with egress_metric = true can be used to identify egress logs.
-                    // This can e.g. be used to send egress logs to a location different
-                    // than the other logs. These logs should also have bytes_sent set to
-                    // the number of bytes sent to the destination.
-                    info!(
-                        bytes_sent,
-                        bytes_received,
-                        phase = "apply",
-                        egress_metric = true,
-                        "wrote cdc events to bigquery"
+                    #[cfg(feature = "egress")]
+                    log_processed_bytes(
+                        Self::name(),
+                        PROCESSING_TYPE_STREAMING,
+                        bytes_sent as u64,
+                        bytes_received as u64,
                     );
                 }
             }
