@@ -5,12 +5,10 @@ use std::{
 };
 
 #[cfg(feature = "egress")]
-use crate::egress::ETL_PROCESSED_BYTES;
+use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
 use etl::destination::Destination;
-#[cfg(feature = "egress")]
-use etl::egress_info;
 use etl::error::{ErrorKind, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
@@ -284,12 +282,7 @@ where
                 .await?;
 
             #[cfg(feature = "egress")]
-            egress_info!(
-                ETL_PROCESSED_BYTES,
-                bytes_sent,
-                destination_type = Self::name(),
-                processing_type = "table_copy"
-            );
+            log_processed_bytes(Self::name(), PROCESSING_TYPE_TABLE_COPY, bytes_sent, 0);
         }
 
         Ok(())
@@ -395,12 +388,7 @@ where
                 }
 
                 #[cfg(feature = "egress")]
-                egress_info!(
-                    ETL_PROCESSED_BYTES,
-                    bytes_sent,
-                    destination_type = Self::name(),
-                    processing_type = "streaming"
-                );
+                log_processed_bytes(Self::name(), PROCESSING_TYPE_STREAMING, bytes_sent, 0);
             }
 
             // Collect and deduplicate all table IDs from all truncate events.

@@ -6,9 +6,7 @@ use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_nu
 use etl::{bail, etl_error};
 
 #[cfg(feature = "egress")]
-use crate::egress::ETL_PROCESSED_BYTES;
-#[cfg(feature = "egress")]
-use etl::egress_info;
+use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -513,12 +511,11 @@ where
                 .await?;
 
             #[cfg(feature = "egress")]
-            egress_info!(
-                ETL_PROCESSED_BYTES,
-                bytes_sent,
-                bytes_received,
-                destination_type = Self::name(),
-                processing_type = "table_copy"
+            log_processed_bytes(
+                Self::name(),
+                PROCESSING_TYPE_TABLE_COPY,
+                bytes_sent as u64,
+                bytes_received as u64,
             );
         }
 
@@ -618,12 +615,11 @@ where
                         .await?;
 
                     #[cfg(feature = "egress")]
-                    egress_info!(
-                        ETL_PROCESSED_BYTES,
-                        bytes_sent,
-                        bytes_received,
-                        destination_type = Self::name(),
-                        processing_type = "streaming"
+                    log_processed_bytes(
+                        Self::name(),
+                        PROCESSING_TYPE_STREAMING,
+                        bytes_sent as u64,
+                        bytes_received as u64,
                     );
                 }
             }
