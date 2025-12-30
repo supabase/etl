@@ -1,10 +1,12 @@
 use chrono::{DateTime, Duration, Utc};
 use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::state;
 use etl_postgres::types::TableId;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 
 use crate::error::{ErrorKind, EtlError};
+use crate::{bail, etl_error};
 
 /// Represents an error that occurred during table replication.
 ///
@@ -270,6 +272,67 @@ impl From<TableReplicationError> for TableReplicationPhase {
             reason: value.reason,
             solution: value.solution,
             retry_policy: value.retry_policy,
+        }
+    }
+}
+
+/// Converts Postgres state rows back to ETL table replication phases.
+///
+/// This conversion transforms persisted database state into internal ETL
+/// replication phase representations. It deserializes metadata from the
+/// database row and maps database state enums to ETL phase enums.
+impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
+    type Error = EtlError;
+
+    fn try_from(value: state::TableReplicationStateRow) -> Result<Self, Self::Error> {
+        // Parse the metadata field from the row, which contains all the data we need to build the
+        // replication phase
+        let Some(table_replication_state) = value.deserialize_metadata().map_err(|err| {
+            etl_error!(
+                ErrorKind::DeserializationError,
+                "Table replication state deserialization failed",
+                format!(
+                    "Failed to deserialize table replication state from metadata column in PostgreSQL: {}", err
+                )
+            )
+        })?
+        else {
+            bail!(
+                ErrorKind::InvalidState,
+                "Table replication state not found",
+                "Table replication state does not exist in metadata column in PostgreSQL"
+            );
+        };
+
+        // Convert postgres state to phase (they are the same structs but one is meant to represent
+        // only the state which can be saved in the db).
+        match table_replication_state {
+            state::TableReplicationState::Init => Ok(TableReplicationPhase::Init),
+            state::TableReplicationState::DataSync => Ok(TableReplicationPhase::DataSync),
+            state::TableReplicationState::FinishedCopy => Ok(TableReplicationPhase::FinishedCopy),
+            state::TableReplicationState::SyncDone { lsn } => {
+                Ok(TableReplicationPhase::SyncDone { lsn })
+            }
+            state::TableReplicationState::Ready => Ok(TableReplicationPhase::Ready),
+            state::TableReplicationState::Errored {
+                reason,
+                solution,
+                retry_policy,
+            } => {
+                let etl_retry_policy = match retry_policy {
+                    state::RetryPolicy::NoRetry => RetryPolicy::NoRetry,
+                    state::RetryPolicy::ManualRetry => RetryPolicy::ManualRetry,
+                    state::RetryPolicy::TimedRetry { next_retry } => {
+                        RetryPolicy::TimedRetry { next_retry }
+                    }
+                };
+
+                Ok(TableReplicationPhase::Errored {
+                    reason,
+                    solution,
+                    retry_policy: etl_retry_policy,
+                })
+            }
         }
     }
 }
