@@ -518,7 +518,7 @@ where
                 bytes_sent,
                 bytes_received,
                 destination_type = Self::name(),
-                phase = "table_copy"
+                processing_type = "table_copy"
             );
         }
 
@@ -623,7 +623,7 @@ where
                         bytes_sent,
                         bytes_received,
                         destination_type = Self::name(),
-                        phase = "apply"
+                        processing_type = "streaming"
                     );
                 }
             }

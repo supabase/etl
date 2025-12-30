@@ -288,7 +288,7 @@ where
                 ETL_PROCESSED_BYTES,
                 bytes_sent,
                 destination_type = Self::name(),
-                phase = "table_copy"
+                processing_type = "table_copy"
             );
         }
 
@@ -399,7 +399,7 @@ where
                     ETL_PROCESSED_BYTES,
                     bytes_sent,
                     destination_type = Self::name(),
-                    phase = "apply"
+                    processing_type = "streaming"
                 );
             }
 
