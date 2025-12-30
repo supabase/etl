@@ -432,15 +432,16 @@ impl StateStore for PostgresStore {
     async fn load_table_mappings(&self) -> EtlResult<usize> {
         debug!("loading table mappings from postgres state store");
 
-        let table_mappings = table_mappings::load_table_mappings(self.pool(), self.pipeline_id as i64)
-            .await
-            .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
-                    "Table mappings loading failed",
-                    format!("Failed to load table mappings from PostgreSQL: {}", err)
-                )
-            })?;
+        let table_mappings =
+            table_mappings::load_table_mappings(self.pool(), self.pipeline_id as i64)
+                .await
+                .map_err(|err| {
+                    etl_error!(
+                        ErrorKind::SourceQueryFailed,
+                        "Table mappings loading failed",
+                        format!("Failed to load table mappings from PostgreSQL: {}", err)
+                    )
+                })?;
         let table_mappings_len = table_mappings.len();
 
         let mut inner = self.inner.lock().await;
