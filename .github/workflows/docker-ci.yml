@@ -112,3 +112,5 @@ jobs:
       experimental: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental || false }}
       # Build from the resolved ref: merge commit for PRs, or provided ref, fallback to current SHA.
       checkout_ref: ${{ needs.resolve-ref.outputs.ref }}
+      build_args: |
+        ENABLE_EGRESS=true

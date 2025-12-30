@@ -7,10 +7,14 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+default = []
+egress = ["etl/egress", "etl-destinations/egress"]
+
 [dependencies]
-etl = { workspace = true, features = ["egress"] }
+etl = { workspace = true }
 etl-config = { workspace = true }
-etl-destinations = { workspace = true, features = ["bigquery", "iceberg", "egress"] }
+etl-destinations = { workspace = true, features = ["bigquery", "iceberg"] }
 etl-telemetry = { workspace = true }
 
 anyhow = { workspace = true, features = ["std"] }
