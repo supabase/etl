@@ -1,11 +1,12 @@
-use crate::error::{ErrorKind, EtlError};
-use crate::{bail, etl_error};
 use chrono::{DateTime, Duration, Utc};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::state;
 use etl_postgres::types::TableId;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
+
+use crate::error::{ErrorKind, EtlError};
+use crate::{bail, etl_error};
 
 /// Represents an error that occurred during table replication.
 ///
