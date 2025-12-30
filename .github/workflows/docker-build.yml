@@ -35,10 +35,27 @@ on:
         description: "Build experimental image (main branch excluded)"
         type: boolean
         default: false
+      binary_name:
+        description: "Name of the binary (defaults to image repo name if not specified)"
+        type: string
+        required: false
     secrets:
       PROD_AWS_ROLE:
         description: "AWS IAM role ARN for ECR push access"
         required: true
+      SENTRY_AUTH_TOKEN:
+        description: "Sentry authentication token for debug symbol upload"
+        required: false
+      SENTRY_ORG:
+        description: "Sentry organization slug"
+        required: false
+      SENTRY_PROJECT:
+        description: "Sentry project slug"
+        required: false
+
+env:
+  # Pin sentry-cli version for reproducibility
+  SENTRY_CLI_VERSION: "3.0.1"
 
 permissions:
   contents: read
@@ -62,14 +79,39 @@ jobs:
     outputs:
       digest-amd64: ${{ steps.export-digest.outputs.digest-amd64 }}
       digest-arm64: ${{ steps.export-digest.outputs.digest-arm64 }}
-      image-name: ${{ steps.extract-name.outputs.name }}
+      git-sha: ${{ steps.git-sha.outputs.sha }}
     steps:
-      - name: Extract Image Name
+      - name: Extract Image and Binary Name
         id: extract-name
         run: |
           IMAGE="${{ inputs.image }}"
-          NAME="${IMAGE##*/}"
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          IMAGE_NAME="${IMAGE##*/}"
+          echo "image-name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+
+          # Use explicit binary_name if provided, otherwise default to image name
+          if [ -n "${{ inputs.binary_name }}" ]; then
+            BINARY_NAME="${{ inputs.binary_name }}"
+          else
+            BINARY_NAME="$IMAGE_NAME"
+          fi
+          echo "binary-name=$BINARY_NAME" >> "$GITHUB_OUTPUT"
+          echo "Image: $IMAGE_NAME, Binary: $BINARY_NAME"
+
+      - name: Check Sentry configuration
+        id: sentry-config
+        run: |
+          # Require all three Sentry variables to be set
+          if [ -n "$SENTRY_AUTH_TOKEN" ] && [ -n "$SENTRY_ORG" ] && [ -n "$SENTRY_PROJECT" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Sentry debug symbol upload: enabled"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Sentry debug symbol upload: disabled (missing SENTRY_AUTH_TOKEN, SENTRY_ORG, or SENTRY_PROJECT)"
+          fi
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
 
       - name: Checkout (specific ref)
         if: inputs.checkout_ref != ''
@@ -80,6 +122,13 @@ jobs:
       - name: Checkout (default)
         if: inputs.checkout_ref == ''
         uses: actions/checkout@v4
+
+      - name: Get Git SHA
+        id: git-sha
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Git SHA: $SHA"
 
       - name: Set up Docker Buildx
         uses: useblacksmith/setup-docker-builder@v1
@@ -97,6 +146,126 @@ jobs:
         with:
           registry: public.ecr.aws
 
+      # Build debug-symbols stage FIRST and extract debug symbols
+      # This caches all the heavy compilation work (chef -> planner -> builder -> stripper)
+      # The debug-symbols stage is a minimal scratch image with only the binaries we need
+      # The final image build will then only need to add the thin final layer
+      - name: Build and extract debug symbols
+        if: inputs.push == true && steps.sentry-config.outputs.enabled == 'true'
+        id: extract-debug
+        run: |
+          set -euo pipefail
+          BINARY_NAME="${{ steps.extract-name.outputs.binary-name }}"
+          CACHE_SCOPE="${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }}"
+          CACHE_LOCAL="/tmp/.buildx-cache-${CACHE_SCOPE}"
+
+          echo "Building to debug-symbols stage (caches all compilation)..."
+
+          # Build to debug-symbols stage and export only those files
+          # The debug-symbols stage is FROM scratch with only the 2 binaries (~100MB)
+          # Uses GHA cache backend for cross-run caching
+          mkdir -p ./debug-output
+          docker buildx build \
+            --target debug-symbols \
+            --platform ${{ matrix.platform }} \
+            --cache-from type=local,src=${CACHE_LOCAL} \
+            --cache-from type=gha,scope=$CACHE_SCOPE \
+            --cache-to type=local,dest=${CACHE_LOCAL},mode=max \
+            --cache-to type=gha,scope=$CACHE_SCOPE,mode=max \
+            --output type=local,dest=./debug-output \
+            -f ${{ inputs.file }} \
+            ${{ inputs.context }}
+
+          # Move binaries to working directory
+          mv ./debug-output/${BINARY_NAME}.debug ./${BINARY_NAME}.debug
+          mv ./debug-output/${BINARY_NAME} ./${BINARY_NAME}.stripped
+          rm -rf ./debug-output
+
+          # Get Build IDs for verification
+          DEBUG_BUILD_ID=$(readelf -n "./${BINARY_NAME}.debug" 2>/dev/null | grep "Build ID" | awk '{print $3}' || echo "unknown")
+          STRIPPED_BUILD_ID=$(readelf -n "./${BINARY_NAME}.stripped" 2>/dev/null | grep "Build ID" | awk '{print $3}' || echo "unknown")
+
+          echo "=========================================="
+          echo "BUILD ID VERIFICATION (${{ matrix.arch }})"
+          echo "=========================================="
+          echo "Debug binary Build ID:    ${DEBUG_BUILD_ID}"
+          echo "Stripped binary Build ID: ${STRIPPED_BUILD_ID}"
+
+          if [ "$DEBUG_BUILD_ID" = "$STRIPPED_BUILD_ID" ]; then
+            echo "✅ Build IDs MATCH - debug symbols will work correctly"
+          else
+            echo "❌ Build IDs MISMATCH - debug symbols will not work!"
+            echo "This indicates the build was not properly cached."
+            exit 1
+          fi
+          echo "=========================================="
+
+          # Output for later steps
+          echo "debug-build-id=${DEBUG_BUILD_ID}" >> "$GITHUB_OUTPUT"
+
+          # Show file sizes for context
+          echo ""
+          echo "File sizes:"
+          echo "  Debug symbols: $(du -h ./${BINARY_NAME}.debug | cut -f1)"
+          echo "  Stripped:      $(du -h ./${BINARY_NAME}.stripped | cut -f1)"
+
+          # Prepare debug files directory for Sentry upload
+          # Sentry recommends uploading from a directory, not a single file
+          # Include both stripped binary and debug companion for best matching
+          mkdir -p ./sentry-dif/${{ matrix.arch }}
+          mv ./${BINARY_NAME}.debug ./sentry-dif/${{ matrix.arch }}/
+          mv ./${BINARY_NAME}.stripped ./sentry-dif/${{ matrix.arch }}/${BINARY_NAME}
+
+      - name: Install sentry-cli
+        if: inputs.push == true && steps.sentry-config.outputs.enabled == 'true'
+        run: |
+          # Determine architecture for sentry-cli download
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            SENTRY_ARCH="aarch64"
+          else
+            SENTRY_ARCH="x86_64"
+          fi
+          curl -sL "https://release-registry.services.sentry.io/apps/sentry-cli/${SENTRY_CLI_VERSION}?response=download&arch=${SENTRY_ARCH}&platform=Linux&package=sentry-cli" -o /tmp/sentry-cli
+          chmod +x /tmp/sentry-cli
+          sudo mv /tmp/sentry-cli /usr/local/bin/sentry-cli
+          sentry-cli --version
+
+      - name: Upload debug symbols to Sentry
+        if: inputs.push == true && steps.sentry-config.outputs.enabled == 'true'
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        run: |
+          set -euo pipefail
+          BINARY_NAME="${{ steps.extract-name.outputs.binary-name }}"
+
+          echo "=========================================="
+          echo "SENTRY DEBUG SYMBOL UPLOAD (${{ matrix.arch }})"
+          echo "=========================================="
+          echo "Build ID: ${{ steps.extract-debug.outputs.debug-build-id }}"
+          echo "=========================================="
+
+          # Validate both files before upload
+          echo "Validating debug files..."
+          sentry-cli difutil check ./sentry-dif/${{ matrix.arch }}/${BINARY_NAME}
+          sentry-cli difutil check ./sentry-dif/${{ matrix.arch }}/${BINARY_NAME}.debug
+
+          # Upload debug symbols to Sentry from directory (includes both stripped binary and debug companion)
+          echo "Uploading debug symbols..."
+          sentry-cli debug-files upload \
+            --include-sources \
+            --wait \
+            ./sentry-dif/${{ matrix.arch }}/
+
+          echo "=========================================="
+          echo "✅ Debug symbols uploaded for ${BINARY_NAME} (${{ matrix.arch }})"
+          echo "=========================================="
+
+          # Cleanup
+          rm -rf ./sentry-dif
+
+      # Build and push final image - uses cached stripper stage, only adds thin final layer
       - name: Build and Push Single-Platform Image
         id: build
         uses: useblacksmith/build-push-action@v2
@@ -107,6 +276,12 @@ jobs:
           platforms: ${{ matrix.platform }}
           provenance: false
           outputs: type=image,name=${{ inputs.image }},push-by-digest=true,name-canonical=true
+          cache-from: |
+            type=local,src=/tmp/.buildx-cache-${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }}
+            type=gha,scope=${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }}
+          cache-to: |
+            type=local,dest=/tmp/.buildx-cache-${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }},mode=max
+            type=gha,scope=${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }},mode=max
 
       - name: Export Digest
         id: export-digest
@@ -121,7 +296,7 @@ jobs:
         if: inputs.push == true
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ steps.extract-name.outputs.name }}-${{ matrix.arch }}
+          name: digests-${{ steps.extract-name.outputs.image-name }}-${{ matrix.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -137,14 +312,14 @@ jobs:
         id: extract-name
         run: |
           IMAGE="${{ inputs.image }}"
-          NAME="${IMAGE##*/}"
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          IMAGE_NAME="${IMAGE##*/}"
+          echo "image-name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Download Digests
         uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
-          pattern: digests-${{ steps.extract-name.outputs.name }}-*
+          pattern: digests-${{ steps.extract-name.outputs.image-name }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -161,20 +336,13 @@ jobs:
         with:
           registry: public.ecr.aws
 
-      - name: Checkout (specific ref)
-        if: inputs.checkout_ref != ''
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.checkout_ref }}
-
-      - name: Checkout (default)
-        if: inputs.checkout_ref == ''
-        uses: actions/checkout@v4
-
       - name: Create and Push Multi-Arch Manifest
         run: |
           IMAGE="${{ inputs.image }}"
-          FULL_SHA=$(git rev-parse HEAD)
+          # Use the exact SHA from the build job, not from a fresh checkout
+          FULL_SHA="${{ needs.build-platform.outputs.git-sha }}"
+
+          echo "Using Git SHA from build job: $FULL_SHA"
 
           # Prepare digest list for imagetools
           DIGEST_LIST=""
@@ -201,7 +369,7 @@ jobs:
         run: |
           IMAGE="${{ inputs.image }}"
           NAME="${IMAGE##*/}"
-          FULL_SHA=$(git rev-parse HEAD)
+          FULL_SHA="${{ needs.build-platform.outputs.git-sha }}"
           if [ "${{ inputs.experimental }}" = "true" ]; then
             TAGS="${FULL_SHA}-experimental"
             MODE="experimental"

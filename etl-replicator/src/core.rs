@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::error::{ReplicatorError, ReplicatorResult};
 use crate::migrations::migrate_state_store;
 use etl::destination::memory::MemoryDestination;
 use etl::pipeline::Pipeline;
@@ -32,7 +33,7 @@ use tracing::{debug, info, warn};
 /// destinations with proper initialization and error handling.
 pub async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
-) -> anyhow::Result<()> {
+) -> ReplicatorResult<()> {
     info!("starting replicator service");
 
     log_config(&replicator_config);
@@ -89,7 +90,7 @@ pub async fn start_replicator_with_config(
         } => {
             install_crypto_provider();
 
-            let supabase_domain = match Environment::load()? {
+            let supabase_domain = match Environment::load().map_err(ReplicatorError::config)? {
                 Environment::Prod => "supabase.co",
                 Environment::Staging | Environment::Dev => "supabase.red",
             };
@@ -102,7 +103,8 @@ pub async fn start_replicator_with_config(
                 s3_secret_access_key.expose_secret().to_string(),
                 s3_region.clone(),
             )
-            .await?;
+            .await
+            .map_err(ReplicatorError::config)?;
             let namespace = match namespace {
                 Some(ns) => DestinationNamespace::Single(ns.to_string()),
                 None => DestinationNamespace::OnePerSchema,
@@ -132,7 +134,8 @@ pub async fn start_replicator_with_config(
                     s3_endpoint.clone(),
                 ),
             )
-            .await?;
+            .await
+            .map_err(ReplicatorError::config)?;
             let namespace = match namespace {
                 Some(ns) => DestinationNamespace::Single(ns.to_string()),
                 None => DestinationNamespace::OnePerSchema,
@@ -265,7 +268,7 @@ fn log_batch_config(config: &BatchConfig) {
 async fn init_store(
     pipeline_id: PipelineId,
     pg_connection_config: PgConnectionConfig,
-) -> anyhow::Result<impl StateStore + SchemaStore + CleanupStore + Clone> {
+) -> ReplicatorResult<impl StateStore + SchemaStore + CleanupStore + Clone> {
     migrate_state_store(&pg_connection_config).await?;
 
     Ok(PostgresStore::new(pipeline_id, pg_connection_config))
@@ -277,7 +280,7 @@ async fn init_store(
 /// and ensures proper cleanup on shutdown. The pipeline will attempt to
 /// finish processing current batches before terminating.
 #[tracing::instrument(skip(pipeline))]
-async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> anyhow::Result<()>
+async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> ReplicatorResult<()>
 where
     S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
@@ -322,7 +325,7 @@ where
     shutdown_handle.abort();
     let _ = shutdown_handle.await;
 
-    // Propagate any pipeline error as anyhow error.
+    // Propagate any pipeline error.
     result?;
 
     Ok(())
