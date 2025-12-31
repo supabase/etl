@@ -328,11 +328,6 @@ struct ApplyLoopState {
     next_status_update: StatusUpdate,
     /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
-    /// Deadline for when the next status update must be dispatched.
-    ///
-    /// This deadline is set when the status update timer is started via
-    /// [`reset_status_update_deadline`]. It is `None` before the first call.
-    status_update_deadline: Option<Instant>,
     /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
@@ -344,6 +339,16 @@ struct ApplyLoopState {
     /// transaction boundary is found. If not found, the process will continue until it is killed via
     /// a `SIGKILL`.
     shutdown_discarded: bool,
+    /// Timer registry for managing batch flush and status update timers.
+    ///
+    /// This registry persists across loop iterations and handles automatic timer
+    /// replacement when registering with the same identifier.
+    timer_registry: TimerRegistry<ApplyTimers>,
+    /// Deadline for when the next status update must be dispatched.
+    ///
+    /// This deadline is set when the status update timer is started via
+    /// [`reset_status_update_deadline`]. It is `None` before the first call.
+    status_update_deadline: Option<Instant>,
     /// The deadline by which the current batch must be flushed.
     ///
     /// This deadline is set when the first message of a batch is received. When the deadline
@@ -352,11 +357,6 @@ struct ApplyLoopState {
     batch_flush_deadline: Option<Instant>,
     /// The maximum duration to wait before forcibly flushing a batch.
     max_batch_fill_duration: Duration,
-    /// Timer registry for managing batch flush and status update timers.
-    ///
-    /// This registry persists across loop iterations and handles automatic timer
-    /// replacement when registering with the same identifier.
-    timer_registry: TimerRegistry<ApplyTimers>,
 }
 
 impl ApplyLoopState {
@@ -369,21 +369,21 @@ impl ApplyLoopState {
     /// to register the initial status update timer.
     fn new(
         next_status_update: StatusUpdate,
-        events_batch: Vec<Event>,
+        max_batch_size: usize,
         max_batch_fill_duration: Duration,
     ) -> Self {
         Self {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
             next_status_update,
-            events_batch,
-            status_update_deadline: None,
+            events_batch: Vec::with_capacity(max_batch_size),
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
+            timer_registry: TimerRegistry::new(),
+            status_update_deadline: None,
             batch_flush_deadline: None,
             max_batch_fill_duration,
-            timer_registry: TimerRegistry::new(),
         }
     }
 
@@ -598,9 +598,6 @@ where
         .start_logical_replication(&config.publication_name, &slot_name, start_lsn)
         .await?;
 
-    // Maximum time to wait for additional events when batching (prevents indefinite delays).
-    let max_batch_fill_duration = Duration::from_millis(config.batch.max_fill_ms);
-
     // We wrap the logical replication stream with EventsStream to expose special status update
     // methods on the stream.
     let events_stream = EventsStream::wrap(logical_replication_stream, pipeline_id);
@@ -611,8 +608,8 @@ where
     // The state includes a timer registry that persists across loop iterations.
     let mut state = ApplyLoopState::new(
         first_status_update,
-        Vec::with_capacity(config.batch.max_size),
-        max_batch_fill_duration,
+        config.batch.max_size,
+        Duration::from_millis(config.batch.max_fill_ms),
     );
 
     // Register the initial status update timer.
