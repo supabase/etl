@@ -227,6 +227,16 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutStream<B, S> {
     type Item = TimeoutStreamResult<B>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // TODO: we want the timer to keep on going in case we receive an event which is a keep alive
+        //  since time time we want to measure is when the last event was received. We need to figure
+        //  out the right semantics for this since it's tricky.
+        //  What is especially tricky is that if we have the keep alive frequency > than the timeout here
+        //  we will keep on getting keep alive messages and we will never go into timeout.
+        //  The logic could be: if we receive a primary keep alive and we are expired, we return the keep
+        //  alive and then in the next iteration we will timeout. Or we return a timeout with result. Maybe
+        //  we could implement a mechanism which is TimeoutStreamResult with expired_timeout boolean and a value.
+        //  Then this can be interpreted downstream, if it has timeout expired + value, the system includes the
+        //  value and unconditionally flushes.
         let mut this = self.project();
 
         // If the timer should be reset, it means that we want to start counting down again.

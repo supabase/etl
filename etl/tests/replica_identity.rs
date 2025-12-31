@@ -141,7 +141,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -273,7 +273,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -396,7 +396,7 @@ async fn update_toast_values_with_default_replica_identity() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -529,7 +529,7 @@ async fn update_non_toast_values_with_none_replica_identity() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -675,7 +675,7 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();

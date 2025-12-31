@@ -11,11 +11,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::log::warn;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::concurrency::shutdown::ShutdownRx;
-use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
@@ -41,6 +39,9 @@ use crate::{bail, etl_error};
 ///
 /// This value must be less than the `wal_sender_timeout` configured in the Postgres instance.
 /// If set too high, Postgres may timeout before the next status update is sent.
+///
+/// TODO: we might want to fetch this value from Postgres itself to keep the values similar. Postgres
+///  sends updates every (wal_sender_timeout / 2) seconds.
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Result type for the apply loop execution.
@@ -375,33 +376,50 @@ impl ApplyLoopState {
 
     /// Returns the LSN that should be reported as flushed to the PostgreSQL server.
     ///
-    /// This method determines the appropriate flush LSN based on the current replication state.
-    /// When no transaction is being processed and no events are pending, it advances the flush
-    /// LSN to match the write LSN, preventing WAL buildup on idle replicated tables.
+    /// This method computes the correct *flush LSN* based on the current replication
+    /// state and the presence of in flight transactions and pending events.
     ///
-    /// # WAL Advancement for Idle Tables
+    /// When the replicator is idle, meaning no active transaction and no buffered
+    /// events, the flush LSN is advanced to the current write LSN. This prevents WAL
+    /// retention for replicated tables that are not receiving writes.
     ///
-    /// When there are no outstanding transactions to flush (i.e., we're not inside a transaction
-    /// and have no pending events), we advance flush_lsn to match write_lsn. This allows the
-    /// replication slot's restart_lsn to advance even when replicated tables are idle.
+    /// # Advancing the Flush LSN for Idle Replication
     ///
-    /// Without this advancement, consider a scenario where:
-    /// - Table A (replicated): idle, receiving no writes
-    /// - Table B (not replicated): actively receiving writes
+    /// If there are no outstanding changes to flush, we safely report `write_lsn`
+    /// as flushed. Doing so allows PostgreSQL to advance the replication slot’s
+    /// `restart_lsn`, even if replicated tables are idle.
     ///
-    /// The restart_lsn would remain stalled at Table A's position despite Table B generating
-    /// new WAL entries. This stall could cause:
-    /// 1. WAL accumulation on the primary
-    /// 2. Potential slot invalidation if WAL exceeds `max_slot_wal_keep_size`
+    /// Consider the following scenario:
+    /// - Table A is replicated but idle
+    /// - Table B is not replicated and receives continuous writes
     ///
-    /// By advancing flush_lsn, we signal that all replicated data up to write_lsn has been
-    /// processed, allowing PostgreSQL to safely advance restart_lsn and reclaim WAL.
+    /// Without advancing the flush LSN, the slot’s `restart_lsn` would remain pinned
+    /// at Table A’s last activity, despite WAL continuing to grow due to Table B.
+    /// This can lead to unnecessary WAL accumulation and, in extreme cases, slot
+    /// invalidation when `max_slot_wal_keep_size` is exceeded.
+    ///
+    /// By advancing the flush LSN when idle, we explicitly acknowledge that all
+    /// replicated changes up to `write_lsn` have been processed, allowing PostgreSQL
+    /// to safely reclaim WAL.
+    ///
+    /// # Use During Table Sync Outside Transactions
+    ///
+    /// This method is also used when syncing tables outside an explicit
+    /// transaction. In that case, events are driven by keepalive messages.
+    ///
+    /// When processing keepalives with no active transaction, we advance the flush
+    /// LSN to the value reported by the server. This ensures forward progress of the
+    /// slot while remaining consistent with what has actually been flushed.
+    ///
+    /// If a batch of events is non-empty, we do not advance the flush LSN to
+    /// `write_lsn`. Reporting a higher LSN than what has been flushed would
+    /// incorrectly mark WAL segments as processed even though they are not.
     ///
     /// # Returns
     ///
-    /// The LSN up to which all changes have been flushed and can be safely discarded by
-    /// the PostgreSQL server.
-    fn flush_lsn(&self) -> PgLsn {
+    /// The highest LSN for which all replicated changes have been flushed and can be
+    /// safely discarded by PostgreSQL.
+    fn hypothetical_flush_lsn(&self) -> PgLsn {
         if !self.handling_transaction() && self.events_batch.is_empty() {
             // Report write_lsn as flush_lsn when idle to prevent WAL buildup. Since the `send_status_update`
             // method tracks the last sent data, we should not worry about the LSN being reported first at
@@ -420,11 +438,6 @@ impl ApplyLoopState {
     /// Returns true when the status update deadline has elapsed.
     fn status_update_due(&self) -> bool {
         Instant::now() >= self.status_update_deadline
-    }
-
-    /// Returns the deadline for the next status update as a Tokio instant.
-    fn next_status_update_deadline(&self) -> tokio::time::Instant {
-        tokio::time::Instant::from_std(self.status_update_deadline)
     }
 
     /// Returns true if the apply loop is in the middle of processing a transaction, false otherwise.
@@ -491,7 +504,6 @@ pub async fn start_apply_loop<S, D, T>(
     destination: D,
     hook: T,
     mut shutdown_rx: ShutdownRx,
-    mut force_syncing_tables_rx: Option<SignalRx>,
 ) -> EtlResult<ApplyLoopResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -629,7 +641,7 @@ where
                     logical_replication_stream
                         .as_mut()
                         .get_inner()
-                        .send_status_update(state.write_lsn(), state.flush_lsn(), true, StatusUpdateType::Timeout)
+                        .send_status_update(state.write_lsn(), state.hypothetical_flush_lsn(), true, StatusUpdateType::Timeout)
                         .await?;
                     state.mark_status_update_sent();
                 }
@@ -637,46 +649,6 @@ where
                 if let Some(result) = action.to_result() {
                     return Ok(result);
                 }
-            }
-
-            // PRIORITY 3: Handle table synchronization coordination signals.
-            // Table sync workers signal when they complete initial data copying and are ready
-            // to transition to continuous replication mode. Guard the branch so it stays
-            // dormant if no signal receiver was provided.
-            _ = async {
-                if let Some(rx) = force_syncing_tables_rx.as_mut() {
-                    let _ = rx.changed().await;
-                }
-            }, if force_syncing_tables_rx.is_some() => {
-                // Table state transitions can only occur at transaction boundaries to maintain consistency.
-                // If we're in the middle of processing a transaction (`remote_final_lsn` is set),
-                // we defer the sync processing until the current transaction completes.
-                if !state.handling_transaction() {
-                    debug!("forcefully processing syncing tables");
-
-                    let action = hook.process_syncing_tables(state.next_status_update.flush_lsn, true).await?;
-                    if let Some(result) = action.to_result() {
-                        return Ok(result);
-                    }
-                } else {
-                    debug!("skipping forced table sync processing because of in progress transaction");
-                }
-            }
-
-            // PRIORITY 4: Periodic housekeeping and Postgres status updates.
-            // Every REFRESH_INTERVAL (1 second), send progress updates back to Postgres
-            // This serves multiple purposes:
-            // 1. Keeps Postgres informed of our processing progress
-            // 2. Allows Postgres to clean up old WAL files based on our progress
-            // 3. Provides a heartbeat mechanism to detect connection issues
-            _ = tokio::time::sleep_until(state.next_status_update_deadline()) => {
-                logical_replication_stream
-                    .as_mut()
-                    .get_inner()
-                    .send_status_update(state.write_lsn(), state.flush_lsn(), true, StatusUpdateType::Timeout)
-                    .await?;
-
-                state.mark_status_update_sent();
             }
         }
     }
@@ -706,7 +678,7 @@ where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
-    match result {
+    let mut action = match result {
         TimeoutStreamResult::Value(message) => {
             let result = handle_replication_message(
                 state,
@@ -728,7 +700,6 @@ where
                 state.update_last_commit_end_lsn(result.end_lsn);
             }
 
-            // TODO: check if this is what we want.
             // The action that we want to perform is by default the action attached to the message.
             let mut action = result.action;
 
@@ -738,7 +709,7 @@ where
                 // We check if the batch has elements. It can be that a batch has no elements when
                 // the batch is ended prematurely, and it contains only skipped events. In this case,
                 // we don't produce any events to the destination but downstream code treats it as if
-                // those evets are "persisted".
+                // those events are "persisted".
                 if !state.events_batch.is_empty() {
                     send_batch(
                         state,
@@ -774,7 +745,7 @@ where
                 // If we were to synchronize for every event, we would risk data loss since we would notify
                 // Postgres about our progress of events processing without having those events durably
                 // persisted in the destination.
-                action = action.merge(synchronize(state, hook).await?);
+                action = action.merge(try_synchronize_after_batch(state, hook).await?);
             }
 
             Ok(action)
@@ -799,9 +770,15 @@ where
             }
 
             // We perform synchronization to make sure that tables are synced.
-            synchronize(state, hook).await
+            try_synchronize_after_batch(state, hook).await
         }
-    }
+    }?;
+
+    // After processing a message, we try to perform synchronization if we are outside a
+    // transaction.
+    action = action.merge(try_synchronize_outside_transaction(state, hook).await?);
+
+    Ok(action)
 }
 
 /// Sends the current batch of events to the destination and updates metrics.
@@ -832,7 +809,7 @@ where
 
     destination.write_events(events_batch).await?;
 
-    metrics::counter!(
+    counter!(
         ETL_EVENTS_PROCESSED_TOTAL,
         WORKER_TYPE_LABEL => "apply",
         ACTION_LABEL => "table_streaming",
@@ -858,18 +835,66 @@ where
     Ok(())
 }
 
+/// Forces synchronization outside normal `COMMIT` boundaries.
+///
+/// The forcing of synchronization is necessary for the progress of the system when there are no
+/// transactions flowing through.
+async fn try_synchronize_outside_transaction<T>(
+    state: &mut ApplyLoopState,
+    hook: &T,
+) -> EtlResult<ApplyLoopAction>
+where
+    T: ApplyLoopHook,
+{
+    // Table state transitions can only occur at transaction boundaries to maintain consistency, thus
+    // only if we are not handling a transaction, we force the synchronization of tables, in all the
+    // other cases we defer the sync processing until the current transaction completes.
+    if state.handling_transaction() {
+        debug!("skipping table sync processing because of in progress transaction");
+
+        return Ok(ApplyLoopAction::Continue);
+    }
+
+    info!("processing syncing tables when no transaction is in progress");
+
+    // With this synchronization, we are using `flush_lsn()` method which returns the LSN based on the
+    // current state of the loop. The reason for why we are using that method is that we want to make sure
+    // to communicate the latest LSN to the workers, which guarantees data to have been durably flushed.
+    //
+    // To go more in detail, suppose we have the following case ([x] is LSN x):
+    // [1]BEGIN [2]INSERT [3]INSERT [4]COMMIT [5]KEEPALIVE (flush) [6]KEEPALIVE
+    //
+    // Assume that those inserts were not flushed, once we receive the first KEEPALIVE, the system will
+    // have (write_lsn = 5, flush_lsn = 0). Since we have not flushed the inserts yet, the system will supply
+    // to syncing tables the LSN of 0 since data was not flushed yet. Now we flush the data, and so the `flush_lsn` is
+    // updated to 5 (in practice it's a bit more complex, but for the example it's fine). The next KEEPALIVE
+    // is received, and we have (write_lsn = 6, flush_lsn = 5), since now there is no transaction in progress, and
+    // we flushed everything, the system will report 6 (it's just returning 6 but not advancing the actual flush LSN). Then
+    // when new data is received, the system will process it, advance all the LSNs and continue like that. This way, it can
+    // make progress by syncing tables more often when the outside of a transaction, but it won't notify a higher LSN to the workers
+    // until it's guaranteed to have been flushed.
+    let action = hook
+        .process_syncing_tables(state.hypothetical_flush_lsn(), true)
+        .await?;
+
+    Ok(action)
+}
+
 /// Performs post-batch synchronization and progress reporting.
 ///
 /// Updates the next status update LSNs (flush and apply) after a batch has
 /// been durably written, and calls [`ApplyLoopHook::process_syncing_tables`]
 /// to advance table synchronization state. Returns `true` if the caller
 /// should terminate the loop based on hook feedback.
-async fn synchronize<T>(state: &mut ApplyLoopState, hook: &T) -> EtlResult<ApplyLoopAction>
+async fn try_synchronize_after_batch<T>(
+    state: &mut ApplyLoopState,
+    hook: &T,
+) -> EtlResult<ApplyLoopAction>
 where
     T: ApplyLoopHook,
 {
     // At this point, the `last_commit_end_lsn` will contain the LSN of the next byte in the WAL after
-    // the last `Commit` message that was processed in this batch or in the previous ones.
+    // the last `COMMIT` message that was processed in this batch or in the previous ones.
     //
     // We take the entry here, since we want to avoid issuing `process_syncing_tables` multiple times
     // with the same LSN, with `take` this can't happen under the assumption that the next LSN will be
@@ -878,6 +903,11 @@ where
         return Ok(ApplyLoopAction::Continue);
     };
 
+    debug!(
+        "updating lsn for next status update to {}",
+        last_commit_end_lsn
+    );
+
     // We also prepare the next status update for Postgres, where we will confirm that we flushed
     // data up to this LSN to allow for WAL pruning on the database side.
     //
@@ -885,10 +915,6 @@ where
     // we are guaranteed that data has been safely persisted. In all the other cases, we just update
     // the `write_lsn` which is used by Postgres to get an acknowledgement of how far we have processed
     // messages but not flushed them.
-    debug!(
-        "updating lsn for next status update to {}",
-        last_commit_end_lsn
-    );
     state
         .next_status_update
         .update_flush_lsn(last_commit_end_lsn);
@@ -965,7 +991,7 @@ where
                 .get_inner()
                 .send_status_update(
                     state.write_lsn(),
-                    state.flush_lsn(),
+                    state.hypothetical_flush_lsn(),
                     message.reply() == 1,
                     StatusUpdateType::KeepAlive,
                 )
