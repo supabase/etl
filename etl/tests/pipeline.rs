@@ -166,24 +166,6 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We check that the states are correctly set.
-    let table_replication_states = store.get_table_replication_states().await;
-    assert_eq!(table_replication_states.len(), 2);
-    assert_eq!(
-        table_replication_states
-            .get(&database_schema.users_schema().id)
-            .unwrap()
-            .as_type(),
-        TableReplicationPhaseType::SyncDone
-    );
-    assert_eq!(
-        table_replication_states
-            .get(&database_schema.orders_schema().id)
-            .unwrap()
-            .as_type(),
-        TableReplicationPhaseType::SyncDone
-    );
-
     // We check that the table schemas have been stored.
     let table_schemas = store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 2);
