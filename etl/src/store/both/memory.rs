@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
-use crate::state::destination::DestinationTableMetadata;
+use crate::state::destination_metadata::DestinationTableMetadata;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;

@@ -2,7 +2,7 @@ use etl_postgres::types::TableId;
 use std::{collections::HashMap, future::Future};
 
 use crate::error::EtlResult;
-use crate::state::destination::DestinationTableMetadata;
+use crate::state::destination_metadata::DestinationTableMetadata;
 use crate::state::table::TableReplicationPhase;
 
 /// Trait for storing and retrieving table replication state and destination metadata.
