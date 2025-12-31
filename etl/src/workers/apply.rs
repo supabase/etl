@@ -486,6 +486,7 @@ where
         update_state: bool,
     ) -> EtlResult<ApplyLoopAction> {
         // TODO: this is a very hot path and we have to optimize it as much as possible.
+        // TODO: find a way to deterministically return and process tables always in the same order.
         let active_table_replication_states =
             get_active_table_replication_states(&self.store).await?;
         debug!(
