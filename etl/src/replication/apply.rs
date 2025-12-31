@@ -419,7 +419,7 @@ impl ApplyLoopState {
     ///
     /// The highest LSN for which all replicated changes have been flushed and can be
     /// safely discarded by PostgreSQL.
-    fn flush_lsn(&self) -> PgLsn {
+    fn hypothetical_flush_lsn(&self) -> PgLsn {
         if !self.handling_transaction() && self.events_batch.is_empty() {
             // Report write_lsn as flush_lsn when idle to prevent WAL buildup. Since the `send_status_update`
             // method tracks the last sent data, we should not worry about the LSN being reported first at
@@ -641,7 +641,7 @@ where
                     logical_replication_stream
                         .as_mut()
                         .get_inner()
-                        .send_status_update(state.write_lsn(), state.flush_lsn(), true, StatusUpdateType::Timeout)
+                        .send_status_update(state.write_lsn(), state.hypothetical_flush_lsn(), true, StatusUpdateType::Timeout)
                         .await?;
                     state.mark_status_update_sent();
                 }
@@ -857,11 +857,25 @@ where
 
     info!("processing syncing tables when no transaction is in progress");
 
-    // When doing the synchronization, we use the `flush_lsn` which will return `write_lsn` in case
-    // we are not in a transaction. This is done for a similar reason as the status update. If we have
-    // a slot that doesn't get any DML events, we still want to rely on keep alive messages `end_lsn` to
-    // advance the progress correctly.
-    let action = hook.process_syncing_tables(state.flush_lsn(), true).await?;
+    // With this synchronization, we are using `flush_lsn()` method which returns the LSN based on the
+    // current state of the loop. The reason for why we are using that method is that we want to make sure
+    // to communicate the latest LSN to the workers, which guarantees data to have been durably flushed.
+    //
+    // To go more in detail, suppose we have the following case ([x] is LSN x):
+    // [1]BEGIN [2]INSERT [3]INSERT [4]COMMIT [5]KEEPALIVE (flush) [6]KEEPALIVE
+    //
+    // Assume that those inserts were not flushed, once we receive the first KEEPALIVE, the system will
+    // have (write_lsn = 5, flush_lsn = 0). Since we have not flushed the inserts yet, the system will supply
+    // to syncing tables the LSN of 0 since data was not flushed yet. Now we flush the data, and so the `flush_lsn` is
+    // updated to 5 (in practice it's a bit more complex, but for the example it's fine). The next KEEPALIVE
+    // is received, and we have (write_lsn = 6, flush_lsn = 5), since now there is no transaction in progress, and
+    // we flushed everything, the system will report 6 (it's just returning 6 but not advancing the actual flush LSN). Then
+    // when new data is received, the system will process it, advance all the LSNs and continue like that. This way, it can
+    // make progress by syncing tables more often when the outside of a transaction, but it won't notify a higher LSN to the workers
+    // until it's guaranteed to have been flushed.
+    let action = hook
+        .process_syncing_tables(state.hypothetical_flush_lsn(), true)
+        .await?;
 
     Ok(action)
 }
@@ -977,7 +991,7 @@ where
                 .get_inner()
                 .send_status_update(
                     state.write_lsn(),
-                    state.flush_lsn(),
+                    state.hypothetical_flush_lsn(),
                     message.reply() == 1,
                     StatusUpdateType::KeepAlive,
                 )
