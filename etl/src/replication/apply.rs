@@ -329,7 +329,10 @@ struct ApplyLoopState {
     /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
     /// Deadline for when the next status update must be dispatched.
-    status_update_deadline: Instant,
+    ///
+    /// This deadline is set when the status update timer is started via
+    /// [`reset_status_update_deadline`]. It is `None` before the first call.
+    status_update_deadline: Option<Instant>,
     /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
@@ -361,30 +364,26 @@ impl ApplyLoopState {
     ///
     /// This constructor initializes the state tracking structure used throughout
     /// the apply loop to maintain replication progress and coordinate batching.
-    /// The status update timer is automatically registered upon creation.
+    ///
+    /// Note: The caller must call [`reset_status_update_deadline`] after construction
+    /// to register the initial status update timer.
     fn new(
         next_status_update: StatusUpdate,
         events_batch: Vec<Event>,
         max_batch_fill_duration: Duration,
     ) -> Self {
-        let status_update_deadline = Instant::now() + STATUS_UPDATE_INTERVAL;
-
-        // Initialize the timer registry and register the initial status update timer.
-        let mut timer_registry = TimerRegistry::new();
-        timer_registry.register(ApplyTimers::StatusUpdate, status_update_deadline);
-
         Self {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
             next_status_update,
             events_batch,
-            status_update_deadline,
+            status_update_deadline: None,
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
             batch_flush_deadline: None,
             max_batch_fill_duration,
-            timer_registry,
+            timer_registry: TimerRegistry::new(),
         }
     }
 
@@ -400,7 +399,8 @@ impl ApplyLoopState {
 
         let deadline = Instant::now() + self.max_batch_fill_duration;
         self.batch_flush_deadline = Some(deadline);
-        self.timer_registry.register(ApplyTimers::BatchFlush, deadline);
+        self.timer_registry
+            .register(ApplyTimers::BatchFlush, deadline);
     }
 
     /// Resets the batch flush deadline and cancels the timer.
@@ -417,9 +417,10 @@ impl ApplyLoopState {
     /// This method is called after a status update is sent (either due to timer expiry
     /// or keepalive response). The new deadline is set and the timer is re-registered.
     fn reset_status_update_deadline(&mut self) {
-        self.status_update_deadline = Instant::now() + STATUS_UPDATE_INTERVAL;
+        let deadline = Instant::now() + STATUS_UPDATE_INTERVAL;
+        self.status_update_deadline = Some(deadline);
         self.timer_registry
-            .register(ApplyTimers::StatusUpdate, self.status_update_deadline);
+            .register(ApplyTimers::StatusUpdate, deadline);
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -608,12 +609,14 @@ where
 
     // We initialize the shared state used throughout the loop to track progress.
     // The state includes a timer registry that persists across loop iterations.
-    // The initial status update timer is automatically registered in the constructor.
     let mut state = ApplyLoopState::new(
         first_status_update,
         Vec::with_capacity(config.batch.max_size),
         max_batch_fill_duration,
     );
+
+    // Register the initial status update timer.
+    state.reset_status_update_deadline();
 
     // Main event processing loop, continues until shutdown or fatal error
     loop {
@@ -666,8 +669,6 @@ where
                         )
                         .await?;
 
-                        // Timer is already removed from registry when it fires.
-                        // Deadline is reset in flush_batch.
                         if let Some(result) = action.to_result() {
                             return Ok(result);
                         }
@@ -677,7 +678,7 @@ where
 
                         events_stream
                             .as_mut()
-                            .send_status_update(state.write_lsn(), state.flush_lsn(), true, StatusUpdateType::Timeout)
+                            .send_status_update(state.write_lsn(), state.hypothetical_flush_lsn(), true, StatusUpdateType::Timeout)
                             .await?;
 
                         // Reset the deadline and re-register the timer for the next interval.
@@ -725,7 +726,7 @@ where
 
                 // Start the batch timer if we have events and no timer is running.
                 // The timer is registered inside start_batch_timer_if_needed.
-                // If the batch was flushed, reset_batch_deadline already cancelled the timer.
+                // If the batch was flushed, reset_batch_deadline already canceled the timer.
                 if !state.events_batch.is_empty() {
                     state.start_batch_timer_if_needed();
                 }
@@ -832,7 +833,6 @@ where
 /// - Timer expired
 ///
 /// After flushing, it resets the batch timer and performs synchronization.
-#[expect(clippy::too_many_arguments)]
 async fn flush_batch<D, T>(
     state: &mut ApplyLoopState,
     events_stream: Pin<&mut EventsStream>,
