@@ -14,7 +14,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::{debug, info, warn};
 
 use crate::concurrency::shutdown::ShutdownRx;
-use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
+use crate::concurrency::timer::TimerRegistry;
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
@@ -43,6 +43,17 @@ use crate::{bail, etl_error};
 /// TODO: we might want to fetch this value from Postgres itself to keep the values similar. Postgres
 ///  sends updates every (wal_sender_timeout / 2) seconds.
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Timer types used in the apply loop.
+///
+/// Each variant represents a different deadline that can trigger actions in the main loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ApplyTimers {
+    /// Timer for flushing the current batch of events to the destination.
+    BatchFlush,
+    /// Timer for sending a status update to Postgres.
+    StatusUpdate,
+}
 
 /// Result type for the apply loop execution.
 ///
@@ -330,6 +341,14 @@ struct ApplyLoopState {
     /// transaction boundary is found. If not found, the process will continue until it is killed via
     /// a `SIGKILL`.
     shutdown_discarded: bool,
+    /// The deadline by which the current batch must be flushed.
+    ///
+    /// This deadline is set when the first message of a batch is received. When the deadline
+    /// expires, the batch is unconditionally flushed regardless of size. The deadline is reset
+    /// (set to `None`) after each flush.
+    batch_flush_deadline: Option<Instant>,
+    /// The maximum duration to wait before flushing a batch.
+    max_batch_fill_duration: Duration,
 }
 
 impl ApplyLoopState {
@@ -337,7 +356,11 @@ impl ApplyLoopState {
     ///
     /// This constructor initializes the state tracking structure used throughout
     /// the apply loop to maintain replication progress and coordinate batching.
-    fn new(next_status_update: StatusUpdate, events_batch: Vec<Event>) -> Self {
+    fn new(
+        next_status_update: StatusUpdate,
+        events_batch: Vec<Event>,
+        max_batch_fill_duration: Duration,
+    ) -> Self {
         Self {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
@@ -347,7 +370,35 @@ impl ApplyLoopState {
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
+            batch_flush_deadline: None,
+            max_batch_fill_duration,
         }
+    }
+
+    /// Returns the batch flush deadline, setting it if not already set.
+    ///
+    /// This method is called when checking if a batch timer needs to be registered.
+    /// Returns `Some(deadline)` if the timer should be registered, `None` if already set.
+    fn get_or_set_batch_deadline(&mut self) -> Option<Instant> {
+        if self.batch_flush_deadline.is_none() {
+            let deadline = Instant::now() + self.max_batch_fill_duration;
+            self.batch_flush_deadline = Some(deadline);
+            Some(deadline)
+        } else {
+            None
+        }
+    }
+
+    /// Resets the batch flush deadline.
+    ///
+    /// This method is called after a batch is flushed to prepare for the next batch.
+    fn reset_batch_deadline(&mut self) {
+        self.batch_flush_deadline = None;
+    }
+
+    /// Resets the status update deadline to schedule the next update.
+    fn reset_status_update_deadline(&mut self) {
+        self.status_update_deadline = Instant::now() + STATUS_UPDATE_INTERVAL;
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -414,16 +465,6 @@ impl ApplyLoopState {
         }
     }
 
-    /// Records that a status update was sent and schedules the next refresh deadline.
-    fn mark_status_update_sent(&mut self) {
-        self.status_update_deadline = Instant::now() + STATUS_UPDATE_INTERVAL;
-    }
-
-    /// Returns true when the status update deadline has elapsed.
-    fn status_update_due(&self) -> bool {
-        Instant::now() >= self.status_update_deadline
-    }
-
     /// Returns true if the apply loop is in the middle of processing a transaction, false otherwise.
     ///
     /// This method checks whether a transaction is currently active by examining
@@ -433,17 +474,6 @@ impl ApplyLoopState {
         self.remote_final_lsn.is_some()
     }
 }
-
-/// An [`EventsStream`] which is wrapped inside a [`TimeoutStream`] for timing purposes.
-type TimeoutEventsStream =
-    TimeoutStream<EtlResult<ReplicationMessage<LogicalReplicationMessage>>, EventsStream>;
-
-/// Result type for reading from [`TimeoutEventsStream`].
-///
-/// Wraps either a replication message value or a timeout marker used to
-/// trigger batch flushes when no new events arrive within the deadline.
-type TimeoutEventsStreamResult =
-    TimeoutStreamResult<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>;
 
 /// Starts the main apply loop for processing replication events.
 ///
@@ -530,30 +560,36 @@ where
         .start_logical_replication(&config.publication_name, &slot_name, start_lsn)
         .await?;
 
-    // Maximum time to wait for additional events when batching (prevents indefinite delays)
+    // Maximum time to wait for additional events when batching (prevents indefinite delays).
     let max_batch_fill_duration = Duration::from_millis(config.batch.max_fill_ms);
 
-    // We wrap the logical replication stream with multiple streams:
-    // - EventsStream -> used to expose special status updates methods on the stream.
-    // - TimeoutStream -> adds a timeout mechanism that detects when no data has been going through
-    //   the stream for a while, and returns a special marker to signal that.
-    let logical_replication_stream = EventsStream::wrap(logical_replication_stream, pipeline_id);
-    let logical_replication_stream =
-        TimeoutStream::wrap(logical_replication_stream, max_batch_fill_duration);
+    // We wrap the logical replication stream with EventsStream to expose special status update
+    // methods on the stream.
+    let events_stream = EventsStream::wrap(logical_replication_stream, pipeline_id);
 
-    pin!(logical_replication_stream);
+    pin!(events_stream);
 
     // We initialize the shared state used throughout the loop to track progress.
     let mut state = ApplyLoopState::new(
         first_status_update,
         Vec::with_capacity(config.batch.max_size),
+        max_batch_fill_duration,
     );
 
-    // Main event processing loop - continues until shutdown or fatal error
+    // Create a timer registry that persists across loop iterations.
+    // Timers are registered once and continue counting down until they fire or are cancelled.
+    let mut timer_registry: TimerRegistry<ApplyTimers> = TimerRegistry::new();
+
+    // Register the initial status update timer.
+    timer_registry.register(ApplyTimers::StatusUpdate, state.status_update_deadline);
+
+    // Main event processing loop, continues until shutdown or fatal error
     loop {
         tokio::select! {
-            // Use biased selection to prioritize shutdown signals over other operations
-            // This ensures graceful shutdown takes precedence over event processing
+            // Use biased selection to enforce priority ordering:
+            // 1. Shutdown (highest priority)
+            // 2. Timer expiry (batch flush or status update)
+            // 3. Incoming events (lowest priority)
             biased;
 
             // PRIORITY 1: Handle shutdown signals.
@@ -577,10 +613,53 @@ where
                 state.shutdown_discarded = true;
             }
 
-            // PRIORITY 2: Process incoming replication messages from Postgres.
+            // PRIORITY 2: Handle timer expiry.
+            // Dispatch the appropriate action based on which timer fired first.
+            // The timer is automatically removed from the registry when it fires.
+            timer = timer_registry.wait_first() => {
+                match timer {
+                    ApplyTimers::BatchFlush => {
+                        debug!(
+                            "batch timer expired, flushing batch of {} events",
+                            state.events_batch.len()
+                        );
+
+                        let action = flush_batch(
+                            &mut state,
+                            events_stream.as_mut(),
+                            &destination,
+                            &hook,
+                            config.batch.max_size,
+                            pipeline_id,
+                        )
+                        .await?;
+
+                        // Timer is already removed from registry when it fires.
+                        // Deadline is reset in flush_batch.
+
+                        if let Some(result) = action.to_result() {
+                            return Ok(result);
+                        }
+                    }
+                    ApplyTimers::StatusUpdate => {
+                        debug!("status update timer expired, sending status update to Postgres");
+
+                        events_stream
+                            .as_mut()
+                            .send_status_update(state.write_lsn(), state.flush_lsn(), true, StatusUpdateType::Timeout)
+                            .await?;
+
+                        // Re-register the status update timer for the next interval.
+                        state.reset_status_update_deadline();
+                        timer_registry.register(ApplyTimers::StatusUpdate, state.status_update_deadline);
+                    }
+                }
+            }
+
+            // PRIORITY 3: Process incoming replication messages from Postgres.
             // This is the primary data flow, converts replication protocol messages
             // into typed events and accumulates them into batches for efficient processing.
-            message = logical_replication_stream.next() => {
+            message = events_stream.next() => {
                 let Some(message) = message else {
                     // The stream returned None, which should never happen for logical replication
                     // since it runs indefinitely. This indicates either the connection was closed
@@ -602,10 +681,10 @@ where
                     }
                 };
 
-                let action = handle_replication_message_with_timeout(
+                let action = handle_replication_message_and_flush(
                     &mut state,
-                    logical_replication_stream.as_mut(),
-                    message,
+                    events_stream.as_mut(),
+                    message?,
                     &schema_store,
                     &destination,
                     &hook,
@@ -614,20 +693,17 @@ where
                 )
                 .await?;
 
-                // After processing each message, we explicitly check for the status update deadline.
-                // This is necessary because message processing time is unbounded, so Postgres could
-                // timeout before we receive a primary keep-alive message in the stream.
-                //
-                // By performing this check here, we minimize the risk of missing the status update.
-                // However, in rare cases where a single message's processing exceeds the timeout,
-                // the error could still occur but this scenario is highly unlikely.
-                if state.status_update_due() {
-                    logical_replication_stream
-                        .as_mut()
-                        .get_inner()
-                        .send_status_update(state.write_lsn(), state.flush_lsn(), true, StatusUpdateType::Timeout)
-                        .await?;
-                    state.mark_status_update_sent();
+                // If we have events and no batch timer is running, start one.
+                // get_or_set_batch_deadline returns Some(deadline) only when setting a new deadline.
+                if !state.events_batch.is_empty() {
+                    if let Some(deadline) = state.get_or_set_batch_deadline() {
+                        timer_registry.register(ApplyTimers::BatchFlush, deadline);
+                    }
+                }
+
+                // If the batch was flushed (deadline reset), cancel any pending batch timer.
+                if state.batch_flush_deadline.is_none() {
+                    timer_registry.cancel(&ApplyTimers::BatchFlush);
                 }
 
                 if let Some(result) = action.to_result() {
@@ -638,19 +714,16 @@ where
     }
 }
 
-/// Handles a replication message or a timeout.
+/// Handles a replication message and flushes the batch if necessary.
 ///
-/// The rationale for having a value or timeout is to handle for the cases where a batch can't
-/// be filled within a reasonable time bound. In that case, the stream will timeout, signaling a
-/// force flush of the current events in the batch.
-///
-/// This function performs synchronization under the assumption that transaction boundary events are
-/// always processed and never skipped.
+/// This function processes a replication message, adds it to the batch if applicable,
+/// and flushes the batch when the size limit is reached or when `end_batch` is signaled.
+/// After processing each message, it processes syncing tables outside of transactions.
 #[expect(clippy::too_many_arguments)]
-async fn handle_replication_message_with_timeout<S, D, T>(
+async fn handle_replication_message_and_flush<S, D, T>(
     state: &mut ApplyLoopState,
-    mut events_stream: Pin<&mut TimeoutEventsStream>,
-    result: TimeoutEventsStreamResult,
+    mut events_stream: Pin<&mut EventsStream>,
+    message: ReplicationMessage<LogicalReplicationMessage>,
     schema_store: &S,
     destination: &D,
     hook: &T,
@@ -662,117 +735,119 @@ where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
-    let mut action = match result {
-        TimeoutStreamResult::Value(message) => {
-            let result = handle_replication_message(
+    let result = handle_replication_message(
+        state,
+        events_stream.as_mut(),
+        message,
+        schema_store,
+        hook,
+        pipeline_id,
+    )
+    .await?;
+
+    // If we have an event, and we want to keep it, we add it to the batch and update the last
+    // commit lsn (if any).
+    let should_include_event = matches!(result.end_batch, None | Some(EndBatch::Inclusive));
+    if let Some(event) = result.event
+        && should_include_event
+    {
+        state.events_batch.push(event);
+        state.update_last_commit_end_lsn(result.end_lsn);
+    }
+
+    // The action that we want to perform is by default the action attached to the message.
+    let mut action = result.action;
+
+    // Check if we should flush the batch due to size limit or end_batch signal.
+    let should_flush = state.events_batch.len() >= max_batch_size || result.end_batch.is_some();
+
+    if should_flush && !state.events_batch.is_empty() {
+        action = action.merge(
+            flush_batch(
                 state,
                 events_stream.as_mut(),
-                message?,
-                schema_store,
+                destination,
                 hook,
+                max_batch_size,
                 pipeline_id,
             )
-            .await?;
+            .await?,
+        );
+    }
 
-            // If we have an event, and we want to keep it, we add it to the batch and update the last
-            // commit lsn (if any).
-            let should_include_event = matches!(result.end_batch, None | Some(EndBatch::Inclusive));
-            if let Some(event) = result.event
-                && should_include_event
-            {
-                state.events_batch.push(event);
-                state.update_last_commit_end_lsn(result.end_lsn);
-            }
+    // If we have a caught table error, we want to mark the table as errored.
+    //
+    // Note that if we have a failure after marking a table as errored and events will
+    // be reprocessed, even the events before the failure will be skipped.
+    //
+    // Usually in the apply loop, errors are propagated upstream and handled based on if
+    // we are in a table sync worker or apply worker, however we have an edge case (for
+    // relation messages that change the schema) where we want to mark a table as errored
+    // manually, not propagating the error outside the loop, which is going to be handled
+    // differently based on the worker:
+    // - Apply worker -> will continue the loop skipping the table.
+    // - Table sync worker -> will stop the work (as if it had a normal uncaught error).
+    // Ideally we would get rid of this since it's an anomalous case which adds unnecessary
+    // complexity.
+    if let Some(error) = result.table_replication_error {
+        action = action.merge(hook.mark_table_errored(error).await?);
+    }
 
-            // The action that we want to perform is by default the action attached to the message.
-            let mut action = result.action;
-
-            // If we have elements in the batch, and we have reached the max batch size, or we are told
-            // to end the batch, we send it.
-            if state.events_batch.len() >= max_batch_size || result.end_batch.is_some() {
-                // We check if the batch has elements. It can be that a batch has no elements when
-                // the batch is ended prematurely, and it contains only skipped events. In this case,
-                // we don't produce any events to the destination but downstream code treats it as if
-                // those events are "persisted".
-                if !state.events_batch.is_empty() {
-                    send_batch(
-                        state,
-                        events_stream.as_mut(),
-                        destination,
-                        max_batch_size,
-                        pipeline_id,
-                    )
-                    .await?;
-                }
-
-                // If we have a caught table error, we want to mark the table as errored.
-                //
-                // Note that if we have a failure after marking a table as errored and events will
-                // be reprocessed, even the events before the failure will be skipped.
-                //
-                // Usually in the apply loop, errors are propagated upstream and handled based on if
-                // we are in a table sync worker or apply worker, however we have an edge case (for
-                // relation messages that change the schema) where we want to mark a table as errored
-                // manually, not propagating the error outside the loop, which is going to be handled
-                // differently based on the worker:
-                // - Apply worker -> will continue the loop skipping the table.
-                // - Table sync worker -> will stop the work (as if it had a normal uncaught error).
-                // Ideally we would get rid of this since it's an anomalous case which adds unnecessary
-                // complexity.
-                if let Some(error) = result.table_replication_error {
-                    action = action.merge(hook.mark_table_errored(error).await?);
-                }
-
-                // Once the batch is sent, we have the guarantee that all events up to this point have
-                // been durably persisted, so we do synchronization.
-                //
-                // If we were to synchronize for every event, we would risk data loss since we would notify
-                // Postgres about our progress of events processing without having those events durably
-                // persisted in the destination.
-                action = action.merge(try_synchronize_after_batch(state, hook).await?);
-            }
-
-            Ok(action)
-        }
-        TimeoutStreamResult::Timeout => {
-            debug!(
-                "the events stream timed out before reaching batch size of {}, ready to flush batch of {} events",
-                max_batch_size,
-                state.events_batch.len()
-            );
-
-            if !state.events_batch.is_empty() {
-                // We send the non-empty batch.
-                send_batch(
-                    state,
-                    events_stream.as_mut(),
-                    destination,
-                    max_batch_size,
-                    pipeline_id,
-                )
-                .await?;
-            }
-
-            // We perform synchronization to make sure that tables are synced.
-            try_synchronize_after_batch(state, hook).await
-        }
-    }?;
-
-    // After processing a message, we try to perform synchronization if we are outside a
-    // transaction.
+    // After processing each message, process syncing tables if we are outside a transaction.
     action = action.merge(try_synchronize_outside_transaction(state, hook).await?);
 
     Ok(action)
 }
 
+/// Flushes the current batch of events to the destination.
+///
+/// This is the unified flush method that handles all flush cases:
+/// - Batch size limit reached
+/// - `end_batch` signal received
+/// - Timer expired
+///
+/// After flushing, it resets the batch timer and performs synchronization.
+#[expect(clippy::too_many_arguments)]
+async fn flush_batch<D, T>(
+    state: &mut ApplyLoopState,
+    events_stream: Pin<&mut EventsStream>,
+    destination: &D,
+    hook: &T,
+    max_batch_size: usize,
+    pipeline_id: PipelineId,
+) -> EtlResult<ApplyLoopAction>
+where
+    D: Destination + Clone + Send + 'static,
+    T: ApplyLoopHook,
+{
+    send_batch_to_destination(
+        state,
+        events_stream,
+        destination,
+        max_batch_size,
+        pipeline_id,
+    )
+    .await?;
+
+    // Reset the batch deadline after flushing (the timer will be cancelled in the main loop).
+    state.reset_batch_deadline();
+
+    // Once the batch is sent, we have the guarantee that all events up to this point have
+    // been durably persisted, so we do synchronization.
+    //
+    // If we were to synchronize for every event, we would risk data loss since we would notify
+    // Postgres about our progress of events processing without having those events durably
+    // persisted in the destination.
+    try_synchronize_after_batch(state, hook).await
+}
+
 /// Sends the current batch of events to the destination and updates metrics.
 ///
 /// Swaps out the in-memory batch to avoid reallocations, persists the events
-/// via [`Destination::write_events`], records counters and timings, and resets
-/// the stream timeout to continue batching.
-async fn send_batch<D>(
+/// via [`Destination::write_events`], and records counters and timings.
+async fn send_batch_to_destination<D>(
     state: &mut ApplyLoopState,
-    events_stream: Pin<&mut TimeoutEventsStream>,
+    _events_stream: Pin<&mut EventsStream>,
     destination: &D,
     max_batch_size: usize,
     pipeline_id: PipelineId,
@@ -811,10 +886,6 @@ where
         DESTINATION_LABEL => D::name(),
     )
     .record(send_duration_seconds);
-
-    // We tell the stream to reset the timer when it is polled the next time, this way the deadline
-    // is restarted.
-    events_stream.mark_reset_timer();
 
     Ok(())
 }
@@ -913,7 +984,7 @@ where
 /// to maintain the replication connection and inform Postgres of progress.
 async fn handle_replication_message<S, T>(
     state: &mut ApplyLoopState,
-    events_stream: Pin<&mut TimeoutEventsStream>,
+    events_stream: Pin<&mut EventsStream>,
     message: ReplicationMessage<LogicalReplicationMessage>,
     schema_store: &S,
     hook: &T,
@@ -958,7 +1029,6 @@ where
             );
 
             events_stream
-                .get_inner()
                 .send_status_update(
                     state.write_lsn(),
                     state.flush_lsn(),
@@ -967,7 +1037,7 @@ where
                 )
                 .await?;
 
-            state.mark_status_update_sent();
+            state.reset_status_update_deadline();
 
             Ok(HandleMessageResult::no_event())
         }
