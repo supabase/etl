@@ -448,33 +448,49 @@ impl ApplyLoopState {
 
     /// Returns the LSN that should be reported as flushed to the PostgreSQL server.
     ///
-    /// This method determines the appropriate flush LSN based on the current replication state.
-    /// When no transaction is being processed and no events are pending, it advances the flush
-    /// LSN to match the write LSN, preventing WAL buildup on idle replicated tables. This is also
-    /// use for process syncing tables progress when there is no active transaction.
+    /// This method computes the correct *flush LSN* based on the current replication
+    /// state and the presence of in flight transactions and pending events.
     ///
-    /// # WAL Advancement for Idle Tables
+    /// When the replicator is idle, meaning no active transaction and no buffered
+    /// events, the flush LSN is advanced to the current write LSN. This prevents WAL
+    /// retention for replicated tables that are not receiving writes.
     ///
-    /// When there are no outstanding transactions to flush (i.e., we're not inside a transaction
-    /// and have no pending events), we advance flush_lsn to match write_lsn. This allows the
-    /// replication slot's restart_lsn to advance even when replicated tables are idle.
+    /// # Advancing the Flush LSN for Idle Replication
     ///
-    /// Without this advancement, consider a scenario where:
-    /// - Table A (replicated): idle, receiving no writes
-    /// - Table B (not replicated): actively receiving writes
+    /// If there are no outstanding changes to flush, we safely report `write_lsn`
+    /// as flushed. Doing so allows PostgreSQL to advance the replication slot’s
+    /// `restart_lsn`, even if replicated tables are idle.
     ///
-    /// The restart_lsn would remain stalled at Table A's position despite Table B generating
-    /// new WAL entries. This stall could cause:
-    /// 1. WAL accumulation on the primary
-    /// 2. Potential slot invalidation if WAL exceeds `max_slot_wal_keep_size`
+    /// Consider the following scenario:
+    /// - Table A is replicated but idle
+    /// - Table B is not replicated and receives continuous writes
     ///
-    /// By advancing flush_lsn, we signal that all replicated data up to write_lsn has been
-    /// processed, allowing PostgreSQL to safely advance restart_lsn and reclaim WAL.
+    /// Without advancing the flush LSN, the slot’s `restart_lsn` would remain pinned
+    /// at Table A’s last activity, despite WAL continuing to grow due to Table B.
+    /// This can lead to unnecessary WAL accumulation and, in extreme cases, slot
+    /// invalidation when `max_slot_wal_keep_size` is exceeded.
+    ///
+    /// By advancing the flush LSN when idle, we explicitly acknowledge that all
+    /// replicated changes up to `write_lsn` have been processed, allowing PostgreSQL
+    /// to safely reclaim WAL.
+    ///
+    /// # Use During Table Sync Outside Transactions
+    ///
+    /// This method is also used when syncing tables outside an explicit
+    /// transaction. In that case, events are driven by keepalive messages.
+    ///
+    /// When processing keepalives with no active transaction, we advance the flush
+    /// LSN to the value reported by the server. This ensures forward progress of the
+    /// slot while remaining consistent with what has actually been flushed.
+    ///
+    /// If a batch of events is non-empty, we do not advance the flush LSN to
+    /// `write_lsn`. Reporting a higher LSN than what has been flushed would
+    /// incorrectly mark WAL segments as processed even though they are not.
     ///
     /// # Returns
     ///
-    /// The LSN up to which all changes have been flushed and can be safely discarded by
-    /// the PostgreSQL server.
+    /// The highest LSN for which all replicated changes have been flushed and can be
+    /// safely discarded by PostgreSQL.
     fn flush_lsn(&self) -> PgLsn {
         if !self.handling_transaction() && self.events_batch.is_empty() {
             // Report write_lsn as flush_lsn when idle to prevent WAL buildup. Since the `send_status_update`
