@@ -680,7 +680,7 @@ where
                         }
                     }
                     ApplyTimers::StatusUpdate => {
-                        debug!("status update timer expired, sending status update to Postgres");
+                        debug!("status update timer expired, sending status update to postgres");
 
                         events_stream
                             .as_mut()
