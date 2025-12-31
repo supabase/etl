@@ -11,11 +11,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::log::warn;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::concurrency::shutdown::ShutdownRx;
-use crate::concurrency::signal::SignalRx;
 use crate::concurrency::stream::{TimeoutStream, TimeoutStreamResult};
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
@@ -41,6 +39,9 @@ use crate::{bail, etl_error};
 ///
 /// This value must be less than the `wal_sender_timeout` configured in the Postgres instance.
 /// If set too high, Postgres may timeout before the next status update is sent.
+///
+/// TODO: we might want to fetch this value from Postgres itself to keep the values similar. Postgres
+///  sends updates every (wal_sender_timeout / 2) seconds.
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Result type for the apply loop execution.
@@ -423,11 +424,6 @@ impl ApplyLoopState {
         Instant::now() >= self.status_update_deadline
     }
 
-    /// Returns the deadline for the next status update as a Tokio instant.
-    fn next_status_update_deadline(&self) -> tokio::time::Instant {
-        tokio::time::Instant::from_std(self.status_update_deadline)
-    }
-
     /// Returns true if the apply loop is in the middle of processing a transaction, false otherwise.
     ///
     /// This method checks whether a transaction is currently active by examining
@@ -492,7 +488,6 @@ pub async fn start_apply_loop<S, D, T>(
     destination: D,
     hook: T,
     mut shutdown_rx: ShutdownRx,
-    mut force_syncing_tables_rx: Option<SignalRx>,
 ) -> EtlResult<ApplyLoopResult>
 where
     S: SchemaStore + Clone + Send + 'static,
@@ -639,27 +634,6 @@ where
                     return Ok(result);
                 }
             }
-
-            // TODO: enable if needed.
-            // PRIORITY 3: Handle table synchronization coordination signals.
-            //
-            // Table sync workers signal when they complete initial data copying and are ready
-            // to transition to continuous replication mode. Guard the branch so it stays
-            // dormant if no signal receiver was provided.
-            //
-            // This mechanism is just a speedup to make transitions faster without having to wait on
-            // keep alive signals from Postgres.
-            // _ = async {
-            //     if let Some(rx) = force_syncing_tables_rx.as_mut() {
-            //         let _ = rx.changed().await;
-            //     }
-            // }, if force_syncing_tables_rx.is_some() => {
-            //     if let Some(action) = try_synchronize_outside_transaction(&mut state, &hook).await? {
-            //         if let Some(result) = action.to_result() {
-            //             return Ok(result);
-            //         }
-            //     }
-            // }
         }
     }
 }
@@ -786,9 +760,7 @@ where
 
     // After processing a message, we try to perform synchronization if we are outside a
     // transaction.
-    // TODO: figure out how we can reduce the need for synchronization calls. Maybe it's enough
-    //  to track the last synchronized lsn and avoid issuing one, but that is not ideal.
-    action.merge(try_synchronize_outside_transaction(state, hook).await?);
+    action = action.merge(try_synchronize_outside_transaction(state, hook).await?);
 
     Ok(action)
 }
@@ -867,7 +839,7 @@ where
         return Ok(ApplyLoopAction::Continue);
     }
 
-    debug!("processing syncing tables when no transaction is in progress");
+    info!("processing syncing tables when no transaction is in progress");
 
     // When doing the synchronization, we use the `flush_lsn` which will return `write_lsn` in case
     // we are not in a transaction. This is done for a similar reason as the status update. If we have

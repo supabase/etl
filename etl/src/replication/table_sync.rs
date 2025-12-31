@@ -7,11 +7,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::TimeoutBatchStream;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -65,13 +64,12 @@ pub async fn start_table_sync<S, D>(
     store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
-    force_syncing_tables_tx: SignalTx,
 ) -> EtlResult<TableSyncResult>
 where
     S: StateStore + SchemaStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
 {
-    info!("starting table sync for table {}", table_id);
+    info!("starting initial table sync for table {}", table_id);
 
     // We are safe to keep the lock only for this section, since we know that the state will be changed by the
     // apply worker only if `SyncWait` is set, which is not the case if we arrive here, so we are
@@ -87,7 +85,7 @@ where
             TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
         ) {
             info!(
-                "table {} sync not required, already in phase '{:?}'",
+                "initial table sync not required for table {}, already in phase '{:?}'",
                 table_id, phase_type
             );
 
@@ -103,7 +101,7 @@ where
                 | TableReplicationPhaseType::FinishedCopy
         ) {
             warn!(
-                "invalid replication phase '{:?}' for table {}, cannot perform table sync",
+                "invalid replication phase '{:?}' for table {}, cannot perform initial table sync",
                 phase_type, table_id
             );
 
@@ -165,7 +163,10 @@ where
             destination.truncate_table(table_id).await?;
 
             // We are ready to start copying table data, and we update the state accordingly.
-            info!("starting data copy for table {}", table_id);
+            info!(
+                "starting data copy for table {} during initial table sync",
+                table_id
+            );
             {
                 let mut inner = table_sync_worker_state.lock().await;
                 inner
@@ -324,7 +325,7 @@ where
         TableReplicationPhaseType::FinishedCopy => {
             let slot = replication_client.get_slot(&slot_name).await?;
             info!(
-                "resuming table sync for table {} from lsn {}",
+                "resuming initial table sync for table {} from lsn {}",
                 table_id, slot.confirmed_flush_lsn
             );
 
@@ -340,15 +341,6 @@ where
         inner
             .set_and_store(TableReplicationPhase::SyncWait, &store)
             .await?;
-
-        // We notify the main apply worker to force syncing tables. In this way, the `Catchup` phase
-        // will be started even if no events are flowing in the main apply loop.
-        if force_syncing_tables_tx.send(()).is_err() {
-            error!(
-                "error while forcing syncing tables during '{:?}' phase of the table sync worker, the apply worker was likely shutdown",
-                TableReplicationPhaseType::SyncWait
-            );
-        }
     }
 
     // We also wait to be signaled to catch up with the main apply worker up to a specific lsn.
@@ -367,7 +359,10 @@ where
         return Ok(TableSyncResult::SyncStopped);
     }
 
-    info!("table sync for table {} completed", table_id);
+    info!(
+        "initial table sync for table {} completed, moving onto streaming",
+        table_id
+    );
 
     Ok(TableSyncResult::SyncCompleted { start_lsn })
 }

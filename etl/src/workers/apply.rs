@@ -11,8 +11,6 @@ use tracing::{Instrument, debug, error, info};
 
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::signal::SignalTx;
-use crate::concurrency::signal::create_signal;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
@@ -139,9 +137,6 @@ where
             let start_lsn =
                 get_start_lsn(self.pipeline_id, &self.replication_client, &self.store).await?;
 
-            // We create the signal used to notify the apply worker that it should force syncing tables.
-            let (force_syncing_tables_tx, force_syncing_tables_rx) = create_signal();
-
             start_apply_loop(
                 self.pipeline_id,
                 start_lsn,
@@ -156,11 +151,9 @@ where
                     self.store,
                     self.destination,
                     self.shutdown_rx.clone(),
-                    force_syncing_tables_tx,
                     self.table_sync_worker_permits.clone(),
                 ),
                 self.shutdown_rx,
-                Some(force_syncing_tables_rx),
             )
             .await?;
 
@@ -273,8 +266,6 @@ struct ApplyWorkerHook<S, D> {
     destination: D,
     /// Shutdown signal receiver for graceful termination.
     shutdown_rx: ShutdownRx,
-    /// Signal transmitter for triggering table sync operations.
-    force_syncing_tables_tx: SignalTx,
     /// Semaphore controlling maximum concurrent table sync workers.
     table_sync_worker_permits: Arc<Semaphore>,
 }
@@ -284,7 +275,6 @@ impl<S, D> ApplyWorkerHook<S, D> {
     ///
     /// This constructor initializes the hook with all necessary components
     /// for coordinating between the apply loop and table sync workers.
-    #[expect(clippy::too_many_arguments)]
     fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
@@ -292,7 +282,6 @@ impl<S, D> ApplyWorkerHook<S, D> {
         store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
-        force_syncing_tables_tx: SignalTx,
         table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
         Self {
@@ -302,7 +291,6 @@ impl<S, D> ApplyWorkerHook<S, D> {
             store,
             destination,
             shutdown_rx,
-            force_syncing_tables_tx,
             table_sync_worker_permits,
         }
     }
@@ -329,7 +317,6 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
-            self.force_syncing_tables_tx.clone(),
             self.table_sync_worker_permits.clone(),
         )
     }
@@ -498,6 +485,7 @@ where
         current_lsn: PgLsn,
         update_state: bool,
     ) -> EtlResult<ApplyLoopAction> {
+        // TODO: this is a very hot path and we have to optimize it as much as possible.
         let active_table_replication_states =
             get_active_table_replication_states(&self.store).await?;
         debug!(

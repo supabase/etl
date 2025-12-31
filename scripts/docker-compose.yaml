@@ -19,12 +19,17 @@ services:
       - "${POSTGRES_PORT:-5430}:5432"
     volumes:
       - ${POSTGRES_DATA_VOLUME:-postgres_data}:/var/lib/postgresql/data
+    # These parameters are configured for local testing only.
+    # In production, use PostgreSQL defaults or your own tuned values.
+    # `wal_sender_timeout/2` is the keepalive timeout for streaming replication, we set it to 10s to make tests
+    # run fast but also simulate a very low timeout and see how the system behaves.
     command: >
       postgres
       -N 1000
       -c wal_level=logical
       -c max_wal_senders=100
       -c max_replication_slots=100
+      -c wal_sender_timeout=10s
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]

@@ -12,7 +12,6 @@ use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info, warn};
 
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::signal::SignalTx;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::replication::apply::{
@@ -367,7 +366,6 @@ pub struct TableSyncWorker<S, D> {
     store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
-    force_syncing_tables_tx: SignalTx,
     run_permit: Arc<Semaphore>,
 }
 
@@ -386,7 +384,6 @@ impl<S, D> TableSyncWorker<S, D> {
         store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
-        force_syncing_tables_tx: SignalTx,
         run_permit: Arc<Semaphore>,
     ) -> Self {
         Self {
@@ -397,7 +394,6 @@ impl<S, D> TableSyncWorker<S, D> {
             store,
             destination,
             shutdown_rx,
-            force_syncing_tables_tx,
             run_permit,
         }
     }
@@ -433,7 +429,6 @@ where
         let pipeline_id = self.pipeline_id;
         let destination = self.destination.clone();
         let shutdown_rx = self.shutdown_rx.clone();
-        let force_syncing_tables_tx = self.force_syncing_tables_tx.clone();
         let run_permit = self.run_permit.clone();
 
         loop {
@@ -446,7 +441,6 @@ where
                 store: store.clone(),
                 destination: destination.clone(),
                 shutdown_rx: shutdown_rx.clone(),
-                force_syncing_tables_tx: force_syncing_tables_tx.clone(),
                 run_permit: run_permit.clone(),
             };
 
@@ -624,7 +618,6 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
-            self.force_syncing_tables_tx,
         )
         .await;
 
@@ -648,7 +641,6 @@ where
             self.destination,
             TableSyncWorkerHook::new(self.table_id, state, self.store),
             self.shutdown_rx,
-            None,
         )
         .await?;
 
@@ -860,8 +852,8 @@ where
         update_state: bool,
     ) -> EtlResult<ApplyLoopAction> {
         info!(
-            "processing syncing tables for table sync worker with lsn {}",
-            current_lsn
+            "processing syncing tables for table sync worker of table {} with lsn {}",
+            self.table_id, current_lsn
         );
 
         self.try_advance_phase(current_lsn, update_state).await
