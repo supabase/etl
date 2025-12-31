@@ -10,12 +10,26 @@ use crate::types::{Event, TableRow};
 /// The trait supports both bulk operations for initial table synchronization and streaming
 /// operations for real-time replication events.
 ///
+/// # Idempotency
+///
 /// Implementations should ensure idempotent operations where possible, as the ETL system
 /// may retry failed operations. The destination should handle concurrent writes safely
 /// when multiple table sync workers are active.
 pub trait Destination {
     /// Returns the name of the destination.
     fn name() -> &'static str;
+
+    /// Validates that the destination is properly configured and accessible.
+    ///
+    /// This method should verify:
+    /// - Credentials are valid and authentication succeeds
+    /// - The destination service is reachable
+    /// - Required resources (datasets, namespaces, etc.) exist
+    /// - Any destination-specific prerequisites are met
+    ///
+    /// Returns `Ok(())` if validation passes, or an error with
+    /// [`ErrorKind::ValidationError`](crate::error::ErrorKind::ValidationError) if validation fails.
+    fn validate(&self) -> impl Future<Output = EtlResult<()>> + Send;
 
     /// Truncates all data in the specified table.
     ///

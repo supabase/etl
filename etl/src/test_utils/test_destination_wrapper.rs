@@ -158,6 +158,14 @@ where
         "wrapper"
     }
 
+    async fn validate(&self) -> EtlResult<()> {
+        let destination = {
+            let inner = self.inner.read().await;
+            inner.wrapped_destination.clone()
+        };
+        destination.validate().await
+    }
+
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;

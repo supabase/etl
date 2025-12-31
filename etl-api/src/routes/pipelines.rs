@@ -28,9 +28,9 @@ use crate::k8s::core::{
     delete_pipeline_resources_in_k8s,
 };
 use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache, TrustedRootCertsError};
-use crate::routes::{
-    ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
-};
+use crate::db::connect_to_source_database_with_defaults;
+use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
+use crate::validation::{PipelineValidationError, validate_pipeline_prerequisites};
 use crate::utils::parse_docker_image_tag;
 use crate::{config::ApiConfig, k8s::PodStatus};
 
@@ -113,6 +113,9 @@ pub enum PipelineError {
 
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
+
+    #[error(transparent)]
+    Validation(#[from] PipelineValidationError),
 }
 
 impl From<PipelinesDbError> for PipelineError {
@@ -169,9 +172,9 @@ impl ResponseError for PipelineError {
             | PipelineError::ImageIdNotDefault(_)
             | PipelineError::DestinationNotFound(_)
             | PipelineError::SourceNotFound(_) => StatusCode::NOT_FOUND,
-            PipelineError::TenantId(_) | PipelineError::NotRollbackable(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            PipelineError::TenantId(_)
+            | PipelineError::NotRollbackable(_)
+            | PipelineError::Validation(_) => StatusCode::BAD_REQUEST,
             PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             PipelineError::PipelineLimitReached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         }
@@ -499,6 +502,9 @@ pub struct GetPipelineVersionResponse {
 pub async fn create_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    encryption_key: Data<EncryptionKey>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     pipeline: Json<CreatePipelineRequest>,
     feature_flags_client: Option<Data<configcat::Client>>,
 ) -> Result<impl Responder, PipelineError> {
@@ -506,9 +512,16 @@ pub async fn create_pipeline(
     let pipeline = pipeline.into_inner();
 
     let mut txn = pool.begin().await?;
-    if !source_exists(txn.deref_mut(), tenant_id, pipeline.source_id).await? {
-        return Err(PipelineError::SourceNotFound(pipeline.source_id));
-    }
+
+    // Read source to get connection config for validation
+    let source = db::sources::read_source(
+        txn.deref_mut(),
+        tenant_id,
+        pipeline.source_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
     if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
         return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
@@ -527,6 +540,20 @@ pub async fn create_pipeline(
             limit: max_pipelines,
         });
     }
+
+    // Validate pipeline prerequisites before creating
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
+    let source_config = source.config.into_connection_config(tls_config);
+    // Default max_table_sync_workers to 4 if not specified (matches StoredPipelineConfig default)
+    let max_table_sync_workers = pipeline.config.max_table_sync_workers.unwrap_or(4);
+    validate_pipeline_prerequisites(
+        &source_config,
+        &pipeline.config.publication_name,
+        max_table_sync_workers,
+    )
+    .await?;
 
     let image = db::images::read_default_image(txn.deref_mut())
         .await?

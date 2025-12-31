@@ -15,7 +15,9 @@ path = "src/main.rs"
 name = "etl-api"
 
 [dependencies]
+etl = { workspace = true }
 etl-config = { workspace = true, features = ["utoipa"] }
+etl-destinations = { workspace = true, features = ["bigquery", "iceberg"] }
 etl-postgres = { workspace = true, features = ["replication"] }
 etl-telemetry = { workspace = true }
 

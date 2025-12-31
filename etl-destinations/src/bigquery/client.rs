@@ -310,6 +310,24 @@ impl BigQueryClient {
         Ok(exists)
     }
 
+    /// Checks whether a dataset exists and is accessible.
+    ///
+    /// Returns `true` if the dataset exists and the client has access, `false` if the
+    /// dataset does not exist. Returns an error for authentication or connectivity failures.
+    pub async fn dataset_exists(&self, dataset_id: &BigQueryDatasetId) -> EtlResult<bool> {
+        let result = self
+            .client
+            .dataset()
+            .get(&self.project_id, dataset_id)
+            .await;
+
+        match result {
+            Ok(_) => Ok(true),
+            Err(BQError::ResponseError { error }) if error.error.code == 404 => Ok(false),
+            Err(e) => Err(bq_error_to_etl_error(e)),
+        }
+    }
+
     /// Streams table batches to BigQuery using the concurrent Storage Write API.
     ///
     /// Accepts pre-constructed TableBatch objects and processes them concurrently with

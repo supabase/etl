@@ -788,6 +788,28 @@ where
         "bigquery"
     }
 
+    async fn validate(&self) -> EtlResult<()> {
+        match self.client.dataset_exists(&self.dataset_id).await {
+            Ok(true) => Ok(()),
+            Ok(false) => bail!(
+                ErrorKind::ValidationError,
+                "BigQuery dataset validation failed",
+                format!(
+                    "Dataset '{}' does not exist or is not accessible",
+                    self.dataset_id
+                )
+            ),
+            Err(e) => bail!(
+                ErrorKind::ValidationError,
+                "BigQuery connection validation failed",
+                format!(
+                    "Failed to connect to BigQuery: {}",
+                    e.detail().unwrap_or(&e.to_string())
+                )
+            ),
+        }
+    }
+
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         self.process_truncate_for_table_ids(iter::once(table_id), false)
             .await

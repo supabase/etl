@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 use crate::config::ApiConfig;
 use crate::db::publications::PublicationsDbError;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
-use crate::routes::connect_to_source_database_with_defaults;
+use crate::db::connect_to_source_database_with_defaults;
 use crate::{
     configs::encryption::EncryptionKey,
     db::{self, publications::Publication, sources::SourcesDbError, tables::Table},

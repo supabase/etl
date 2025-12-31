@@ -11,6 +11,7 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use super::{ErrorMessage, TenantIdError, destinations::DestinationError, extract_tenant_id};
+use crate::validation::{PipelineValidationError, validate_pipeline_prerequisites};
 use crate::config::ApiConfig;
 use crate::configs::destination::FullApiDestinationConfig;
 use crate::configs::encryption::EncryptionKey;
@@ -75,6 +76,9 @@ enum DestinationPipelineError {
 
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
+
+    #[error(transparent)]
+    Validation(#[from] PipelineValidationError),
 }
 
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
@@ -124,9 +128,8 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::SourceNotFound(_)
             | DestinationPipelineError::DestinationNotFound(_)
             | DestinationPipelineError::PipelineNotFound(_)
-            | DestinationPipelineError::PipelineDestinationMismatch(_, _) => {
-                StatusCode::BAD_REQUEST
-            }
+            | DestinationPipelineError::PipelineDestinationMismatch(_, _)
+            | DestinationPipelineError::Validation(_) => StatusCode::BAD_REQUEST,
             DestinationPipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             DestinationPipelineError::PipelineLimitReached { .. } => {
                 StatusCode::UNPROCESSABLE_ENTITY
@@ -199,6 +202,8 @@ pub struct UpdateDestinationPipelineRequest {
 pub async fn create_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
     feature_flags_client: Option<Data<configcat::Client>>,
@@ -208,17 +213,17 @@ pub async fn create_destination_and_pipeline(
 
     let mut txn = pool.begin().await?;
 
-    if !source_exists(
+    // Read source to get connection config for validation
+    let source = db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
+        &encryption_key,
     )
     .await?
-    {
-        return Err(DestinationPipelineError::SourceNotFound(
-            destination_and_pipeline.source_id,
-        ));
-    }
+    .ok_or(DestinationPipelineError::SourceNotFound(
+        destination_and_pipeline.source_id,
+    ))?;
 
     let max_pipelines = get_max_pipelines_per_tenant(
         feature_flags_client.as_ref(),
@@ -232,6 +237,25 @@ pub async fn create_destination_and_pipeline(
             limit: max_pipelines,
         });
     }
+
+    // Validate pipeline prerequisites before creating
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
+    let source_config = source.config.into_connection_config(tls_config);
+
+    // Default max_table_sync_workers to 4 if not specified (matches StoredPipelineConfig default)
+    let max_table_sync_workers = destination_and_pipeline
+        .pipeline_config
+        .max_table_sync_workers
+        .unwrap_or(4);
+
+    validate_pipeline_prerequisites(
+        &source_config,
+        &destination_and_pipeline.pipeline_config.publication_name,
+        max_table_sync_workers,
+    )
+    .await?;
 
     let image = db::images::read_default_image(&**pool)
         .await?
