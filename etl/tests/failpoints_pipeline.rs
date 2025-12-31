@@ -188,7 +188,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -251,7 +251,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 

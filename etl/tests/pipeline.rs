@@ -49,7 +49,7 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     let sync_done_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -58,16 +58,6 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     sync_done_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
-
-    // Verify that the table is in SyncDone state (not Init).
-    let table_states = store.get_table_replication_states().await;
-    assert_eq!(
-        table_states
-            .get(&database_schema.users_schema().id)
-            .unwrap()
-            .as_type(),
-        TableReplicationPhaseType::SyncDone
-    );
 
     // Verify that the replication slot for the apply worker exists.
     let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
@@ -149,13 +139,13 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -269,12 +259,12 @@ async fn publication_changes_are_correctly_handled() {
         destination.clone(),
     );
 
-    // Wait for initial copy completion (SyncDone) for both tables.
+    // Wait for initial copy completion (Ready) for both tables.
     let table_1_done = store
-        .notify_on_table_state_type(table_1_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_1_id, TableReplicationPhaseType::Ready)
         .await;
     let table_2_done = store
-        .notify_on_table_state_type(table_2_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_2_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -330,7 +320,7 @@ async fn publication_changes_are_correctly_handled() {
 
     // Wait for the table_3 to be done.
     let table_3_done = store
-        .notify_on_table_state_type(table_3_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_3_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -423,7 +413,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     );
 
     let sync_done = store
-        .notify_on_table_state_type(table_1_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_1_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -463,7 +453,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     );
 
     let sync_done = store
-        .notify_on_table_state_type(table_2_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_2_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -514,13 +504,13 @@ async fn table_copy_replicates_existing_data() {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -601,13 +591,13 @@ async fn table_copy_and_sync_streams_new_data() {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -765,7 +755,7 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -850,7 +840,7 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -917,7 +907,7 @@ async fn table_processing_with_schema_change_errors_table() {
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -1124,7 +1114,7 @@ async fn pipeline_respects_column_level_publication() {
 
     // Wait for the table to finish syncing.
     let sync_done_notify = state_store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -1224,7 +1214,7 @@ async fn empty_tables_are_created_at_destination() {
 
     // Wait for the table to be synced.
     let table_synced_notify = state_store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     table_synced_notify.notified().await;
