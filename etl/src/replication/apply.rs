@@ -682,6 +682,22 @@ where
                     ApplyTimers::StatusUpdate => {
                         debug!("status update timer expired, sending status update to postgres");
 
+                        // One important detail about the status update timer is that it exists primarily to
+                        // reduce the risk of Postgres closing the replication connection due to missing feedback.
+                        //
+                        // Postgres may emit keep-alive messages while we are still processing earlier messages,
+                        // and that processing can take an unbounded amount of time. By maintaining our own timer,
+                        // we can periodically check, between messages, whether a status update should be sent
+                        // back to Postgres.
+                        //
+                        // However, this mechanism has a fundamental limitation. If a single replication message
+                        // triggers a batch write, the batch flush itself may take an arbitrarily long time.
+                        // During that period, we cannot observe timer expiration, so the connection may still
+                        // appear idle from Postgres’ perspective.
+                        //
+                        // A more robust, future-proof approach would be to support out-of-band status updates,
+                        // allowing us to periodically send feedback with the same LSN purely to keep the
+                        // connection alive, independent of message processing or batch flushing.
                         events_stream
                             .as_mut()
                             .send_status_update(state.write_lsn(), state.hypothetical_flush_lsn(), true, StatusUpdateType::Timeout)
