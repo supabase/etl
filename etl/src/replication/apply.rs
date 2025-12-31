@@ -273,7 +273,7 @@ struct HandleMessageResult {
     /// The action that this event should have on the loop.
     ///
     /// Note that this action might be overridden by operations that are happening when a batch is flushed
-    ///and that can also return loop actions. Those actions will be merged with this action using the
+    /// and that can also return loop actions. Those actions will be merged with this action using the
     /// [`ApplyLoopAction::merge`] method.
     action: ApplyLoopAction,
 }
@@ -347,8 +347,13 @@ struct ApplyLoopState {
     /// expires, the batch is unconditionally flushed regardless of size. The deadline is reset
     /// (set to `None`) after each flush.
     batch_flush_deadline: Option<Instant>,
-    /// The maximum duration to wait before flushing a batch.
+    /// The maximum duration to wait before forcibly flushing a batch.
     max_batch_fill_duration: Duration,
+    /// Timer registry for managing batch flush and status update timers.
+    ///
+    /// This registry persists across loop iterations and handles automatic timer
+    /// replacement when registering with the same identifier.
+    timer_registry: TimerRegistry<ApplyTimers>,
 }
 
 impl ApplyLoopState {
@@ -356,49 +361,65 @@ impl ApplyLoopState {
     ///
     /// This constructor initializes the state tracking structure used throughout
     /// the apply loop to maintain replication progress and coordinate batching.
+    /// The status update timer is automatically registered upon creation.
     fn new(
         next_status_update: StatusUpdate,
         events_batch: Vec<Event>,
         max_batch_fill_duration: Duration,
     ) -> Self {
+        let status_update_deadline = Instant::now() + STATUS_UPDATE_INTERVAL;
+
+        // Initialize the timer registry and register the initial status update timer.
+        let mut timer_registry = TimerRegistry::new();
+        timer_registry.register(ApplyTimers::StatusUpdate, status_update_deadline);
+
         Self {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
             next_status_update,
             events_batch,
-            status_update_deadline: Instant::now() + STATUS_UPDATE_INTERVAL,
+            status_update_deadline,
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
             batch_flush_deadline: None,
             max_batch_fill_duration,
+            timer_registry,
         }
     }
 
-    /// Returns the batch flush deadline, setting it if not already set.
+    /// Starts the batch flush timer if not already running.
     ///
-    /// This method is called when checking if a batch timer needs to be registered.
-    /// Returns `Some(deadline)` if the timer should be registered, `None` if already set.
-    fn get_or_set_batch_deadline(&mut self) -> Option<Instant> {
-        if self.batch_flush_deadline.is_none() {
-            let deadline = Instant::now() + self.max_batch_fill_duration;
-            self.batch_flush_deadline = Some(deadline);
-            Some(deadline)
-        } else {
-            None
+    /// This method is called when the first event of a batch is received. If a timer
+    /// is already running, this is a no-op. The timer is registered with the registry
+    /// and will fire after `max_batch_fill_duration`.
+    fn start_batch_timer_if_needed(&mut self) {
+        if self.batch_flush_deadline.is_some() {
+            return;
         }
+
+        let deadline = Instant::now() + self.max_batch_fill_duration;
+        self.batch_flush_deadline = Some(deadline);
+        self.timer_registry.register(ApplyTimers::BatchFlush, deadline);
     }
 
-    /// Resets the batch flush deadline.
+    /// Resets the batch flush deadline and cancels the timer.
     ///
-    /// This method is called after a batch is flushed to prepare for the next batch.
+    /// This method is called after a batch is flushed. The timer is cancelled from
+    /// the registry and will be re-started when the next event arrives.
     fn reset_batch_deadline(&mut self) {
         self.batch_flush_deadline = None;
+        self.timer_registry.cancel(&ApplyTimers::BatchFlush);
     }
 
-    /// Resets the status update deadline to schedule the next update.
+    /// Resets the status update deadline and re-registers the timer.
+    ///
+    /// This method is called after a status update is sent (either due to timer expiry
+    /// or keepalive response). The new deadline is set and the timer is re-registered.
     fn reset_status_update_deadline(&mut self) {
         self.status_update_deadline = Instant::now() + STATUS_UPDATE_INTERVAL;
+        self.timer_registry
+            .register(ApplyTimers::StatusUpdate, self.status_update_deadline);
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -570,18 +591,13 @@ where
     pin!(events_stream);
 
     // We initialize the shared state used throughout the loop to track progress.
+    // The state includes a timer registry that persists across loop iterations.
+    // The initial status update timer is automatically registered in the constructor.
     let mut state = ApplyLoopState::new(
         first_status_update,
         Vec::with_capacity(config.batch.max_size),
         max_batch_fill_duration,
     );
-
-    // Create a timer registry that persists across loop iterations.
-    // Timers are registered once and continue counting down until they fire or are cancelled.
-    let mut timer_registry: TimerRegistry<ApplyTimers> = TimerRegistry::new();
-
-    // Register the initial status update timer.
-    timer_registry.register(ApplyTimers::StatusUpdate, state.status_update_deadline);
 
     // Main event processing loop, continues until shutdown or fatal error
     loop {
@@ -616,7 +632,7 @@ where
             // PRIORITY 2: Handle timer expiry.
             // Dispatch the appropriate action based on which timer fired first.
             // The timer is automatically removed from the registry when it fires.
-            timer = timer_registry.wait_first() => {
+            timer = state.timer_registry.wait_first() => {
                 match timer {
                     ApplyTimers::BatchFlush => {
                         debug!(
@@ -636,7 +652,6 @@ where
 
                         // Timer is already removed from registry when it fires.
                         // Deadline is reset in flush_batch.
-
                         if let Some(result) = action.to_result() {
                             return Ok(result);
                         }
@@ -649,9 +664,8 @@ where
                             .send_status_update(state.write_lsn(), state.flush_lsn(), true, StatusUpdateType::Timeout)
                             .await?;
 
-                        // Re-register the status update timer for the next interval.
+                        // Reset the deadline and re-register the timer for the next interval.
                         state.reset_status_update_deadline();
-                        timer_registry.register(ApplyTimers::StatusUpdate, state.status_update_deadline);
                     }
                 }
             }
@@ -693,17 +707,11 @@ where
                 )
                 .await?;
 
-                // If we have events and no batch timer is running, start one.
-                // get_or_set_batch_deadline returns Some(deadline) only when setting a new deadline.
+                // Start the batch timer if we have events and no timer is running.
+                // The timer is registered inside start_batch_timer_if_needed.
+                // If the batch was flushed, reset_batch_deadline already cancelled the timer.
                 if !state.events_batch.is_empty() {
-                    if let Some(deadline) = state.get_or_set_batch_deadline() {
-                        timer_registry.register(ApplyTimers::BatchFlush, deadline);
-                    }
-                }
-
-                // If the batch was flushed (deadline reset), cancel any pending batch timer.
-                if state.batch_flush_deadline.is_none() {
-                    timer_registry.cancel(&ApplyTimers::BatchFlush);
+                    state.start_batch_timer_if_needed();
                 }
 
                 if let Some(result) = action.to_result() {
@@ -758,21 +766,20 @@ where
     // The action that we want to perform is by default the action attached to the message.
     let mut action = result.action;
 
-    // Check if we should flush the batch due to size limit or end_batch signal.
+    // Check if we should flush the batch due to the size limit or end_batch signal.
     let should_flush = state.events_batch.len() >= max_batch_size || result.end_batch.is_some();
-
     if should_flush && !state.events_batch.is_empty() {
-        action = action.merge(
-            flush_batch(
-                state,
-                events_stream.as_mut(),
-                destination,
-                hook,
-                max_batch_size,
-                pipeline_id,
-            )
-            .await?,
-        );
+        let flush_batch_action = flush_batch(
+            state,
+            events_stream.as_mut(),
+            destination,
+            hook,
+            max_batch_size,
+            pipeline_id,
+        )
+        .await?;
+
+        action = action.merge(flush_batch_action);
     }
 
     // If we have a caught table error, we want to mark the table as errored.
@@ -790,11 +797,13 @@ where
     // Ideally we would get rid of this since it's an anomalous case which adds unnecessary
     // complexity.
     if let Some(error) = result.table_replication_error {
-        action = action.merge(hook.mark_table_errored(error).await?);
+        let mark_table_errored_action = hook.mark_table_errored(error).await?;
+        action = action.merge(mark_table_errored_action);
     }
 
     // After processing each message, process syncing tables if we are outside a transaction.
-    action = action.merge(try_synchronize_outside_transaction(state, hook).await?);
+    let synchronize_action = try_synchronize_outside_transaction(state, hook).await?;
+    action = action.merge(synchronize_action);
 
     Ok(action)
 }

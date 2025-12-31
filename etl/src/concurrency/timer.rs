@@ -9,7 +9,7 @@ use tokio::time::sleep_until;
 /// This registry allows registering timers with associated identifiers. When a timer with an
 /// existing identifier is registered, the old timer is cancelled and replaced with the new one.
 ///
-/// The registry is designed to be reused across loop iterations - timers persist and
+/// The registry is designed to be reused across loop iterations, timers persist and
 /// continue counting down between calls to `wait_first`.
 #[derive(Debug)]
 pub struct TimerRegistry<T> {
@@ -39,21 +39,6 @@ impl<T: Eq + Hash + Clone> TimerRegistry<T> {
     /// Returns `true` if a timer was cancelled, `false` if no timer with that identifier existed.
     pub fn cancel(&mut self, id: &T) -> bool {
         self.deadlines.remove(id).is_some()
-    }
-
-    /// Returns true if no timers are registered.
-    pub fn is_empty(&self) -> bool {
-        self.deadlines.is_empty()
-    }
-
-    /// Returns true if a timer with the given identifier is registered.
-    pub fn has_timer(&self, id: &T) -> bool {
-        self.deadlines.contains_key(id)
-    }
-
-    /// Returns the number of registered timers.
-    pub fn len(&self) -> usize {
-        self.deadlines.len()
     }
 }
 
@@ -115,7 +100,7 @@ mod tests {
     async fn test_empty_registry_does_not_complete() {
         let mut registry: TimerRegistry<&str> = TimerRegistry::new();
 
-        // wait_first on empty registry should not complete
+        // wait_first on empty registry should not complete.
         let result = tokio::time::timeout(Duration::from_millis(50), registry.wait_first()).await;
         assert!(
             result.is_err(),
@@ -130,7 +115,7 @@ mod tests {
 
         let result = registry.wait_first().await;
         assert_eq!(result, "timer1");
-        assert!(registry.is_empty());
+        assert!(registry.deadlines.is_empty());
     }
 
     #[tokio::test]
@@ -145,16 +130,16 @@ mod tests {
         let result = registry.wait_first().await;
         assert_eq!(result, "fast");
 
-        // Other timers should still be registered
-        assert_eq!(registry.len(), 2);
-        assert!(registry.has_timer(&"slow"));
-        assert!(registry.has_timer(&"medium"));
+        // Other timers should still be registered.
+        assert_eq!(registry.deadlines.len(), 2);
+        assert!(registry.deadlines.contains_key(&"slow"));
+        assert!(registry.deadlines.contains_key(&"medium"));
     }
 
     #[tokio::test]
     async fn test_past_deadline_fires_immediately() {
         let mut registry = TimerRegistry::new();
-        // Deadline in the past
+        // Deadline in the past.
         registry.register("past", Instant::now() - Duration::from_millis(100));
 
         let start = Instant::now();
@@ -162,7 +147,7 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert_eq!(result, "past");
-        // Should complete almost immediately
+        // Should complete almost immediately.
         assert!(elapsed < Duration::from_millis(50));
     }
 
@@ -171,20 +156,20 @@ mod tests {
         let mut registry = TimerRegistry::new();
         let now = Instant::now();
 
-        // Register a timer with a long deadline
+        // Register a timer with a long deadline.
         registry.register("timer", now + Duration::from_secs(10));
 
-        // Replace it with a short deadline
+        // Replace it with a short deadline.
         registry.register("timer", now + Duration::from_millis(10));
 
-        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.deadlines.len(), 1);
 
         let start = Instant::now();
         let result = registry.wait_first().await;
         let elapsed = start.elapsed();
 
         assert_eq!(result, "timer");
-        // Should complete quickly (the replacement timer), not after 10 seconds
+        // Should complete quickly (the replacement timer), not after 10 seconds.
         assert!(elapsed < Duration::from_millis(100));
     }
 
@@ -196,15 +181,15 @@ mod tests {
         registry.register("timer1", now + Duration::from_millis(50));
         registry.register("timer2", now + Duration::from_millis(100));
 
-        assert_eq!(registry.len(), 2);
+        assert_eq!(registry.deadlines.len(), 2);
 
         let cancelled = registry.cancel(&"timer1");
         assert!(cancelled);
-        assert_eq!(registry.len(), 1);
-        assert!(!registry.has_timer(&"timer1"));
-        assert!(registry.has_timer(&"timer2"));
+        assert_eq!(registry.deadlines.len(), 1);
+        assert!(!registry.deadlines.contains_key(&"timer1"));
+        assert!(registry.deadlines.contains_key(&"timer2"));
 
-        // Cancelling non-existent timer returns false
+        // Cancelling non-existent timer returns false.
         let cancelled = registry.cancel(&"nonexistent");
         assert!(!cancelled);
     }
@@ -218,19 +203,19 @@ mod tests {
         registry.register("second", now + Duration::from_millis(30));
         registry.register("third", now + Duration::from_millis(50));
 
-        // First wait
+        // First wait.
         let result = registry.wait_first().await;
         assert_eq!(result, "first");
-        assert_eq!(registry.len(), 2);
+        assert_eq!(registry.deadlines.len(), 2);
 
-        // Second wait - remaining timers should still be there
+        // Second wait - remaining timers should still be there.
         let result = registry.wait_first().await;
         assert_eq!(result, "second");
-        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.deadlines.len(), 1);
 
-        // Third wait
+        // Third wait.
         let result = registry.wait_first().await;
         assert_eq!(result, "third");
-        assert!(registry.is_empty());
+        assert!(registry.deadlines.is_empty());
     }
 }
