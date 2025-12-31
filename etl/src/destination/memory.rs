@@ -81,11 +81,6 @@ impl Destination for MemoryDestination {
         "memory"
     }
 
-    async fn validate(&self) -> EtlResult<()> {
-        // In-memory destination is always available
-        Ok(())
-    }
-
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         // For truncation, we simulate removing all table rows for a specific table and also the events
         // of that table.

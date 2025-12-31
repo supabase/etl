@@ -182,6 +182,33 @@ impl<S> BigQueryDestination<S>
 where
     S: StateStore + SchemaStore + Send + Sync,
 {
+    /// Creates a new [`BigQueryDestination`] with a pre-configured client.
+    ///
+    /// Accepts an existing [`BigQueryClient`] instance, allowing the caller to control
+    /// client creation separately from destination initialization. This is useful for
+    /// validation scenarios where you want to create and validate the client first.
+    pub fn new(
+        client: BigQueryClient,
+        dataset_id: BigQueryDatasetId,
+        max_staleness_mins: Option<u16>,
+        max_concurrent_streams: usize,
+        store: S,
+    ) -> Self {
+        let inner = Inner {
+            created_tables: HashSet::new(),
+            created_views: HashMap::new(),
+        };
+
+        Self {
+            client,
+            dataset_id,
+            max_staleness_mins,
+            max_concurrent_streams,
+            store,
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+
     /// Creates a new [`BigQueryDestination`] using a service account key file path.
     ///
     /// Initializes the BigQuery client with the provided credentials and project settings.
@@ -786,28 +813,6 @@ where
 {
     fn name() -> &'static str {
         "bigquery"
-    }
-
-    async fn validate(&self) -> EtlResult<()> {
-        match self.client.dataset_exists(&self.dataset_id).await {
-            Ok(true) => Ok(()),
-            Ok(false) => bail!(
-                ErrorKind::ValidationError,
-                "BigQuery dataset validation failed",
-                format!(
-                    "Dataset '{}' does not exist or is not accessible",
-                    self.dataset_id
-                )
-            ),
-            Err(e) => bail!(
-                ErrorKind::ValidationError,
-                "BigQuery connection validation failed",
-                format!(
-                    "Failed to connect to BigQuery: {}",
-                    e.detail().unwrap_or(&e.to_string())
-                )
-            ),
-        }
     }
 
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {

@@ -575,17 +575,6 @@ where
         "iceberg"
     }
 
-    async fn validate(&self) -> EtlResult<()> {
-        self.client
-            .validate_connectivity()
-            .await
-            .map_err(|e| etl_error!(
-                ErrorKind::ValidationError,
-                "Iceberg catalog validation failed",
-                format!("Failed to connect to Iceberg catalog: {e}")
-            ))
-    }
-
     /// Truncates the specified table by dropping and recreating it.
     ///
     /// Removes all data from the target Iceberg table while preserving

@@ -19,18 +19,6 @@ pub trait Destination {
     /// Returns the name of the destination.
     fn name() -> &'static str;
 
-    /// Validates that the destination is properly configured and accessible.
-    ///
-    /// This method should verify:
-    /// - Credentials are valid and authentication succeeds
-    /// - The destination service is reachable
-    /// - Required resources (datasets, namespaces, etc.) exist
-    /// - Any destination-specific prerequisites are met
-    ///
-    /// Returns `Ok(())` if validation passes, or an error with
-    /// [`ErrorKind::ValidationError`](crate::error::ErrorKind::ValidationError) if validation fails.
-    fn validate(&self) -> impl Future<Output = EtlResult<()>> + Send;
-
     /// Truncates all data in the specified table.
     ///
     /// This operation is called during initial table synchronization to ensure the

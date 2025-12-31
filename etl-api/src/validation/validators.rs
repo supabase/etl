@@ -1,10 +1,8 @@
 //! Built-in validators for common ETL pipeline prerequisites.
 
 use async_trait::async_trait;
-use etl::destination::Destination;
-use etl::store::both::memory::MemoryStore;
-use etl_destinations::bigquery::BigQueryDestination;
-use etl_destinations::iceberg::{DestinationNamespace, IcebergClient, IcebergDestination};
+use etl_destinations::bigquery::BigQueryClient;
+use etl_destinations::iceberg::IcebergClient;
 use secrecy::ExposeSecret;
 
 use crate::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
@@ -170,10 +168,10 @@ impl Validator for ReplicationSlotsValidator {
 // Destination Validators
 // =============================================================================
 
-/// Validates BigQuery destination by instantiating the destination and calling validate.
+/// Validates BigQuery destination by creating a client and checking dataset accessibility.
 ///
-/// Creates a [`BigQueryDestination`] instance and calls its `validate()` method
-/// to verify connectivity and dataset accessibility.
+/// Creates a [`BigQueryClient`] instance and verifies that the specified dataset
+/// exists and is accessible.
 pub struct BigQueryValidator {
     project_id: String,
     dataset_id: String,
@@ -198,45 +196,49 @@ impl Validator for BigQueryValidator {
     }
 
     async fn validate(&self, _ctx: &ValidationContext) -> ValidationResult {
-        // Create a MemoryStore for validation (not actually used by validate())
-        let store = MemoryStore::new();
-
-        let destination = match BigQueryDestination::new_with_key(
+        // Create the BigQuery client
+        let client = match BigQueryClient::new_with_key(
             self.project_id.clone(),
-            self.dataset_id.clone(),
             &self.service_account_key,
-            None, // max_staleness_mins
-            1,    // max_concurrent_streams (not used for validation)
-            store,
         )
         .await
         {
-            Ok(dest) => dest,
+            Ok(client) => client,
             Err(e) => {
                 return ValidationResult::Failed {
                     name: "bigquery_destination".to_string(),
                     reason: format!(
-                        "Failed to create BigQuery destination: {}",
+                        "Failed to create BigQuery client: {}",
                         e.detail().unwrap_or(&e.to_string())
                     ),
                 };
             }
         };
 
-        match destination.validate().await {
-            Ok(()) => ValidationResult::Passed,
+        // Validate that the dataset exists
+        match client.dataset_exists(&self.dataset_id).await {
+            Ok(true) => ValidationResult::Passed,
+            Ok(false) => ValidationResult::Failed {
+                name: "bigquery_destination".to_string(),
+                reason: format!(
+                    "Dataset '{}' does not exist or is not accessible in project '{}'",
+                    self.dataset_id, self.project_id
+                ),
+            },
             Err(e) => ValidationResult::Failed {
                 name: "bigquery_destination".to_string(),
-                reason: e.detail().unwrap_or(&e.to_string()).to_string(),
+                reason: format!(
+                    "Failed to check BigQuery dataset: {}",
+                    e.detail().unwrap_or(&e.to_string())
+                ),
             },
         }
     }
 }
 
-/// Validates Iceberg destination by instantiating the destination and calling validate.
+/// Validates Iceberg destination by creating a client and checking catalog connectivity.
 ///
-/// Creates an [`IcebergDestination`] instance and calls its `validate()` method
-/// to verify catalog connectivity.
+/// Creates an [`IcebergClient`] instance and verifies that the catalog is accessible.
 pub struct IcebergValidator {
     config: FullApiIcebergConfig,
 }
@@ -256,7 +258,7 @@ impl Validator for IcebergValidator {
 
     async fn validate(&self, _ctx: &ValidationContext) -> ValidationResult {
         // Create the Iceberg client based on config type
-        let (client, namespace) = match &self.config {
+        let client = match &self.config {
             FullApiIcebergConfig::Supabase {
                 project_ref,
                 warehouse_name,
@@ -264,10 +266,9 @@ impl Validator for IcebergValidator {
                 s3_access_key_id,
                 s3_secret_access_key,
                 s3_region,
-                namespace,
                 ..
             } => {
-                let client = IcebergClient::new_with_supabase_catalog(
+                IcebergClient::new_with_supabase_catalog(
                     project_ref,
                     "supabase.com",
                     catalog_token.expose_secret().to_string(),
@@ -276,8 +277,7 @@ impl Validator for IcebergValidator {
                     s3_secret_access_key.expose_secret().to_string(),
                     s3_region.clone(),
                 )
-                .await;
-                (client, namespace.clone())
+                .await
             }
             FullApiIcebergConfig::Rest {
                 catalog_uri,
@@ -285,7 +285,6 @@ impl Validator for IcebergValidator {
                 s3_access_key_id,
                 s3_secret_access_key,
                 s3_endpoint,
-                namespace,
                 ..
             } => {
                 let props = std::collections::HashMap::from([
@@ -300,13 +299,12 @@ impl Validator for IcebergValidator {
                     ("s3.endpoint".to_string(), s3_endpoint.clone()),
                     ("s3.region".to_string(), "auto".to_string()),
                 ]);
-                let client = IcebergClient::new_with_rest_catalog(
+                IcebergClient::new_with_rest_catalog(
                     catalog_uri.clone(),
                     warehouse_name.clone(),
                     props,
                 )
-                .await;
-                (client, namespace.clone())
+                .await
             }
         };
 
@@ -320,19 +318,12 @@ impl Validator for IcebergValidator {
             }
         };
 
-        // Create a MemoryStore for validation (not actually used by validate())
-        let store = MemoryStore::new();
-        let destination_namespace = match namespace {
-            Some(ns) => DestinationNamespace::Single(ns),
-            None => DestinationNamespace::OnePerSchema,
-        };
-        let destination = IcebergDestination::new(client, destination_namespace, store);
-
-        match destination.validate().await {
+        // Validate catalog connectivity
+        match client.validate_connectivity().await {
             Ok(()) => ValidationResult::Passed,
             Err(e) => ValidationResult::Failed {
                 name: "iceberg_destination".to_string(),
-                reason: e.detail().unwrap_or(&e.to_string()).to_string(),
+                reason: format!("Failed to connect to Iceberg catalog: {e}"),
             },
         }
     }
