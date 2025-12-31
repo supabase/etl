@@ -401,6 +401,11 @@ impl ApplyLoopState {
         self.batch_flush_deadline = Some(deadline);
         self.timer_registry
             .register(ApplyTimers::BatchFlush, deadline);
+
+        debug!(
+            "started batch flush timer (timeout: {:?})",
+            self.max_batch_fill_duration
+        );
     }
 
     /// Resets the batch flush deadline and cancels the timer.
@@ -410,6 +415,8 @@ impl ApplyLoopState {
     fn reset_batch_deadline(&mut self) {
         self.batch_flush_deadline = None;
         self.timer_registry.cancel(&ApplyTimers::BatchFlush);
+
+        debug!("reset batch flush timer");
     }
 
     /// Resets the status update deadline and re-registers the timer.
@@ -421,6 +428,8 @@ impl ApplyLoopState {
         self.status_update_deadline = Some(deadline);
         self.timer_registry
             .register(ApplyTimers::StatusUpdate, deadline);
+
+        debug!("scheduled next status update");
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
