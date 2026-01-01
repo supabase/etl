@@ -15,7 +15,6 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::replication::apply::{ApplyLoopAction, ApplyLoopHook, start_apply_loop};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient};
-use crate::replication::common::get_active_table_replication_states;
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
@@ -442,9 +441,14 @@ where
         update_state: bool,
     ) -> EtlResult<ApplyLoopAction> {
         // TODO: this is a very hot path and we have to optimize it as much as possible.
-        // TODO: find a way to deterministically return and process tables always in the same order.
-        let active_table_replication_states =
-            get_active_table_replication_states(&self.store).await?;
+        // We fetch the tables that are in active syncing state. For more predictability and performance
+        // we leverage the order of the BTreeMap.
+        let active_table_replication_states = self
+            .store
+            .get_table_replication_states()
+            .await?
+            .into_iter()
+            .filter(|(_, state)| !state.as_type().is_done());
 
         for (table_id, table_replication_phase) in active_table_replication_states {
             // We read the state store state first, if we don't find `SyncDone` we will attempt to
