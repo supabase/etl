@@ -202,29 +202,29 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // 4. Begin streaming replication data
     pipeline.start().await?;
 
-    info!("Pipeline started successfully! Data replication is now active. Press Ctrl+C to stop.");
+    info!("pipeline started, data replication is now active, press ctrl+c to stop");
 
     // Set up signal handler for graceful shutdown on Ctrl+C
     let shutdown_signal = async {
         signal::ctrl_c()
             .await
             .expect("Failed to install Ctrl+C handler");
-        info!("Received Ctrl+C signal, initiating graceful shutdown...");
+        info!("received ctrl+c signal, initiating graceful shutdown");
     };
 
     // Wait for either the pipeline to complete naturally or receive a shutdown signal
     // The pipeline will run indefinitely unless an error occurs or it's manually stopped
     tokio::select! {
         result = pipeline.wait() => {
-            info!("Pipeline completed normally (this usually indicates an error condition)");
+            info!("pipeline completed normally (this usually indicates an error condition)");
             result?;
         }
         _ = shutdown_signal => {
-            info!("Gracefully shutting down pipeline and cleaning up resources...");
+            info!("gracefully shutting down pipeline and cleaning up resources");
         }
     }
 
-    info!("Pipeline stopped successfully. All resources cleaned up.");
+    info!("pipeline stopped, all resources cleaned up");
 
     Ok(())
 }

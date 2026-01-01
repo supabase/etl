@@ -94,7 +94,7 @@ impl TrustedRootCertsCache {
         }
 
         // Slow path: fetch from Kubernetes and update cache
-        debug!("fetching trusted root certificates from Kubernetes");
+        debug!("fetching trusted root certificates from kubernetes");
         let certs = self.fetch_from_k8s().await?;
 
         let mut cache = self.cache.write().await;

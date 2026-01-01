@@ -193,7 +193,7 @@ async fn test_table_schema_copy_is_consistent() {
 
     // We use the transaction to consistently read the table schemas.
     let table_1_schema = transaction
-        .get_table_schemas(&[table_1_id], None)
+        .get_table_schema(table_1_id, None)
         .await
         .unwrap();
     transaction.commit().await.unwrap();
@@ -245,7 +245,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
 
     // We use the transaction to consistently read the table schemas.
     let table_1_schema = transaction
-        .get_table_schemas(&[table_1_id], None)
+        .get_table_schema(table_1_id, None)
         .await
         .unwrap();
     transaction.commit().await.unwrap();
@@ -280,11 +280,11 @@ async fn test_table_schema_copy_across_multiple_connections() {
 
     // We use the transaction to consistently read the table schemas.
     let table_1_schema = transaction
-        .get_table_schemas(&[table_1_id], None)
+        .get_table_schema(table_1_id, None)
         .await
         .unwrap();
     let table_2_schema = transaction
-        .get_table_schemas(&[table_2_id], None)
+        .get_table_schema(table_2_id, None)
         .await
         .unwrap();
     transaction.commit().await.unwrap();
@@ -506,12 +506,12 @@ async fn test_table_copy_stream_respects_column_filter() {
         .unwrap();
 
     // Get table schema with the publication - should only include published columns.
-    let table_schemas = transaction
-        .get_table_schemas(&[test_table_id], Some(publication_name))
+    let table_schema = transaction
+        .get_table_schema(test_table_id, Some(publication_name))
         .await
         .unwrap();
     assert_table_schema(
-        &table_schemas,
+        &table_schema,
         test_table_id,
         test_table_name,
         &[
@@ -537,7 +537,7 @@ async fn test_table_copy_stream_respects_column_filter() {
     let stream = transaction
         .get_table_copy_stream(
             test_table_id,
-            &table_schemas[&test_table_id].column_schemas,
+            &table_schema.column_schemas,
             Some("test_pub"),
         )
         .await

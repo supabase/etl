@@ -210,49 +210,49 @@ pub fn spawn_jemalloc_metrics_task(pipeline_id: u64) {
         let epoch_mib = match epoch::mib() {
             Ok(mib) => mib,
             Err(err) => {
-                warn!("failed to initialize jemalloc epoch MIB: {err}");
+                warn!(%err, "failed to initialize jemalloc epoch mib");
                 return;
             }
         };
         let allocated_mib = match stats::allocated::mib() {
             Ok(mib) => mib,
             Err(err) => {
-                warn!("failed to initialize jemalloc allocated MIB: {err}");
+                warn!(%err, "failed to initialize jemalloc allocated mib");
                 return;
             }
         };
         let active_mib = match stats::active::mib() {
             Ok(mib) => mib,
             Err(err) => {
-                warn!("failed to initialize jemalloc active MIB: {err}");
+                warn!(%err, "failed to initialize jemalloc active mib");
                 return;
             }
         };
         let resident_mib = match stats::resident::mib() {
             Ok(mib) => mib,
             Err(err) => {
-                warn!("failed to initialize jemalloc resident MIB: {err}");
+                warn!(%err, "failed to initialize jemalloc resident mib");
                 return;
             }
         };
         let mapped_mib = match stats::mapped::mib() {
             Ok(mib) => mib,
             Err(err) => {
-                warn!("failed to initialize jemalloc mapped MIB: {err}");
+                warn!(%err, "failed to initialize jemalloc mapped mib");
                 return;
             }
         };
         let retained_mib = match stats::retained::mib() {
             Ok(mib) => mib,
             Err(err) => {
-                warn!("failed to initialize jemalloc retained MIB: {err}");
+                warn!(%err, "failed to initialize jemalloc retained mib");
                 return;
             }
         };
         let metadata_mib = match stats::metadata::mib() {
             Ok(mib) => mib,
             Err(err) => {
-                warn!("failed to initialize jemalloc metadata MIB: {err}");
+                warn!(%err, "failed to initialize jemalloc metadata mib");
                 return;
             }
         };
@@ -260,7 +260,7 @@ pub fn spawn_jemalloc_metrics_task(pipeline_id: u64) {
         loop {
             // Advance epoch to refresh cached statistics.
             if let Err(err) = epoch_mib.advance() {
-                warn!("failed to advance jemalloc epoch: {err}");
+                warn!(%err, "failed to advance jemalloc epoch");
                 tokio::time::sleep(POLL_INTERVAL).await;
                 continue;
             }

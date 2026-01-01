@@ -248,7 +248,7 @@ struct PrepareArgs {
 }
 
 async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
-    info!("Preparing benchmark environment...");
+    info!("preparing benchmark environment");
 
     // Build connection string
     let mut connection_string = format!(
@@ -270,12 +270,12 @@ async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
         connection_string.push_str("?sslmode=disable");
     }
 
-    info!("Connecting to database at {}:{}", args.host, args.port);
+    info!(host = %args.host, port = %args.port, "connecting to database");
 
     // Connect to the database
     let pool = PgPool::connect(&connection_string).await?;
 
-    info!("Cleaning up existing replication slots...");
+    info!("cleaning up existing replication slots");
 
     // Execute the cleanup SQL
     let cleanup_sql = r#"
@@ -292,7 +292,7 @@ async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
 
     sqlx::query(cleanup_sql).execute(&pool).await?;
 
-    info!("Replication slots cleanup completed successfully!");
+    info!("replication slots cleanup completed");
 
     // Close the connection
     pool.close().await;
@@ -301,13 +301,16 @@ async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
 }
 
 async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
-    info!("Starting ETL pipeline benchmark");
+    info!("starting etl pipeline benchmark");
     info!(
-        "Database: {}@{}:{}/{}",
-        args.username, args.host, args.port, args.database
+        username = %args.username,
+        host = %args.host,
+        port = %args.port,
+        database = %args.database,
+        "connecting to database"
     );
-    info!("Table IDs: {:?}", args.table_ids);
-    info!("Destination: {:?}", args.destination);
+    info!(table_ids = ?args.table_ids, "target tables");
+    info!(destination = ?args.destination, "destination type");
 
     let pg_connection_config = PgConnectionConfig {
         host: args.host,
@@ -380,21 +383,21 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     }
 
     let mut pipeline = Pipeline::new(pipeline_config, store, destination);
-    info!("Starting pipeline...");
+    info!("starting pipeline");
     pipeline.start().await?;
 
     info!(
-        "Waiting for all {} tables to complete copy phase...",
-        args.table_ids.len()
+        table_count = args.table_ids.len(),
+        "waiting for tables to complete copy phase"
     );
     for notification in table_copied_notifications {
         notification.notified().await;
     }
-    info!("All tables completed copy phase");
+    info!("all tables completed copy phase");
 
-    info!("Shutting down pipeline...");
+    info!("shutting down pipeline");
     pipeline.shutdown_and_wait().await?;
-    info!("ETL pipeline benchmark completed successfully");
+    info!("etl pipeline benchmark completed");
 
     Ok(())
 }

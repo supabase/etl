@@ -19,8 +19,7 @@ use etl::types::{
 use etl::{bail, etl_error};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::log::warn;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// CDC operation types for Iceberg changelog tables.
 ///
@@ -197,7 +196,8 @@ where
             // table schema is not there.
             if !is_cdc_truncate {
                 warn!(
-                    "the table schema for table {table_id} was not found in the schema store while processing truncate events for Iceberg",
+                    %table_id,
+                    "table schema not found in schema store while processing truncate events for iceberg"
                 );
 
                 return Ok(());
@@ -218,7 +218,8 @@ where
             // table mapping is not there.
             if !is_cdc_truncate {
                 warn!(
-                    "the table mapping for table {table_id} was not found in the state store while processing truncate events for Iceberg",
+                    %table_id,
+                    "table mapping not found in state store while processing truncate events for iceberg"
                 );
 
                 return Ok(());
@@ -336,7 +337,7 @@ where
                     }
                     Event::Delete(delete) => {
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
-                            info!("the `DELETE` event has no row, so it was skipped");
+                            info!("delete event has no row, skipping");
                             continue;
                         };
 
@@ -351,9 +352,9 @@ where
                             table_id_to_table_rows.entry(delete.table_id).or_default();
                         table_rows.push(old_table_row);
                     }
-                    _ => {
+                    event => {
                         // Every other event type is currently not supported.
-                        debug!("skipping unsupported event in iceberg");
+                        debug!(event_type = %event.event_type(), "skipping unsupported event type");
                     }
                 }
             }
@@ -459,7 +460,7 @@ where
     }
 
     /// Creates a namespace if it is missing in the destination.
-    /// Once created adds it to the created_namesapces HashMap to
+    /// Once created adds it to the created_namespaces HashSet to
     /// avoid creating it again.
     async fn create_namespace_if_missing(
         &self,
@@ -481,7 +482,7 @@ where
     }
 
     /// Creates a table if it is missing in the destination.
-    /// Once created adds it to the created_trees HashMap to
+    /// Once created adds it to the created_tables HashSet to
     /// avoid creating it again.
     async fn create_table_if_missing(
         &self,
