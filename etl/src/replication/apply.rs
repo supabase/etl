@@ -179,51 +179,53 @@ pub trait ApplyLoopHook {
     fn worker_type(&self) -> WorkerType;
 }
 
-/// The status update that is sent to Postgres to report progress.
+/// Tracks the progress of logical replication from PostgreSQL.
 ///
-/// The status update is a crucial part since it enables Postgres to know our replication process
-/// and is required for WAL pruning.
+/// This struct maintains the LSN positions used for sending status updates to PostgreSQL
+/// and for coordinating table synchronization. PostgreSQL uses these positions to determine
+/// which WAL segments can be safely pruned.
 #[derive(Debug, Clone)]
-struct StatusUpdate {
-    /// The highest LSN observed from Postgres so far.
+struct ReplicationProgress {
+    /// The highest LSN received from PostgreSQL so far.
     ///
     /// This value is updated for every received replication message. For each message,
     /// it is set to the maximum of `start_lsn` and `end_lsn`, where:
-    /// * `start_lsn` is the LSN at which Postgres started decoding the message.
+    /// * `start_lsn` is the LSN at which PostgreSQL started decoding the message
+    ///   (Keep alive messages do not have a `start_lsn` field).
     /// * `end_lsn` is the LSN immediately after the last WAL record decoded for the message.
     ///
-    /// As a result, `write_lsn` always represents the furthest WAL position that has been
-    /// successfully received and processed by the replicator.
-    write_lsn: PgLsn,
+    /// This LSN represents the furthest WAL position that has been successfully received
+    /// by the replicator. It is reported to PostgreSQL as the `write` position in status updates.
+    last_received_lsn: PgLsn,
     /// The highest commit LSN that has been durably flushed to the destination.
     ///
     /// This value is updated only when a batch is flushed. When flushing, it is set to the
     /// last `end_lsn` among all `Commit` messages contained in the batch. If a batch
     /// contains no `Commit` messages, the previously stored value is retained.
     ///
-    /// `flush_lsn` is used when sending feedback to Postgres to indicate that all WAL
-    /// positions strictly less than this LSN have been safely persisted. Postgres may then
-    /// consider those WAL segments eligible for cleanup and vacuuming.
-    flush_lsn: PgLsn,
+    /// This LSN is reported to PostgreSQL as the `flush` position in status updates to indicate
+    /// that all WAL positions strictly less than this LSN have been safely persisted. PostgreSQL
+    /// may then consider those WAL segments eligible for cleanup and vacuuming.
+    last_flush_lsn: PgLsn,
 }
 
-impl StatusUpdate {
-    /// Updates the write LSN to a higher value if the new LSN is greater.
-    fn update_write_lsn(&mut self, new_write_lsn: PgLsn) {
-        if new_write_lsn <= self.write_lsn {
+impl ReplicationProgress {
+    /// Updates the last received LSN to a higher value if the new LSN is greater.
+    fn update_last_received_lsn(&mut self, new_lsn: PgLsn) {
+        if new_lsn <= self.last_received_lsn {
             return;
         }
 
-        self.write_lsn = new_write_lsn;
+        self.last_received_lsn = new_lsn;
     }
 
-    /// Updates the flush LSN to a higher value if the new LSN is greater.
-    fn update_flush_lsn(&mut self, flush_lsn: PgLsn) {
-        if flush_lsn <= self.flush_lsn {
+    /// Updates the last flush LSN to a higher value if the new LSN is greater.
+    fn update_last_flush_lsn(&mut self, new_lsn: PgLsn) {
+        if new_lsn <= self.last_flush_lsn {
             return;
         }
 
-        self.flush_lsn = flush_lsn;
+        self.last_flush_lsn = new_lsn;
     }
 }
 
@@ -336,8 +338,8 @@ struct ApplyLoopState {
     /// This LSN is set at every `BEGIN` of a new transaction, and it's used to know the `commit_lsn`
     /// of the transaction which is currently being processed.
     remote_final_lsn: Option<PgLsn>,
-    /// The LSNs of the status update that we want to send to Postgres.
-    next_status_update: StatusUpdate,
+    /// The current replication progress tracking received and flushed LSN positions.
+    replication_progress: ReplicationProgress,
     /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
     /// Instant from when a transaction began.
@@ -372,7 +374,7 @@ struct ApplyLoopState {
 }
 
 impl ApplyLoopState {
-    /// Creates a new [`ApplyLoopState`] with initial status update and event batch.
+    /// Creates a new [`ApplyLoopState`] with initial replication progress and event batch.
     ///
     /// This constructor initializes the state tracking structure used throughout
     /// the apply loop to maintain replication progress and coordinate batching.
@@ -380,14 +382,14 @@ impl ApplyLoopState {
     /// Note: The caller must call [`reset_status_update_deadline`] after construction
     /// to register the initial status update timer.
     fn new(
-        next_status_update: StatusUpdate,
+        replication_progress: ReplicationProgress,
         max_batch_size: usize,
         max_batch_fill_duration: Duration,
     ) -> Self {
         Self {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
-            next_status_update,
+            replication_progress,
             events_batch: Vec::with_capacity(max_batch_size),
             current_tx_begin_ts: None,
             current_tx_events: 0,
@@ -463,37 +465,37 @@ impl ApplyLoopState {
         }
     }
 
-    /// Returns the LSN that should be reported as written to the PostgresSQL server.
-    fn write_lsn(&self) -> PgLsn {
-        self.next_status_update.write_lsn
+    /// Returns the last received LSN that should be reported as written to the PostgreSQL server.
+    fn last_received_lsn(&self) -> PgLsn {
+        self.replication_progress.last_received_lsn
     }
 
-    /// Returns the LSN that should be reported as flushed to the PostgreSQL server.
+    /// Returns the effective flush LSN that should be reported to the PostgreSQL server.
     ///
-    /// This method computes the correct *flush LSN* based on the current replication
-    /// state and the presence of in flight transactions and pending events.
+    /// This method computes the correct flush LSN based on the current replication
+    /// state and the presence of in-flight transactions and pending events.
     ///
     /// When the replicator is idle, meaning no active transaction and no buffered
-    /// events, the flush LSN is advanced to the current write LSN. This prevents WAL
+    /// events, the flush LSN is advanced to the last received LSN. This prevents WAL
     /// retention for replicated tables that are not receiving writes.
     ///
     /// # Advancing the Flush LSN for Idle Replication
     ///
-    /// If there are no outstanding changes to flush, we safely report `write_lsn`
-    /// as flushed. Doing so allows PostgreSQL to advance the replication slot’s
+    /// If there are no outstanding changes to flush, we safely report `last_received_lsn`
+    /// as flushed. Doing so allows PostgreSQL to advance the replication slot's
     /// `restart_lsn`, even if replicated tables are idle.
     ///
     /// Consider the following scenario:
     /// - Table A is replicated but idle
     /// - Table B is not replicated and receives continuous writes
     ///
-    /// Without advancing the flush LSN, the slot’s `restart_lsn` would remain pinned
-    /// at Table A’s last activity, despite WAL continuing to grow due to Table B.
+    /// Without advancing the flush LSN, the slot's `restart_lsn` would remain pinned
+    /// at Table A's last activity, despite WAL continuing to grow due to Table B.
     /// This can lead to unnecessary WAL accumulation and, in extreme cases, slot
     /// invalidation when `max_slot_wal_keep_size` is exceeded.
     ///
     /// By advancing the flush LSN when idle, we explicitly acknowledge that all
-    /// replicated changes up to `write_lsn` have been processed, allowing PostgreSQL
+    /// replicated changes up to `last_received_lsn` have been processed, allowing PostgreSQL
     /// to safely reclaim WAL.
     ///
     /// # Use During Table Sync Outside Transactions
@@ -506,21 +508,21 @@ impl ApplyLoopState {
     /// slot while remaining consistent with what has actually been flushed.
     ///
     /// If a batch of events is non-empty, we do not advance the flush LSN to
-    /// `write_lsn`. Reporting a higher LSN than what has been flushed would
+    /// `last_received_lsn`. Reporting a higher LSN than what has been flushed would
     /// incorrectly mark WAL segments as processed even though they are not.
     ///
     /// # Returns
     ///
     /// The highest LSN for which all replicated changes have been flushed and can be
     /// safely discarded by PostgreSQL.
-    fn hypothetical_flush_lsn(&self) -> PgLsn {
+    fn effective_flush_lsn(&self) -> PgLsn {
         if !self.handling_transaction() && self.events_batch.is_empty() {
-            // Report write_lsn as flush_lsn when idle to prevent WAL buildup. Since the `send_status_update`
-            // method tracks the last sent data, we should not worry about the LSN being reported first at
-            // a higher position and then later at a lower position.
-            self.next_status_update.write_lsn
+            // Report last_received_lsn as flush LSN when idle to prevent WAL buildup. Since the
+            // `send_status_update` method tracks the last sent data, we should not worry about the
+            // LSN being reported first at a higher position and then later at a lower position.
+            self.replication_progress.last_received_lsn
         } else {
-            self.next_status_update.flush_lsn
+            self.replication_progress.last_flush_lsn
         }
     }
 
@@ -590,9 +592,9 @@ where
 
     // The first status update is defaulted from the start lsn since at this point we haven't
     // processed anything.
-    let first_status_update = StatusUpdate {
-        write_lsn: start_lsn,
-        flush_lsn: start_lsn,
+    let initial_progress = ReplicationProgress {
+        last_received_lsn: start_lsn,
+        last_flush_lsn: start_lsn,
     };
 
     // We compute the slot name for the replication slot that we are going to use for the logical
@@ -617,7 +619,7 @@ where
     // We initialize the shared state used throughout the loop to track progress.
     // The state includes a timer registry that persists across loop iterations.
     let mut state = ApplyLoopState::new(
-        first_status_update,
+        initial_progress,
         config.batch.max_size,
         Duration::from_millis(config.batch.max_fill_ms),
     );
@@ -700,7 +702,7 @@ where
                         // connection alive, independent of message processing or batch flushing.
                         events_stream
                             .as_mut()
-                            .send_status_update(state.write_lsn(), state.hypothetical_flush_lsn(), true, StatusUpdateType::Timeout)
+                            .send_status_update(state.last_received_lsn(), state.effective_flush_lsn(), true, StatusUpdateType::Timeout)
                             .await?;
 
                         // Reset the deadline and re-register the timer for the next interval.
@@ -964,7 +966,7 @@ where
     // make progress by syncing tables more often when the outside of a transaction, but it won't notify a higher LSN to the workers
     // until it's guaranteed to have been flushed.
     let action = hook
-        .process_syncing_tables(state.hypothetical_flush_lsn(), true)
+        .process_syncing_tables(state.effective_flush_lsn(), true)
         .await?;
 
     Ok(action)
@@ -1003,22 +1005,22 @@ where
     //
     // Note that we do this ONLY once a batch is fully saved, since that is the only place where
     // we are guaranteed that data has been safely persisted. In all the other cases, we just update
-    // the `write_lsn` which is used by Postgres to get an acknowledgement of how far we have processed
-    // messages but not flushed them.
+    // the `last_received_lsn` which is used by Postgres to get an acknowledgement of how far we have
+    // processed messages but not flushed them.
     state
-        .next_status_update
-        .update_flush_lsn(last_commit_end_lsn);
+        .replication_progress
+        .update_last_flush_lsn(last_commit_end_lsn);
 
     // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
     // and ack for the batch from the destination. This is important to keep a consistent state.
     // Without this order it could happen that the table's state was updated but sending the batch
     // to the destination failed.
     //
-    // For this loop, we use the `flush_lsn` as LSN instead of the `last_commit_end_lsn` just
+    // For this loop, we use the `last_flush_lsn` as LSN instead of the `last_commit_end_lsn` just
     // because we want to semantically process syncing tables with the same LSN that we tell
-    // Postgres that we flushed durably to disk. In practice, `flush_lsn` and `last_commit_end_lsn`
+    // Postgres that we flushed durably to disk. In practice, `last_flush_lsn` and `last_commit_end_lsn`
     // will be always equal, since LSNs are guaranteed to be monotonically increasing.
-    hook.process_syncing_tables(state.next_status_update.flush_lsn, true)
+    hook.process_syncing_tables(state.replication_progress.last_flush_lsn, true)
         .await
 }
 
@@ -1046,12 +1048,14 @@ where
     match message {
         ReplicationMessage::XLogData(message) => {
             let start_lsn = PgLsn::from(message.wal_start());
-            state.next_status_update.update_write_lsn(start_lsn);
+            state
+                .replication_progress
+                .update_last_received_lsn(start_lsn);
 
             // The `end_lsn` here is the LSN of the last byte in the WAL that was processed by the
             // server, and it's different from the `end_lsn` found in the `Commit` message.
             let end_lsn = PgLsn::from(message.wal_end());
-            state.next_status_update.update_write_lsn(end_lsn);
+            state.replication_progress.update_last_received_lsn(end_lsn);
 
             debug!(
                 "handling logical replication data message (start_lsn: {}, end_lsn: {})",
@@ -1070,7 +1074,7 @@ where
         }
         ReplicationMessage::PrimaryKeepAlive(message) => {
             let end_lsn = PgLsn::from(message.wal_end());
-            state.next_status_update.update_write_lsn(end_lsn);
+            state.replication_progress.update_last_received_lsn(end_lsn);
 
             warn!("keepalive message received: {:?}", message);
 
@@ -1081,8 +1085,8 @@ where
 
             events_stream
                 .send_status_update(
-                    state.write_lsn(),
-                    state.hypothetical_flush_lsn(),
+                    state.last_received_lsn(),
+                    state.effective_flush_lsn(),
                     message.reply() == 1,
                     StatusUpdateType::KeepAlive,
                 )
