@@ -200,8 +200,8 @@ where
         // errors during copy). In this case, we skip the truncate since there's nothing to truncate.
         let Some(metadata) = self.store.get_destination_table_metadata(&table_id).await? else {
             warn!(
-                "skipping truncate for table {}: no metadata exists (table was likely never created)",
-                table_id
+                %table_id,
+                "skipping truncate because no metadata exists (table was likely never created)",
             );
             return Ok(());
         };
@@ -316,7 +316,7 @@ where
                     }
                     Event::Delete(delete) => {
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
-                            info!("the `DELETE` event has no row, so it was skipped");
+                            info!("delete event has no row, skipping");
                             continue;
                         };
 
@@ -360,9 +360,9 @@ where
                             }
                         }
                     }
-                    _ => {
+                    event => {
                         // Every other event type is currently not supported.
-                        debug!("skipping unsupported event in iceberg");
+                        debug!(event_type = %event.event_type(), "skipping unsupported event type");
                     }
                 }
             }
@@ -498,7 +498,7 @@ where
     }
 
     /// Creates a namespace if it is missing in the destination.
-    /// Once created adds it to the created_namesapces HashMap to
+    /// Once created adds it to the created_namespaces HashSet to
     /// avoid creating it again.
     async fn create_namespace_if_missing(
         &self,

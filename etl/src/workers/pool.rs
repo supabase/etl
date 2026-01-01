@@ -52,7 +52,7 @@ impl TableSyncWorkerPoolInner {
     {
         let table_id = worker.table_id();
         if self.active.contains_key(&table_id) {
-            warn!("worker for table {} already exists in the pool", table_id);
+            warn!(%table_id, "worker already exists in pool");
             return Ok(false);
         }
 
@@ -61,10 +61,7 @@ impl TableSyncWorkerPoolInner {
 
         // Metric removed: active workers gauge is omitted.
 
-        debug!(
-            "successfully added worker for table {} to the pool",
-            table_id
-        );
+        debug!(%table_id, "added worker to pool");
 
         Ok(true)
     }
@@ -95,7 +92,7 @@ impl TableSyncWorkerPoolInner {
     pub fn get_active_worker_state(&self, table_id: TableId) -> Option<TableSyncWorkerState> {
         let state = self.active.get(&table_id)?.state().clone();
 
-        debug!("retrieved active worker state for table {table_id}");
+        debug!(%table_id, "retrieved active worker state");
 
         Some(state)
     }

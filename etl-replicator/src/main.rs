@@ -131,7 +131,7 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
     // We start the replicator and catch any errors.
     if let Err(err) = start_replicator_with_config(replicator_config).await {
         sentry::capture_error(&*err);
-        error!("an error occurred in the replicator: {err}");
+        error!(%err, "an error occurred in the replicator");
 
         // Send an error notification if a client is available.
         if let Some(client) = notification_client {

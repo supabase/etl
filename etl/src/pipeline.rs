@@ -119,8 +119,9 @@ where
     /// and starts the apply worker for processing replication stream events.
     pub async fn start(&mut self) -> EtlResult<()> {
         info!(
-            "starting pipeline for publication '{}' with id {}",
-            self.config.publication_name, self.config.id
+            publication_name = %self.config.publication_name,
+            pipeline_id = %self.config.id,
+            "starting pipeline"
         );
 
         // Run migrations before starting the pipeline.
@@ -194,7 +195,7 @@ where
     /// 3. Any errors from workers are aggregated and returned
     pub async fn wait(self) -> EtlResult<()> {
         let PipelineState::Started { apply_worker, pool } = self.state else {
-            info!("pipeline was not started, nothing to wait for");
+            info!("pipeline was not started, skipping wait");
 
             return Ok(());
         };
@@ -220,7 +221,7 @@ where
             // it means that no table sync workers are running, which is fine.
             let _ = self.shutdown_tx.shutdown();
 
-            info!("apply worker completed with an error, shutting down table sync workers");
+            info!("apply worker failed, shutting down table sync workers");
         }
 
         info!("waiting for table sync workers to complete");
@@ -233,7 +234,7 @@ where
 
             errors.push(err);
 
-            info!("{} table sync workers failed with an error", errors_number);
+            info!(error_count = errors_number, "table sync workers failed");
         }
 
         if !errors.is_empty() {
@@ -251,14 +252,14 @@ where
     ///
     /// Use [`Pipeline::wait`] after calling this method to wait for complete shutdown.
     pub fn shutdown(&self) {
-        info!("trying to shut down the pipeline");
+        info!("initiating pipeline shutdown");
 
         if let Err(err) = self.shutdown_tx.shutdown() {
-            error!("failed to send shutdown signal to the pipeline: {}", err);
+            error!(error = %err, "failed to send shutdown signal");
             return;
         }
 
-        info!("shut down signal successfully sent to all workers");
+        info!("shutdown signal sent to all workers");
     }
 
     /// Initiates shutdown and waits for complete pipeline termination.
@@ -292,8 +293,8 @@ where
             .await?
         {
             error!(
-                "publication '{}' does not exist in the database",
-                self.config.publication_name
+                publication_name = %self.config.publication_name,
+                "publication does not exist in the database"
             );
 
             bail!(
@@ -311,9 +312,9 @@ where
             .await?;
 
         info!(
-            "the publication '{}' contains {} tables",
-            self.config.publication_name,
-            publication_table_ids.len()
+            publication_name = %self.config.publication_name,
+            table_count = publication_table_ids.len(),
+            "publication tables loaded"
         );
 
         // Validate that the publication is configured correctly for partitioned tables.
@@ -333,8 +334,8 @@ where
 
             if has_partitioned_tables {
                 error!(
-                    "publication '{}' has publish_via_partition_root=false but contains partitioned table(s)",
-                    self.config.publication_name
+                    publication_name = %self.config.publication_name,
+                    "publication has publish_via_partition_root=false but contains partitioned tables"
                 );
 
                 bail!(
@@ -370,8 +371,8 @@ where
         for (table_id, _) in table_replication_states {
             if !publication_set.contains(&table_id) {
                 info!(
-                    "table {} removed from publication, purging stored state",
-                    table_id
+                    %table_id,
+                    "table removed from publication, purging stored state"
                 );
 
                 self.store.cleanup_table_state(table_id).await?;

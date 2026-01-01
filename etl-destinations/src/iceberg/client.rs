@@ -128,7 +128,7 @@ impl IcebergClient {
     /// namespace string can use dot notation for hierarchical namespaces
     /// (e.g., "warehouse.schema").
     pub async fn create_namespace_if_missing(&self, namespace: &str) -> Result<(), iceberg::Error> {
-        debug!("creating namespace {namespace}");
+        debug!(%namespace, "creating namespace");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         if !self.catalog.namespace_exists(&namespace_ident).await? {
             self.catalog
@@ -145,7 +145,7 @@ impl IcebergClient {
     /// is present. The namespace string supports dot notation for hierarchical
     /// namespaces.
     pub async fn namespace_exists(&self, namespace: &str) -> Result<bool, iceberg::Error> {
-        debug!("checking if namespace {namespace} exists");
+        debug!(%namespace, "checking if namespace exists");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         self.catalog.namespace_exists(&namespace_ident).await
     }
@@ -165,8 +165,7 @@ impl IcebergClient {
         table_name: String,
         column_schemas: &[ColumnSchema],
     ) -> Result<(), iceberg::Error> {
-        debug!("creating table {table_name} in namespace {namespace} if missing");
-
+        debug!(%table_name, %namespace, "creating table if missing");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         let table_ident = TableIdent::new(namespace_ident.clone(), table_name.clone());
 
@@ -218,7 +217,7 @@ impl IcebergClient {
         namespace: &str,
         table_name: String,
     ) -> Result<bool, iceberg::Error> {
-        debug!("checking if table {table_name} in namespace {namespace} exists");
+        debug!(%table_name, %namespace, "checking if table exists");
 
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         let table_ident = TableIdent::new(namespace_ident, table_name);
@@ -235,7 +234,7 @@ impl IcebergClient {
         namespace: &str,
         table_name: String,
     ) -> Result<bool, iceberg::Error> {
-        debug!("dropping table {table_name} in namespace {namespace} if exists");
+        debug!(%table_name, %namespace, "dropping table if exists");
 
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         let table_ident = TableIdent::new(namespace_ident, table_name);
@@ -254,7 +253,7 @@ impl IcebergClient {
     /// This method permanently deletes the namespace from the catalog. The namespace
     /// must be empty (contain no tables) before it can be dropped.
     pub async fn drop_namespace(&self, namespace: &str) -> Result<(), iceberg::Error> {
-        debug!("dropping namespace {namespace}");
+        debug!(%namespace, "dropping namespace");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         self.catalog.drop_namespace(&namespace_ident).await
     }
@@ -269,7 +268,7 @@ impl IcebergClient {
         namespace: String,
         table_name: String,
     ) -> Result<iceberg::table::Table, iceberg::Error> {
-        debug!("loading table {table_name} in namespace {namespace}");
+        debug!(%table_name, %namespace, "loading table");
         let namespace_ident = NamespaceIdent::new(namespace);
         let table_ident = TableIdent::new(namespace_ident, table_name);
         self.catalog.load_table(&table_ident).await

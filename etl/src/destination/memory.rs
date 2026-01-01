@@ -89,7 +89,7 @@ impl Destination for MemoryDestination {
         let mut inner = self.inner.lock().await;
 
         let table_id = replicated_table_schema.id();
-        info!("truncating table {}", table_id);
+        info!(%table_id, "truncating table");
 
         inner.table_rows.remove(&table_id);
         inner.events.retain_mut(|event| {
@@ -121,11 +121,7 @@ impl Destination for MemoryDestination {
         let mut inner = self.inner.lock().await;
         let table_id = replicated_table_schema.id();
 
-        info!("writing a batch of {} table rows:", table_rows.len());
-
-        for table_row in &table_rows {
-            info!("  {:?}", table_row);
-        }
+        info!(%table_id, row_count = table_rows.len(), "writing table rows");
         inner.table_rows.insert(table_id, table_rows);
 
         Ok(())
@@ -134,11 +130,7 @@ impl Destination for MemoryDestination {
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        info!("writing a batch of {} events:", events.len());
-
-        for event in &events {
-            info!("  {:?}", event);
-        }
+        info!(event_count = events.len(), "writing events");
         inner.events.extend(events);
 
         Ok(())

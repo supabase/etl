@@ -50,16 +50,14 @@ async fn async_main() -> anyhow::Result<()> {
                     info!("database migrated successfully");
                 }
                 _ => {
-                    let message = format!("invalid command: {command}");
-                    error!("{message}");
-                    return Err(anyhow!(message));
+                    error!(%command, "invalid command");
+                    return Err(anyhow!("invalid command: {command}"));
                 }
             }
         }
         _ => {
-            let message = "invalid number of command line arguments";
-            error!("{message}");
-            return Err(anyhow!(message));
+            error!("invalid number of command line arguments");
+            return Err(anyhow!("invalid number of command line arguments"));
         }
     }
 

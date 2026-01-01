@@ -204,12 +204,11 @@ async fn test_table_schema_copy_is_consistent() {
         .unwrap();
 
     // We use the transaction to consistently read the table schemas.
-    let table_1_schemas = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
+    let table_1_schema = transaction.get_table_schema(table_1_id).await.unwrap();
     transaction.commit().await.unwrap();
-    let table_1_schema = table_1_schemas.get(&table_1_id).unwrap();
     assert_eq!(table_1_schema.id, table_1_id);
     assert_eq!(table_1_schema.name, test_table_name("table_1"));
-    assert_table_schema_columns(table_1_schema, &[id_column_schema(), age_schema.clone()]);
+    assert_table_schema_columns(&table_1_schema, &[id_column_schema(), age_schema.clone()]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -239,12 +238,11 @@ async fn test_table_schema_copy_across_multiple_connections() {
         .unwrap();
 
     // We use the transaction to consistently read the table schemas.
-    let table_1_schemas = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
+    let table_1_schema = transaction.get_table_schema(table_1_id).await.unwrap();
     transaction.commit().await.unwrap();
-    let table_1_schema = table_1_schemas.get(&table_1_id).unwrap();
     assert_eq!(table_1_schema.id, table_1_id);
     assert_eq!(table_1_schema.name, test_table_name("table_1"));
-    assert_table_schema_columns(table_1_schema, &[id_column_schema(), age_schema.clone()]);
+    assert_table_schema_columns(&table_1_schema, &[id_column_schema(), age_schema.clone()]);
 
     // We create a new table in the database and update the schema of the old one.
     let table_2_id = database
@@ -269,20 +267,18 @@ async fn test_table_schema_copy_across_multiple_connections() {
         .unwrap();
 
     // We use the transaction to consistently read the table schemas.
-    let table_1_schemas = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
-    let table_2_schemas = transaction.get_table_schemas(&[table_2_id]).await.unwrap();
+    let table_1_schema = transaction.get_table_schema(table_1_id).await.unwrap();
+    let table_2_schema = transaction.get_table_schema(table_2_id).await.unwrap();
     transaction.commit().await.unwrap();
-    let table_1_schema = table_1_schemas.get(&table_1_id).unwrap();
     assert_eq!(table_1_schema.id, table_1_id);
     assert_eq!(table_1_schema.name, test_table_name("table_1"));
     assert_table_schema_columns(
-        table_1_schema,
+        &table_1_schema,
         &[id_column_schema(), age_schema.clone(), year_schema.clone()],
     );
-    let table_2_schema = table_2_schemas.get(&table_2_id).unwrap();
     assert_eq!(table_2_schema.id, table_2_id);
     assert_eq!(table_2_schema.name, test_table_name("table_2"));
-    assert_table_schema_columns(table_2_schema, &[id_column_schema(), year_schema]);
+    assert_table_schema_columns(&table_2_schema, &[id_column_schema(), year_schema]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -457,17 +453,13 @@ async fn test_get_replicated_column_names_respects_column_filter() {
         .unwrap();
 
     // Get table schema without publication filter - should include ALL columns.
-    let table_schemas = transaction
-        .get_table_schemas(&[test_table_id])
-        .await
-        .unwrap();
-    let table_schema = &table_schemas[&test_table_id];
+    let table_schema = transaction.get_table_schema(test_table_id).await.unwrap();
 
     // Verify all columns are present in the schema.
     assert_eq!(table_schema.id, test_table_id);
     assert_eq!(table_schema.name, test_table_name);
     assert_table_schema_columns(
-        table_schema,
+        &table_schema,
         &[
             id_column_schema(),
             test_column("name", Type::TEXT, 2, true, false),
@@ -478,7 +470,7 @@ async fn test_get_replicated_column_names_respects_column_filter() {
 
     // Get replicated column names from the publication - should only include published columns.
     let replicated_columns = transaction
-        .get_replicated_column_names(test_table_id, table_schema, publication_name)
+        .get_replicated_column_names(test_table_id, &table_schema, publication_name)
         .await
         .unwrap();
 
@@ -541,16 +533,12 @@ async fn test_get_replicated_column_names_for_all_tables_publication() {
         .unwrap();
 
     // Get table schema.
-    let table_schemas = transaction
-        .get_table_schemas(&[test_table_id])
-        .await
-        .unwrap();
-    let table_schema = &table_schemas[&test_table_id];
+    let table_schema = transaction.get_table_schema(test_table_id).await.unwrap();
 
     // Get replicated column names - FOR ALL TABLES doesn't support column filtering,
     // so all columns should be returned.
     let replicated_columns = transaction
-        .get_replicated_column_names(test_table_id, table_schema, publication_name)
+        .get_replicated_column_names(test_table_id, &table_schema, publication_name)
         .await
         .unwrap();
 
@@ -613,16 +601,12 @@ async fn test_get_replicated_column_names_for_tables_in_schema_publication() {
         .unwrap();
 
     // Get table schema.
-    let table_schemas = transaction
-        .get_table_schemas(&[test_table_id])
-        .await
-        .unwrap();
-    let table_schema = &table_schemas[&test_table_id];
+    let table_schema = transaction.get_table_schema(test_table_id).await.unwrap();
 
     // Get replicated column names - FOR TABLES IN SCHEMA doesn't support column filtering,
     // so all columns should be returned.
     let replicated_columns = transaction
-        .get_replicated_column_names(test_table_id, table_schema, publication_name)
+        .get_replicated_column_names(test_table_id, &table_schema, publication_name)
         .await
         .unwrap();
 
@@ -689,12 +673,11 @@ async fn test_get_replicated_column_names_errors_when_table_not_in_publication()
         .unwrap();
 
     // Get table schema for the table NOT in the publication.
-    let table_schemas = transaction.get_table_schemas(&[table_1_id]).await.unwrap();
-    let table_schema = &table_schemas[&table_1_id];
+    let table_schema = transaction.get_table_schema(table_1_id).await.unwrap();
 
     // Attempting to get replicated column names for a table not in the publication should error.
     let result = transaction
-        .get_replicated_column_names(table_1_id, table_schema, publication_name)
+        .get_replicated_column_names(table_1_id, &table_schema, publication_name)
         .await;
 
     transaction.commit().await.unwrap();

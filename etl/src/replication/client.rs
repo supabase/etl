@@ -11,7 +11,7 @@ use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
 use rustls::pki_types::{CertificateDer, pem::PemObject};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroI32;
 use std::sync::Arc;
@@ -35,8 +35,8 @@ where
         let result = connection.await;
 
         match result {
-            Err(err) => error!("an error occurred during the postgres connection: {}", err),
-            Ok(()) => info!("postgres connection terminated successfully"),
+            Err(err) => error!(error = %err, "postgres connection error"),
+            Ok(()) => info!("postgres connection terminated"),
         }
     }
     .instrument(span);
@@ -108,17 +108,6 @@ impl PgReplicationSlotTransaction {
         client.begin_tx().await?;
 
         Ok(Self { client })
-    }
-
-    /// Retrieves the schema information for the specified tables.
-    ///
-    /// If a publication is specified, only columns of the tables included in that publication
-    /// will be returned.
-    pub async fn get_table_schemas(
-        &self,
-        table_ids: &[TableId],
-    ) -> EtlResult<HashMap<TableId, TableSchema>> {
-        self.client.get_table_schemas(table_ids).await
     }
 
     /// Retrieves the schema information for the supplied table.
@@ -207,7 +196,7 @@ impl PgReplicationClient {
 
         spawn_postgres_connection::<NoTls>(connection);
 
-        info!("successfully connected to postgres without tls");
+        info!("connected to postgres without tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
@@ -244,7 +233,7 @@ impl PgReplicationClient {
 
         spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
-        info!("successfully connected to postgres with tls");
+        info!("connected to postgres with tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
@@ -321,12 +310,12 @@ impl PgReplicationClient {
     pub async fn get_or_create_slot(&self, slot_name: &str) -> EtlResult<GetOrCreateSlotResult> {
         match self.get_slot(slot_name).await {
             Ok(slot) => {
-                info!("using existing replication slot '{}'", slot_name);
+                info!(slot_name, "using existing replication slot");
 
                 Ok(GetOrCreateSlotResult::GetSlot(slot))
             }
             Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
-                info!("creating new replication slot '{}'", slot_name);
+                info!(slot_name, "creating new replication slot");
 
                 let create_result = self.create_slot_internal(slot_name, false).await?;
 
@@ -340,7 +329,7 @@ impl PgReplicationClient {
     ///
     /// Returns an error if the slot doesn't exist or if there are any issues with the deletion.
     pub async fn delete_slot(&self, slot_name: &str) -> EtlResult<()> {
-        info!("deleting replication slot '{}'", slot_name);
+        info!(slot_name, "deleting replication slot");
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let query = format!(
             r#"DROP_REPLICATION_SLOT {} WAIT;"#,
@@ -349,7 +338,7 @@ impl PgReplicationClient {
 
         match self.client.simple_query(&query).await {
             Ok(_) => {
-                info!("successfully deleted replication slot '{}'", slot_name);
+                info!(slot_name, "deleted replication slot");
 
                 Ok(())
             }
@@ -358,8 +347,8 @@ impl PgReplicationClient {
                     && *code == SqlState::UNDEFINED_OBJECT
                 {
                     warn!(
-                        "attempted to delete non-existent replication slot '{}'",
-                        slot_name
+                        slot_name,
+                        "attempted to delete non-existent replication slot"
                     );
 
                     bail!(
@@ -372,7 +361,7 @@ impl PgReplicationClient {
                     );
                 }
 
-                error!("failed to delete replication slot '{}': {}", slot_name, err);
+                error!(slot_name, error = %err, "failed to delete replication slot");
 
                 Err(err.into())
             }
@@ -551,10 +540,7 @@ impl PgReplicationClient {
         slot_name: &str,
         start_lsn: PgLsn,
     ) -> EtlResult<LogicalReplicationStream> {
-        info!(
-            "starting logical replication from publication '{}' with slot named '{}' at lsn {}",
-            publication_name, slot_name, start_lsn
-        );
+        info!(publication_name, slot_name, %start_lsn, "starting logical replication");
 
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let options = format!(
@@ -661,35 +647,6 @@ impl PgReplicationClient {
             ErrorKind::ReplicationSlotNotCreated,
             "Replication slot creation failed"
         ))
-    }
-
-    /// Retrieves schema information for multiple tables.
-    ///
-    /// Tables without primary keys will be skipped and logged with a warning.
-    async fn get_table_schemas(
-        &self,
-        table_ids: &[TableId],
-    ) -> EtlResult<HashMap<TableId, TableSchema>> {
-        let mut table_schemas = HashMap::new();
-
-        // TODO: consider if we want to fail when at least one table was missing or not.
-        for table_id in table_ids {
-            let table_schema = self.get_table_schema(*table_id).await?;
-
-            // TODO: this warning and skipping should not happen in this method,
-            //  but rather higher in the stack.
-            if !table_schema.has_primary_keys() {
-                warn!(
-                    "table {} with id {} will not be copied because it has no primary key",
-                    table_schema.name, table_schema.id
-                );
-                continue;
-            }
-
-            table_schemas.insert(table_schema.id, table_schema);
-        }
-
-        Ok(table_schemas)
     }
 
     /// Retrieves the schema for a single table.

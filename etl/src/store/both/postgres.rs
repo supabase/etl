@@ -276,8 +276,8 @@ impl StateStore for PostgresStore {
         emit_table_metrics(self.pipeline_id, &inner.phase_counts);
 
         info!(
-            "loaded {} table replication states from postgres state store",
-            table_states_len
+            count = table_states_len,
+            "loaded table replication states from postgres state store"
         );
 
         Ok(table_states_len)
@@ -388,8 +388,8 @@ impl StateStore for PostgresStore {
         inner.destination_tables_metadata = metadata;
 
         info!(
-            "loaded {} destination tables metadata from postgres state store",
-            metadata_len
+            count = metadata_len,
+            "loaded destination tables metadata from postgres state store"
         );
 
         Ok(metadata_len)
@@ -401,6 +401,12 @@ impl StateStore for PostgresStore {
         table_id: TableId,
         metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
+        debug!(
+            %table_id,
+            detination_table_id = %metadata.destination_table_id,
+            "storing table mapping"
+        );
+
         destination_metadata::store_destination_table_metadata(
             &self.pool,
             self.pipeline_id as i64,
@@ -541,8 +547,8 @@ impl SchemaStore for PostgresStore {
         }
 
         info!(
-            "loaded {} table schemas from postgres state store",
-            table_schemas_len
+            count = table_schemas_len,
+            "loaded table schemas from postgres state store"
         );
 
         Ok(table_schemas_len)
@@ -554,10 +560,7 @@ impl SchemaStore for PostgresStore {
     /// in-memory cache atomically. The schema's snapshot_id determines which
     /// version this schema represents.
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
-        debug!(
-            "storing table schema for table '{}' at snapshot {}",
-            table_schema.name, table_schema.snapshot_id
-        );
+        debug!(table_name = %table_schema.name, snapshot_id = %table_schema.snapshot_id, "storing table schema");
 
         schema::store_table_schema(&self.pool, self.pipeline_id as i64, &table_schema)
             .await

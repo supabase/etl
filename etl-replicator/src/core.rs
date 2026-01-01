@@ -201,7 +201,7 @@ fn log_destination_config(config: &DestinationConfig) {
         } => {
             debug!(
                 namespace,
-                project_ref, warehouse_name, s3_region, "using Supabase iceberg destination config"
+                project_ref, warehouse_name, s3_region, "using supabase iceberg destination config"
             )
         }
         DestinationConfig::Iceberg {
@@ -220,7 +220,7 @@ fn log_destination_config(config: &DestinationConfig) {
                 warehouse_name,
                 namespace,
                 s3_endpoint,
-                "using generic REST iceberg destination config"
+                "using generic rest iceberg destination config"
             )
         }
     }
@@ -294,15 +294,15 @@ where
 
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                info!("SIGINT (Ctrl+C) received, shutting down pipeline");
+                info!("sigint (ctrl+c) received, shutting down pipeline");
             }
             _ = sigterm.recv() => {
-                info!("SIGTERM received, shutting down pipeline");
+                info!("sigterm received, shutting down pipeline");
             }
         }
 
         if let Err(e) = shutdown_tx.shutdown() {
-            warn!("failed to send shutdown signal: {:?}", e);
+            warn!(error = ?e, "failed to send shutdown signal");
             return;
         }
 
