@@ -294,7 +294,7 @@ impl<S, D> ApplyWorkerHook<S, D> {
         pool: TableSyncWorkerPool,
         store: S,
         destination: D,
-        replication_masks: ReplicationMasks,    
+        replication_masks: ReplicationMasks,
         shutdown_rx: ShutdownRx,
         table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
