@@ -273,10 +273,10 @@ impl fmt::Display for TableReplicationPhase {
             Self::DataSync => write!(f, "data_sync"),
             Self::FinishedCopy => write!(f, "finished_copy"),
             Self::SyncWait => write!(f, "sync_wait"),
-            Self::Catchup { lsn } => write!(f, "catchup({})", lsn),
-            Self::SyncDone { lsn } => write!(f, "sync_done({})", lsn),
+            Self::Catchup { lsn } => write!(f, "catchup({lsn})"),
+            Self::SyncDone { lsn } => write!(f, "sync_done({lsn})"),
             Self::Ready => write!(f, "ready"),
-            Self::Errored { reason, .. } => write!(f, "errored({})", reason),
+            Self::Errored { reason, .. } => write!(f, "errored({reason})"),
         }
     }
 }
