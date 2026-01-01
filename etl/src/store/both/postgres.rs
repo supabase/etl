@@ -4,12 +4,10 @@ use etl_postgres::types::{TableId, TableSchema};
 use metrics::gauge;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::DerefMut;
+use std::sync::Arc;
 use std::time::Duration;
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
