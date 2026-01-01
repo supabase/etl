@@ -1,8 +1,6 @@
 use etl_postgres::types::TableId;
-use std::{
-    collections::{BTreeMap, HashMap},
-    future::Future,
-};
+use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 
 use crate::error::EtlResult;
 use crate::state::table::TableReplicationPhase;
