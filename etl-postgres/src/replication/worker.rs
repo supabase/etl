@@ -1,3 +1,5 @@
+use std::fmt::{Display, Formatter};
+
 use crate::replication::slots::EtlReplicationSlot;
 use crate::types::TableId;
 
@@ -16,6 +18,15 @@ impl WorkerType {
                 pipeline_id,
                 table_id: *table_id,
             },
+        }
+    }
+}
+
+impl Display for WorkerType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Apply => write!(f, "apply"),
+            Self::TableSync { table_id } => write!(f, "table_sync({table_id})"),
         }
     }
 }

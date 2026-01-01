@@ -65,13 +65,13 @@ async fn table_copy_and_streaming_with_restart() {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -198,7 +198,7 @@ async fn table_insert_update_delete() {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -315,7 +315,7 @@ async fn table_subsequent_updates() {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -414,13 +414,13 @@ async fn table_truncate_with_batching() {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -551,7 +551,7 @@ async fn table_nullable_scalar_columns() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -760,7 +760,7 @@ async fn table_nullable_array_columns() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -995,7 +995,7 @@ async fn table_non_nullable_scalar_columns() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -1245,7 +1245,7 @@ async fn table_non_nullable_array_columns() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -1529,7 +1529,7 @@ async fn table_array_with_null_values() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
@@ -1597,7 +1597,7 @@ async fn table_array_with_null_values() {
     );
 
     let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();

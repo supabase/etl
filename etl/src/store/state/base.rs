@@ -1,5 +1,6 @@
 use etl_postgres::types::TableId;
-use std::{collections::HashMap, future::Future};
+use std::collections::BTreeMap;
+use std::future::Future;
 
 use crate::error::EtlResult;
 use crate::state::destination_metadata::DestinationTableMetadata;
@@ -25,7 +26,7 @@ pub trait StateStore {
     /// Does not read from the persistent store.
     fn get_table_replication_states(
         &self,
-    ) -> impl Future<Output = EtlResult<HashMap<TableId, TableReplicationPhase>>> + Send;
+    ) -> impl Future<Output = EtlResult<BTreeMap<TableId, TableReplicationPhase>>> + Send;
 
     /// Loads the table replication states from the persistent state into the cache.
     ///

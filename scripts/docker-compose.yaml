@@ -21,7 +21,8 @@ services:
       - ${POSTGRES_DATA_VOLUME:-postgres_data}:/var/lib/postgresql/data
     # These parameters are configured for local testing only.
     # In production, use PostgreSQL defaults or your own tuned values.
-    # `wal_sender_timeout/2` is the keepalive timeout for streaming replication.
+    # `wal_sender_timeout/2` is the keepalive timeout for streaming replication, we set it to 10s to make tests
+    # run fast but also simulate a very low timeout and see how the system behaves.
     command: >
       postgres
       -N 1000

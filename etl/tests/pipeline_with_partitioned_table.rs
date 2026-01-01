@@ -56,7 +56,7 @@ async fn partitioned_table_copy_replicates_existing_data() {
 
     // Register notification for initial copy completion.
     let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let pipeline_id: PipelineId = random();
@@ -156,7 +156,7 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
 
     // Register notification for initial copy completion.
     let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let pipeline_id: PipelineId = random();
@@ -250,7 +250,7 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let pipeline_id: PipelineId = random();
@@ -357,7 +357,7 @@ async fn parent_table_truncate_does_emit_truncate_event() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let pipeline_id: PipelineId = random();
@@ -434,7 +434,7 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let pipeline_id: PipelineId = random();
@@ -523,7 +523,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let pipeline_id: PipelineId = random();
@@ -642,7 +642,7 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let pipeline_id: PipelineId = random();
@@ -772,7 +772,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
 
     // Start pipeline and wait for initial sync.
     let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let pipeline_id: PipelineId = random();
@@ -817,7 +817,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
 
     // Restart the pipeline. It should now discover the detached partition as a new table.
     let detached_sync_done = state_store
-        .notify_on_table_state_type(p1_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(p1_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let mut pipeline = create_pipeline(
@@ -897,7 +897,7 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let pipeline_id: PipelineId = random();
@@ -1038,7 +1038,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
 
     // Start pipeline and wait for initial sync.
     let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let pipeline_id: PipelineId = random();
@@ -1083,7 +1083,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
 
     // Restart the pipeline. It should now discover the detached partition as a new table.
     let detached_sync_done = state_store
-        .notify_on_table_state_type(p1_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(p1_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let mut pipeline = create_pipeline(
@@ -1229,7 +1229,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Register notification for initial copy completion.
     let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     let pipeline_id: PipelineId = random();

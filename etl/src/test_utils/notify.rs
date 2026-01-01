@@ -1,4 +1,5 @@
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::collections::{BTreeMap, HashMap};
+use std::{fmt, sync::Arc};
 
 use etl_postgres::types::{SnapshotId, TableId, TableSchema};
 use tokio::sync::{Notify, RwLock};
@@ -28,7 +29,7 @@ type TableStateCondition = (
 );
 
 struct Inner {
-    table_replication_states: HashMap<TableId, TableReplicationPhase>,
+    table_replication_states: BTreeMap<TableId, TableReplicationPhase>,
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     /// Stores table schemas in insertion order per table.
     table_schemas: HashMap<TableId, Vec<Arc<TableSchema>>>,
@@ -86,7 +87,7 @@ pub struct NotifyingStore {
 impl NotifyingStore {
     pub fn new() -> Self {
         let inner = Inner {
-            table_replication_states: HashMap::new(),
+            table_replication_states: BTreeMap::new(),
             table_state_history: HashMap::new(),
             table_schemas: HashMap::new(),
             destination_tables_metadata: HashMap::new(),
@@ -100,7 +101,7 @@ impl NotifyingStore {
         }
     }
 
-    pub async fn get_table_replication_states(&self) -> HashMap<TableId, TableReplicationPhase> {
+    pub async fn get_table_replication_states(&self) -> BTreeMap<TableId, TableReplicationPhase> {
         let inner = self.inner.read().await;
         inner.table_replication_states.clone()
     }
@@ -208,7 +209,7 @@ impl StateStore for NotifyingStore {
 
     async fn get_table_replication_states(
         &self,
-    ) -> EtlResult<HashMap<TableId, TableReplicationPhase>> {
+    ) -> EtlResult<BTreeMap<TableId, TableReplicationPhase>> {
         let inner = self.inner.read().await;
         let result = Ok(inner.table_replication_states.clone());
 

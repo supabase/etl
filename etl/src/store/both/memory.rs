@@ -1,5 +1,5 @@
 use etl_postgres::types::{SnapshotId, TableId, TableSchema};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -16,7 +16,7 @@ use crate::store::state::StateStore;
 struct Inner {
     /// Current replication state for each table - this is the authoritative source of truth
     /// for table states. Every table being replicated must have an entry here.
-    table_replication_states: HashMap<TableId, TableReplicationPhase>,
+    table_replication_states: BTreeMap<TableId, TableReplicationPhase>,
     /// Complete history of state transitions for each table, used for debugging and auditing.
     /// This is an append-only log that grows over time and provides visibility into
     /// table state evolution. Entries are chronologically ordered.
@@ -48,7 +48,7 @@ impl MemoryStore {
     /// state and schema information.
     pub fn new() -> Self {
         let inner = Inner {
-            table_replication_states: HashMap::new(),
+            table_replication_states: BTreeMap::new(),
             table_state_history: HashMap::new(),
             table_schemas: HashMap::new(),
             destination_tables_metadata: HashMap::new(),
@@ -78,7 +78,7 @@ impl StateStore for MemoryStore {
 
     async fn get_table_replication_states(
         &self,
-    ) -> EtlResult<HashMap<TableId, TableReplicationPhase>> {
+    ) -> EtlResult<BTreeMap<TableId, TableReplicationPhase>> {
         let inner = self.inner.lock().await;
 
         Ok(inner.table_replication_states.clone())

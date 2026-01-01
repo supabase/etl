@@ -80,13 +80,13 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -222,17 +222,17 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         destination.clone(),
     );
 
-    // Register notifications for table copy completion (SyncDone for both tables).
+    // Register notifications for table copy completion (Ready for both tables).
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -248,7 +248,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         .wait_for_events_count(vec![(EventType::Insert, 4)])
         .await;
 
-    // Insert rows AFTER SyncDone so they are captured as CDC events.
+    // Insert rows AFTER Ready so they are captured as CDC events.
     insert_mock_data(
         &mut database,
         &database_schema.users_schema().name,
@@ -526,17 +526,17 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
         destination.clone(),
     );
 
-    // Register notifications for table copy completion (SyncDone for both tables).
+    // Register notifications for table copy completion (Ready for both tables).
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
