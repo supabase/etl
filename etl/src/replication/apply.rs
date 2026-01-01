@@ -969,8 +969,6 @@ where
                 .replication_progress
                 .update_last_received_lsn(start_lsn);
 
-            // The `end_lsn` here is the LSN of the last byte in the WAL that was processed by the
-            // server, and it's different from the `end_lsn` found in the `Commit` message.
             let end_lsn = PgLsn::from(message.wal_end());
             state.replication_progress.update_last_received_lsn(end_lsn);
 
@@ -1228,10 +1226,9 @@ where
     }
 
     // We call `process_syncing_tables` with `update_state` set to false here because we do not yet want
-    // to update the table state. This function will be called again in `handle_replication_message_batch`
-    // with `update_state` set to true *after* sending the batch to the destination. This order is needed
-    // for consistency because otherwise we might update the table state before receiving an ack from the
-    // destination.
+    // to update the table state. This function will be called again after with `update_state=true` after
+    // flushing the batch. This order is needed for consistency because otherwise we might update the table
+    // state before having written durably the data to the destination.
     let mut action = hook.process_syncing_tables(end_lsn, false).await?;
 
     // If we are told to continue processing but the shutdown was discarded, it means that we should
