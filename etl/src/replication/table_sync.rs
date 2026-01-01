@@ -69,7 +69,7 @@ where
     S: StateStore + SchemaStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
 {
-    info!("starting initial table sync for table {}", table_id);
+    info!(table_id = %table_id, "starting initial table sync");
 
     // We are safe to keep the lock only for this section, since we know that the state will be changed by the
     // apply worker only if `SyncWait` is set, which is not the case if we arrive here, so we are
@@ -85,8 +85,9 @@ where
             TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
         ) {
             info!(
-                "initial table sync not required for table {}, already in phase '{:?}'",
-                table_id, phase_type
+                table_id = %table_id,
+                phase_type = %phase_type,
+                "initial table sync not required, already in phase",
             );
 
             return Ok(TableSyncResult::SyncNotRequired);
@@ -101,8 +102,9 @@ where
                 | TableReplicationPhaseType::FinishedCopy
         ) {
             warn!(
-                "invalid replication phase '{:?}' for table {}, cannot perform initial table sync",
-                phase_type, table_id
+                table_id = %table_id,
+                phase_type = %phase_type,
+                "invalid replication phase, cannot perform initial table sync",
             );
 
             bail!(
@@ -163,10 +165,7 @@ where
             destination.truncate_table(table_id).await?;
 
             // We are ready to start copying table data, and we update the state accordingly.
-            info!(
-                "starting data copy for table {} during initial table sync",
-                table_id
-            );
+            info!(table_id = %table_id, "starting data copy during initial table sync");
             {
                 let mut inner = table_sync_worker_state.lock().await;
                 inner
@@ -194,7 +193,7 @@ where
             //  for correct decoding, thus we rely on our own state store to preserve this information.
             // - Destination -> we write here because some consumers might want to have the schema of incoming
             //  data.
-            info!("fetching table schema for table {}", table_id);
+            info!(table_id = %table_id, "fetching table schema");
             let table_schema = transaction
                 .get_table_schema(table_id, Some(&config.publication_name))
                 .await?;
@@ -228,7 +227,7 @@ where
             );
             pin!(table_copy_stream);
 
-            info!("starting table copy stream for table {}", table_id);
+            info!(table_id = %table_id, "starting table copy stream");
 
             let table_copy_start = Instant::now();
             let mut total_rows_copied = 0;
@@ -275,10 +274,7 @@ where
                         // If we received a shutdown in the middle of a table copy, we bail knowing
                         // that the system can automatically recover if a table copy has failed in
                         // the middle of processing.
-                        info!(
-                            "shutting down table sync worker for table {} during table copy",
-                            table_id
-                        );
+                        info!(table_id = %table_id, "shutting down table sync worker during table copy");
 
                         return Ok(TableSyncResult::SyncStopped);
                     }
@@ -289,10 +285,7 @@ where
             // table creation.
             if !table_rows_written {
                 destination.write_table_rows(table_id, vec![]).await?;
-                info!(
-                    "writing empty table rows since table {} was empty",
-                    table_id
-                );
+                info!(table_id = %table_id, "writing empty table rows since table was empty");
             }
 
             // We commit the transaction before starting the apply loop, otherwise it will fail
@@ -308,8 +301,9 @@ where
             .record(table_copy_duration);
 
             info!(
-                "completed table copy for table {} ({} rows copied)",
-                table_id, total_rows_copied
+                table_id = %table_id,
+                total_rows_copied = total_rows_copied,
+                "completed table copy",
             );
 
             // We mark that we finished the copy of the table schema and data.
@@ -325,8 +319,9 @@ where
         TableReplicationPhaseType::FinishedCopy => {
             let slot = replication_client.get_slot(&slot_name).await?;
             info!(
-                "resuming initial table sync for table {} from lsn {}",
-                table_id, slot.confirmed_flush_lsn
+                table_id = %table_id,
+                confirmed_flush_lsn = %slot.confirmed_flush_lsn,
+                "resuming initial table sync",
             );
 
             slot.confirmed_flush_lsn
@@ -351,18 +346,12 @@ where
     // If we are told to shut down while waiting for a phase change, we will signal this to
     // the caller.
     if result.should_shutdown() {
-        info!(
-            "shutting down table sync worker for table {} while waiting for catchup",
-            table_id
-        );
+        info!(table_id = %table_id, "shutting down table sync worker while waiting for catchup");
 
         return Ok(TableSyncResult::SyncStopped);
     }
 
-    info!(
-        "initial table sync for table {} completed, moving onto streaming",
-        table_id
-    );
+    info!(table_id = %table_id, "initial table sync completed, moving onto streaming");
 
     Ok(TableSyncResult::SyncCompleted { start_lsn })
 }

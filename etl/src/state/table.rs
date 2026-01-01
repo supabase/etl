@@ -266,6 +266,21 @@ impl TableReplicationPhase {
     }
 }
 
+impl fmt::Display for TableReplicationPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Init => write!(f, "init"),
+            Self::DataSync => write!(f, "data_sync"),
+            Self::FinishedCopy => write!(f, "finished_copy"),
+            Self::SyncWait => write!(f, "sync_wait"),
+            Self::Catchup { lsn } => write!(f, "catchup({lsn})"),
+            Self::SyncDone { lsn } => write!(f, "sync_done({lsn})"),
+            Self::Ready => write!(f, "ready"),
+            Self::Errored { reason, .. } => write!(f, "errored({reason})"),
+        }
+    }
+}
+
 impl From<TableReplicationError> for TableReplicationPhase {
     fn from(value: TableReplicationError) -> Self {
         Self::Errored {

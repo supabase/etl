@@ -60,7 +60,7 @@ pub fn parse_event_from_commit_message(
         start_lsn,
         commit_lsn,
         flags: commit_body.flags(),
-        end_lsn: commit_body.end_lsn(),
+        end_lsn: commit_body.end_lsn().into(),
         timestamp: commit_body.timestamp(),
     }
 }

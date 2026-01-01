@@ -6,7 +6,6 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
-use tracing::warn;
 use tracing::{Instrument, debug, error, info};
 
 use crate::bail;
@@ -307,7 +306,7 @@ where
     /// handle the initial data synchronization for the given table. The worker
     /// inherits the hook's configuration and coordination channels.
     async fn build_table_sync_worker(&self, table_id: TableId) -> TableSyncWorker<S, D> {
-        info!("creating a new table sync worker for table {}", table_id);
+        info!(table_id = %table_id, "creating a new table sync worker");
 
         TableSyncWorker::new(
             self.pipeline_id,
@@ -362,8 +361,9 @@ where
             let mut inner = table_sync_worker_state.lock().await;
             if inner.replication_phase().as_type() == TableReplicationPhaseType::SyncWait {
                 info!(
-                    "table sync worker {} is waiting to catchup, starting catchup at lsn {}",
-                    table_id, current_lsn
+                    table_id = %table_id,
+                    current_lsn = %current_lsn,
+                    "table sync worker is waiting to catchup, starting catchup",
                 );
 
                 inner
@@ -379,8 +379,8 @@ where
 
         if catchup_started {
             info!(
-                "catchup was started, waiting for table sync worker {} to complete sync",
-                table_id
+                table_id = %table_id,
+                "catchup was started, waiting for table sync worker to complete sync",
             );
 
             // We wait for the table to be in `SyncDone` or `Errored`. The reason for waiting for
@@ -400,8 +400,8 @@ where
             // the caller which will result in the apply loop being cancelled.
             if result.should_shutdown() {
                 info!(
-                    "the table sync worker {} didn't manage to finish syncing because it was instructed to shutdown",
-                    table_id
+                    table_id = %table_id,
+                    "the table sync worker didn't manage to finish syncing because it was instructed to shutdown",
                 );
 
                 return Ok(ApplyLoopAction::Pause);
@@ -411,15 +411,15 @@ where
             if let ShutdownResult::Ok(inner) = &result {
                 if inner.replication_phase().as_type().is_errored() {
                     info!(
-                        "the table sync worker {} errored, skipping table and continuing",
-                        table_id
+                        table_id = %table_id,
+                        "the table sync worker errored, skipping table and continuing",
                     );
 
                     return Ok(ApplyLoopAction::Continue);
                 }
             }
 
-            info!("the table sync worker {} has finished syncing", table_id);
+            info!(table_id = %table_id, "the table sync worker has finished syncing");
         }
 
         Ok(ApplyLoopAction::Continue)
@@ -431,50 +431,6 @@ where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    /// Initializes table sync workers before the main apply loop begins.
-    ///
-    /// This hook method starts table sync workers for all tables that need
-    /// initial synchronization. It excludes tables already in `SyncDone` state
-    /// and avoids starting duplicate workers for tables that already have
-    /// active workers in the pool.
-    async fn before_loop(&self, _start_lsn: PgLsn) -> EtlResult<ApplyLoopAction> {
-        info!("starting table sync workers before the main apply loop");
-
-        for (table_id, table_replication_phase) in self.store.get_table_replication_states().await?
-        {
-            if !table_replication_phase.as_type().is_done() {
-                // A table in `SyncDone` doesn't need to have its worker started, since the main apply
-                // worker will move it into `Ready` state automatically once the condition is met.
-                if let TableReplicationPhaseType::SyncDone = table_replication_phase.as_type() {
-                    continue;
-                }
-
-                // If there is already an active worker for this table in the pool, we can avoid starting
-                // it.
-                let mut pool = self.pool.lock().await;
-                if pool.get_active_worker_state(table_id).is_some() {
-                    continue;
-                }
-
-                // If we fail, we just show an error, and hopefully we will succeed when starting it
-                // during syncing tables.
-                let table_sync_worker = self.build_table_sync_worker(table_id).await;
-                if let Err(err) = pool.start_worker(table_sync_worker).await {
-                    error!(
-                        "error starting table sync worker for table {} during initialization: {}",
-                        table_id, err
-                    );
-                }
-            } else if table_replication_phase.as_type().is_errored() {
-                warn!(
-                    "table sync worker for table {table_id} won't run because it is in an errored state."
-                );
-            }
-        }
-
-        Ok(ApplyLoopAction::Continue)
-    }
-
     /// Processes all tables currently in synchronization phases.
     ///
     /// This method coordinates the lifecycle of syncing tables by promoting
@@ -486,12 +442,9 @@ where
         update_state: bool,
     ) -> EtlResult<ApplyLoopAction> {
         // TODO: this is a very hot path and we have to optimize it as much as possible.
+        // TODO: find a way to deterministically return and process tables always in the same order.
         let active_table_replication_states =
             get_active_table_replication_states(&self.store).await?;
-        debug!(
-            "processing syncing tables for apply worker with lsn {}",
-            current_lsn
-        );
 
         for (table_id, table_replication_phase) in active_table_replication_states {
             // We read the state store state first, if we don't find `SyncDone` we will attempt to
@@ -508,8 +461,8 @@ where
                 TableReplicationPhase::SyncDone { lsn } => {
                     if current_lsn >= lsn && update_state {
                         info!(
-                            "table {} is ready, its events will now be processed by the main apply worker",
-                            table_id
+                            table_id = %table_id,
+                            "table is ready, its events will now be processed by the main apply worker",
                         );
 
                         self.store
@@ -526,7 +479,11 @@ where
                         }
                     }
                     Err(err) => {
-                        error!("error handling syncing for table {}: {}", table_id, err);
+                        error!(
+                            table_id = %table_id,
+                            error = %err,
+                            "error handling syncing for table",
+                        );
                     }
                 },
             }
@@ -589,10 +546,10 @@ where
                 let Some(state) = self.store.get_table_replication_state(table_id).await? else {
                     // If we don't even find the state for this table, we skip the event entirely.
                     debug!(
-                        "table {} should apply changes in {:?}: {}",
-                        table_id,
-                        self.worker_type(),
-                        false
+                        table_id = %table_id,
+                        worker_type = %self.worker_type(),
+                        should_apply_changes = false,
+                        "evaluated whether table should apply changes",
                     );
 
                     return Ok(false);
@@ -609,10 +566,10 @@ where
         };
 
         debug!(
-            "table {} should apply changes in {:?}: {}",
-            table_id,
-            self.worker_type(),
-            should_apply_changes
+            table_id = %table_id,
+            worker_type = %self.worker_type(),
+            should_apply_changes = should_apply_changes,
+            "evaluated whether table should apply changes",
         );
 
         Ok(should_apply_changes)
