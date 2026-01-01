@@ -57,7 +57,7 @@ impl RootSpanBuilder for ApiRootSpanBuilder {
         if let Ok(response) = outcome
             && response.response().error().is_none()
         {
-            debug!("HTTP request completed successfully");
+            debug!("http request completed successfully");
         }
     }
 }

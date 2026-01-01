@@ -123,8 +123,8 @@ impl Application {
             Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
             Err(e) => {
                 warn!(
-                    "Failed to create Kubernetes client: {}. Running without Kubernetes support.",
-                    e
+                    error = %e,
+                    "failed to create kubernetes client, running without kubernetes support"
                 );
                 None
             }
@@ -174,13 +174,14 @@ async fn test_orbstack_connection(client: &kube::Client) -> Result<(), K8sError>
     match client.apiserver_version().await {
         Ok(version) => {
             info!(
-                "successfully connected to orbstack kubernetes api server version: {}.{}",
-                version.major, version.minor
+                major = %version.major,
+                minor = %version.minor,
+                "connected to orbstack kubernetes api server"
             );
         }
         Err(e) => {
             error!(
-                "failed to connect to orbstack, make sure you have orbstack installed and kubernetes enabled in it."
+                "failed to connect to orbstack, ensure orbstack is installed and kubernetes is enabled"
             );
             return Err(e.into());
         }

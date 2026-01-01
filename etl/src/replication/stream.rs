@@ -210,10 +210,10 @@ impl EventsStream {
                 .increment(1);
 
                 debug!(
-                    last_flush = %flush_lsn,
+                    %flush_lsn,
                     last_update_elapsed_secs = last_update.elapsed().as_secs(),
-                    status_update_type = %status_update_type,
-                    "skipping status update due to unforced reply and recent update"
+                    %status_update_type,
+                    "skipping status update"
                 );
 
                 return Ok(());
@@ -251,12 +251,12 @@ impl EventsStream {
         .increment(1);
 
         debug!(
-            write_lsn = %write_lsn,
-            flush_lsn = %flush_lsn,
+            %write_lsn,
+            %flush_lsn,
             apply_lsn = %flush_lsn,
-            force = force,
-            status_update_type = %status_update_type,
-            "status update successfully sent"
+            force,
+            %status_update_type,
+            "status update sent"
         );
 
         // Update the state after successful send.

@@ -77,7 +77,7 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
             // Shutdown handling takes priority over all other operations to ensure
             // graceful termination. We return any accumulated items with shutdown indication.
             if this.shutdown_rx.has_changed().unwrap_or(false) {
-                info!("the stream has been forcefully stopped");
+                info!("stream forcefully stopped due to shutdown signal");
 
                 // Mark stream as permanently stopped to prevent further polling.
                 *this.stream_stopped = true;

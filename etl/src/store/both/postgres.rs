@@ -276,8 +276,8 @@ impl StateStore for PostgresStore {
         emit_table_metrics(self.pipeline_id, &inner.phase_counts);
 
         info!(
-            "loaded {} table replication states from postgres state store",
-            table_states_len
+            count = table_states_len,
+            "loaded table replication states from postgres state store"
         );
 
         Ok(table_states_len)
@@ -377,8 +377,8 @@ impl StateStore for PostgresStore {
         inner.table_mappings = table_mappings;
 
         info!(
-            "loaded {} table mappings from postgres state store",
-            table_mappings_len
+            count = table_mappings_len,
+            "loaded table mappings from postgres state store"
         );
 
         Ok(table_mappings_len)
@@ -391,8 +391,9 @@ impl StateStore for PostgresStore {
         destination_table_id: String,
     ) -> EtlResult<()> {
         debug!(
-            "storing table mapping: '{}' -> '{}'",
-            source_table_id, destination_table_id
+            %source_table_id,
+            destination_table_id,
+            "storing table mapping"
         );
 
         table_mappings::store_table_mapping(
@@ -471,8 +472,8 @@ impl SchemaStore for PostgresStore {
         }
 
         info!(
-            "loaded {} table schemas from postgres state store",
-            table_schemas_len
+            count = table_schemas_len,
+            "loaded table schemas from postgres state store"
         );
 
         Ok(table_schemas_len)
@@ -480,7 +481,7 @@ impl SchemaStore for PostgresStore {
 
     /// Stores a table schema in both database and cache.
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
-        debug!("storing table schema for table '{}'", table_schema.name);
+        debug!(table_name = %table_schema.name, "storing table schema");
 
         schema::store_table_schema(&self.pool, self.pipeline_id as i64, &table_schema)
             .await

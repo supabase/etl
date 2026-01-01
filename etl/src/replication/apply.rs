@@ -536,7 +536,7 @@ where
 {
     info!(
         worker_type = %hook.worker_type(),
-        start_lsn = %start_lsn,
+        %start_lsn,
         "starting apply loop",
     );
 
@@ -589,17 +589,17 @@ where
             _ = shutdown_rx.changed() => {
                 // If the shutdown is being discarded, we don't want to handle it again.
                 if state.shutdown_discarded {
-                    info!("shutdown was already requested but has been discarded because of a running transaction");
+                    info!("shutdown already requested, continuing due to running transaction");
                     continue;
                 }
 
                 // If we are not inside a transaction, we can cleanly stop streaming and return.
                 if !state.handling_transaction() {
-                    info!("shutting down apply loop while waiting for incoming events outside of a transaction");
+                    info!("shutting down apply loop outside transaction");
                     return Ok(ApplyLoopResult::Paused);
                 }
 
-                info!("discarding shutdown because of a running transaction, the apply loop will shut down on the next transaction boundary");
+                info!("deferring shutdown until transaction boundary");
 
                 state.shutdown_discarded = true;
             }
@@ -639,14 +639,14 @@ where
                     // since it runs indefinitely. This indicates either the connection was closed
                     // or something unexpected occurred.
                     if replication_client.is_closed() {
-                        warn!("replication stream ended because the postgres connection was closed, the apply loop will terminate");
+                        warn!("replication stream ended due to closed postgres connection");
 
                         bail!(
                             ErrorKind::SourceConnectionFailed,
                             "PostgreSQL connection has been closed during the apply loop"
                         )
                     } else {
-                        warn!("replication stream ended unexpectedly without the connection being closed, the apply loop will terminate");
+                        warn!("replication stream ended unexpectedly");
 
                         bail!(
                             ErrorKind::SourceConnectionFailed,
@@ -872,7 +872,7 @@ where
     }
 
     let current_lsn = state.effective_flush_lsn();
-    info!(worker_type = %hook.worker_type(), current_lsn = %current_lsn, "processing syncing tables when no transaction is in progress");
+    info!(worker_type = %hook.worker_type(), %current_lsn, "processing syncing tables outside transaction");
 
     // With this synchronization, we are using `flush_lsn()` method which returns the LSN based on the
     // current state of the loop. The reason for why we are using that method is that we want to make sure
@@ -930,7 +930,7 @@ where
         .update_last_flush_lsn(last_commit_end_lsn);
 
     let current_lsn = state.replication_progress.last_received_lsn;
-    info!(worker_type = %hook.worker_type(), current_lsn = %current_lsn, "processing syncing tables after batch flush");
+    info!(worker_type = %hook.worker_type(), %current_lsn, "processing syncing tables after batch flush");
 
     // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
     // and ack for the batch from the destination. This is important to keep a consistent state.
@@ -978,8 +978,8 @@ where
             state.replication_progress.update_last_received_lsn(end_lsn);
 
             debug!(
-                start_lsn = %start_lsn,
-                end_lsn = %end_lsn,
+                %start_lsn,
+                %end_lsn,
                 "handling logical replication data message",
             );
 

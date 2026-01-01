@@ -166,7 +166,9 @@ impl BigQueryClient {
         };
 
         info!(
-            "creating or replacing table {full_table_name} in BigQuery (existed: {table_existed})"
+            %full_table_name,
+            %table_existed,
+            "creating or replacing table in bigquery"
         );
 
         let query = format!(
@@ -219,7 +221,7 @@ impl BigQueryClient {
             "".to_string()
         };
 
-        info!("creating table {full_table_name} in BigQuery");
+        info!(%full_table_name, "creating table in bigquery");
 
         let query = format!("create table {full_table_name} {columns_spec} {max_staleness_option}");
 
@@ -239,7 +241,7 @@ impl BigQueryClient {
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
-        info!("truncating table {full_table_name} in BigQuery");
+        info!(%full_table_name, "truncating table in bigquery");
 
         let delete_query = format!("truncate table {full_table_name}",);
 
@@ -260,7 +262,7 @@ impl BigQueryClient {
         let full_view_name = self.full_table_name(dataset_id, view_name)?;
         let full_target_table_name = self.full_table_name(dataset_id, target_table_id)?;
 
-        info!("creating/replacing view {full_view_name} pointing to {full_target_table_name}");
+        info!(%full_view_name, %full_target_table_name, "creating/replacing view");
 
         let query = format!(
             "create or replace view {full_view_name} as select * from {full_target_table_name}"
@@ -281,7 +283,7 @@ impl BigQueryClient {
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
-        info!("dropping table {full_table_name} from bigquery");
+        info!(%full_table_name, "dropping table from bigquery");
 
         let query = format!("drop table if exists {full_table_name}");
 
@@ -330,9 +332,9 @@ impl BigQueryClient {
         }
 
         debug!(
-            "streaming {:?} table batches concurrently with maximum {:?} concurrent streams",
-            table_batches.len(),
-            max_concurrent_streams
+            batch_count = table_batches.len(),
+            %max_concurrent_streams,
+            "streaming table batches concurrently"
         );
 
         // Use the new concurrent append_table_batches method
@@ -358,8 +360,9 @@ impl BigQueryClient {
                 match response {
                     Ok(response) => {
                         debug!(
-                            "append rows response for batch {:?}: {:?} ",
-                            batch_result.batch_index, response
+                            batch_index = batch_result.batch_index,
+                            ?response,
+                            "append rows response received"
                         );
 
                         total_bytes_received += response.encoded_len();
