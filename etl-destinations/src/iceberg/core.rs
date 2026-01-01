@@ -352,9 +352,9 @@ where
                             table_id_to_table_rows.entry(delete.table_id).or_default();
                         table_rows.push(old_table_row);
                     }
-                    _ => {
+                    event => {
                         // Every other event type is currently not supported.
-                        debug!("skipping unsupported event type");
+                        debug!(event_type = %event.event_type(), "skipping unsupported event type");
                     }
                 }
             }

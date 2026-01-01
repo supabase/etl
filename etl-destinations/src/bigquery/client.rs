@@ -154,7 +154,7 @@ impl BigQueryClient {
         column_schemas: &[ColumnSchema],
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<bool> {
-        let table_existed = self.table_exists(dataset_id, table_id).await?;
+        let table_exists = self.table_exists(dataset_id, table_id).await?;
 
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
@@ -167,7 +167,7 @@ impl BigQueryClient {
 
         info!(
             %full_table_name,
-            %table_existed,
+            %table_exists,
             "creating or replacing table in bigquery"
         );
 
@@ -178,7 +178,7 @@ impl BigQueryClient {
         let _ = self.query(QueryRequest::new(query)).await?;
 
         // Return true if it was a fresh creation, false if it was a replacement
-        Ok(!table_existed)
+        Ok(!table_exists)
     }
 
     /// Creates a table in BigQuery if it doesn't already exist.

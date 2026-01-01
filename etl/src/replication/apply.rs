@@ -613,7 +613,7 @@ where
             } => {
                 info!(
                     batch_size = state.events_batch.len(),
-                    "batch timer expired, flushing batch",
+                    "batch flush timer expired, flushing batch",
                 );
 
                 let action = flush_batch(
@@ -874,22 +874,45 @@ where
     let current_lsn = state.effective_flush_lsn();
     info!(worker_type = %hook.worker_type(), %current_lsn, "processing syncing tables outside transaction");
 
-    // With this synchronization, we are using `flush_lsn()` method which returns the LSN based on the
-    // current state of the loop. The reason for why we are using that method is that we want to make sure
-    // to communicate the latest LSN to the workers, which guarantees data to have been durably flushed.
+    // With this synchronization, we use `effective_flush_lsn()`, which returns the highest LSN that we can
+    // safely treat as “durably flushed” given the current state of the loop.
     //
-    // To go more in detail, suppose we have the following case ([x] is LSN x):
-    // [1]BEGIN [2]INSERT [3]INSERT [4]COMMIT [5]KEEPALIVE (flush) [6]KEEPALIVE
+    // We use this method because we want to notify workers with the most advanced LSN that is still
+    // guaranteed to have been persisted. In particular, Postgres keepalives may carry a WAL position
+    // that is ahead of the last commit we have actually flushed, so we must be careful not to report
+    // progress too early.
     //
-    // Assume that those inserts were not flushed, once we receive the first KEEPALIVE, the system will
-    // have (write_lsn = 5, flush_lsn = 0). Since we have not flushed the inserts yet, the system will supply
-    // to syncing tables the LSN of 0 since data was not flushed yet. Now we flush the data, and so the `flush_lsn` is
-    // updated to 5 (in practice it's a bit more complex, but for the example it's fine). The next KEEPALIVE
-    // is received, and we have (write_lsn = 6, flush_lsn = 5), since now there is no transaction in progress, and
-    // we flushed everything, the system will report 6 (it's just returning 6 but not advancing the actual flush LSN). Then
-    // when new data is received, the system will process it, advance all the LSNs and continue like that. This way, it can
-    // make progress by syncing tables more often when the outside of a transaction, but it won't notify a higher LSN to the workers
-    // until it's guaranteed to have been flushed.
+    // Example timeline ([x] is LSN x and data is accumulated in memory before flushing):
+    //   [1] BEGIN
+    //   [2] INSERT
+    //   [3] INSERT
+    //   [4] COMMIT
+    //   [5] KEEPALIVE
+    //   (flush)
+    //   [6] KEEPALIVE
+    //
+    // Assume the INSERTs have not been flushed yet. When we receive the first KEEPALIVE, we have:
+    //   last_received_lsn = 5
+    //   last_flush_lsn = 0 (assuming 0 is the start_lsn when the apply loop is called)
+    //
+    // Even though we have received WAL up to 5, we have not durably flushed the transaction yet, so
+    // the safe LSN to expose to syncing tables is still 0.
+    //
+    // Now we flush the data for the transaction. This updates `last_flush_lsn` to 4 (simplified: in
+    // practice the bookkeeping is slightly more involved).
+    //
+    // When the next KEEPALIVE arrives, we may observe something like:
+    //   last_received_lsn = 6
+    //   last_flush_lsn = 4 (now points to the LSN of the commit)
+    //
+    // At this point there is no transaction in progress, and we have flushed everything up to the last
+    // commit. In this “outside a transaction” state, it is safe for `effective_flush_lsn()` to return
+    // the keepalive LSN (6) as the effective point of durable progress, even though `last_flush_lsn`
+    // itself only advances on commit boundaries after flushing.
+    //
+    // This syncing step is crucial for the system to make progress when we are not actively inside
+    // a transaction. Without it, the system could stall since it will never process syncing tables
+    // if no transactions are being replicated.
     let action = hook.process_syncing_tables(current_lsn, true).await?;
 
     Ok(action)

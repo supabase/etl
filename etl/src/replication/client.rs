@@ -11,7 +11,6 @@ use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
 use rustls::pki_types::{CertificateDer, pem::PemObject};
-use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroI32;
 use std::sync::Arc;
@@ -108,20 +107,6 @@ impl PgReplicationSlotTransaction {
         client.begin_tx().await?;
 
         Ok(Self { client })
-    }
-
-    /// Retrieves the schema information for the specified tables.
-    ///
-    /// If a publication is specified, only columns of the tables included in that publication
-    /// will be returned.
-    pub async fn get_table_schemas(
-        &self,
-        table_ids: &[TableId],
-        publication_name: Option<&str>,
-    ) -> EtlResult<HashMap<TableId, TableSchema>> {
-        self.client
-            .get_table_schemas(table_ids, publication_name)
-            .await
     }
 
     /// Retrieves the schema information for the supplied table.
@@ -641,37 +626,6 @@ impl PgReplicationClient {
             ErrorKind::ReplicationSlotNotCreated,
             "Replication slot creation failed"
         ))
-    }
-
-    /// Retrieves schema information for multiple tables.
-    ///
-    /// Tables without primary keys will be skipped and logged with a warning.
-    async fn get_table_schemas(
-        &self,
-        table_ids: &[TableId],
-        publication_name: Option<&str>,
-    ) -> EtlResult<HashMap<TableId, TableSchema>> {
-        let mut table_schemas = HashMap::new();
-
-        // TODO: consider if we want to fail when at least one table was missing or not.
-        for table_id in table_ids {
-            let table_schema = self.get_table_schema(*table_id, publication_name).await?;
-
-            // TODO: this warning and skipping should not happen in this method,
-            //  but rather higher in the stack.
-            if !table_schema.has_primary_keys() {
-                warn!(
-                    table_name = %table_schema.name,
-                    table_id = %table_schema.id,
-                    "skipping table without primary key"
-                );
-                continue;
-            }
-
-            table_schemas.insert(table_schema.id, table_schema);
-        }
-
-        Ok(table_schemas)
     }
 
     /// Retrieves the schema for a single table.

@@ -1223,8 +1223,9 @@ async fn empty_tables_are_created_at_destination() {
 
     // Verify the table schema was stored.
     let table_schemas = state_store.get_table_schemas().await;
+    let table_schema = table_schemas.get(&table_id).unwrap();
     assert_table_schema(
-        &table_schemas,
+        table_schema,
         table_id,
         table_name,
         &[
