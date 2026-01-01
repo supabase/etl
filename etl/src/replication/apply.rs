@@ -1076,8 +1076,6 @@ where
             let end_lsn = PgLsn::from(message.wal_end());
             state.replication_progress.update_last_received_lsn(end_lsn);
 
-            warn!("keepalive message received: {:?}", message);
-
             debug!(
                 "handling logical replication status update message (end_lsn: {})",
                 end_lsn
