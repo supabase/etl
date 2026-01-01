@@ -185,7 +185,25 @@ pub trait ApplyLoopHook {
 /// and is required for WAL pruning.
 #[derive(Debug, Clone)]
 struct StatusUpdate {
+    /// The highest LSN observed from Postgres so far.
+    ///
+    /// This value is updated for every received replication message. For each message,
+    /// it is set to the maximum of `start_lsn` and `end_lsn`, where:
+    /// * `start_lsn` is the LSN at which Postgres started decoding the message.
+    /// * `end_lsn` is the LSN immediately after the last WAL record decoded for the message.
+    ///
+    /// As a result, `write_lsn` always represents the furthest WAL position that has been
+    /// successfully received and processed by the replicator.
     write_lsn: PgLsn,
+    /// The highest commit LSN that has been durably flushed to the destination.
+    ///
+    /// This value is updated only when a batch is flushed. When flushing, it is set to the
+    /// last `end_lsn` among all `Commit` messages contained in the batch. If a batch
+    /// contains no `Commit` messages, the previously stored value is retained.
+    ///
+    /// `flush_lsn` is used when sending feedback to Postgres to indicate that all WAL
+    /// positions strictly less than this LSN have been safely persisted. Postgres may then
+    /// consider those WAL segments eligible for cleanup and vacuuming.
     flush_lsn: PgLsn,
 }
 
