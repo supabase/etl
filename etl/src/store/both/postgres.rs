@@ -6,7 +6,10 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::ops::DerefMut;
 use std::time::Duration;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
@@ -113,7 +116,7 @@ struct Inner {
     /// Count of number of tables in each phase. Used for metrics.
     phase_counts: HashMap<&'static str, u64>,
     /// Cached table replication states indexed by table ID.
-    table_states: HashMap<TableId, TableReplicationPhase>,
+    table_states: BTreeMap<TableId, TableReplicationPhase>,
     /// Cached table schemas indexed by table ID.
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
     /// Cached table mappings from source table ID to destination table name.
@@ -122,7 +125,7 @@ struct Inner {
 
 impl Inner {
     /// Initializes phase counts from an existing table states map.
-    fn init_phase_counts(&mut self, table_states: &HashMap<TableId, TableReplicationPhase>) {
+    fn init_phase_counts(&mut self, table_states: &BTreeMap<TableId, TableReplicationPhase>) {
         let mut phase_counts = HashMap::new();
         for phase in table_states.values() {
             *phase_counts
@@ -205,7 +208,7 @@ impl PostgresStore {
         let pool = create_database_pool(&source_config);
         let inner = Inner {
             phase_counts: HashMap::new(),
-            table_states: HashMap::new(),
+            table_states: BTreeMap::new(),
             table_schemas: HashMap::new(),
             table_mappings: HashMap::new(),
         };
@@ -240,7 +243,7 @@ impl StateStore for PostgresStore {
     /// operations that need visibility into all tables.
     async fn get_table_replication_states(
         &self,
-    ) -> EtlResult<HashMap<TableId, TableReplicationPhase>> {
+    ) -> EtlResult<BTreeMap<TableId, TableReplicationPhase>> {
         let inner = self.inner.lock().await;
 
         Ok(inner.table_states.clone())
@@ -258,7 +261,7 @@ impl StateStore for PostgresStore {
         let replication_state_rows =
             state::get_table_replication_state_rows(&self.pool, self.pipeline_id as i64).await?;
 
-        let mut table_states: HashMap<TableId, TableReplicationPhase> = HashMap::new();
+        let mut table_states: BTreeMap<TableId, TableReplicationPhase> = BTreeMap::new();
         for row in replication_state_rows {
             let table_id = TableId::new(row.table_id.0);
             let phase: TableReplicationPhase = row.try_into()?;
