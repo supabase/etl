@@ -14,7 +14,6 @@ use tokio_postgres::types::PgLsn;
 use tracing::{debug, info, warn};
 
 use crate::concurrency::shutdown::ShutdownRx;
-use crate::concurrency::timer::TimerRegistry;
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
@@ -34,26 +33,6 @@ use crate::state::table::{RetryPolicy, TableReplicationError};
 use crate::store::schema::SchemaStore;
 use crate::types::{Event, PipelineId};
 use crate::{bail, etl_error};
-
-/// The minimum interval (in milliseconds) between consecutive status updates.
-///
-/// This value must be less than the `wal_sender_timeout` configured in the Postgres instance.
-/// If set too high, Postgres may timeout before the next status update is sent.
-///
-/// TODO: we might want to fetch this value from Postgres itself to keep the values similar. Postgres
-///  sends updates every (wal_sender_timeout / 2) seconds.
-const STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Timer types used in the apply loop.
-///
-/// Each variant represents a different deadline that can trigger actions in the main loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum ApplyTimers {
-    /// Timer for flushing the current batch of events to the destination.
-    BatchFlush,
-    /// Timer for sending a status update to Postgres.
-    StatusUpdate,
-}
 
 /// Result type for the apply loop execution.
 ///
@@ -361,16 +340,6 @@ struct ApplyLoopState {
     /// transaction boundary is found. If not found, the process will continue until it is killed via
     /// a `SIGKILL`.
     shutdown_discarded: bool,
-    /// Timer registry for managing batch flush and status update timers.
-    ///
-    /// This registry persists across loop iterations and handles automatic timer
-    /// replacement when registering with the same identifier.
-    timer_registry: TimerRegistry<ApplyTimers>,
-    /// Deadline for when the next status update must be dispatched.
-    ///
-    /// This deadline is set when the status update timer is started via
-    /// [`reset_status_update_deadline`]. It is `None` before the first call.
-    status_update_deadline: Option<Instant>,
     /// The deadline by which the current batch must be flushed.
     ///
     /// This deadline is set when the first message of a batch is received. When the deadline
@@ -386,9 +355,6 @@ impl ApplyLoopState {
     ///
     /// This constructor initializes the state tracking structure used throughout
     /// the apply loop to maintain replication progress and coordinate batching.
-    ///
-    /// Note: The caller must call [`reset_status_update_deadline`] after construction
-    /// to register the initial status update timer.
     fn new(
         replication_progress: ReplicationProgress,
         max_batch_size: usize,
@@ -402,8 +368,6 @@ impl ApplyLoopState {
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_discarded: false,
-            timer_registry: TimerRegistry::new(),
-            status_update_deadline: None,
             batch_flush_deadline: None,
             max_batch_fill_duration,
         }
@@ -411,47 +375,25 @@ impl ApplyLoopState {
 
     /// Starts the batch flush timer if not already running.
     ///
-    /// This method is called when the first event of a batch is received. If a timer
-    /// is already running, this is a no-op. The timer is registered with the registry
-    /// and will fire after `max_batch_fill_duration`.
+    /// This method is called when the first event of a batch is received. If a deadline
+    /// is already set, this is a no-op.
     fn start_batch_timer_if_needed(&mut self) {
         if self.batch_flush_deadline.is_some() {
             return;
         }
 
-        let deadline = Instant::now() + self.max_batch_fill_duration;
-        self.batch_flush_deadline = Some(deadline);
-        self.timer_registry
-            .register(ApplyTimers::BatchFlush, deadline);
+        self.batch_flush_deadline = Some(Instant::now() + self.max_batch_fill_duration);
 
-        debug!(
-            "started batch flush timer (timeout: {:?})",
-            self.max_batch_fill_duration
-        );
+        debug!("started batch flush timer");
     }
 
-    /// Resets the batch flush deadline and cancels the timer.
+    /// Resets the batch flush deadline.
     ///
-    /// This method is called after a batch is flushed. The timer is cancelled from
-    /// the registry and will be re-started when the next event arrives.
+    /// This method is called after a batch is flushed.
     fn reset_batch_deadline(&mut self) {
         self.batch_flush_deadline = None;
-        self.timer_registry.cancel(&ApplyTimers::BatchFlush);
 
         debug!("reset batch flush timer");
-    }
-
-    /// Resets the status update deadline and re-registers the timer.
-    ///
-    /// This method is called after a status update is sent (either due to timer expiry
-    /// or keepalive response). The new deadline is set and the timer is re-registered.
-    fn reset_status_update_deadline(&mut self) {
-        let deadline = Instant::now() + STATUS_UPDATE_INTERVAL;
-        self.status_update_deadline = Some(deadline);
-        self.timer_registry
-            .register(ApplyTimers::StatusUpdate, deadline);
-
-        debug!("scheduled next status update");
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -593,9 +535,9 @@ where
     T: ApplyLoopHook,
 {
     info!(
-        "starting apply loop in worker '{:?}' from lsn {}",
-        hook.worker_type(),
-        start_lsn
+        worker_type = %hook.worker_type(),
+        start_lsn = %start_lsn,
+        "starting apply loop",
     );
 
     // The first status update is defaulted from the start lsn since at this point we haven't
@@ -632,15 +574,12 @@ where
         Duration::from_millis(config.batch.max_fill_ms),
     );
 
-    // Register the initial status update timer.
-    state.reset_status_update_deadline();
-
     // Main event processing loop, continues until shutdown or fatal error
     loop {
         tokio::select! {
             // Use biased selection to enforce priority ordering:
             // 1. Shutdown (highest priority)
-            // 2. Timer expiry (batch flush or status update)
+            // 2. Batch flush timer expiry
             // 3. Incoming events (lowest priority)
             biased;
 
@@ -650,7 +589,7 @@ where
             _ = shutdown_rx.changed() => {
                 // If the shutdown is being discarded, we don't want to handle it again.
                 if state.shutdown_discarded {
-                    info!("shutdown was already requested but it has been discarded because of a running transaction");
+                    info!("shutdown was already requested but has been discarded because of a running transaction");
                     continue;
                 }
 
@@ -665,57 +604,29 @@ where
                 state.shutdown_discarded = true;
             }
 
-            // PRIORITY 2: Handle timer expiry.
-            // Dispatch the appropriate action based on which timer fired first.
-            // The timer is automatically removed from the registry when it fires.
-            timer = state.timer_registry.wait_first() => {
-                match timer {
-                    ApplyTimers::BatchFlush => {
-                        debug!(
-                            "batch timer expired, flushing batch of {} events",
-                            state.events_batch.len()
-                        );
+            // PRIORITY 2: Handle batch flush timer expiry.
+            _ = async {
+                match state.batch_flush_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                info!(
+                    batch_size = state.events_batch.len(),
+                    "batch timer expired, flushing batch",
+                );
 
-                        let action = flush_batch(
-                            &mut state,
-                            &destination,
-                            &hook,
-                            config.batch.max_size,
-                            pipeline_id,
-                        )
-                        .await?;
+                let action = flush_batch(
+                    &mut state,
+                    &destination,
+                    &hook,
+                    config.batch.max_size,
+                    pipeline_id,
+                )
+                .await?;
 
-                        if let Some(result) = action.to_result() {
-                            return Ok(result);
-                        }
-                    }
-                    ApplyTimers::StatusUpdate => {
-                        debug!("status update timer expired, sending status update to postgres");
-
-                        // One important detail about the status update timer is that it exists primarily to
-                        // reduce the risk of Postgres closing the replication connection due to missing feedback.
-                        //
-                        // Postgres may emit keep-alive messages while we are still processing earlier messages,
-                        // and that processing can take an unbounded amount of time. By maintaining our own timer,
-                        // we can periodically check, between messages, whether a status update should be sent
-                        // back to Postgres.
-                        //
-                        // However, this mechanism has a fundamental limitation. If a single replication message
-                        // triggers a batch write, the batch flush itself may take an arbitrarily long time.
-                        // During that period, we cannot observe timer expiration, so the connection may still
-                        // appear idle from Postgres’ perspective.
-                        //
-                        // A more robust, future-proof approach would be to support out-of-band status updates,
-                        // allowing us to periodically send feedback with the same LSN purely to keep the
-                        // connection alive, independent of message processing or batch flushing.
-                        events_stream
-                            .as_mut()
-                            .send_status_update(state.last_received_lsn(), state.effective_flush_lsn(), true, StatusUpdateType::Timeout)
-                            .await?;
-
-                        // Reset the deadline and re-register the timer for the next interval.
-                        state.reset_status_update_deadline();
-                    }
+                if let Some(result) = action.to_result() {
+                    return Ok(result);
                 }
             }
 
@@ -817,6 +728,11 @@ where
     // Check if we should flush the batch due to the size limit or end_batch signal.
     let should_flush = state.events_batch.len() >= max_batch_size || result.end_batch.is_some();
     if should_flush && !state.events_batch.is_empty() {
+        info!(
+            batch_size = state.events_batch.len(),
+            "batch flush condition reached, flushing batch"
+        );
+
         let flush_batch_action =
             flush_batch(state, destination, hook, max_batch_size, pipeline_id).await?;
 
@@ -907,7 +823,7 @@ where
         std::mem::replace(&mut state.events_batch, Vec::with_capacity(max_batch_size));
 
     let batch_size = events_batch.len();
-    info!("sending batch of {} events to destination", batch_size);
+    info!(batch_size = batch_size, "sending batch to destination");
 
     let before_sending = Instant::now();
 
@@ -955,7 +871,8 @@ where
         return Ok(ApplyLoopAction::Continue);
     }
 
-    info!("processing syncing tables when no transaction is in progress");
+    let current_lsn = state.effective_flush_lsn();
+    info!(worker_type = %hook.worker_type(), current_lsn = %current_lsn, "processing syncing tables when no transaction is in progress");
 
     // With this synchronization, we are using `flush_lsn()` method which returns the LSN based on the
     // current state of the loop. The reason for why we are using that method is that we want to make sure
@@ -973,9 +890,7 @@ where
     // when new data is received, the system will process it, advance all the LSNs and continue like that. This way, it can
     // make progress by syncing tables more often when the outside of a transaction, but it won't notify a higher LSN to the workers
     // until it's guaranteed to have been flushed.
-    let action = hook
-        .process_syncing_tables(state.effective_flush_lsn(), true)
-        .await?;
+    let action = hook.process_syncing_tables(current_lsn, true).await?;
 
     Ok(action)
 }
@@ -1003,11 +918,6 @@ where
         return Ok(ApplyLoopAction::Continue);
     };
 
-    debug!(
-        "updating lsn for next status update to {}",
-        last_commit_end_lsn
-    );
-
     // We also prepare the next status update for Postgres, where we will confirm that we flushed
     // data up to this LSN to allow for WAL pruning on the database side.
     //
@@ -1019,6 +929,9 @@ where
         .replication_progress
         .update_last_flush_lsn(last_commit_end_lsn);
 
+    let current_lsn = state.replication_progress.last_received_lsn;
+    info!(worker_type = %hook.worker_type(), current_lsn = %current_lsn, "processing syncing tables after batch flush");
+
     // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
     // and ack for the batch from the destination. This is important to keep a consistent state.
     // Without this order it could happen that the table's state was updated but sending the batch
@@ -1028,8 +941,7 @@ where
     // because we want to semantically process syncing tables with the same LSN that we tell
     // Postgres that we flushed durably to disk. In practice, `last_flush_lsn` and `last_commit_end_lsn`
     // will be always equal, since LSNs are guaranteed to be monotonically increasing.
-    hook.process_syncing_tables(state.replication_progress.last_flush_lsn, true)
-        .await
+    hook.process_syncing_tables(current_lsn, true).await
 }
 
 /// Dispatches replication protocol messages to appropriate handlers.
@@ -1066,8 +978,9 @@ where
             state.replication_progress.update_last_received_lsn(end_lsn);
 
             debug!(
-                "handling logical replication data message (start_lsn: {}, end_lsn: {})",
-                start_lsn, end_lsn
+                start_lsn = %start_lsn,
+                end_lsn = %end_lsn,
+                "handling logical replication data message",
             );
 
             handle_logical_replication_message(
@@ -1085,8 +998,8 @@ where
             state.replication_progress.update_last_received_lsn(end_lsn);
 
             debug!(
-                "handling logical replication status update message (end_lsn: {})",
-                end_lsn
+                message = ?message,
+                "handling logical replication keep alive message",
             );
 
             events_stream
@@ -1097,8 +1010,6 @@ where
                     StatusUpdateType::KeepAlive,
                 )
                 .await?;
-
-            state.reset_status_update_deadline();
 
             Ok(HandleMessageResult::no_event())
         }

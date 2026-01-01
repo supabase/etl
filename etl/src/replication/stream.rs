@@ -107,15 +107,21 @@ impl<'a> Stream for TableCopyStream<'a> {
 pub enum StatusUpdateType {
     /// Represents an update requested by Postgres.
     KeepAlive,
-    /// Represents an update sent by ETL on its own.
-    Timeout,
+}
+
+impl StatusUpdateType {
+    /// Returns `true` whether this status update type requires a reply from Postgres, `false` otherwise.
+    fn request_reply(&self) -> bool {
+        match self {
+            Self::KeepAlive => false,
+        }
+    }
 }
 
 impl Display for StatusUpdateType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::KeepAlive => write!(f, "keep_alive"),
-            Self::Timeout => write!(f, "timeout"),
         }
     }
 }
@@ -231,8 +237,9 @@ impl EventsStream {
         // them as Postgres does. The reason is that `apply_lsn` is used to mark when an LSN is both
         // durable and visible, but from ETL's perspective we are fine with just it being durable, which
         // is marked via the `flush_lsn`.
+        let request_reply: u8 = status_update_type.request_reply().into();
         this.stream
-            .standby_status_update(write_lsn, flush_lsn, flush_lsn, ts, 0)
+            .standby_status_update(write_lsn, flush_lsn, flush_lsn, ts, request_reply)
             .await?;
 
         counter!(
