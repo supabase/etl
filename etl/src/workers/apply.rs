@@ -6,7 +6,6 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
-use tracing::warn;
 use tracing::{Instrument, debug, error, info};
 
 use crate::bail;
@@ -431,50 +430,6 @@ where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    /// Initializes table sync workers before the main apply loop begins.
-    ///
-    /// This hook method starts table sync workers for all tables that need
-    /// initial synchronization. It excludes tables already in `SyncDone` state
-    /// and avoids starting duplicate workers for tables that already have
-    /// active workers in the pool.
-    async fn before_loop(&self, _start_lsn: PgLsn) -> EtlResult<ApplyLoopAction> {
-        info!("starting table sync workers before the main apply loop");
-
-        for (table_id, table_replication_phase) in self.store.get_table_replication_states().await?
-        {
-            if !table_replication_phase.as_type().is_done() {
-                // A table in `SyncDone` doesn't need to have its worker started, since the main apply
-                // worker will move it into `Ready` state automatically once the condition is met.
-                if let TableReplicationPhaseType::SyncDone = table_replication_phase.as_type() {
-                    continue;
-                }
-
-                // If there is already an active worker for this table in the pool, we can avoid starting
-                // it.
-                let mut pool = self.pool.lock().await;
-                if pool.get_active_worker_state(table_id).is_some() {
-                    continue;
-                }
-
-                // If we fail, we just show an error, and hopefully we will succeed when starting it
-                // during syncing tables.
-                let table_sync_worker = self.build_table_sync_worker(table_id).await;
-                if let Err(err) = pool.start_worker(table_sync_worker).await {
-                    error!(
-                        "error starting table sync worker for table {} during initialization: {}",
-                        table_id, err
-                    );
-                }
-            } else if table_replication_phase.as_type().is_errored() {
-                warn!(
-                    "table sync worker for table {table_id} won't run because it is in an errored state."
-                );
-            }
-        }
-
-        Ok(ApplyLoopAction::Continue)
-    }
-
     /// Processes all tables currently in synchronization phases.
     ///
     /// This method coordinates the lifecycle of syncing tables by promoting

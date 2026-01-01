@@ -819,16 +819,6 @@ impl<S> ApplyLoopHook for TableSyncWorkerHook<S>
 where
     S: StateStore + Clone + Send + Sync + 'static,
 {
-    /// Checks if the table sync worker is already synchronized before starting the apply loop.
-    ///
-    /// This hook method evaluates whether the worker has already caught up with the
-    /// apply worker's starting position.
-    async fn before_loop(&self, start_lsn: PgLsn) -> EtlResult<ApplyLoopAction> {
-        info!("checking if the table sync worker is already caught up with the apply worker");
-
-        self.try_advance_phase(start_lsn, true).await
-    }
-
     /// This function compares `current_lsn` against the table's catch up lsn
     /// and if it is greater than or equal to the `Catchup` `lsn`:
     ///

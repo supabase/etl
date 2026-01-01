@@ -148,12 +148,6 @@ impl ApplyLoopAction {
 /// [`ApplyLoopHook`] allows external components to inject custom logic into
 /// the apply loop processing cycle.
 pub trait ApplyLoopHook {
-    /// Called before the main apply loop begins processing.
-    fn before_loop(
-        &self,
-        start_lsn: PgLsn,
-    ) -> impl Future<Output = EtlResult<ApplyLoopAction>> + Send;
-
     /// Called to process tables that are currently synchronizing.
     ///
     /// This hook coordinates with table sync workers and manages the transition
@@ -538,7 +532,6 @@ impl ApplyLoopState {
 /// # Processing Phases
 ///
 /// ## 1. Initialization Phase
-/// - Validates hook requirements via `before_loop()` callback.
 /// - Establishes logical replication stream from Postgres.
 /// - Initializes batch processing state and status tracking.
 ///
@@ -576,16 +569,6 @@ where
         hook.worker_type(),
         start_lsn
     );
-
-    // We call the `before_loop` hook and stop the loop immediately in case we are told to stop.
-    let action = hook.before_loop(start_lsn).await?;
-    if let Some(result) = action.to_result() {
-        info!(
-            "no need to run apply loop for worker '{:?}', the loop will terminate",
-            hook.worker_type()
-        );
-        return Ok(result);
-    }
 
     // The first status update is defaulted from the start lsn since at this point we haven't
     // processed anything.
@@ -667,7 +650,6 @@ where
 
                         let action = flush_batch(
                             &mut state,
-                            events_stream.as_mut(),
                             &destination,
                             &hook,
                             config.batch.max_size,
@@ -747,7 +729,6 @@ where
                 .await?;
 
                 // Start the batch timer if we have events and no timer is running.
-                // The timer is registered inside start_batch_timer_if_needed.
                 // If the batch was flushed, reset_batch_deadline already canceled the timer.
                 if !state.events_batch.is_empty() {
                     state.start_batch_timer_if_needed();
@@ -808,15 +789,8 @@ where
     // Check if we should flush the batch due to the size limit or end_batch signal.
     let should_flush = state.events_batch.len() >= max_batch_size || result.end_batch.is_some();
     if should_flush && !state.events_batch.is_empty() {
-        let flush_batch_action = flush_batch(
-            state,
-            events_stream.as_mut(),
-            destination,
-            hook,
-            max_batch_size,
-            pipeline_id,
-        )
-        .await?;
+        let flush_batch_action =
+            flush_batch(state, destination, hook, max_batch_size, pipeline_id).await?;
 
         action = action.merge(flush_batch_action);
     }
@@ -857,7 +831,6 @@ where
 /// After flushing, it resets the batch timer and performs synchronization.
 async fn flush_batch<D, T>(
     state: &mut ApplyLoopState,
-    events_stream: Pin<&mut EventsStream>,
     destination: &D,
     hook: &T,
     max_batch_size: usize,
@@ -867,14 +840,7 @@ where
     D: Destination + Clone + Send + 'static,
     T: ApplyLoopHook,
 {
-    send_batch_to_destination(
-        state,
-        events_stream,
-        destination,
-        max_batch_size,
-        pipeline_id,
-    )
-    .await?;
+    send_batch_to_destination(state, destination, max_batch_size, pipeline_id).await?;
 
     // Reset the batch deadline after flushing (the timer will be cancelled in the main loop).
     state.reset_batch_deadline();
@@ -894,7 +860,6 @@ where
 /// via [`Destination::write_events`], and records counters and timings.
 async fn send_batch_to_destination<D>(
     state: &mut ApplyLoopState,
-    _events_stream: Pin<&mut EventsStream>,
     destination: &D,
     max_batch_size: usize,
     pipeline_id: PipelineId,
@@ -902,6 +867,11 @@ async fn send_batch_to_destination<D>(
 where
     D: Destination + Clone + Send + 'static,
 {
+    // If there are no events in the batch, we can skip sending them to the destination.
+    if state.events_batch.is_empty() {
+        return Ok(());
+    }
+
     // TODO: figure out if we can send a slice to the destination instead of a vec
     //  that would allow use to avoid new allocations of the `events_batch` vec and
     //  we could just call clear() on it.
@@ -1083,6 +1053,8 @@ where
         ReplicationMessage::PrimaryKeepAlive(message) => {
             let end_lsn = PgLsn::from(message.wal_end());
             state.next_status_update.update_write_lsn(end_lsn);
+
+            warn!("keepalive message received: {:?}", message);
 
             debug!(
                 "handling logical replication status update message (end_lsn: {})",
