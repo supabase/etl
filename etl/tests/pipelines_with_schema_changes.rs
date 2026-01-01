@@ -733,13 +733,13 @@ async fn partitioned_table_schema_change_updates_relation_message() {
         destination.clone(),
     );
 
-    let parent_sync_done = state_store
-        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::SyncDone)
+    let parent_ready = state_store
+        .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    parent_sync_done.notified().await;
+    parent_ready.notified().await;
 
     // Wait for the Relation event (schema change) and Insert event.
     let notify = destination

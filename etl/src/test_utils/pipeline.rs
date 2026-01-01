@@ -121,20 +121,20 @@ pub async fn create_database_and_pipeline_with_table(
         destination.clone(),
     );
 
-    // We wait for sync done so that we have the apply worker dealing with events, this is the common
+    // We wait for ready so that we have the apply worker dealing with events, this is the common
     // testing condition which ensures that the table is ready to be streamed from the main apply worker.
     //
     // The rationale for wanting to test ETL mainly on the apply worker is that it's really hard to test
-    // ETL in a state before `SyncDone` since the system will advance on its own. To properly test all
+    // ETL in a state before `Ready` since the system will advance on its own. To properly test all
     // the table sync worker states, we would need a way to programmatically drive execution, but we deemed
     // it too much work compared to the benefit it brings.
-    let sync_done = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+    let ready = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    sync_done.notified().await;
+    ready.notified().await;
 
     (
         database,
