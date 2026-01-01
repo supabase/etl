@@ -442,8 +442,8 @@ where
     ) -> EtlResult<ApplyLoopAction> {
         // TODO: this is a very hot path and we have to optimize it as much as possible.
         // We fetch the tables that are in active syncing state. For more predictability and performance
-        // we leverage the order of the BTreeMap
-        let mut active_table_replication_states = self
+        // we leverage the order of the BTreeMap.
+        let active_table_replication_states = self
             .store
             .get_table_replication_states()
             .await?
