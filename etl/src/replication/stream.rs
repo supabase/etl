@@ -176,6 +176,10 @@ impl EventsStream {
             flush_lsn = *last_flush_lsn;
         }
 
+        // This invariant is important since if `flush_lsn` becomes bigger, it means that there
+        // was a problem during replication.
+        debug_assert!(write_lsn >= flush_lsn);
+
         // If we are not forced to send an update, we can willingly do so based on a set of conditions.
         if !force
             && let (Some(last_update), Some(last_flush)) =

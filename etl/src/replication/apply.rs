@@ -216,6 +216,10 @@ impl ReplicationProgress {
             return;
         }
 
+        // This invariant is important since if `last_flush_lsn` becomes bigger, it means that there
+        // was a problem during replication.
+        debug_assert!(self.last_received_lsn >= self.last_flush_lsn);
+
         self.last_received_lsn = new_lsn;
     }
 
@@ -224,6 +228,10 @@ impl ReplicationProgress {
         if new_lsn <= self.last_flush_lsn {
             return;
         }
+
+        // This invariant is important since if `last_flush_lsn` becomes bigger, it means that there
+        // was a problem during replication.
+        debug_assert!(self.last_received_lsn >= self.last_flush_lsn);
 
         self.last_flush_lsn = new_lsn;
     }
