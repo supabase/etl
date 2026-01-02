@@ -62,6 +62,7 @@ utoipa-swagger-ui = { workspace = true, features = ["actix-web", "reqwest"] }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
+etl-destinations = { workspace = true, features = ["test-utils", "iceberg"] }
 etl-postgres = { workspace = true, features = ["test-utils", "sqlx"] }
 
 insta = { workspace = true, features = ["json", "redactions"] }

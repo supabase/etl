@@ -32,6 +32,7 @@ iceberg = [
 ]
 egress = ["etl/egress"]
 encryption = ["dep:rustls"]
+test-utils = ["dep:reqwest", "dep:serde", "dep:uuid", "dep:tokio"]
 
 [dependencies]
 etl = { workspace = true }

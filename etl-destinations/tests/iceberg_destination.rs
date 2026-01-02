@@ -1,4 +1,4 @@
-#![cfg(feature = "iceberg")]
+#![cfg(all(feature = "iceberg", feature = "test-utils"))]
 
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::spawn_source_database;
@@ -9,6 +9,7 @@ use etl::test_utils::test_schema::{
     TableSelection, TestDatabaseSchema, insert_mock_data, setup_test_database_schema,
 };
 use etl::types::{Cell, EventType, PipelineId, TableRow};
+use etl_destinations::iceberg::test_utils::LakekeeperClient;
 use etl_destinations::iceberg::{
     DestinationNamespace, IcebergClient, IcebergDestination, IcebergOperationType,
     table_name_to_iceberg_table_name,
@@ -17,7 +18,6 @@ use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
 use crate::support::iceberg::{LAKEKEEPER_URL, create_props, get_catalog_url, read_all_rows};
-use crate::support::lakekeeper::LakekeeperClient;
 
 mod support;
 

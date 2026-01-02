@@ -144,6 +144,9 @@ pub async fn validate_destination_pipeline(
 }
 
 /// Formats validation failures into a human-readable error message.
+///
+/// For now, we just format everything into a string to return to the user, but in the future we
+/// might want to craft a proper typed response for the API.
 pub fn format_validation_failures(failures: &[ValidationFailure]) -> String {
     failures
         .iter()
@@ -159,7 +162,7 @@ mod tests {
     #[tokio::test]
     async fn test_validation_result_display() {
         let result = ValidationFailure::new("test", "Something wrong");
-        assert_eq!(format!("{}", result), "test: Something wrong");
+        assert_eq!(result.to_string(), "test: Something wrong");
     }
 
     #[tokio::test]
