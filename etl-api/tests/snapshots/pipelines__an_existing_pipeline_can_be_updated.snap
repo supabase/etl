@@ -4,6 +4,7 @@ expression: response.config
 ---
 FullApiPipelineConfig {
     publication_name: "updated_publication",
+    temporary_replication_slot: false,
     batch: Some(
         ApiBatchConfig {
             max_size: Some(

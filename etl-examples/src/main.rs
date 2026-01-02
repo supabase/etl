@@ -32,7 +32,9 @@ The pipeline will automatically:
 */
 
 use clap::{Args, Parser};
-use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
+use etl::config::{
+    BatchConfig, PgConnectionConfig, PipelineConfig, ReplicationSlotConfig, TlsConfig,
+};
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
 use etl_destinations::bigquery::BigQueryDestination;
@@ -174,6 +176,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.bq_args.max_table_sync_workers,
+        replication_slot: ReplicationSlotConfig::Permanent,
     };
 
     // Initialize BigQuery destination with service account authentication

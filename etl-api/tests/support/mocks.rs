@@ -238,6 +238,7 @@ pub mod pipelines {
             table_error_retry_max_attempts: Some(5),
             max_table_sync_workers: Some(2),
             log_level: Some(LogLevel::Info),
+            temporary_replication_slot: false,
         }
     }
 
@@ -253,6 +254,7 @@ pub mod pipelines {
             table_error_retry_max_attempts: Some(10),
             max_table_sync_workers: Some(4),
             log_level: Some(LogLevel::Info),
+            temporary_replication_slot: false,
         }
     }
 
