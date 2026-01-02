@@ -166,7 +166,7 @@ where
                 }
                 Err(err) => {
                     // We log the error here, this way it's logged even if the worker is not awaited.
-                    error!("apply worker failed: {}", err);
+                    error!(error = %err, "apply worker failed");
                     Err(err)
                 }
             }

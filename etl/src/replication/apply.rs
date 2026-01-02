@@ -1138,7 +1138,7 @@ where
             .await
         }
         message => {
-            debug!("received unsupported message: {:?}", message);
+            debug!(?message, "received unsupported message");
             Ok(HandleMessageResult::no_event())
         }
     }

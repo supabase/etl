@@ -537,7 +537,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
     // Spawn the connection on a new task
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            info!("connection error: {e}");
+            info!(error = %e, "connection error");
         }
     });
 
@@ -576,7 +576,7 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Opt
     // Spawn the connection on a new task
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            info!("connection error: {e}");
+            info!(error = %e, "connection error");
         }
     });
 
@@ -607,7 +607,7 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Spawn the connection on a new task
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            info!("connection error: {e}");
+            info!(error = %e, "connection error");
         }
     });
 

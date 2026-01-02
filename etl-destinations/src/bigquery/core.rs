@@ -679,7 +679,7 @@ where
     /// to transform the destination schema.
     async fn apply_schema_diff(&self, table_id: &TableId, diff: &SchemaDiff) -> EtlResult<()> {
         if diff.is_empty() {
-            debug!("no schema changes to apply for table {}", table_id);
+            debug!(%table_id, "no schema changes to apply for table");
             return Ok(());
         }
 

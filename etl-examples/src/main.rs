@@ -104,7 +104,7 @@ struct BqArgs {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     if let Err(e) = main_impl().await {
-        error!("{e}");
+        error!(error = %e, "fatal error");
         std::process::exit(1);
     }
 
