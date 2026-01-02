@@ -11,7 +11,6 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use super::{ErrorMessage, TenantIdError, destinations::DestinationError, extract_tenant_id};
-use crate::validation::{PipelineValidationError, validate_pipeline_prerequisites};
 use crate::config::ApiConfig;
 use crate::configs::destination::FullApiDestinationConfig;
 use crate::configs::encryption::EncryptionKey;
@@ -23,9 +22,10 @@ use crate::db::images::ImagesDbError;
 use crate::db::pipelines::{
     MAX_PIPELINES_PER_TENANT, PipelinesDbError, count_pipelines_for_tenant, read_pipeline,
 };
-use crate::db::sources::{SourcesDbError, source_exists};
+use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
+use crate::validation::{format_validation_failures, validate_destination_pipeline};
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -77,8 +77,8 @@ enum DestinationPipelineError {
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
 
-    #[error(transparent)]
-    Validation(#[from] PipelineValidationError),
+    #[error("Validation failed: {0}")]
+    Validation(String),
 }
 
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
@@ -238,24 +238,23 @@ pub async fn create_destination_and_pipeline(
         });
     }
 
-    // Validate pipeline prerequisites before creating
+    // Validate destination and pipeline prerequisites before creating
     let tls_config = trusted_root_certs_cache
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_config = source.config.into_connection_config(tls_config);
 
-    // Default max_table_sync_workers to 4 if not specified (matches StoredPipelineConfig default)
-    let max_table_sync_workers = destination_and_pipeline
-        .pipeline_config
-        .max_table_sync_workers
-        .unwrap_or(4);
-
-    validate_pipeline_prerequisites(
+    let validation_failures = validate_destination_pipeline(
+        &destination_and_pipeline.destination_config,
+        &destination_and_pipeline.pipeline_config,
         &source_config,
-        &destination_and_pipeline.pipeline_config.publication_name,
-        max_table_sync_workers,
     )
-    .await?;
+    .await;
+    if !validation_failures.is_empty() {
+        return Err(DestinationPipelineError::Validation(
+            format_validation_failures(&validation_failures),
+        ));
+    }
 
     let image = db::images::read_default_image(&**pool)
         .await?
@@ -305,6 +304,8 @@ pub async fn create_destination_and_pipeline(
 pub async fn update_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
     destination_and_pipeline: Json<UpdateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
@@ -315,17 +316,17 @@ pub async fn update_destination_and_pipeline(
 
     let mut txn = pool.begin().await?;
 
-    if !source_exists(
+    // Read source to get connection config for validation
+    let source = db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
+        &encryption_key,
     )
     .await?
-    {
-        return Err(DestinationPipelineError::SourceNotFound(
-            destination_and_pipeline.source_id,
-        ));
-    }
+    .ok_or(DestinationPipelineError::SourceNotFound(
+        destination_and_pipeline.source_id,
+    ))?;
 
     if !destination_exists(txn.deref_mut(), tenant_id, destination_id).await? {
         return Err(DestinationPipelineError::DestinationNotFound(
@@ -341,6 +342,24 @@ pub async fn update_destination_and_pipeline(
         return Err(DestinationPipelineError::PipelineDestinationMismatch(
             pipeline_id,
             destination_id,
+        ));
+    }
+
+    // Validate destination and pipeline prerequisites before updating
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
+    let source_config = source.config.into_connection_config(tls_config);
+
+    let validation_failures = validate_destination_pipeline(
+        &destination_and_pipeline.destination_config,
+        &destination_and_pipeline.pipeline_config,
+        &source_config,
+    )
+    .await;
+    if !validation_failures.is_empty() {
+        return Err(DestinationPipelineError::Validation(
+            format_validation_failures(&validation_failures),
         ));
     }
 

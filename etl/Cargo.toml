@@ -17,7 +17,6 @@ default = []
 etl-config = { workspace = true }
 etl-postgres = { workspace = true, features = ["tokio", "replication"] }
 
-async-trait = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }

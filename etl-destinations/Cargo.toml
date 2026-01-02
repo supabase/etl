@@ -11,16 +11,15 @@ homepage.workspace = true
 bigquery = [
     "dep:gcp-bigquery-client",
     "dep:prost",
-    "dep:rustls",
     "dep:tracing",
     "dep:tokio",
     "dep:base64",
+    "encryption",
 ]
 iceberg = [
     "dep:iceberg",
     "dep:iceberg-catalog-rest",
     "dep:arrow",
-    "dep:rustls",
     "dep:tracing",
     "dep:parquet",
     "dep:uuid",
@@ -29,8 +28,10 @@ iceberg = [
     "dep:async-trait",
     "dep:serde",
     "dep:serde_json",
+    "encryption",
 ]
 egress = ["etl/egress"]
+encryption = ["dep:rustls"]
 
 [dependencies]
 etl = { workspace = true }

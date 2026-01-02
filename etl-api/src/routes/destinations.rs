@@ -14,6 +14,7 @@ use crate::configs::encryption::EncryptionKey;
 use crate::db;
 use crate::db::destinations::DestinationsDbError;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
+use crate::validation::{format_validation_failures, validate_destination};
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
@@ -25,6 +26,9 @@ pub enum DestinationError {
 
     #[error(transparent)]
     DestinationsDb(#[from] DestinationsDbError),
+
+    #[error("Validation failed: {0}")]
+    Validation(String),
 }
 
 impl DestinationError {
@@ -45,7 +49,9 @@ impl ResponseError for DestinationError {
         match self {
             DestinationError::DestinationsDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationError::DestinationNotFound(_) => StatusCode::NOT_FOUND,
-            DestinationError::TenantId(_) => StatusCode::BAD_REQUEST,
+            DestinationError::TenantId(_) | DestinationError::Validation(_) => {
+                StatusCode::BAD_REQUEST
+            }
         }
     }
 
@@ -203,6 +209,14 @@ pub async fn update_destination(
     let tenant_id = extract_tenant_id(&req)?;
     let destination_id = destination_id.into_inner();
     let destination = destination.into_inner();
+
+    // Validate destination prerequisites before updating
+    let validation_failures = validate_destination(&destination.config).await;
+    if !validation_failures.is_empty() {
+        return Err(DestinationError::Validation(format_validation_failures(
+            &validation_failures,
+        )));
+    }
 
     db::destinations::update_destination(
         &**pool,

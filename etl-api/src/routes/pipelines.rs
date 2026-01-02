@@ -17,21 +17,21 @@ use utoipa::ToSchema;
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
 use crate::db;
+use crate::db::connect_to_source_database_with_defaults;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::images::ImagesDbError;
 use crate::db::pipelines::{MAX_PIPELINES_PER_TENANT, PipelinesDbError, read_pipeline_components};
 use crate::db::replicators::ReplicatorsDbError;
-use crate::db::sources::{SourcesDbError, source_exists};
+use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::core::{
     create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
     delete_pipeline_resources_in_k8s,
 };
 use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache, TrustedRootCertsError};
-use crate::db::connect_to_source_database_with_defaults;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
-use crate::validation::{PipelineValidationError, validate_pipeline_prerequisites};
 use crate::utils::parse_docker_image_tag;
+use crate::validation::{format_validation_failures, validate_pipeline};
 use crate::{config::ApiConfig, k8s::PodStatus};
 
 #[derive(Debug, Error)]
@@ -114,8 +114,8 @@ pub enum PipelineError {
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
 
-    #[error(transparent)]
-    Validation(#[from] PipelineValidationError),
+    #[error("Validation failed: {0}")]
+    Validation(String),
 }
 
 impl From<PipelinesDbError> for PipelineError {
@@ -546,14 +546,12 @@ pub async fn create_pipeline(
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_config = source.config.into_connection_config(tls_config);
-    // Default max_table_sync_workers to 4 if not specified (matches StoredPipelineConfig default)
-    let max_table_sync_workers = pipeline.config.max_table_sync_workers.unwrap_or(4);
-    validate_pipeline_prerequisites(
-        &source_config,
-        &pipeline.config.publication_name,
-        max_table_sync_workers,
-    )
-    .await?;
+    let validation_failures = validate_pipeline(&pipeline.config, &source_config).await;
+    if !validation_failures.is_empty() {
+        return Err(PipelineError::Validation(format_validation_failures(
+            &validation_failures,
+        )));
+    }
 
     let image = db::images::read_default_image(txn.deref_mut())
         .await?
@@ -639,20 +637,43 @@ pub async fn read_pipeline(
 pub async fn update_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     pipeline_id: Path<i64>,
     pipeline: Json<UpdatePipelineRequest>,
+    encryption_key: Data<EncryptionKey>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
     let pipeline = pipeline.into_inner();
 
     let mut txn = pool.begin().await?;
-    if !source_exists(txn.deref_mut(), tenant_id, pipeline.source_id).await? {
-        return Err(PipelineError::SourceNotFound(pipeline.source_id));
-    }
+
+    // Read source to get connection config for validation
+    let source = db::sources::read_source(
+        txn.deref_mut(),
+        tenant_id,
+        pipeline.source_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
     if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
         return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
+    }
+
+    // Validate pipeline prerequisites before updating
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
+    let source_config = source.config.into_connection_config(tls_config);
+
+    let validation_failures = validate_pipeline(&pipeline.config, &source_config).await;
+    if !validation_failures.is_empty() {
+        return Err(PipelineError::Validation(format_validation_failures(
+            &validation_failures,
+        )));
     }
 
     db::pipelines::update_pipeline(

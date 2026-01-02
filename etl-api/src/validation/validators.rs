@@ -1,55 +1,26 @@
-//! Built-in validators for common ETL pipeline prerequisites.
+//! Built-in validators for ETL pipeline and destination prerequisites.
+
+use std::collections::HashMap;
 
 use async_trait::async_trait;
+use etl_config::Environment;
 use etl_destinations::bigquery::BigQueryClient;
-use etl_destinations::iceberg::IcebergClient;
+use etl_destinations::iceberg::{
+    IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
+};
 use secrecy::ExposeSecret;
 
 use crate::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
+use crate::configs::pipeline::FullApiPipelineConfig;
 
-use super::{ValidationContext, ValidationResult, Validator};
-
-// =============================================================================
-// Source Validators
-// =============================================================================
-
-/// Validates that the source Postgres database is accessible.
-///
-/// Attempts to execute a simple query to verify connectivity,
-/// authentication, and basic permissions.
-pub struct SourceConnectionValidator;
-
-#[async_trait]
-impl Validator for SourceConnectionValidator {
-    fn name(&self) -> &str {
-        "source_connection"
-    }
-
-    async fn validate(&self, ctx: &ValidationContext) -> ValidationResult {
-        match sqlx::query_scalar::<_, i32>("SELECT 1")
-            .fetch_one(&ctx.source_pool)
-            .await
-        {
-            Ok(_) => ValidationResult::Passed,
-            Err(e) => ValidationResult::Failed {
-                name: "source_connection".to_string(),
-                reason: format!("Failed to connect to source PostgreSQL database: {e}"),
-            },
-        }
-    }
-}
+use super::{ValidationContext, ValidationFailure, Validator};
 
 /// Validates that the required publication exists in the source database.
-///
-/// Checks that the publication specified in the pipeline configuration
-/// exists in the source Postgres database. The publication must exist before
-/// replication can begin.
 pub struct PublicationExistsValidator {
     publication_name: String,
 }
 
 impl PublicationExistsValidator {
-    /// Creates a new publication exists validator.
     pub fn new(publication_name: String) -> Self {
         Self { publication_name }
     }
@@ -57,49 +28,43 @@ impl PublicationExistsValidator {
 
 #[async_trait]
 impl Validator for PublicationExistsValidator {
-    fn name(&self) -> &str {
-        "publication_exists"
-    }
+    async fn validate(&self, ctx: &ValidationContext) -> Vec<ValidationFailure> {
+        let source_pool = match &ctx.source_pool {
+            Some(pool) => pool,
+            None => {
+                return vec![ValidationFailure::new(
+                    "Source Connection",
+                    "Connection not available",
+                )];
+            }
+        };
 
-    async fn validate(&self, ctx: &ValidationContext) -> ValidationResult {
-        let exists: Result<bool, _> = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname = $1)",
-        )
-        .bind(&self.publication_name)
-        .fetch_one(&ctx.source_pool)
-        .await;
+        let exists: Result<bool, _> =
+            sqlx::query_scalar("select exists(select 1 from pg_publication where pubname = $1)")
+                .bind(&self.publication_name)
+                .fetch_one(source_pool)
+                .await;
 
         match exists {
-            Ok(true) => ValidationResult::Passed,
-            Ok(false) => ValidationResult::Failed {
-                name: "publication_exists".to_string(),
-                reason: format!(
-                    "Publication '{}' does not exist. Create it with: \
-                    CREATE PUBLICATION {} FOR TABLE ...",
+            Ok(true) => vec![],
+            Ok(false) => vec![ValidationFailure::new(
+                "Publication Not Found",
+                format!(
+                    "'{}' does not exist. Create with: CREATE PUBLICATION {} FOR TABLE ...",
                     self.publication_name, self.publication_name
                 ),
-            },
-            Err(e) => ValidationResult::Failed {
-                name: "publication_exists".to_string(),
-                reason: format!("Failed to check publication: {e}"),
-            },
+            )],
+            Err(err) => vec![ValidationFailure::new("Publication Check", err.to_string())],
         }
     }
 }
 
 /// Validates that there are enough free replication slots for the pipeline.
-///
-/// Checks the source Postgres database to ensure that the configured
-/// `max_table_sync_workers + 1` does not exceed the number of available replication slots.
-/// The pipeline requires:
-/// - 1 slot for the apply worker (main replication stream)
-/// - Up to `max_table_sync_workers` slots for parallel initial table synchronization
 pub struct ReplicationSlotsValidator {
     max_table_sync_workers: u16,
 }
 
 impl ReplicationSlotsValidator {
-    /// Creates a new replication slots validator.
     pub fn new(max_table_sync_workers: u16) -> Self {
         Self {
             max_table_sync_workers,
@@ -109,38 +74,39 @@ impl ReplicationSlotsValidator {
 
 #[async_trait]
 impl Validator for ReplicationSlotsValidator {
-    fn name(&self) -> &str {
-        "replication_slots"
-    }
+    async fn validate(&self, ctx: &ValidationContext) -> Vec<ValidationFailure> {
+        let source_pool = match &ctx.source_pool {
+            Some(pool) => pool,
+            None => {
+                return vec![ValidationFailure::new(
+                    "Source Connection",
+                    "Connection not available",
+                )];
+            }
+        };
 
-    async fn validate(&self, ctx: &ValidationContext) -> ValidationResult {
-        let max_slots: Result<i32, _> =
-            sqlx::query_scalar("SELECT setting::int FROM pg_settings WHERE name = 'max_replication_slots'")
-                .fetch_one(&ctx.source_pool)
-                .await;
+        let max_slots: Result<i32, _> = sqlx::query_scalar(
+            "select setting::int from pg_settings where name = 'max_replication_slots'",
+        )
+        .fetch_one(source_pool)
+        .await;
 
         let max_slots = match max_slots {
             Ok(v) => v,
-            Err(e) => {
-                return ValidationResult::Failed {
-                    name: "replication_slots".to_string(),
-                    reason: format!("Failed to query max_replication_slots: {e}"),
-                };
+            Err(err) => {
+                return vec![ValidationFailure::new("Replication Slots", err.to_string())];
             }
         };
 
         let used_slots: Result<i64, _> =
-            sqlx::query_scalar("SELECT COUNT(*) FROM pg_replication_slots")
-                .fetch_one(&ctx.source_pool)
+            sqlx::query_scalar("select count(*) from pg_replication_slots")
+                .fetch_one(source_pool)
                 .await;
 
         let used_slots = match used_slots {
             Ok(v) => v,
-            Err(e) => {
-                return ValidationResult::Failed {
-                    name: "replication_slots".to_string(),
-                    reason: format!("Failed to query replication slots: {e}"),
-                };
+            Err(err) => {
+                return vec![ValidationFailure::new("Replication Slots", err.to_string())];
             }
         };
 
@@ -148,39 +114,63 @@ impl Validator for ReplicationSlotsValidator {
         let required_slots = self.max_table_sync_workers as i64 + 1;
 
         if required_slots <= free_slots {
-            ValidationResult::Passed
+            vec![]
         } else {
-            ValidationResult::Failed {
-                name: "replication_slots".to_string(),
-                reason: format!(
-                    "Insufficient replication slots: {free_slots} free but {required_slots} required \
-                    (max_table_sync_workers={} + 1 apply worker). \
-                    Current usage: {used_slots}/{max_slots} slots. \
-                    Either increase max_replication_slots in PostgreSQL or reduce max_table_sync_workers.",
-                    self.max_table_sync_workers
+            vec![ValidationFailure::new(
+                "Insufficient Replication Slots",
+                format!(
+                    "{free_slots} free, {required_slots} required ({used_slots}/{max_slots} in use). \
+                    Increase max_replication_slots or reduce max_table_sync_workers.",
                 ),
-            }
+            )]
         }
     }
 }
 
-// =============================================================================
-// Destination Validators
-// =============================================================================
+/// Composite validator for pipeline prerequisites.
+pub struct PipelineValidator {
+    config: FullApiPipelineConfig,
+}
 
-/// Validates BigQuery destination by creating a client and checking dataset accessibility.
-///
-/// Creates a [`BigQueryClient`] instance and verifies that the specified dataset
-/// exists and is accessible.
-pub struct BigQueryValidator {
+impl PipelineValidator {
+    pub fn new(config: FullApiPipelineConfig) -> Self {
+        Self { config }
+    }
+
+    fn sub_validators(&self) -> Vec<Box<dyn Validator>> {
+        let max_table_sync_workers = self.config.max_table_sync_workers.unwrap_or(4);
+
+        vec![
+            Box::new(PublicationExistsValidator::new(
+                self.config.publication_name.clone(),
+            )),
+            Box::new(ReplicationSlotsValidator::new(max_table_sync_workers)),
+        ]
+    }
+}
+
+#[async_trait]
+impl Validator for PipelineValidator {
+    async fn validate(&self, ctx: &ValidationContext) -> Vec<ValidationFailure> {
+        let mut failures = Vec::new();
+
+        for validator in self.sub_validators() {
+            failures.extend(validator.validate(ctx).await);
+        }
+
+        failures
+    }
+}
+
+/// Validates BigQuery destination connectivity and dataset accessibility.
+struct BigQueryValidator {
     project_id: String,
     dataset_id: String,
     service_account_key: String,
 }
 
 impl BigQueryValidator {
-    /// Creates a new BigQuery validator.
-    pub fn new(project_id: String, dataset_id: String, service_account_key: String) -> Self {
+    fn new(project_id: String, dataset_id: String, service_account_key: String) -> Self {
         Self {
             project_id,
             dataset_id,
@@ -191,73 +181,48 @@ impl BigQueryValidator {
 
 #[async_trait]
 impl Validator for BigQueryValidator {
-    fn name(&self) -> &str {
-        "bigquery_destination"
-    }
+    async fn validate(&self, _ctx: &ValidationContext) -> Vec<ValidationFailure> {
+        let client =
+            match BigQueryClient::new_with_key(self.project_id.clone(), &self.service_account_key)
+                .await
+            {
+                Ok(client) => client,
+                Err(err) => {
+                    return vec![ValidationFailure::new(
+                        "BigQuery Connection",
+                        err.detail().unwrap_or(&err.to_string()).to_string(),
+                    )];
+                }
+            };
 
-    async fn validate(&self, _ctx: &ValidationContext) -> ValidationResult {
-        // Create the BigQuery client
-        let client = match BigQueryClient::new_with_key(
-            self.project_id.clone(),
-            &self.service_account_key,
-        )
-        .await
-        {
-            Ok(client) => client,
-            Err(e) => {
-                return ValidationResult::Failed {
-                    name: "bigquery_destination".to_string(),
-                    reason: format!(
-                        "Failed to create BigQuery client: {}",
-                        e.detail().unwrap_or(&e.to_string())
-                    ),
-                };
-            }
-        };
-
-        // Validate that the dataset exists
         match client.dataset_exists(&self.dataset_id).await {
-            Ok(true) => ValidationResult::Passed,
-            Ok(false) => ValidationResult::Failed {
-                name: "bigquery_destination".to_string(),
-                reason: format!(
-                    "Dataset '{}' does not exist or is not accessible in project '{}'",
-                    self.dataset_id, self.project_id
-                ),
-            },
-            Err(e) => ValidationResult::Failed {
-                name: "bigquery_destination".to_string(),
-                reason: format!(
-                    "Failed to check BigQuery dataset: {}",
-                    e.detail().unwrap_or(&e.to_string())
-                ),
-            },
+            Ok(true) => vec![],
+            Ok(false) => vec![ValidationFailure::new(
+                "BigQuery Dataset Not Found",
+                format!("'{}' in project '{}'", self.dataset_id, self.project_id),
+            )],
+            Err(err) => vec![ValidationFailure::new(
+                "BigQuery Dataset",
+                err.detail().unwrap_or(&err.to_string()).to_string(),
+            )],
         }
     }
 }
 
-/// Validates Iceberg destination by creating a client and checking catalog connectivity.
-///
-/// Creates an [`IcebergClient`] instance and verifies that the catalog is accessible.
-pub struct IcebergValidator {
+/// Validates Iceberg destination connectivity.
+struct IcebergValidator {
     config: FullApiIcebergConfig,
 }
 
 impl IcebergValidator {
-    /// Creates a new Iceberg validator.
-    pub fn new(config: FullApiIcebergConfig) -> Self {
+    fn new(config: FullApiIcebergConfig) -> Self {
         Self { config }
     }
 }
 
 #[async_trait]
 impl Validator for IcebergValidator {
-    fn name(&self) -> &str {
-        "iceberg_destination"
-    }
-
-    async fn validate(&self, _ctx: &ValidationContext) -> ValidationResult {
-        // Create the Iceberg client based on config type
+    async fn validate(&self, _ctx: &ValidationContext) -> Vec<ValidationFailure> {
         let client = match &self.config {
             FullApiIcebergConfig::Supabase {
                 project_ref,
@@ -268,9 +233,17 @@ impl Validator for IcebergValidator {
                 s3_region,
                 ..
             } => {
+                let supabase_domain = match Environment::load() {
+                    Ok(Environment::Prod) => "supabase.co",
+                    Ok(Environment::Staging | Environment::Dev) => "supabase.red",
+                    Err(err) => {
+                        return vec![ValidationFailure::new("Environment", err.to_string())];
+                    }
+                };
+
                 IcebergClient::new_with_supabase_catalog(
                     project_ref,
-                    "supabase.com",
+                    supabase_domain,
                     catalog_token.expose_secret().to_string(),
                     warehouse_name.clone(),
                     s3_access_key_id.expose_secret().to_string(),
@@ -287,18 +260,17 @@ impl Validator for IcebergValidator {
                 s3_endpoint,
                 ..
             } => {
-                let props = std::collections::HashMap::from([
-                    (
-                        "s3.access-key-id".to_string(),
-                        s3_access_key_id.expose_secret().to_string(),
-                    ),
-                    (
-                        "s3.secret-access-key".to_string(),
-                        s3_secret_access_key.expose_secret().to_string(),
-                    ),
-                    ("s3.endpoint".to_string(), s3_endpoint.clone()),
-                    ("s3.region".to_string(), "auto".to_string()),
-                ]);
+                let mut props = HashMap::new();
+                props.insert(
+                    S3_ACCESS_KEY_ID.to_string(),
+                    s3_access_key_id.expose_secret().to_string(),
+                );
+                props.insert(
+                    S3_SECRET_ACCESS_KEY.to_string(),
+                    s3_secret_access_key.expose_secret().to_string(),
+                );
+                props.insert(S3_ENDPOINT.to_string(), s3_endpoint.clone());
+
                 IcebergClient::new_with_rest_catalog(
                     catalog_uri.clone(),
                     warehouse_name.clone(),
@@ -310,37 +282,27 @@ impl Validator for IcebergValidator {
 
         let client = match client {
             Ok(client) => client,
-            Err(e) => {
-                return ValidationResult::Failed {
-                    name: "iceberg_destination".to_string(),
-                    reason: format!("Failed to create Iceberg client: {e}"),
-                };
+            Err(err) => {
+                return vec![ValidationFailure::new(
+                    "Iceberg Connection",
+                    err.to_string(),
+                )];
             }
         };
 
-        // Validate catalog connectivity
         match client.validate_connectivity().await {
-            Ok(()) => ValidationResult::Passed,
-            Err(e) => ValidationResult::Failed {
-                name: "iceberg_destination".to_string(),
-                reason: format!("Failed to connect to Iceberg catalog: {e}"),
-            },
+            Ok(()) => vec![],
+            Err(err) => vec![ValidationFailure::new("Iceberg Catalog", err.to_string())],
         }
     }
 }
 
-/// Validates destination connectivity based on the destination configuration.
-///
-/// Dispatches to the appropriate destination-specific validator:
-/// - **BigQuery**: Uses [`BigQueryValidator`]
-/// - **Iceberg**: Uses [`IcebergValidator`]
-/// - **Memory**: Always passes (in-memory destination is always available)
+/// Composite validator for destination prerequisites.
 pub struct DestinationValidator {
     config: FullApiDestinationConfig,
 }
 
 impl DestinationValidator {
-    /// Creates a new destination validator with the given configuration.
     pub fn new(config: FullApiDestinationConfig) -> Self {
         Self { config }
     }
@@ -348,13 +310,9 @@ impl DestinationValidator {
 
 #[async_trait]
 impl Validator for DestinationValidator {
-    fn name(&self) -> &str {
-        "destination"
-    }
-
-    async fn validate(&self, ctx: &ValidationContext) -> ValidationResult {
+    async fn validate(&self, ctx: &ValidationContext) -> Vec<ValidationFailure> {
         match &self.config {
-            FullApiDestinationConfig::Memory => ValidationResult::Passed,
+            FullApiDestinationConfig::Memory => vec![],
             FullApiDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,

@@ -1,6 +1,6 @@
-use sqlx::PgPool;
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::replication::connect_to_source_database;
+use sqlx::PgPool;
 
 pub mod destinations;
 pub mod destinations_pipelines;
