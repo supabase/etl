@@ -10,7 +10,7 @@ use futures::StreamExt;
 
 use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
 
-pub use etl_destinations::iceberg::test_utils::{LAKEKEEPER_URL, create_props, get_catalog_url};
+
 
 /// Converts a RecordBatch back to a vector of TableRows.
 pub fn record_batch_to_table_rows(batch: &RecordBatch) -> Vec<TableRow> {
