@@ -8,3 +8,4 @@ pub mod routes;
 pub mod span_builder;
 pub mod startup;
 pub mod utils;
+pub mod validation;

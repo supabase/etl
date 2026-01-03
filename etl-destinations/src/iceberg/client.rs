@@ -150,6 +150,20 @@ impl IcebergClient {
         self.catalog.namespace_exists(&namespace_ident).await
     }
 
+    /// Validates that the catalog is accessible by listing namespaces.
+    ///
+    /// This method attempts to list namespaces in the catalog as a connectivity check,
+    /// similar to how BigQuery's `dataset_exists` verifies access. This is the cheapest
+    /// way to verify the connection to the Iceberg catalog works correctly.
+    /// Returns `Ok(())` if the catalog is accessible, or an error if connectivity fails.
+    pub async fn validate_connectivity(&self) -> Result<(), iceberg::Error> {
+        debug!("validating iceberg catalog connectivity");
+        // Try to list namespaces as a connectivity check; this is the cheapest
+        // operation that actually polls data from the catalog.
+        self.catalog.list_namespaces(None).await?;
+        Ok(())
+    }
+
     /// Creates a table if it does not already exist.
     ///
     /// This method performs an idempotent table creation operation. It checks

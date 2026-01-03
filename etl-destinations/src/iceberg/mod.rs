@@ -4,6 +4,8 @@ mod core;
 mod encoding;
 mod error;
 mod schema;
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
 
 pub use client::IcebergClient;
 pub use core::{

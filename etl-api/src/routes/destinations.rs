@@ -14,6 +14,7 @@ use crate::configs::encryption::EncryptionKey;
 use crate::db;
 use crate::db::destinations::DestinationsDbError;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
+use crate::validation::{ValidationFailure, validate_destination as run_destination_validation};
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
@@ -99,6 +100,34 @@ pub struct ReadDestinationResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReadDestinationsResponse {
     pub destinations: Vec<ReadDestinationResponse>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidateDestinationRequest {
+    #[schema(required = true)]
+    pub config: FullApiDestinationConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidationFailureResponse {
+    #[schema(example = "BigQuery Dataset Not Found")]
+    pub name: String,
+    #[schema(example = "'my_dataset' in project 'my_project'")]
+    pub reason: String,
+}
+
+impl From<ValidationFailure> for ValidationFailureResponse {
+    fn from(failure: ValidationFailure) -> Self {
+        Self {
+            name: failure.name,
+            reason: failure.reason,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidateDestinationResponse {
+    pub validation_failures: Vec<ValidationFailureResponse>,
 }
 
 #[utoipa::path(
@@ -282,6 +311,36 @@ pub async fn read_all_destinations(
     }
 
     let response = ReadDestinationsResponse { destinations };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Validate destination configuration",
+    description = "Validates that the destination is accessible and properly configured.",
+    request_body = ValidateDestinationRequest,
+    params(
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Validation completed", body = ValidateDestinationResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations"
+)]
+#[post("/destinations/validate")]
+pub async fn validate_destination(
+    req: HttpRequest,
+    request: Json<ValidateDestinationRequest>,
+) -> Result<impl Responder, DestinationError> {
+    let _tenant_id = extract_tenant_id(&req)?;
+    let request = request.into_inner();
+
+    let failures = run_destination_validation(&request.config).await;
+    let response = ValidateDestinationResponse {
+        validation_failures: failures.into_iter().map(Into::into).collect(),
+    };
 
     Ok(Json(response))
 }

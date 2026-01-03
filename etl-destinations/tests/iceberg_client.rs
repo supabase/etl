@@ -1,15 +1,13 @@
-#![cfg(feature = "iceberg")]
+#![cfg(all(feature = "iceberg", feature = "test-utils"))]
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::types::{ArrayCell, Cell, ColumnSchema, TableRow, Type};
 use etl_destinations::iceberg::IcebergClient;
+use etl_destinations::iceberg::test_utils::LakekeeperClient;
 use etl_telemetry::tracing::init_test_tracing;
 use uuid::Uuid;
 
-use crate::support::{
-    iceberg::{LAKEKEEPER_URL, create_props, get_catalog_url, read_all_rows},
-    lakekeeper::LakekeeperClient,
-};
+use crate::support::iceberg::{LAKEKEEPER_URL, create_props, get_catalog_url, read_all_rows};
 
 mod support;
 

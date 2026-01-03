@@ -1,3 +1,5 @@
+//! Cryptographic provider initialization for TLS connections.
+
 use std::sync::Once;
 
 /// Ensures crypto provider is only initialized once.

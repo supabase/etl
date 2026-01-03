@@ -22,9 +22,12 @@ use crate::db::images::ImagesDbError;
 use crate::db::pipelines::{
     MAX_PIPELINES_PER_TENANT, PipelinesDbError, count_pipelines_for_tenant, read_pipeline,
 };
-use crate::db::sources::{SourcesDbError, source_exists};
+use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
+use crate::validation::{
+    ValidationFailure, validate_destination_pipeline as run_destination_pipeline_validation,
+};
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -180,6 +183,38 @@ pub struct UpdateDestinationPipelineRequest {
     pub pipeline_config: FullApiPipelineConfig,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidateDestinationPipelineRequest {
+    #[schema(required = true)]
+    pub destination_config: FullApiDestinationConfig,
+    #[schema(required = true, example = 1)]
+    pub source_id: i64,
+    #[schema(required = true)]
+    pub pipeline_config: FullApiPipelineConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidationFailureResponse {
+    #[schema(example = "Publication Not Found")]
+    pub name: String,
+    #[schema(example = "'my_publication' does not exist")]
+    pub reason: String,
+}
+
+impl From<ValidationFailure> for ValidationFailureResponse {
+    fn from(failure: ValidationFailure) -> Self {
+        Self {
+            name: failure.name,
+            reason: failure.reason,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidateDestinationPipelineResponse {
+    pub validation_failures: Vec<ValidationFailureResponse>,
+}
+
 #[utoipa::path(
     summary = "Create destination and pipeline",
     description = "Creates a destination and a pipeline linked to the specified source.",
@@ -208,17 +243,17 @@ pub async fn create_destination_and_pipeline(
 
     let mut txn = pool.begin().await?;
 
-    if !source_exists(
+    // Verify source exists
+    let _source = db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
+        &encryption_key,
     )
     .await?
-    {
-        return Err(DestinationPipelineError::SourceNotFound(
-            destination_and_pipeline.source_id,
-        ));
-    }
+    .ok_or(DestinationPipelineError::SourceNotFound(
+        destination_and_pipeline.source_id,
+    ))?;
 
     let max_pipelines = get_max_pipelines_per_tenant(
         feature_flags_client.as_ref(),
@@ -291,17 +326,17 @@ pub async fn update_destination_and_pipeline(
 
     let mut txn = pool.begin().await?;
 
-    if !source_exists(
+    // Verify source exists
+    let _source = db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
+        &encryption_key,
     )
     .await?
-    {
-        return Err(DestinationPipelineError::SourceNotFound(
-            destination_and_pipeline.source_id,
-        ));
-    }
+    .ok_or(DestinationPipelineError::SourceNotFound(
+        destination_and_pipeline.source_id,
+    ))?;
 
     if !destination_exists(txn.deref_mut(), tenant_id, destination_id).await? {
         return Err(DestinationPipelineError::DestinationNotFound(
@@ -420,4 +455,61 @@ pub async fn delete_destination_and_pipeline(
     .await?;
 
     Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    summary = "Validate destination and pipeline configuration",
+    description = "Validates both destination connectivity and pipeline prerequisites.",
+    request_body = ValidateDestinationPipelineRequest,
+    params(
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Validation completed", body = ValidateDestinationPipelineResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations and Pipelines"
+)]
+#[post("/destinations-pipelines/validate")]
+pub async fn validate_destination_pipeline(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    request: Json<ValidateDestinationPipelineRequest>,
+    encryption_key: Data<EncryptionKey>,
+) -> Result<impl Responder, DestinationPipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let request = request.into_inner();
+
+    let mut txn = pool.begin().await?;
+
+    let source = db::sources::read_source(
+        txn.deref_mut(),
+        tenant_id,
+        request.source_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(DestinationPipelineError::SourceNotFound(request.source_id))?;
+
+    txn.commit().await?;
+
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
+    let source_config = source.config.into_connection_config(tls_config);
+
+    let failures = run_destination_pipeline_validation(
+        &request.destination_config,
+        &request.pipeline_config,
+        &source_config,
+    )
+    .await;
+    let response = ValidateDestinationPipelineResponse {
+        validation_failures: failures.into_iter().map(Into::into).collect(),
+    };
+
+    Ok(Json(response))
 }
