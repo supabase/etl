@@ -25,7 +25,9 @@ use crate::db::pipelines::{
 use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
-use crate::validation::{format_validation_failures, validate_destination_pipeline};
+use crate::validation::{
+    ValidationFailure, validate_destination_pipeline as run_destination_pipeline_validation,
+};
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -76,9 +78,6 @@ enum DestinationPipelineError {
 
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
-
-    #[error("Validation failed: {0}")]
-    Validation(String),
 }
 
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
@@ -128,8 +127,9 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::SourceNotFound(_)
             | DestinationPipelineError::DestinationNotFound(_)
             | DestinationPipelineError::PipelineNotFound(_)
-            | DestinationPipelineError::PipelineDestinationMismatch(_, _)
-            | DestinationPipelineError::Validation(_) => StatusCode::BAD_REQUEST,
+            | DestinationPipelineError::PipelineDestinationMismatch(_, _) => {
+                StatusCode::BAD_REQUEST
+            }
             DestinationPipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             DestinationPipelineError::PipelineLimitReached { .. } => {
                 StatusCode::UNPROCESSABLE_ENTITY
@@ -183,6 +183,38 @@ pub struct UpdateDestinationPipelineRequest {
     pub pipeline_config: FullApiPipelineConfig,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidateDestinationPipelineRequest {
+    #[schema(required = true)]
+    pub destination_config: FullApiDestinationConfig,
+    #[schema(required = true, example = 1)]
+    pub source_id: i64,
+    #[schema(required = true)]
+    pub pipeline_config: FullApiPipelineConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidationFailureResponse {
+    #[schema(example = "Publication Not Found")]
+    pub name: String,
+    #[schema(example = "'my_publication' does not exist")]
+    pub reason: String,
+}
+
+impl From<ValidationFailure> for ValidationFailureResponse {
+    fn from(failure: ValidationFailure) -> Self {
+        Self {
+            name: failure.name,
+            reason: failure.reason,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidateDestinationPipelineResponse {
+    pub validation_failures: Vec<ValidationFailureResponse>,
+}
+
 #[utoipa::path(
     summary = "Create destination and pipeline",
     description = "Creates a destination and a pipeline linked to the specified source.",
@@ -202,8 +234,6 @@ pub struct UpdateDestinationPipelineRequest {
 pub async fn create_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
     feature_flags_client: Option<Data<configcat::Client>>,
@@ -213,8 +243,8 @@ pub async fn create_destination_and_pipeline(
 
     let mut txn = pool.begin().await?;
 
-    // Read source to get connection config for validation
-    let source = db::sources::read_source(
+    // Verify source exists
+    let _source = db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
@@ -236,24 +266,6 @@ pub async fn create_destination_and_pipeline(
         return Err(DestinationPipelineError::PipelineLimitReached {
             limit: max_pipelines,
         });
-    }
-
-    // Validate destination and pipeline prerequisites before creating
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
-        .await?;
-    let source_config = source.config.into_connection_config(tls_config);
-
-    let validation_failures = validate_destination_pipeline(
-        &destination_and_pipeline.destination_config,
-        &destination_and_pipeline.pipeline_config,
-        &source_config,
-    )
-    .await;
-    if !validation_failures.is_empty() {
-        return Err(DestinationPipelineError::Validation(
-            format_validation_failures(&validation_failures),
-        ));
     }
 
     let image = db::images::read_default_image(&**pool)
@@ -304,8 +316,6 @@ pub async fn create_destination_and_pipeline(
 pub async fn update_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
     destination_and_pipeline: Json<UpdateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
@@ -316,8 +326,8 @@ pub async fn update_destination_and_pipeline(
 
     let mut txn = pool.begin().await?;
 
-    // Read source to get connection config for validation
-    let source = db::sources::read_source(
+    // Verify source exists
+    let _source = db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
@@ -342,24 +352,6 @@ pub async fn update_destination_and_pipeline(
         return Err(DestinationPipelineError::PipelineDestinationMismatch(
             pipeline_id,
             destination_id,
-        ));
-    }
-
-    // Validate destination and pipeline prerequisites before updating
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
-        .await?;
-    let source_config = source.config.into_connection_config(tls_config);
-
-    let validation_failures = validate_destination_pipeline(
-        &destination_and_pipeline.destination_config,
-        &destination_and_pipeline.pipeline_config,
-        &source_config,
-    )
-    .await;
-    if !validation_failures.is_empty() {
-        return Err(DestinationPipelineError::Validation(
-            format_validation_failures(&validation_failures),
         ));
     }
 
@@ -463,4 +455,61 @@ pub async fn delete_destination_and_pipeline(
     .await?;
 
     Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    summary = "Validate destination and pipeline configuration",
+    description = "Validates both destination connectivity and pipeline prerequisites.",
+    request_body = ValidateDestinationPipelineRequest,
+    params(
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Validation completed", body = ValidateDestinationPipelineResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations and Pipelines"
+)]
+#[post("/destinations-pipelines/validate")]
+pub async fn validate_destination_pipeline(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    request: Json<ValidateDestinationPipelineRequest>,
+    encryption_key: Data<EncryptionKey>,
+) -> Result<impl Responder, DestinationPipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let request = request.into_inner();
+
+    let mut txn = pool.begin().await?;
+
+    let source = db::sources::read_source(
+        txn.deref_mut(),
+        tenant_id,
+        request.source_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(DestinationPipelineError::SourceNotFound(request.source_id))?;
+
+    txn.commit().await?;
+
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
+    let source_config = source.config.into_connection_config(tls_config);
+
+    let failures = run_destination_pipeline_validation(
+        &request.destination_config,
+        &request.pipeline_config,
+        &source_config,
+    )
+    .await;
+    let response = ValidateDestinationPipelineResponse {
+        validation_failures: failures.into_iter().map(Into::into).collect(),
+    };
+
+    Ok(Json(response))
 }
