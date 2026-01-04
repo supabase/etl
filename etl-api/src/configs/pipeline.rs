@@ -26,7 +26,6 @@ pub struct ApiBatchConfig {
     pub max_fill_ms: Option<u64>,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApiReplicationSlotConfig {
     #[schema(example = false)]
@@ -41,13 +40,17 @@ impl Default for ApiReplicationSlotConfig {
 
 impl From<ReplicationSlotConfig> for ApiReplicationSlotConfig {
     fn from(value: ReplicationSlotConfig) -> Self {
-        ApiReplicationSlotConfig { temporary: value.temporary }
+        ApiReplicationSlotConfig {
+            temporary: value.temporary,
+        }
     }
 }
 
 impl From<ApiReplicationSlotConfig> for ReplicationSlotConfig {
     fn from(value: ApiReplicationSlotConfig) -> Self {
-        ReplicationSlotConfig { temporary: value.temporary }
+        ReplicationSlotConfig {
+            temporary: value.temporary,
+        }
     }
 }
 
@@ -70,7 +73,6 @@ pub struct FullApiPipelineConfig {
     pub max_table_sync_workers: Option<u16>,
     pub log_level: Option<LogLevel>,
 }
-
 
 impl From<StoredPipelineConfig> for FullApiPipelineConfig {
     fn from(value: StoredPipelineConfig) -> Self {
@@ -256,7 +258,7 @@ mod tests {
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
             log_level: Some(LogLevel::Debug),
-            replication_slot: ApiReplicationSlotConfig::default()
+            replication_slot: ApiReplicationSlotConfig::default(),
         };
 
         let stored: StoredPipelineConfig = full_config.clone().into();

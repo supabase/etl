@@ -224,7 +224,10 @@ pub mod tenants {
 /// Pipeline config helpers.
 pub mod pipelines {
     use super::*;
-    use etl_api::configs::{log::LogLevel, pipeline::{ApiBatchConfig, ApiReplicationSlotConfig}};
+    use etl_api::configs::{
+        log::LogLevel,
+        pipeline::{ApiBatchConfig, ApiReplicationSlotConfig},
+    };
 
     /// Returns a default pipeline config.
     pub fn new_pipeline_config() -> FullApiPipelineConfig {

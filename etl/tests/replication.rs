@@ -186,7 +186,7 @@ async fn test_replication_client_temporary_slot_dropped_on_disconnect() {
     let slot_name = test_slot_name("my_slot");
     assert!(matches!(
         client
-            .create_slot(&slot_name, ReplicationSlotConfig { temporary: true})
+            .create_slot(&slot_name, ReplicationSlotConfig { temporary: true })
             .await,
         Ok(CreateSlotResult {
             consistent_point: _
@@ -204,7 +204,7 @@ async fn test_replication_client_temporary_slot_dropped_on_disconnect() {
 
     assert!(matches!(
         client
-            .create_slot(&slot_name, ReplicationSlotConfig { temporary: true})
+            .create_slot(&slot_name, ReplicationSlotConfig { temporary: true })
             .await,
         Ok(CreateSlotResult {
             consistent_point: _
@@ -223,7 +223,7 @@ async fn test_replication_client_permanent_slot_persisted_on_disconnect() {
     let slot_name = test_slot_name("my_slot");
     assert!(matches!(
         client
-            .create_slot(&slot_name, ReplicationSlotConfig { temporary: false})
+            .create_slot(&slot_name, ReplicationSlotConfig { temporary: false })
             .await,
         Ok(CreateSlotResult {
             consistent_point: _
