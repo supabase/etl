@@ -26,16 +26,10 @@ pub struct ApiBatchConfig {
     pub max_fill_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct ApiReplicationSlotConfig {
     #[schema(example = false)]
     pub temporary: bool,
-}
-
-impl Default for ApiReplicationSlotConfig {
-    fn default() -> Self {
-        Self { temporary: false }
-    }
 }
 
 impl From<ReplicationSlotConfig> for ApiReplicationSlotConfig {
