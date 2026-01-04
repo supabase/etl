@@ -26,12 +26,37 @@ pub struct ApiBatchConfig {
     pub max_fill_ms: Option<u64>,
 }
 
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ApiReplicationSlotConfig {
+    #[schema(example = false)]
+    pub temporary: bool,
+}
+
+impl Default for ApiReplicationSlotConfig {
+    fn default() -> Self {
+        Self { temporary: false }
+    }
+}
+
+impl From<ReplicationSlotConfig> for ApiReplicationSlotConfig {
+    fn from(value: ReplicationSlotConfig) -> Self {
+        ApiReplicationSlotConfig { temporary: value.temporary }
+    }
+}
+
+impl From<ApiReplicationSlotConfig> for ReplicationSlotConfig {
+    fn from(value: ApiReplicationSlotConfig) -> Self {
+        ReplicationSlotConfig { temporary: value.temporary }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FullApiPipelineConfig {
     #[schema(example = "my_publication")]
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub publication_name: String,
-    pub temporary_replication_slot: bool,
+    pub replication_slot: ApiReplicationSlotConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<ApiBatchConfig>,
     #[schema(example = 1000)]
@@ -46,14 +71,12 @@ pub struct FullApiPipelineConfig {
     pub log_level: Option<LogLevel>,
 }
 
+
 impl From<StoredPipelineConfig> for FullApiPipelineConfig {
     fn from(value: StoredPipelineConfig) -> Self {
         Self {
             publication_name: value.publication_name,
-            temporary_replication_slot: match value.replication_slot {
-                ReplicationSlotConfig::Temporary => true,
-                ReplicationSlotConfig::Permanent => false,
-            },
+            replication_slot: value.replication_slot.into(),
             batch: Some(ApiBatchConfig {
                 max_size: Some(value.batch.max_size),
                 max_fill_ms: Some(value.batch.max_fill_ms),
@@ -94,6 +117,7 @@ pub struct PartialApiPipelineConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredPipelineConfig {
     pub publication_name: String,
+    #[serde(default)]
     pub replication_slot: ReplicationSlotConfig,
     pub batch: BatchConfig,
     pub table_error_retry_delay_ms: u64,
@@ -168,11 +192,7 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
 
         Self {
             publication_name: value.publication_name,
-            replication_slot: if value.temporary_replication_slot {
-                ReplicationSlotConfig::Temporary
-            } else {
-                ReplicationSlotConfig::Permanent
-            },
+            replication_slot: value.replication_slot.into(),
             batch,
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
@@ -197,7 +217,7 @@ mod tests {
     fn test_stored_pipeline_config_serialization() {
         let config = StoredPipelineConfig {
             publication_name: "test_publication".to_string(),
-            replication_slot: ReplicationSlotConfig::Permanent,
+            replication_slot: ReplicationSlotConfig::default(),
             batch: BatchConfig {
                 max_size: 1000,
                 max_fill_ms: 5000,
@@ -236,7 +256,7 @@ mod tests {
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
             log_level: Some(LogLevel::Debug),
-            temporary_replication_slot: false,
+            replication_slot: ApiReplicationSlotConfig::default()
         };
 
         let stored: StoredPipelineConfig = full_config.clone().into();
@@ -249,7 +269,7 @@ mod tests {
     fn test_full_api_pipeline_config_defaults() {
         let full_config = FullApiPipelineConfig {
             publication_name: "test_publication".to_string(),
-            temporary_replication_slot: false,
+            replication_slot: ApiReplicationSlotConfig::default(),
             batch: None,
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
@@ -279,7 +299,7 @@ mod tests {
     fn test_partial_api_pipeline_config_merge() {
         let mut stored = StoredPipelineConfig {
             publication_name: "old_publication".to_string(),
-            replication_slot: ReplicationSlotConfig::Permanent,
+            replication_slot: ReplicationSlotConfig::default(),
             batch: BatchConfig {
                 max_size: 500,
                 max_fill_ms: 2000,

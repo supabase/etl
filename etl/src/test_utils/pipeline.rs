@@ -39,7 +39,7 @@ where
         table_error_retry_delay_ms: 1000,
         table_error_retry_max_attempts: 2,
         max_table_sync_workers: 1,
-        replication_slot: ReplicationSlotConfig::Permanent,
+        replication_slot: ReplicationSlotConfig::default(),
     };
 
     Pipeline::new(config, store, destination)
@@ -65,7 +65,7 @@ where
     let config = PipelineConfig {
         id: pipeline_id,
         publication_name,
-        replication_slot: ReplicationSlotConfig::Permanent,
+        replication_slot: ReplicationSlotConfig::default(),
         pg_connection: pg_connection_config.clone(),
         batch,
         table_error_retry_delay_ms: 1000,

@@ -96,7 +96,13 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-pub enum ReplicationSlotConfig {
-    Temporary,
-    Permanent,
+#[serde(rename_all = "snake_case")]
+pub struct ReplicationSlotConfig {
+    pub temporary: bool,
+}
+
+impl Default for ReplicationSlotConfig {
+    fn default() -> Self {
+        ReplicationSlotConfig { temporary: false }
+    }
 }

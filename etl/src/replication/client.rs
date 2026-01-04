@@ -611,9 +611,9 @@ impl PgReplicationClient {
         } else {
             "NOEXPORT_SNAPSHOT"
         };
-        let temporary = match config {
-            ReplicationSlotConfig::Temporary => " TEMPORARY ",
-            ReplicationSlotConfig::Permanent => " ",
+        let temporary = match config.temporary {
+            true => " TEMPORARY ",
+            false => " ",
         };
         let query = format!(
             r#"CREATE_REPLICATION_SLOT {}{}LOGICAL pgoutput {}"#,

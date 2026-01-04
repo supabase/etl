@@ -76,7 +76,7 @@
 //!     let config = PipelineConfig {
 //!         id: 1,
 //!         publication_name: "my_publication".to_string(),
-//!         replication_slot: ReplicationSlotConfig::Permanent,
+//!         replication_slot: ReplicationSlotConfig::default(),
 //!         pg_connection: pg_config,
 //!         batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
 //!         table_error_retry_delay_ms: 10000,

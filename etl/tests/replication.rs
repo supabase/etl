@@ -95,7 +95,7 @@ async fn test_replication_client_creates_slot() {
 
     let slot_name = test_slot_name("my_slot");
     let create_slot = client
-        .create_slot(&slot_name, ReplicationSlotConfig::Permanent)
+        .create_slot(&slot_name, ReplicationSlotConfig::default())
         .await
         .unwrap();
     assert!(!create_slot.consistent_point.to_string().is_empty());
@@ -121,7 +121,7 @@ async fn test_create_and_delete_slot() {
 
     // Create the slot and verify it exists
     let create_slot = client
-        .create_slot(&slot_name, ReplicationSlotConfig::Permanent)
+        .create_slot(&slot_name, ReplicationSlotConfig::default())
         .await
         .unwrap();
     assert!(!create_slot.consistent_point.to_string().is_empty());
@@ -165,12 +165,12 @@ async fn test_replication_client_doesnt_recreate_slot() {
     let slot_name = test_slot_name("my_slot");
     assert!(
         client
-            .create_slot(&slot_name, ReplicationSlotConfig::Permanent)
+            .create_slot(&slot_name, ReplicationSlotConfig::default())
             .await
             .is_ok()
     );
     assert!(matches!(
-        client.create_slot(&slot_name, ReplicationSlotConfig::Permanent).await,
+        client.create_slot(&slot_name, ReplicationSlotConfig::default()).await,
         Err(ref err) if err.kind() == ErrorKind::ReplicationSlotAlreadyExists
     ));
 }
@@ -186,7 +186,7 @@ async fn test_replication_client_temporary_slot_dropped_on_disconnect() {
     let slot_name = test_slot_name("my_slot");
     assert!(matches!(
         client
-            .create_slot(&slot_name, ReplicationSlotConfig::Temporary)
+            .create_slot(&slot_name, ReplicationSlotConfig { temporary: true})
             .await,
         Ok(CreateSlotResult {
             consistent_point: _
@@ -204,7 +204,7 @@ async fn test_replication_client_temporary_slot_dropped_on_disconnect() {
 
     assert!(matches!(
         client
-            .create_slot(&slot_name, ReplicationSlotConfig::Temporary)
+            .create_slot(&slot_name, ReplicationSlotConfig { temporary: true})
             .await,
         Ok(CreateSlotResult {
             consistent_point: _
@@ -223,7 +223,7 @@ async fn test_replication_client_permanent_slot_persisted_on_disconnect() {
     let slot_name = test_slot_name("my_slot");
     assert!(matches!(
         client
-            .create_slot(&slot_name, ReplicationSlotConfig::Permanent)
+            .create_slot(&slot_name, ReplicationSlotConfig { temporary: false})
             .await,
         Ok(CreateSlotResult {
             consistent_point: _
@@ -240,7 +240,7 @@ async fn test_replication_client_permanent_slot_persisted_on_disconnect() {
         .unwrap();
 
     assert!(matches!(
-        client.create_slot(&slot_name, ReplicationSlotConfig::Permanent).await,
+        client.create_slot(&slot_name, ReplicationSlotConfig { temporary: false }).await,
         Err(ref err) if err.kind() == ErrorKind::ReplicationSlotAlreadyExists,
     ));
 }
@@ -269,7 +269,7 @@ async fn test_table_schema_copy_is_consistent() {
 
     // We create the slot when the database schema contains only 'table_1'.
     let (transaction, _) = client
-        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::Permanent)
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -321,7 +321,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
 
     // We create the slot when the database schema contains only 'table_1'.
     let (transaction, _) = first_client
-        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::Permanent)
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -356,7 +356,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
 
     // We create the slot when the database schema contains both 'table_1' and 'table_2'.
     let (transaction, _) = second_client
-        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::Permanent)
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -420,7 +420,7 @@ async fn test_table_copy_stream_is_consistent() {
 
     // We create the slot when the database schema contains only 'table_1' data.
     let (transaction, _) = parent_client
-        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::Permanent)
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -496,7 +496,7 @@ async fn test_table_copy_stream_respects_row_filter() {
 
     // We create the slot when the database schema contains only 'table_1' data.
     let (transaction, _) = parent_client
-        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::Permanent)
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -583,7 +583,7 @@ async fn test_table_copy_stream_respects_column_filter() {
 
     // Create the slot when the database schema contains the test data.
     let (transaction, _) = parent_client
-        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::Permanent)
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -671,7 +671,7 @@ async fn test_table_copy_stream_no_row_filter() {
 
     // We create the slot when the database schema contains only 'table_1' data.
     let (transaction, _) = parent_client
-        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::Permanent)
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -799,7 +799,7 @@ async fn test_start_logical_replication() {
     // We create a slot which is going to replicate data before we insert the data.
     let slot_name = test_slot_name("my_slot");
     let slot = parent_client
-        .create_slot(&slot_name, ReplicationSlotConfig::Permanent)
+        .create_slot(&slot_name, ReplicationSlotConfig::default())
         .await
         .unwrap();
 

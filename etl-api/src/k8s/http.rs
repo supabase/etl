@@ -1139,7 +1139,7 @@ mod tests {
             pipeline: PipelineConfig {
                 id: 42,
                 publication_name: "all-pub".to_string(),
-                replication_slot: ReplicationSlotConfig::Permanent,
+                replication_slot: ReplicationSlotConfig::default(),
                 pg_connection: PgConnectionConfig {
                     host: "localhost".to_string(),
                     port: 5432,
