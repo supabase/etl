@@ -221,6 +221,13 @@ where
             info!(error_count = errors_number, "table sync workers failed");
         }
 
+        // Call the destination's shutdown method to allow cleanup of resources.
+        info!("calling destination shutdown");
+        if let Err(err) = self.destination.shutdown().await {
+            error!(error = %err, "destination shutdown failed");
+            errors.push(err);
+        }
+
         if !errors.is_empty() {
             return Err(errors.into());
         }
