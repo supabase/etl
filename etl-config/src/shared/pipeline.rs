@@ -100,4 +100,3 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
 pub struct ReplicationSlotConfig {
     pub temporary: bool,
 }
-
