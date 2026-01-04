@@ -815,6 +815,11 @@ where
 
         Ok(())
     }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        info!("bigquery destination shutting down");
+        Ok(())
+    }
 }
 
 /// Splits table rows into optimal sub-batches for parallel execution.

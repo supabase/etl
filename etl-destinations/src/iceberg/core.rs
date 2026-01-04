@@ -611,6 +611,11 @@ where
 
         Ok(())
     }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        info!("iceberg destination shutting down");
+        Ok(())
+    }
 }
 
 /// Creates a unique columns name with prefix `new_column_name` to avoid collissions with
