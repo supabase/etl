@@ -7,7 +7,8 @@ use etl_destinations::iceberg::test_utils::LakekeeperClient;
 use etl_telemetry::tracing::init_test_tracing;
 use uuid::Uuid;
 
-use crate::support::iceberg::{LAKEKEEPER_URL, create_props, get_catalog_url, read_all_rows};
+use crate::support::iceberg::read_all_rows;
+use etl_destinations::iceberg::test_utils::{LAKEKEEPER_URL, create_props, get_catalog_url};
 
 mod support;
 

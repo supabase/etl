@@ -17,7 +17,8 @@ use etl_destinations::iceberg::{
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
-use crate::support::iceberg::{LAKEKEEPER_URL, create_props, get_catalog_url, read_all_rows};
+use crate::support::iceberg::read_all_rows;
+use etl_destinations::iceberg::test_utils::{LAKEKEEPER_URL, create_props, get_catalog_url};
 
 mod support;
 
