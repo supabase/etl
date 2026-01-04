@@ -4,7 +4,9 @@ expression: pipeline.config
 ---
 FullApiPipelineConfig {
     publication_name: "publication",
-    temporary_replication_slot: false,
+    replication_slot: ApiReplicationSlotConfig {
+        temporary: false,
+    },
     batch: Some(
         ApiBatchConfig {
             max_size: Some(
