@@ -132,4 +132,9 @@ impl Destination for MemoryDestination {
 
         Ok(())
     }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        info!("memory destination shutting down");
+        Ok(())
+    }
 }

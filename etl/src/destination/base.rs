@@ -50,4 +50,16 @@ pub trait Destination {
     /// Event ordering within a transaction is guaranteed, and transactions are ordered according to
     /// their commit time.
     fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
+
+    /// Performs cleanup operations when the pipeline is shutting down.
+    ///
+    /// This method is called by the pipeline after all workers have completed
+    /// their work. Implementations can use this to release resources, close
+    /// connections, or await pending background tasks.
+    ///
+    /// The default implementation performs no cleanup and returns immediately.
+    /// Override this method if your destination needs graceful shutdown handling.
+    fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send {
+        async { Ok(()) }
+    }
 }
