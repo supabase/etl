@@ -2,49 +2,57 @@
 //!
 //! Provides a trait-based validation framework for checking configuration
 //! and runtime requirements before creating destinations or pipelines.
-//!
-//! # Validation Types
-//!
-//! The module supports three validation scenarios:
-//!
-//! - **Destination validation**: Validates destination connectivity (BigQuery dataset,
-//!   Iceberg catalog). Use [`validate_destination`].
-//! - **Pipeline validation**: Validates source database prerequisites (publication
-//!   existence, replication slots). Use [`validate_pipeline`].
-//! - **Combined validation**: Validates both destination and pipeline prerequisites
-//!   together. Use [`validate_destination_pipeline`].
 
 mod validators;
 
 use std::fmt;
 
 use async_trait::async_trait;
-use etl_config::shared::PgConnectionConfig;
+use etl_config::Environment;
 use sqlx::PgPool;
+use thiserror::Error;
 
 use crate::configs::destination::FullApiDestinationConfig;
 use crate::configs::pipeline::FullApiPipelineConfig;
-use crate::db::connect_to_source_database_with_defaults;
-
-pub use validators::{DestinationValidator, PipelineValidator};
+use crate::validation::validators::{DestinationValidator, PipelineValidator};
 
 /// Shared context provided to validators during validation.
 pub struct ValidationContext {
+    /// Runtime environment for environment-specific configuration.
+    pub environment: Environment,
     /// Connection pool to the source PostgreSQL database.
     /// Required for pipeline validation, optional for destination validation.
     pub source_pool: Option<PgPool>,
 }
 
 impl ValidationContext {
-    /// Creates an empty validation context (for destination-only validation).
-    pub fn empty() -> Self {
-        Self { source_pool: None }
+    /// Creates a new validation context builder.
+    pub fn builder(environment: Environment) -> ValidationContextBuilder {
+        ValidationContextBuilder {
+            environment,
+            source_pool: None,
+        }
+    }
+}
+
+/// Builder for constructing a [`ValidationContext`].
+pub struct ValidationContextBuilder {
+    environment: Environment,
+    source_pool: Option<PgPool>,
+}
+
+impl ValidationContextBuilder {
+    /// Sets the source database connection pool.
+    pub fn source_pool(mut self, pool: PgPool) -> Self {
+        self.source_pool = Some(pool);
+        self
     }
 
-    /// Creates a validation context with the given source database pool.
-    pub fn with_source(source_pool: PgPool) -> Self {
-        Self {
-            source_pool: Some(source_pool),
+    /// Builds the [`ValidationContext`].
+    pub fn build(self) -> ValidationContext {
+        ValidationContext {
+            environment: self.environment,
+            source_pool: self.source_pool,
         }
     }
 }
@@ -74,85 +82,85 @@ impl fmt::Display for ValidationFailure {
     }
 }
 
+/// Errors that can occur during validation execution.
+#[derive(Debug, Error)]
+pub enum ValidationError {
+    /// Failed to execute a database query.
+    #[error("database query failed: {0}")]
+    Database(#[from] sqlx::Error),
+
+    /// Failed to connect to BigQuery.
+    #[error("bigquery connection failed: {0}")]
+    BigQuery(String),
+
+    /// Failed to connect to Iceberg catalog.
+    #[error("iceberg connection failed: {0}")]
+    Iceberg(String),
+}
+
 /// Trait for implementing validation checks.
 #[async_trait]
 pub trait Validator: Send + Sync {
     /// Executes the validation check and returns a list of failures.
-    /// An empty list means validation passed.
-    async fn validate(&self, ctx: &ValidationContext) -> Vec<ValidationFailure>;
+    /// An empty list means validation passed. Returns an error if validation
+    /// could not be completed due to connection or configuration issues.
+    async fn validate(
+        &self,
+        ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError>;
 }
 
 /// Validates destination configuration.
 ///
 /// Returns a list of validation failures. Empty list means validation passed.
+/// Returns an error if validation could not be completed.
 ///
 /// Checks that the destination is accessible and properly configured:
 /// - **BigQuery**: Validates dataset exists and is accessible.
 /// - **Iceberg**: Validates catalog connectivity.
 /// - **Memory**: Always passes.
 pub async fn validate_destination(
+    ctx: &ValidationContext,
     destination_config: &FullApiDestinationConfig,
-) -> Vec<ValidationFailure> {
-    let ctx = ValidationContext::empty();
+) -> Result<Vec<ValidationFailure>, ValidationError> {
     let validator = DestinationValidator::new(destination_config.clone());
-    validator.validate(&ctx).await
+    validator.validate(ctx).await
 }
 
 /// Validates pipeline configuration against the source database.
 ///
 /// Returns a list of validation failures. Empty list means validation passed.
+/// Returns an error if validation could not be completed.
 ///
 /// Checks pipeline prerequisites:
 /// - Publication exists in the source database.
 /// - Sufficient replication slots are available.
 pub async fn validate_pipeline(
+    ctx: &ValidationContext,
     pipeline_config: &FullApiPipelineConfig,
-    source_config: &PgConnectionConfig,
-) -> Vec<ValidationFailure> {
-    let source_pool = match connect_to_source_database_with_defaults(source_config).await {
-        Ok(pool) => pool,
-        Err(e) => {
-            return vec![ValidationFailure::new("Source Connection", e.to_string())];
-        }
-    };
-
-    let ctx = ValidationContext::with_source(source_pool);
+) -> Result<Vec<ValidationFailure>, ValidationError> {
     let validator = PipelineValidator::new(pipeline_config.clone());
-    validator.validate(&ctx).await
+    validator.validate(ctx).await
 }
 
 /// Validates both destination and pipeline configuration.
 ///
 /// Returns a list of validation failures. Empty list means validation passed.
+/// Returns an error if validation could not be completed.
 ///
 /// Runs all validators and collects all failures, returning them together
 /// for comprehensive error reporting.
 pub async fn validate_destination_pipeline(
+    ctx: &ValidationContext,
     destination_config: &FullApiDestinationConfig,
     pipeline_config: &FullApiPipelineConfig,
-    source_config: &PgConnectionConfig,
-) -> Vec<ValidationFailure> {
+) -> Result<Vec<ValidationFailure>, ValidationError> {
     let mut failures = Vec::new();
 
-    // Validate destination (doesn't need source connection)
-    failures.extend(validate_destination(destination_config).await);
+    failures.extend(validate_destination(ctx, destination_config).await?);
+    failures.extend(validate_pipeline(ctx, pipeline_config).await?);
 
-    // Validate pipeline (needs source connection)
-    failures.extend(validate_pipeline(pipeline_config, source_config).await);
-
-    failures
-}
-
-/// Formats validation failures into a human-readable error message.
-///
-/// For now, we just format everything into a string to return to the user, but in the future we
-/// might want to craft a proper typed response for the API.
-pub fn format_validation_failures(failures: &[ValidationFailure]) -> String {
-    failures
-        .iter()
-        .map(|r| r.to_string())
-        .collect::<Vec<_>>()
-        .join("; ")
+    Ok(failures)
 }
 
 #[cfg(test)]
@@ -163,23 +171,5 @@ mod tests {
     async fn test_validation_result_display() {
         let result = ValidationFailure::new("test", "Something wrong");
         assert_eq!(result.to_string(), "test: Something wrong");
-    }
-
-    #[tokio::test]
-    async fn test_format_validation_failures() {
-        let failures = vec![
-            ValidationFailure::new("test1", "Error 1"),
-            ValidationFailure::new("test2", "Error 2"),
-        ];
-
-        let message = format_validation_failures(&failures);
-        assert_eq!(message, "test1: Error 1; test2: Error 2");
-    }
-
-    #[tokio::test]
-    async fn test_format_empty_failures() {
-        let failures: Vec<ValidationFailure> = vec![];
-        let message = format_validation_failures(&failures);
-        assert_eq!(message, "");
     }
 }

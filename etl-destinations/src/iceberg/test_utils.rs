@@ -26,11 +26,12 @@ pub fn get_catalog_url() -> String {
 }
 
 /// Creates S3 properties for connecting to MinIO.
-pub fn create_props() -> HashMap<String, String> {
+pub fn create_minio_props() -> HashMap<String, String> {
     let mut props: HashMap<String, String> = HashMap::new();
     props.insert(S3_ACCESS_KEY_ID.to_string(), MINIO_USERNAME.to_string());
     props.insert(S3_SECRET_ACCESS_KEY.to_string(), MINIO_PASSWORD.to_string());
     props.insert(S3_ENDPOINT.to_string(), MINIO_URL.to_string());
+
     props
 }
 
@@ -170,6 +171,11 @@ impl LakekeeperClient {
     pub async fn drop_warehouse(&self, warehouse_id: Uuid) -> Result<(), reqwest::Error> {
         let url = format!("{}/warehouse/{warehouse_id}", self.base_url);
 
+        // Even if a warehouse has no namespaces, it can still return an error from a delete
+        // request if the namespace was deleted very recently. So we make the best effort
+        // to attempt to delete the warehouse with retries but do not fail the test if it
+        // still doesn't get deleted. At worst, we'll leave some warehouses around if
+        // that happens.
         const MAX_RETRIES: u8 = 10;
         for _ in 0..MAX_RETRIES {
             let response = self.client.delete(url.clone()).send().await?;
@@ -177,6 +183,7 @@ impl LakekeeperClient {
             if response.status().is_success() {
                 break;
             }
+
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 

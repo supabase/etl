@@ -8,7 +8,7 @@ use etl_telemetry::tracing::init_test_tracing;
 use uuid::Uuid;
 
 use crate::support::iceberg::read_all_rows;
-use etl_destinations::iceberg::test_utils::{LAKEKEEPER_URL, create_props, get_catalog_url};
+use etl_destinations::iceberg::test_utils::{LAKEKEEPER_URL, create_minio_props, get_catalog_url};
 
 mod support;
 
@@ -18,10 +18,13 @@ async fn create_namespace() {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
-            .await
-            .unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
 
     let namespace = "test_namespace";
 
@@ -55,10 +58,13 @@ async fn create_hierarchical_namespace() {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
-            .await
-            .unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
 
     let root_namespace = "root_namespace";
 
@@ -97,10 +103,13 @@ async fn create_table_if_missing() {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
-            .await
-            .unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
 
     // Create namespace first
     let namespace = "test_namespace";
@@ -361,10 +370,13 @@ async fn drop_table_if_exists_is_idempotent() {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
-            .await
-            .unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
 
     // Create namespace first
     let namespace = "test_namespace";
@@ -437,10 +449,13 @@ async fn insert_nullable_scalars() {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
-            .await
-            .unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
 
     // Create namespace first
     let namespace = "test_namespace";
@@ -606,10 +621,13 @@ async fn insert_non_nullable_scalars() {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
-            .await
-            .unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
 
     // Create namespace first
     let namespace = "test_namespace";
@@ -749,10 +767,13 @@ async fn insert_nullable_array() {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
-            .await
-            .unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
 
     // Create namespace first
     let namespace = "test_namespace";
@@ -1120,10 +1141,13 @@ async fn insert_non_nullable_array() {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
-            .await
-            .unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
 
     // Create namespace first
     let namespace = "test_namespace";

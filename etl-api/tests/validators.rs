@@ -1,11 +1,14 @@
-//! Minimal tests for validation framework.
-
 use etl_api::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
-use etl_api::validation::validate_destination;
-use etl_config::SerializableSecretString;
+use etl_api::validation::{ValidationContext, validate_destination};
+use etl_config::{Environment, SerializableSecretString};
 use etl_destinations::iceberg::test_utils::{
     LAKEKEEPER_URL, LakekeeperClient, MINIO_PASSWORD, MINIO_URL, MINIO_USERNAME,
 };
+
+fn create_validation_context() -> ValidationContext {
+    let environment = Environment::load().expect("Failed to load environment");
+    ValidationContext::builder(environment).build()
+}
 
 const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
 const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
@@ -55,8 +58,9 @@ async fn validate_iceberg_connection_success() {
         }
     };
 
+    let ctx = create_validation_context();
     let config = create_iceberg_config(&warehouse_name);
-    let failures = validate_destination(&config).await;
+    let failures = validate_destination(&ctx, &config).await.unwrap();
 
     let _ = lakekeeper.drop_warehouse(warehouse_id).await;
 
@@ -65,8 +69,9 @@ async fn validate_iceberg_connection_success() {
 
 #[tokio::test]
 async fn validate_iceberg_connection_failure() {
+    let ctx = create_validation_context();
     let config = create_iceberg_config("nonexistent-warehouse");
-    let failures = validate_destination(&config).await;
+    let failures = validate_destination(&ctx, &config).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert!(failures[0].name.contains("Iceberg"));
@@ -84,8 +89,9 @@ async fn validate_bigquery_connection_success() {
         return;
     };
 
+    let ctx = create_validation_context();
     let config = create_bigquery_config(&project_id, &dataset_id, &sa_key);
-    let failures = validate_destination(&config).await;
+    let failures = validate_destination(&ctx, &config).await.unwrap();
 
     assert!(failures.is_empty(), "Expected no failures: {failures:?}");
 }
@@ -97,8 +103,9 @@ async fn validate_bigquery_dataset_not_found() {
         return;
     };
 
+    let ctx = create_validation_context();
     let config = create_bigquery_config(&project_id, "nonexistent_dataset_12345", &sa_key);
-    let failures = validate_destination(&config).await;
+    let failures = validate_destination(&ctx, &config).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");
     assert!(failures[0].name.contains("BigQuery"));
@@ -106,17 +113,21 @@ async fn validate_bigquery_dataset_not_found() {
 
 #[tokio::test]
 async fn validate_bigquery_invalid_credentials() {
+    let ctx = create_validation_context();
     let config = create_bigquery_config("fake-project", "fake-dataset", "{}");
-    let failures = validate_destination(&config).await;
+    let result = validate_destination(&ctx, &config).await;
 
-    assert!(!failures.is_empty(), "Expected validation failure");
-    assert!(failures[0].name.contains("BigQuery"));
+    assert!(
+        result.is_err(),
+        "Expected validation error for invalid credentials"
+    );
 }
 
 #[tokio::test]
 async fn validate_memory_destination_always_passes() {
+    let ctx = create_validation_context();
     let config = FullApiDestinationConfig::Memory;
-    let failures = validate_destination(&config).await;
+    let failures = validate_destination(&ctx, &config).await.unwrap();
 
     assert!(failures.is_empty());
 }

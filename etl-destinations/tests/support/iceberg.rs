@@ -10,8 +10,6 @@ use futures::StreamExt;
 
 use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
 
-
-
 /// Converts a RecordBatch back to a vector of TableRows.
 pub fn record_batch_to_table_rows(batch: &RecordBatch) -> Vec<TableRow> {
     let mut rows = Vec::with_capacity(batch.num_rows());

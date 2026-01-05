@@ -4,6 +4,7 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
+use etl_config::Environment;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::ops::DerefMut;
@@ -16,6 +17,7 @@ use crate::configs::destination::FullApiDestinationConfig;
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::FullApiPipelineConfig;
 use crate::db;
+use crate::db::connect_to_source_database_with_defaults;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::destinations_pipelines::DestinationPipelinesDbError;
 use crate::db::images::ImagesDbError;
@@ -26,7 +28,8 @@ use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
 use crate::validation::{
-    ValidationFailure, validate_destination_pipeline as run_destination_pipeline_validation,
+    ValidationContext, ValidationError, ValidationFailure,
+    validate_destination_pipeline as run_destination_pipeline_validation,
 };
 
 #[derive(Debug, Error)]
@@ -78,6 +81,12 @@ enum DestinationPipelineError {
 
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
+
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+
+    #[error("Failed to load environment: {0}")]
+    Environment(#[from] std::io::Error),
 }
 
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
@@ -122,7 +131,9 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::SourcesDb(_)
             | DestinationPipelineError::PipelinesDb(_)
             | DestinationPipelineError::Database(_)
-            | DestinationPipelineError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | DestinationPipelineError::TrustedRootCerts(_)
+            | DestinationPipelineError::Validation(_)
+            | DestinationPipelineError::Environment(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationPipelineError::TenantId(_)
             | DestinationPipelineError::SourceNotFound(_)
             | DestinationPipelineError::DestinationNotFound(_)
@@ -244,7 +255,7 @@ pub async fn create_destination_and_pipeline(
     let mut txn = pool.begin().await?;
 
     // Verify source exists
-    let _source = db::sources::read_source(
+    db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
@@ -327,7 +338,7 @@ pub async fn update_destination_and_pipeline(
     let mut txn = pool.begin().await?;
 
     // Verify source exists
-    let _source = db::sources::read_source(
+    db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
@@ -483,30 +494,28 @@ pub async fn validate_destination_pipeline(
     let tenant_id = extract_tenant_id(&req)?;
     let request = request.into_inner();
 
-    let mut txn = pool.begin().await?;
-
-    let source = db::sources::read_source(
-        txn.deref_mut(),
-        tenant_id,
-        request.source_id,
-        &encryption_key,
-    )
-    .await?
-    .ok_or(DestinationPipelineError::SourceNotFound(request.source_id))?;
-
-    txn.commit().await?;
+    let source =
+        db::sources::read_source(pool.as_ref(), tenant_id, request.source_id, &encryption_key)
+            .await?
+            .ok_or(DestinationPipelineError::SourceNotFound(request.source_id))?;
 
     let tls_config = trusted_root_certs_cache
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_config = source.config.into_connection_config(tls_config);
 
+    let environment = Environment::load()?;
+    let source_pool = connect_to_source_database_with_defaults(&source_config).await?;
+    let ctx = ValidationContext::builder(environment)
+        .source_pool(source_pool)
+        .build();
+
     let failures = run_destination_pipeline_validation(
+        &ctx,
         &request.destination_config,
         &request.pipeline_config,
-        &source_config,
     )
-    .await;
+    .await?;
     let response = ValidateDestinationPipelineResponse {
         validation_failures: failures.into_iter().map(Into::into).collect(),
     };

@@ -4,6 +4,7 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
+use etl_config::Environment;
 use etl_postgres::replication::{
     TableLookupError, get_table_names_from_table_ids, health, lag, state,
 };
@@ -31,7 +32,10 @@ use crate::k8s::core::{
 use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache, TrustedRootCertsError};
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use crate::utils::parse_docker_image_tag;
-use crate::validation::{ValidationFailure, validate_pipeline as run_pipeline_validation};
+use crate::validation::{
+    ValidationContext, ValidationError, ValidationFailure,
+    validate_pipeline as run_pipeline_validation,
+};
 use crate::{config::ApiConfig, k8s::PodStatus};
 
 #[derive(Debug, Error)]
@@ -113,6 +117,9 @@ pub enum PipelineError {
 
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
+
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
 }
 
 impl From<PipelinesDbError> for PipelineError {
@@ -163,7 +170,8 @@ impl ResponseError for PipelineError {
             | PipelineError::TableLookup(_)
             | PipelineError::InvalidTableReplicationState(_)
             | PipelineError::MissingEnvironment
-            | PipelineError::MissingTableReplicationState => StatusCode::INTERNAL_SERVER_ERROR,
+            | PipelineError::MissingTableReplicationState
+            | PipelineError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::PipelineNotFound(_)
             | PipelineError::EtlStateNotInitialized
             | PipelineError::ImageIdNotDefault(_)
@@ -539,7 +547,7 @@ pub async fn create_pipeline(
     let mut txn = pool.begin().await?;
 
     // Verify source exists
-    let _source = db::sources::read_source(
+    db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         pipeline.source_id,
@@ -661,7 +669,7 @@ pub async fn update_pipeline(
     let mut txn = pool.begin().await?;
 
     // Verify source exists
-    let _source = db::sources::read_source(
+    db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         pipeline.source_id,
@@ -1560,25 +1568,23 @@ pub async fn validate_pipeline(
     let tenant_id = extract_tenant_id(&req)?;
     let request = request.into_inner();
 
-    let mut txn = pool.begin().await?;
-
-    let source = db::sources::read_source(
-        txn.deref_mut(),
-        tenant_id,
-        request.source_id,
-        &encryption_key,
-    )
-    .await?
-    .ok_or(PipelineError::SourceNotFound(request.source_id))?;
-
-    txn.commit().await?;
+    let source =
+        db::sources::read_source(pool.as_ref(), tenant_id, request.source_id, &encryption_key)
+            .await?
+            .ok_or(PipelineError::SourceNotFound(request.source_id))?;
 
     let tls_config = trusted_root_certs_cache
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_config = source.config.into_connection_config(tls_config);
 
-    let failures = run_pipeline_validation(&request.config, &source_config).await;
+    let environment = Environment::load().map_err(|_| PipelineError::MissingEnvironment)?;
+    let source_pool = connect_to_source_database_with_defaults(&source_config).await?;
+    let ctx = ValidationContext::builder(environment)
+        .source_pool(source_pool)
+        .build();
+
+    let failures = run_pipeline_validation(&ctx, &request.config).await?;
     let response = ValidatePipelineResponse {
         validation_failures: failures.into_iter().map(Into::into).collect(),
     };

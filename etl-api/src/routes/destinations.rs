@@ -4,6 +4,7 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
+use etl_config::Environment;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
@@ -14,7 +15,10 @@ use crate::configs::encryption::EncryptionKey;
 use crate::db;
 use crate::db::destinations::DestinationsDbError;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
-use crate::validation::{ValidationFailure, validate_destination as run_destination_validation};
+use crate::validation::{
+    ValidationContext, ValidationError, ValidationFailure,
+    validate_destination as run_destination_validation,
+};
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
@@ -26,6 +30,12 @@ pub enum DestinationError {
 
     #[error(transparent)]
     DestinationsDb(#[from] DestinationsDbError),
+
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+
+    #[error("Failed to load environment: {0}")]
+    Environment(#[from] std::io::Error),
 }
 
 impl DestinationError {
@@ -44,7 +54,9 @@ impl DestinationError {
 impl ResponseError for DestinationError {
     fn status_code(&self) -> StatusCode {
         match self {
-            DestinationError::DestinationsDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            DestinationError::DestinationsDb(_)
+            | DestinationError::Validation(_)
+            | DestinationError::Environment(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationError::DestinationNotFound(_) => StatusCode::NOT_FOUND,
             DestinationError::TenantId(_) => StatusCode::BAD_REQUEST,
         }
@@ -331,13 +343,14 @@ pub async fn read_all_destinations(
 )]
 #[post("/destinations/validate")]
 pub async fn validate_destination(
-    req: HttpRequest,
     request: Json<ValidateDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {
-    let _tenant_id = extract_tenant_id(&req)?;
     let request = request.into_inner();
 
-    let failures = run_destination_validation(&request.config).await;
+    let environment = Environment::load()?;
+    let ctx = ValidationContext::builder(environment).build();
+
+    let failures = run_destination_validation(&ctx, &request.config).await?;
     let response = ValidateDestinationResponse {
         validation_failures: failures.into_iter().map(Into::into).collect(),
     };

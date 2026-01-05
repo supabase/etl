@@ -89,13 +89,10 @@ pub async fn start_replicator_with_config(
         } => {
             install_crypto_provider();
 
-            let supabase_domain = match Environment::load()? {
-                Environment::Prod => "supabase.co",
-                Environment::Staging | Environment::Dev => "supabase.red",
-            };
+            let env = Environment::load()?;
             let client = IcebergClient::new_with_supabase_catalog(
                 project_ref,
-                supabase_domain,
+                env.get_supabase_domain(),
                 catalog_token.expose_secret().to_string(),
                 warehouse_name.clone(),
                 s3_access_key_id.expose_secret().to_string(),
