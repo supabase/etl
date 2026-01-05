@@ -11,6 +11,7 @@ Receives replicated data. This is the primary extension point for sending data t
 ```rust
 pub trait Destination {
     fn name() -> &'static str;
+    fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
     fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_table_rows(&self, table_id: TableId, table_rows: Vec<TableRow>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
@@ -22,6 +23,7 @@ pub trait Destination {
 | Method | Purpose |
 |--------|---------|
 | `name()` | Returns identifier for logging and diagnostics |
+| `shutdown()` | Called when the pipeline shuts down. Default is a no-op. Override for cleanup or bookkeeping |
 | `truncate_table()` | Clears table data before initial sync. Called unconditionally, even if the table does not exist |
 | `write_table_rows()` | Writes rows during initial table copy. May receive an empty vector for tables with no data |
 | `write_events()` | Processes streaming replication events (inserts, updates, deletes). Batches may span multiple tables |

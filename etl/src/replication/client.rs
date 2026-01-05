@@ -711,6 +711,40 @@ impl PgReplicationClient {
             "#
         );
 
+        // Check for generated columns so we can warn if there are any.
+        let generated_columns_check_query = format!(
+            r#"select exists (
+                select 1
+                from pg_attribute
+                where attrelid = {table_id}
+                    and attnum > 0
+                    and not attisdropped
+                    and attgenerated != ''
+            ) as has_generated;"#
+        );
+
+        for message in self
+            .client
+            .simple_query(&generated_columns_check_query)
+            .await?
+        {
+            if let SimpleQueryMessage::Row(row) = message {
+                let has_generated_columns =
+                    Self::get_row_value::<String>(&row, "has_generated", "pg_attribute").await?
+                        == "t";
+                if has_generated_columns {
+                    warn!(
+                        "Table {} contains generated columns that will NOT be replicated. \
+                         Generated columns are not supported in PostgreSQL logical replication and will \
+                         be excluded from the ETL schema. These columns will NOT appear in the destination.",
+                        table_id
+                    );
+                }
+                // Explicity break for clarity; this query returns a single SimpleQueryMessage::Row.
+                break;
+            }
+        }
+
         let mut column_schemas = vec![];
         for message in self.client.simple_query(&column_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
