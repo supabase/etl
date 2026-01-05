@@ -343,8 +343,10 @@ pub async fn read_all_destinations(
 )]
 #[post("/destinations/validate")]
 pub async fn validate_destination(
+    req: HttpRequest,
     request: Json<ValidateDestinationRequest>,
 ) -> Result<impl Responder, DestinationError> {
+    let _tenant_id = extract_tenant_id(&req)?;
     let request = request.into_inner();
 
     let environment = Environment::load()?;
