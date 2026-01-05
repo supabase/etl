@@ -406,6 +406,27 @@ impl<G: GenericClient> PgDatabase<G> {
         Ok(row.get(0))
     }
 
+    /// Checks whether a Postgres replication slot is active.
+    ///
+    /// Queries the `pg_replication_slots` system catalog to determine
+    /// if a replication slot with the given name is currently active.
+    /// Returns `false` if the slot does not exist.
+    pub async fn replication_slot_is_active(
+        &self,
+        slot_name: &str,
+    ) -> Result<bool, tokio_postgres::Error> {
+        let query =
+            "select coalesce((select active from pg_replication_slots where slot_name = $1), false)";
+        let row = self
+            .client
+            .as_ref()
+            .unwrap()
+            .query_one(query, &[&slot_name])
+            .await?;
+
+        Ok(row.get(0))
+    }
+
     /// Executes arbitrary SQL on the database.
     pub async fn run_sql(&self, sql: &str) -> Result<u64, tokio_postgres::Error> {
         self.client.as_ref().unwrap().execute(sql, &[]).await
