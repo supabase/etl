@@ -12,21 +12,23 @@ use uuid::Uuid;
 
 use crate::support::test_app::TestApp;
 
-/// Creates a database configuration from TEST_DATABASE_* environment variables.
+/// Creates a database configuration from TESTS_DATABASE_* environment variables.
 ///
 /// Generates a unique database name using a UUID suffix to avoid conflicts
 /// between concurrent test runs.
 pub fn get_test_db_config() -> PgConnectionConfig {
     PgConnectionConfig {
-        host: std::env::var("TEST_DATABASE_HOST").expect("TEST_DATABASE_HOST must be set"),
-        port: std::env::var("TEST_DATABASE_PORT")
-            .expect("TEST_DATABASE_PORT must be set")
+        host: std::env::var("TESTS_DATABASE_HOST").expect("TESTS_DATABASE_HOST must be set"),
+        port: std::env::var("TESTS_DATABASE_PORT")
+            .expect("TESTS_DATABASE_PORT must be set")
             .parse()
-            .expect("TEST_DATABASE_PORT must be a valid port number"),
+            .expect("TESTS_DATABASE_PORT must be a valid port number"),
         name: format!("test_db_{}", Uuid::new_v4()),
-        username: std::env::var("TEST_DATABASE_USERNAME")
-            .expect("TEST_DATABASE_USERNAME must be set"),
-        password: std::env::var("TEST_DATABASE_PASSWORD").ok().map(Into::into),
+        username: std::env::var("TESTS_DATABASE_USERNAME")
+            .expect("TESTS_DATABASE_USERNAME must be set"),
+        password: std::env::var("TESTS_DATABASE_PASSWORD")
+            .ok()
+            .map(Into::into),
         tls: TlsConfig::disabled(),
         keepalive: None,
     }

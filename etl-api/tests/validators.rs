@@ -6,15 +6,15 @@ use etl_api::validation::{
     FailureType, ValidationContext, validate_destination, validate_pipeline,
 };
 use etl_config::{Environment, SerializableSecretString};
+use etl_destinations::bigquery::test_utils::{
+    setup_bigquery_database, setup_bigquery_database_without_dataset,
+};
 use etl_destinations::iceberg::test_utils::{
     LAKEKEEPER_URL, LakekeeperClient, MINIO_PASSWORD, MINIO_URL, MINIO_USERNAME,
 };
 use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use sqlx::Executor;
 use support::database::get_test_db_config;
-
-const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
-const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
 
 fn create_validation_context() -> ValidationContext {
     let environment = Environment::load().expect("Failed to load environment");
@@ -34,17 +34,6 @@ async fn create_validation_context_with_source() -> (
         .build();
 
     (ctx, pool, config)
-}
-
-fn get_bigquery_config() -> (String, String) {
-    let project_id =
-        std::env::var(BIGQUERY_PROJECT_ID_ENV).expect("TESTS_BIGQUERY_PROJECT_ID must be set");
-    let sa_key_path =
-        std::env::var(BIGQUERY_SA_KEY_PATH_ENV).expect("TESTS_BIGQUERY_SA_KEY_PATH must be set");
-    let sa_key =
-        std::fs::read_to_string(&sa_key_path).expect("Failed to read service account key file");
-
-    (project_id, sa_key)
 }
 
 fn create_iceberg_config(warehouse_name: &str) -> FullApiDestinationConfig {
@@ -115,23 +104,23 @@ async fn validate_iceberg_connection_failure() {
 
 #[tokio::test]
 async fn validate_bigquery_connection_success() {
-    let (project_id, sa_key) = get_bigquery_config();
-    let dataset_id =
-        std::env::var("TESTS_BIGQUERY_DATASET_ID").expect("TESTS_BIGQUERY_DATASET_ID must be set");
+    let db = setup_bigquery_database().await;
 
     let ctx = create_validation_context();
-    let config = create_bigquery_config(&project_id, &dataset_id, &sa_key);
+    let config = create_bigquery_config(db.project_id(), db.dataset_id(), &db.sa_key());
     let failures = validate_destination(&ctx, &config).await.unwrap();
 
     assert!(failures.is_empty(), "Expected no failures: {failures:?}");
+    // db is dropped here, automatically cleaning up the dataset
 }
 
 #[tokio::test]
 async fn validate_bigquery_dataset_not_found() {
-    let (project_id, sa_key) = get_bigquery_config();
+    let db = setup_bigquery_database_without_dataset().await;
 
     let ctx = create_validation_context();
-    let config = create_bigquery_config(&project_id, "nonexistent_dataset_12345", &sa_key);
+    // Dataset was not created, so validation should fail
+    let config = create_bigquery_config(db.project_id(), db.dataset_id(), &db.sa_key());
     let failures = validate_destination(&ctx, &config).await.unwrap();
 
     assert!(!failures.is_empty(), "Expected validation failure");

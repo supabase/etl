@@ -32,7 +32,9 @@ iceberg = [
 ]
 egress = ["etl/egress"]
 encryption = ["dep:rustls"]
-test-utils = ["dep:reqwest", "dep:serde", "dep:uuid", "dep:tokio"]
+# We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only
+# put here the extra dependencies needed.
+test-utils = ["dep:uuid"]
 
 [dependencies]
 etl = { workspace = true }

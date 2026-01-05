@@ -1,4 +1,4 @@
-#![cfg(feature = "bigquery")]
+#![cfg(all(feature = "bigquery", feature = "test-utils"))]
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
@@ -16,10 +16,11 @@ use rand::random;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::time::sleep;
+use etl_destinations::bigquery::test_utils::setup_bigquery_database;
 
 use crate::support::bigquery::{
     BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
-    parse_bigquery_table_rows, setup_bigquery_connection,
+    parse_bigquery_table_rows
 };
 
 mod support;
@@ -33,7 +34,7 @@ async fn table_copy_and_streaming_with_restart() {
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
-    let bigquery_database = setup_bigquery_connection().await;
+    let bigquery_database = setup_bigquery_database().await;
 
     // Insert initial test data.
     insert_mock_data(
@@ -176,7 +177,7 @@ async fn table_insert_update_delete() {
     let database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
-    let bigquery_database = setup_bigquery_connection().await;
+    let bigquery_database = setup_bigquery_database().await;
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -293,7 +294,7 @@ async fn table_subsequent_updates() {
     let mut database_2 = database_1.duplicate().await;
     let database_schema = setup_test_database_schema(&database_1, TableSelection::UsersOnly).await;
 
-    let bigquery_database = setup_bigquery_connection().await;
+    let bigquery_database = setup_bigquery_database().await;
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -380,7 +381,7 @@ async fn table_truncate_with_batching() {
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
-    let bigquery_database = setup_bigquery_connection().await;
+    let bigquery_database = setup_bigquery_database().await;
 
     // We create table `test_users_1` to simulate an error in the system where a table with that name
     // already exists and should be replaced for replication to work correctly.
@@ -500,7 +501,7 @@ async fn table_nullable_scalar_columns() {
     install_crypto_provider();
 
     let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_connection().await;
+    let bigquery_database = setup_bigquery_database().await;
     let table_name = test_table_name("nullable_cols_scalar");
     let table_id = database
         .create_table(
@@ -709,7 +710,7 @@ async fn table_nullable_array_columns() {
     install_crypto_provider();
 
     let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_connection().await;
+    let bigquery_database = setup_bigquery_database().await;
     let table_name = test_table_name("nullable_cols_array");
     let table_id = database
         .create_table(
@@ -944,7 +945,7 @@ async fn table_non_nullable_scalar_columns() {
     install_crypto_provider();
 
     let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_connection().await;
+    let bigquery_database = setup_bigquery_database().await;
     let table_name = test_table_name("non_nullable_cols_scalar");
     let table_id = database
         .create_table(
@@ -1194,7 +1195,7 @@ async fn table_non_nullable_array_columns() {
     install_crypto_provider();
 
     let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_connection().await;
+    let bigquery_database = setup_bigquery_database().await;
     let table_name = test_table_name("non_nullable_cols_array");
     let table_id = database
         .create_table(
@@ -1500,7 +1501,7 @@ async fn table_array_with_null_values() {
     install_crypto_provider();
 
     let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_connection().await;
+    let bigquery_database = setup_bigquery_database().await;
     let table_name = test_table_name("array_with_nulls");
     let table_id = database
         .create_table(table_name.clone(), true, &[("int_array", "int4[]")])
@@ -1651,7 +1652,7 @@ async fn table_validation_out_of_bounds_values() {
     install_crypto_provider();
 
     let database = spawn_source_database().await;
-    let bigquery_database = setup_bigquery_connection().await;
+    let bigquery_database = setup_bigquery_database().await;
 
     // Create tables with different error types
     let huge_numeric_table = test_table_name("huge_numeric");

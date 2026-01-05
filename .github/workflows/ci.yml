@@ -100,10 +100,10 @@ jobs:
 
       - name: Run Tests
         env:
-          TEST_DATABASE_HOST: localhost
-          TEST_DATABASE_PORT: 5430
-          TEST_DATABASE_USERNAME: postgres
-          TEST_DATABASE_PASSWORD: postgres
+          TESTS_DATABASE_HOST: localhost
+          TESTS_DATABASE_PORT: 5430
+          TESTS_DATABASE_USERNAME: postgres
+          TESTS_DATABASE_PASSWORD: postgres
         run: |
           cargo test \
             --workspace \
@@ -174,10 +174,10 @@ jobs:
       - name: Generate Code Coverage
         id: coverage
         env:
-          TEST_DATABASE_HOST: localhost
-          TEST_DATABASE_PORT: 5430
-          TEST_DATABASE_USERNAME: postgres
-          TEST_DATABASE_PASSWORD: postgres
+          TESTS_DATABASE_HOST: localhost
+          TESTS_DATABASE_PORT: 5430
+          TESTS_DATABASE_USERNAME: postgres
+          TESTS_DATABASE_PASSWORD: postgres
         run: |
           cargo llvm-cov test \
             --workspace --no-fail-fast \
