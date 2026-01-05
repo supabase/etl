@@ -415,8 +415,7 @@ impl<G: GenericClient> PgDatabase<G> {
         &self,
         slot_name: &str,
     ) -> Result<bool, tokio_postgres::Error> {
-        let query =
-            "select coalesce((select active from pg_replication_slots where slot_name = $1), false)";
+        let query = "select coalesce((select active from pg_replication_slots where slot_name = $1), false)";
         let row = self
             .client
             .as_ref()
