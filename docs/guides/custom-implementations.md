@@ -192,12 +192,14 @@ impl CleanupStore for CustomStore {
 
 ## Step 3: Implement a Custom Destination
 
-Create `src/http_destination.rs`. A destination implements the `Destination` trait with four methods:
+Create `src/http_destination.rs`. A destination implements the `Destination` trait with four required methods:
 
 - `name()` - Return an identifier for logging
 - `truncate_table()` - Clear table before bulk load (called even if table does not exist)
 - `write_table_rows()` - Receive rows during initial copy (may receive empty vec for table creation)
 - `write_events()` - Receive streaming changes (batches may span multiple tables)
+
+There's also an optional `shutdown()` method with a default no-op implementation. Override it if your destination needs cleanup when the pipeline shuts down.
 
 ```rust
 use reqwest::Client;

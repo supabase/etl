@@ -336,10 +336,10 @@ struct ApplyLoopState {
     /// Boolean representing whether the shutdown was requested but could not be processed because
     /// a transaction was running.
     ///
-    /// When a shutdown has been discarded, the apply loop will continue processing events until a
+    /// When a shutdown has been deferred, the apply loop will continue processing events until a
     /// transaction boundary is found. If not found, the process will continue until it is killed via
     /// a `SIGKILL`.
-    shutdown_discarded: bool,
+    shutdown_deferred: bool,
     /// The deadline by which the current batch must be flushed.
     ///
     /// This deadline is set when the first message of a batch is received. When the deadline
@@ -367,7 +367,7 @@ impl ApplyLoopState {
             events_batch: Vec::with_capacity(max_batch_size),
             current_tx_begin_ts: None,
             current_tx_events: 0,
-            shutdown_discarded: false,
+            shutdown_deferred: false,
             batch_flush_deadline: None,
             max_batch_fill_duration,
         }
@@ -587,21 +587,23 @@ where
             // When shutdown is requested, we check if we are in a transaction, if we are, we discard
             // the shutdown and gracefully stop when a transaction boundary is found.
             _ = shutdown_rx.changed() => {
-                // If the shutdown is being discarded, we don't want to handle it again.
-                if state.shutdown_discarded {
+                // If the shutdown is being deferred, we don't want to handle it again.
+                if state.shutdown_deferred {
                     info!("shutdown already requested, continuing due to running transaction");
+
                     continue;
                 }
 
                 // If we are not inside a transaction, we can cleanly stop streaming and return.
                 if !state.handling_transaction() {
                     info!("shutting down apply loop outside transaction");
+
                     return Ok(ApplyLoopResult::Paused);
                 }
 
                 info!("deferring shutdown until transaction boundary");
 
-                state.shutdown_discarded = true;
+                state.shutdown_deferred = true;
             }
 
             // PRIORITY 2: Handle batch flush timer expiry.
@@ -725,7 +727,7 @@ where
     // The action that we want to perform is by default the action attached to the message.
     let mut action = result.action;
 
-    // Check if we should flush the batch due to the size limit or end_batch signal.
+    // Check if we should flush the batch due to the size limit or `end_batch` signal.
     let should_flush = state.events_batch.len() >= max_batch_size || result.end_batch.is_some();
     if should_flush && !state.events_batch.is_empty() {
         info!(
@@ -1233,13 +1235,10 @@ where
     // destination.
     let mut action = hook.process_syncing_tables(end_lsn, false).await?;
 
-    // If we are told to continue processing but the shutdown was discarded, it means that we should
-    // stop the apply loop. On the other hand, if we are already told to either stop or complete,
-    // we will honor that decision.
-    if let ApplyLoopAction::Continue = action
-        && state.shutdown_discarded
-    {
-        action = ApplyLoopAction::Pause;
+    // If the shutdown was deferred, and we have just processed a `COMMIT` message, we now want to pause
+    // the apply loop.
+    if state.shutdown_deferred {
+        action = action.merge(ApplyLoopAction::Pause);
     }
 
     // Convert event from the protocol message.
@@ -1257,9 +1256,9 @@ where
         ..Default::default()
     };
 
-    // If we are told to stop the loop, it means we reached the end of processing for this specific
+    // If we are told to stop/pause the loop, it means we reached the end of processing for this specific
     // worker, so we gracefully stop processing the batch, but we include in the batch the last processed
-    // element, in this case the `Commit` message.
+    // element, in this case the `COMMIT` message.
     if action.is_terminating() {
         result.end_batch = Some(EndBatch::Inclusive);
     }

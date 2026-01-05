@@ -27,6 +27,46 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pipeline_shutdown_calls_destination_shutdown() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Wait for the table to be ready.
+    let table_ready_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready_notify.notified().await;
+
+    // Shutdown should not have been called yet.
+    assert!(!destination.shutdown_called().await);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify that shutdown was called on the destination.
+    assert!(destination.shutdown_called().await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     init_test_tracing();
 
@@ -45,8 +85,8 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
         destination.clone(),
     );
 
-    // Wait for the table to finish syncing (not in Init state anymore).
-    let sync_done_notify = store
+    // Wait for the table to be ready.
+    let table_ready_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
             TableReplicationPhaseType::Ready,
@@ -55,7 +95,7 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
 
     pipeline.start().await.unwrap();
 
-    sync_done_notify.notified().await;
+    table_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -260,17 +300,17 @@ async fn publication_changes_are_correctly_handled() {
     );
 
     // Wait for initial copy completion (Ready) for both tables.
-    let table_1_done = store
+    let table_1_ready_notify = store
         .notify_on_table_state_type(table_1_id, TableReplicationPhaseType::Ready)
         .await;
-    let table_2_done = store
+    let table_2_ready_notify = store
         .notify_on_table_state_type(table_2_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    table_1_done.notified().await;
-    table_2_done.notified().await;
+    table_1_ready_notify.notified().await;
+    table_2_ready_notify.notified().await;
 
     // Insert one row in each table and wait for two insert events.
     let inserts_notify = destination
@@ -319,13 +359,13 @@ async fn publication_changes_are_correctly_handled() {
     );
 
     // Wait for the table_3 to be done.
-    let table_3_done = store
+    let table_3_ready_notify = store
         .notify_on_table_state_type(table_3_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    table_3_done.notified().await;
+    table_3_ready_notify.notified().await;
 
     // Insert one row in table_1 and wait for it. (We wait for 4 inserts since it keeps the previous
     // ones).
@@ -412,13 +452,13 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         destination.clone(),
     );
 
-    let sync_done = store
+    let table_ready_notify = store
         .notify_on_table_state_type(table_1_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    sync_done.notified().await;
+    table_ready_notify.notified().await;
 
     // Create a new table in the same schema and insert a row.
     let table_2 = test_table_name("table_2");
@@ -452,13 +492,13 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         destination.clone(),
     );
 
-    let sync_done = store
+    let table_ready_notify = store
         .notify_on_table_state_type(table_2_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    sync_done.notified().await;
+    table_ready_notify.notified().await;
 
     // Shutdown and verify no errors occurred.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -1112,14 +1152,14 @@ async fn pipeline_respects_column_level_publication() {
         destination.clone(),
     );
 
-    // Wait for the table to finish syncing.
-    let sync_done_notify = state_store
+    // Wait for the table to be ready.
+    let table_ready_notify = state_store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    sync_done_notify.notified().await;
+    table_ready_notify.notified().await;
 
     // Wait for two insert events to be processed.
     let insert_events_notify = destination
@@ -1212,12 +1252,12 @@ async fn empty_tables_are_created_at_destination() {
 
     pipeline.start().await.unwrap();
 
-    // Wait for the table to be synced.
-    let table_synced_notify = state_store
+    // Wait for the table to be ready.
+    let table_ready_notify = state_store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
-    table_synced_notify.notified().await;
+    table_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 

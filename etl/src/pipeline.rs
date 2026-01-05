@@ -221,6 +221,12 @@ where
             info!(error_count = errors_number, "table sync workers failed");
         }
 
+        // Once all workers completed, we notify the destination of shutting down.
+        info!("shutting down destination");
+        if let Err(err) = self.destination.shutdown().await {
+            errors.push(err);
+        }
+
         if !errors.is_empty() {
             return Err(errors.into());
         }

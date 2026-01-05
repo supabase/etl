@@ -20,6 +20,7 @@ struct Inner<D> {
     event_conditions: Vec<(EventCondition, Arc<Notify>)>,
     table_row_conditions: Vec<(TableRowCondition, Arc<Notify>)>,
     write_table_rows_called: u64,
+    shutdown_called: bool,
 }
 
 impl<D> Inner<D> {
@@ -85,6 +86,7 @@ impl<D> TestDestinationWrapper<D> {
             event_conditions: Vec::new(),
             table_row_conditions: Vec::new(),
             write_table_rows_called: 0,
+            shutdown_called: false,
         };
 
         Self {
@@ -147,6 +149,11 @@ impl<D> TestDestinationWrapper<D> {
 
     pub async fn write_table_rows_called(&self) -> u64 {
         self.inner.read().await.write_table_rows_called
+    }
+
+    /// Returns whether the shutdown method was called on the destination.
+    pub async fn shutdown_called(&self) -> bool {
+        self.inner.read().await.shutdown_called
     }
 }
 
@@ -238,6 +245,22 @@ where
             }
 
             inner.check_conditions().await;
+        }
+
+        result
+    }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        let destination = {
+            let inner = self.inner.read().await;
+            inner.wrapped_destination.clone()
+        };
+
+        let result = destination.shutdown().await;
+
+        {
+            let mut inner = self.inner.write().await;
+            inner.shutdown_called = true;
         }
 
         result
