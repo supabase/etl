@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::shared::{
-    PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError, batch::BatchConfig,
+    PgConnectionConfig, PgConnectionConfigWithoutSecrets, ReconnectionConfig, ValidationError,
+    batch::BatchConfig,
 };
 
 /// Configuration for an ETL pipeline.
@@ -31,6 +32,9 @@ pub struct PipelineConfig {
     pub table_error_retry_max_attempts: u32,
     /// Maximum number of table sync workers that can run at a time
     pub max_table_sync_workers: u16,
+    /// Configuration for automatic reconnection on connection failures.
+    #[serde(default)]
+    pub reconnection: ReconnectionConfig,
 }
 
 impl PipelineConfig {
@@ -75,6 +79,8 @@ pub struct PipelineConfigWithoutSecrets {
     pub table_error_retry_max_attempts: u32,
     /// Maximum number of table sync workers that can run at a time
     pub max_table_sync_workers: u16,
+    /// Configuration for automatic reconnection on connection failures.
+    pub reconnection: ReconnectionConfig,
 }
 
 impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
@@ -87,6 +93,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             table_error_retry_delay_ms: value.table_error_retry_delay_ms,
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
             max_table_sync_workers: value.max_table_sync_workers,
+            reconnection: value.reconnection,
         }
     }
 }
