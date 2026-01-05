@@ -109,6 +109,15 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
         .unwrap();
     assert!(slot_exists, "Apply slot should exist after pipeline start");
 
+    // Wait for Postgres to mark the slot as inactive before dropping it.
+    while database
+        .replication_slot_is_active(&apply_slot_name)
+        .await
+        .unwrap()
+    {
+        sleep(Duration::from_millis(100)).await;
+    }
+
     // Delete the apply worker slot to simulate slot loss.
     database
         .run_sql(&format!(
