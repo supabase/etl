@@ -33,7 +33,7 @@ use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache, TrustedRootCertsErr
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use crate::utils::parse_docker_image_tag;
 use crate::validation::{
-    ValidationContext, ValidationError, ValidationFailure,
+    FailureType, ValidationContext, ValidationError, ValidationFailure,
     validate_pipeline as run_pipeline_validation,
 };
 use crate::{config::ApiConfig, k8s::PodStatus};
@@ -501,8 +501,10 @@ pub struct ValidatePipelineRequest {
 pub struct ValidationFailureResponse {
     #[schema(example = "Publication Not Found")]
     pub name: String,
-    #[schema(example = "'my_publication' does not exist")]
+    #[schema(example = "Publication 'my_publication' does not exist in the source database")]
     pub reason: String,
+    #[schema(example = "critical")]
+    pub failure_type: FailureType,
 }
 
 impl From<ValidationFailure> for ValidationFailureResponse {
@@ -510,6 +512,7 @@ impl From<ValidationFailure> for ValidationFailureResponse {
         Self {
             name: failure.name,
             reason: failure.reason,
+            failure_type: failure.failure_type,
         }
     }
 }

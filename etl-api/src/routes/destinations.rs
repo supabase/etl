@@ -16,7 +16,7 @@ use crate::db;
 use crate::db::destinations::DestinationsDbError;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use crate::validation::{
-    ValidationContext, ValidationError, ValidationFailure,
+    FailureType, ValidationContext, ValidationError, ValidationFailure,
     validate_destination as run_destination_validation,
 };
 
@@ -124,8 +124,10 @@ pub struct ValidateDestinationRequest {
 pub struct ValidationFailureResponse {
     #[schema(example = "BigQuery Dataset Not Found")]
     pub name: String,
-    #[schema(example = "'my_dataset' in project 'my_project'")]
+    #[schema(example = "Dataset 'my_dataset' does not exist in project 'my_project'")]
     pub reason: String,
+    #[schema(example = "critical")]
+    pub failure_type: FailureType,
 }
 
 impl From<ValidationFailure> for ValidationFailureResponse {
@@ -133,6 +135,7 @@ impl From<ValidationFailure> for ValidationFailureResponse {
         Self {
             name: failure.name,
             reason: failure.reason,
+            failure_type: failure.failure_type,
         }
     }
 }

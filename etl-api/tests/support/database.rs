@@ -3,7 +3,7 @@
 use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use etl_config::SerializableSecretString;
-use etl_config::shared::PgConnectionConfig;
+use etl_config::shared::{PgConnectionConfig, TlsConfig};
 use etl_postgres::replication::connect_to_source_database;
 use etl_postgres::sqlx::test_utils::create_pg_database;
 use secrecy::ExposeSecret;
@@ -11,6 +11,26 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::support::test_app::TestApp;
+
+/// Creates a database configuration from TEST_DATABASE_* environment variables.
+///
+/// Generates a unique database name using a UUID suffix to avoid conflicts
+/// between concurrent test runs.
+pub fn get_test_db_config() -> PgConnectionConfig {
+    PgConnectionConfig {
+        host: std::env::var("TEST_DATABASE_HOST").expect("TEST_DATABASE_HOST must be set"),
+        port: std::env::var("TEST_DATABASE_PORT")
+            .expect("TEST_DATABASE_PORT must be set")
+            .parse()
+            .expect("TEST_DATABASE_PORT must be a valid port number"),
+        name: format!("test_db_{}", Uuid::new_v4()),
+        username: std::env::var("TEST_DATABASE_USERNAME")
+            .expect("TEST_DATABASE_USERNAME must be set"),
+        password: std::env::var("TEST_DATABASE_PASSWORD").ok().map(Into::into),
+        tls: TlsConfig::disabled(),
+        keepalive: None,
+    }
+}
 
 /// Creates and configures a new Postgres database for the API.
 ///

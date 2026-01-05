@@ -1,5 +1,9 @@
 #![allow(dead_code)]
 
+use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
+use aws_lc_rs::rand::fill;
+use base64::prelude::*;
+use etl_api::config::{ApiConfig, ApplicationSettings, EncryptionKey as ConfigEncryptionKey};
 use etl_api::k8s::{K8sClient, TrustedRootCertsCache};
 use etl_api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
 use etl_api::routes::destinations_pipelines::{
@@ -15,15 +19,10 @@ use etl_api::routes::tenants::{
     CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest,
 };
 use etl_api::routes::tenants_sources::CreateTenantSourceRequest;
-use etl_api::{
-    config::ApiConfig,
-    configs::encryption::{self, generate_random_key},
-    startup::run,
-};
+use etl_api::{configs::encryption, startup::run};
+use etl_config::Environment;
 use etl_config::shared::PgConnectionConfig;
-use etl_config::{Environment, load_config};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
-use rand::random_range;
 use reqwest::{IntoUrl, RequestBuilder};
 use std::io;
 use std::net::TcpListener;
@@ -31,9 +30,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::time::sleep;
-use uuid::Uuid;
 
-use crate::support::database::create_etl_api_database;
+use crate::support::database::{create_etl_api_database, get_test_db_config};
 use crate::support::k8s_client::MockK8sClient;
 
 pub struct TestApp {
@@ -518,8 +516,13 @@ impl Drop for TestApp {
     }
 }
 
+fn generate_random_bytes<const N: usize>() -> [u8; N] {
+    let mut bytes = [0u8; N];
+    fill(&mut bytes).expect("failed to generate random bytes");
+    bytes
+}
+
 pub async fn spawn_test_app() -> TestApp {
-    // We set the environment to dev.
     Environment::Dev.set();
 
     let base_address = "127.0.0.1";
@@ -527,24 +530,38 @@ pub async fn spawn_test_app() -> TestApp {
         TcpListener::bind(format!("{base_address}:0")).expect("failed to bind random port");
     let port = listener.local_addr().unwrap().port();
 
-    let mut config = load_config::<ApiConfig>().expect("Failed to read configuration");
-    // We use a random database name.
-    config.database.name = Uuid::new_v4().to_string();
+    let database_config = get_test_db_config();
+    let api_db_pool = create_etl_api_database(&database_config).await;
 
-    let api_db_pool = create_etl_api_database(&config.database).await;
-
-    let key = generate_random_key::<32>().expect("failed to generate random key");
+    // Generate encryption key bytes and create both the key and its base64 representation
+    let key_bytes = generate_random_bytes::<32>();
+    let key =
+        RandomizedNonceKey::new(&AES_256_GCM, &key_bytes).expect("failed to create encryption key");
     let encryption_key = encryption::EncryptionKey { id: 0, key };
 
-    // We choose a random API key from the ones configured to show that rotation works.
-    let api_key_index = random_range(0..config.api_keys.len());
-    let api_key = config.api_keys[api_key_index].clone();
+    // Generate a random API key for tests
+    let api_key_bytes = generate_random_bytes::<32>();
+    let api_key = BASE64_STANDARD.encode(api_key_bytes);
+
+    let config = ApiConfig {
+        database: database_config,
+        application: ApplicationSettings {
+            host: base_address.to_string(),
+            port,
+        },
+        encryption_key: ConfigEncryptionKey {
+            id: 0,
+            key: BASE64_STANDARD.encode(key_bytes),
+        },
+        api_keys: vec![api_key.clone()],
+        sentry: None,
+        supabase_api_url: None,
+        configcat_sdk_key: None,
+        source_tls_enabled: false,
+    };
 
     let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient);
     let trusted_root_certs_cache = TrustedRootCertsCache::new(k8s_client.clone());
-
-    // Disable TLS for tests since local postgres doesn't have TLS configured
-    config.source_tls_enabled = false;
 
     let server = run(
         config.clone(),

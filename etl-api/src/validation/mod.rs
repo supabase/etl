@@ -9,8 +9,10 @@ use std::fmt;
 
 use async_trait::async_trait;
 use etl_config::Environment;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
+use utoipa::ToSchema;
 
 use crate::configs::destination::FullApiDestinationConfig;
 use crate::configs::pipeline::FullApiPipelineConfig;
@@ -57,6 +59,16 @@ impl ValidationContextBuilder {
     }
 }
 
+/// Severity level of a validation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureType {
+    /// Critical failures that prevent the pipeline from running correctly.
+    Critical,
+    /// Warnings that don't prevent operation but indicate potential issues.
+    Warning,
+}
+
 /// A validation failure with details about what failed.
 #[derive(Debug, Clone)]
 pub struct ValidationFailure {
@@ -64,14 +76,26 @@ pub struct ValidationFailure {
     pub name: String,
     /// Human-readable reason for the failure.
     pub reason: String,
+    /// Severity of the failure.
+    pub failure_type: FailureType,
 }
 
 impl ValidationFailure {
-    /// Creates a new validation failure.
-    pub fn new(name: impl Into<String>, reason: impl Into<String>) -> Self {
+    /// Creates a new critical validation failure.
+    pub fn critical(name: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             reason: reason.into(),
+            failure_type: FailureType::Critical,
+        }
+    }
+
+    /// Creates a new warning validation failure.
+    pub fn warning(name: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            reason: reason.into(),
+            failure_type: FailureType::Warning,
         }
     }
 }
@@ -168,8 +192,13 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_validation_result_display() {
-        let result = ValidationFailure::new("test", "Something wrong");
-        assert_eq!(result.to_string(), "test: Something wrong");
+    async fn test_validation_failure_display() {
+        let critical = ValidationFailure::critical("test_error", "Something wrong");
+        assert_eq!(critical.to_string(), "test_error: Something wrong");
+        assert_eq!(critical.failure_type, FailureType::Critical);
+
+        let warning = ValidationFailure::warning("test_warning", "Something to note");
+        assert_eq!(warning.to_string(), "test_warning: Something to note");
+        assert_eq!(warning.failure_type, FailureType::Warning);
     }
 }

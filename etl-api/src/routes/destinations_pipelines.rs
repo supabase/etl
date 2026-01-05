@@ -28,7 +28,7 @@ use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
 use crate::validation::{
-    ValidationContext, ValidationError, ValidationFailure,
+    FailureType, ValidationContext, ValidationError, ValidationFailure,
     validate_destination_pipeline as run_destination_pipeline_validation,
 };
 
@@ -208,8 +208,10 @@ pub struct ValidateDestinationPipelineRequest {
 pub struct ValidationFailureResponse {
     #[schema(example = "Publication Not Found")]
     pub name: String,
-    #[schema(example = "'my_publication' does not exist")]
+    #[schema(example = "Publication 'my_publication' does not exist in the source database")]
     pub reason: String,
+    #[schema(example = "critical")]
+    pub failure_type: FailureType,
 }
 
 impl From<ValidationFailure> for ValidationFailureResponse {
@@ -217,6 +219,7 @@ impl From<ValidationFailure> for ValidationFailureResponse {
         Self {
             name: failure.name,
             reason: failure.reason,
+            failure_type: failure.failure_type,
         }
     }
 }

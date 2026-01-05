@@ -15,6 +15,7 @@ use crate::configs::pipeline::FullApiPipelineConfig;
 use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
 
 /// Validates that the required publication exists in the source database.
+#[derive(Debug)]
 pub struct PublicationExistsValidator {
     publication_name: String,
 }
@@ -45,10 +46,11 @@ impl Validator for PublicationExistsValidator {
         if exists {
             Ok(vec![])
         } else {
-            Ok(vec![ValidationFailure::new(
+            Ok(vec![ValidationFailure::critical(
                 "Publication Not Found",
                 format!(
-                    "'{}' does not exist. Create with: CREATE PUBLICATION {} FOR TABLE ...",
+                    "Publication '{}' does not exist in the source database. \
+                    Create it with: CREATE PUBLICATION {} FOR TABLE <table_name>, ...",
                     self.publication_name, self.publication_name
                 ),
             )])
@@ -57,6 +59,7 @@ impl Validator for PublicationExistsValidator {
 }
 
 /// Validates that there are enough free replication slots for the pipeline.
+#[derive(Debug)]
 pub struct ReplicationSlotsValidator {
     max_table_sync_workers: u16,
 }
@@ -98,11 +101,246 @@ impl Validator for ReplicationSlotsValidator {
         if required_slots <= free_slots {
             Ok(vec![])
         } else {
-            Ok(vec![ValidationFailure::new(
+            Ok(vec![ValidationFailure::critical(
                 "Insufficient Replication Slots",
                 format!(
-                    "{free_slots} free, {required_slots} required ({used_slots}/{max_slots} in use). \
-                    Try to increase max_replication_slots in the source database or delete unused slots",
+                    "Not enough replication slots available. Found {free_slots} free slots, \
+                    but {required_slots} are required ({used_slots}/{max_slots} currently in use). \
+                    Increase max_replication_slots in postgresql.conf or remove unused slots",
+                ),
+            )])
+        }
+    }
+}
+
+/// Validates that the WAL level is set to 'logical' for replication.
+#[derive(Debug)]
+pub struct WalLevelValidator;
+
+#[async_trait]
+impl Validator for WalLevelValidator {
+    async fn validate(
+        &self,
+        ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError> {
+        let source_pool = ctx
+            .source_pool
+            .as_ref()
+            .expect("source pool required for WAL level validation");
+
+        let wal_level: String = sqlx::query_scalar("select current_setting('wal_level')")
+            .fetch_one(source_pool)
+            .await?;
+
+        if wal_level == "logical" {
+            Ok(vec![])
+        } else {
+            Ok(vec![ValidationFailure::critical(
+                "Invalid WAL Level",
+                format!(
+                    "WAL level is set to '{wal_level}', but must be 'logical' for replication. \
+                    Update postgresql.conf with: wal_level = 'logical' and restart PostgreSQL"
+                ),
+            )])
+        }
+    }
+}
+
+/// Validates that the database user has replication permissions.
+#[derive(Debug)]
+pub struct ReplicationPermissionsValidator;
+
+#[async_trait]
+impl Validator for ReplicationPermissionsValidator {
+    async fn validate(
+        &self,
+        ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError> {
+        let source_pool = ctx
+            .source_pool
+            .as_ref()
+            .expect("source pool required for replication permissions validation");
+
+        // Check if user is superuser OR has replication privilege
+        let has_permission: bool = sqlx::query_scalar(
+            "select rolsuper or rolreplication from pg_roles where rolname = current_user",
+        )
+        .fetch_one(source_pool)
+        .await?;
+
+        if has_permission {
+            Ok(vec![])
+        } else {
+            Ok(vec![ValidationFailure::critical(
+                "Missing Replication Permission",
+                "The database user does not have replication privileges",
+            )])
+        }
+    }
+}
+
+/// Validates that a publication contains at least one table.
+#[derive(Debug)]
+pub struct PublicationHasTablesValidator {
+    publication_name: String,
+}
+
+impl PublicationHasTablesValidator {
+    pub fn new(publication_name: String) -> Self {
+        Self { publication_name }
+    }
+}
+
+#[async_trait]
+impl Validator for PublicationHasTablesValidator {
+    async fn validate(
+        &self,
+        ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError> {
+        let source_pool = ctx
+            .source_pool
+            .as_ref()
+            .expect("source pool required for publication tables validation");
+
+        // Check if publication publishes all tables or has specific tables
+        let result: Option<(bool, i64)> = sqlx::query_as(
+            r#"
+            select
+                p.puballtables,
+                (select count(*) from pg_publication_tables pt where pt.pubname = p.pubname)
+            from pg_publication p
+            where p.pubname = $1
+            "#,
+        )
+        .bind(&self.publication_name)
+        .fetch_optional(source_pool)
+        .await?;
+
+        // If publication doesn't exist, skip this check (PublicationExistsValidator handles it)
+        let Some((puballtables, table_count)) = result else {
+            return Ok(vec![]);
+        };
+
+        if puballtables || table_count > 0 {
+            Ok(vec![])
+        } else {
+            Ok(vec![ValidationFailure::critical(
+                "Publication Empty",
+                format!(
+                    "Publication '{}' exists but contains no tables. \
+                    Add tables with: ALTER PUBLICATION {} ADD TABLE <table_name>",
+                    self.publication_name, self.publication_name
+                ),
+            )])
+        }
+    }
+}
+
+/// Validates that all tables in a publication have primary keys.
+#[derive(Debug)]
+pub struct PrimaryKeysValidator {
+    publication_name: String,
+}
+
+impl PrimaryKeysValidator {
+    pub fn new(publication_name: String) -> Self {
+        Self { publication_name }
+    }
+}
+
+#[async_trait]
+impl Validator for PrimaryKeysValidator {
+    async fn validate(
+        &self,
+        ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError> {
+        let source_pool = ctx
+            .source_pool
+            .as_ref()
+            .expect("source pool required for primary keys validation");
+
+        // Find tables without primary keys
+        let tables_without_pk: Vec<String> = sqlx::query_scalar(
+            r#"
+            select pt.schemaname || '.' || pt.tablename
+            from pg_publication_tables pt
+            left join pg_constraint c
+                on c.conrelid = (pt.schemaname || '.' || pt.tablename)::regclass
+                and c.contype = 'p'
+            where pt.pubname = $1
+                and c.oid is null
+            order by pt.schemaname, pt.tablename
+            "#,
+        )
+        .bind(&self.publication_name)
+        .fetch_all(source_pool)
+        .await?;
+
+        if tables_without_pk.is_empty() {
+            Ok(vec![])
+        } else {
+            Ok(vec![ValidationFailure::warning(
+                "Tables Missing Primary Keys",
+                format!(
+                    "Tables without primary keys: {}. \
+                    Primary keys are required for UPDATE and DELETE replication",
+                    tables_without_pk.join(", ")
+                ),
+            )])
+        }
+    }
+}
+
+/// Validates that tables in a publication don't have generated columns.
+#[derive(Debug)]
+pub struct GeneratedColumnsValidator {
+    publication_name: String,
+}
+
+impl GeneratedColumnsValidator {
+    pub fn new(publication_name: String) -> Self {
+        Self { publication_name }
+    }
+}
+
+#[async_trait]
+impl Validator for GeneratedColumnsValidator {
+    async fn validate(
+        &self,
+        ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError> {
+        let source_pool = ctx
+            .source_pool
+            .as_ref()
+            .expect("source pool required for generated columns validation");
+
+        // Find tables with generated columns
+        let tables_with_generated: Vec<String> = sqlx::query_scalar(
+            r#"
+            select distinct pt.schemaname || '.' || pt.tablename
+            from pg_publication_tables pt
+            join pg_attribute a
+                on a.attrelid = (pt.schemaname || '.' || pt.tablename)::regclass
+            where pt.pubname = $1
+                and a.attnum > 0
+                and not a.attisdropped
+                and a.attgenerated != ''
+            order by 1
+            "#,
+        )
+        .bind(&self.publication_name)
+        .fetch_all(source_pool)
+        .await?;
+
+        if tables_with_generated.is_empty() {
+            Ok(vec![])
+        } else {
+            Ok(vec![ValidationFailure::warning(
+                "Tables With Generated Columns",
+                format!(
+                    "Tables with generated columns: {}. \
+                    Generated columns cannot be replicated and will be excluded from the destination",
+                    tables_with_generated.join(", ")
                 ),
             )])
         }
@@ -110,6 +348,7 @@ impl Validator for ReplicationSlotsValidator {
 }
 
 /// Composite validator for pipeline prerequisites.
+#[derive(Debug)]
 pub struct PipelineValidator {
     config: FullApiPipelineConfig,
 }
@@ -121,11 +360,15 @@ impl PipelineValidator {
 
     fn sub_validators(&self) -> Vec<Box<dyn Validator>> {
         let max_table_sync_workers = self.config.max_table_sync_workers.unwrap_or(4);
+        let publication_name = self.config.publication_name.clone();
 
         vec![
-            Box::new(PublicationExistsValidator::new(
-                self.config.publication_name.clone(),
-            )),
+            Box::new(WalLevelValidator),
+            Box::new(ReplicationPermissionsValidator),
+            Box::new(PublicationExistsValidator::new(publication_name.clone())),
+            Box::new(PublicationHasTablesValidator::new(publication_name.clone())),
+            Box::new(PrimaryKeysValidator::new(publication_name.clone())),
+            Box::new(GeneratedColumnsValidator::new(publication_name)),
             Box::new(ReplicationSlotsValidator::new(max_table_sync_workers)),
         ]
     }
@@ -148,6 +391,7 @@ impl Validator for PipelineValidator {
 }
 
 /// Validates BigQuery destination connectivity and dataset accessibility.
+#[derive(Debug)]
 struct BigQueryValidator {
     project_id: String,
     dataset_id: String,
@@ -177,9 +421,12 @@ impl Validator for BigQueryValidator {
 
         match client.dataset_exists(&self.dataset_id).await {
             Ok(true) => Ok(vec![]),
-            Ok(false) => Ok(vec![ValidationFailure::new(
+            Ok(false) => Ok(vec![ValidationFailure::critical(
                 "BigQuery Dataset Not Found",
-                format!("'{}' in project '{}'", self.dataset_id, self.project_id),
+                format!(
+                    "Dataset '{}' does not exist in project '{}'",
+                    self.dataset_id, self.project_id
+                ),
             )]),
             Err(err) => Err(ValidationError::BigQuery(err.to_string())),
         }
@@ -187,6 +434,7 @@ impl Validator for BigQueryValidator {
 }
 
 /// Validates Iceberg destination connectivity.
+#[derive(Debug)]
 struct IcebergValidator {
     config: FullApiIcebergConfig,
 }
@@ -256,15 +504,16 @@ impl Validator for IcebergValidator {
 
         match client.validate_connectivity().await {
             Ok(()) => Ok(vec![]),
-            Err(err) => Ok(vec![ValidationFailure::new(
-                "Iceberg Catalog",
-                err.to_string(),
+            Err(err) => Ok(vec![ValidationFailure::critical(
+                "Iceberg Connection Failed",
+                format!("Failed to connect to Iceberg catalog: {err}"),
             )]),
         }
     }
 }
 
 /// Composite validator for destination prerequisites.
+#[derive(Debug)]
 pub struct DestinationValidator {
     config: FullApiDestinationConfig,
 }
