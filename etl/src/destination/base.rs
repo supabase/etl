@@ -13,14 +13,18 @@ use crate::types::{Event, TableRow};
 /// Implementations should ensure idempotent operations where possible, as the ETL system
 /// may retry failed operations. The destination should handle concurrent writes safely
 /// when multiple table sync workers are active.
+///
+/// The trait also provides an optional [`Destination::shutdown`] method with a default no-op
+/// implementation. Override this method if your destination requires cleanup or bookkeeping
+/// when the pipeline shuts down.
 pub trait Destination {
     /// Returns the name of the destination.
     fn name() -> &'static str;
 
     /// Propagates the shutdown signal to the destination.
     ///
-    /// This method should be implemented only if there needs to be some bookkeeping in the destination
-    /// when the system is signaled to shut down.
+    /// Override this method if the destination needs to perform cleanup or bookkeeping
+    /// when the pipeline shuts down. The default implementation is a no-op.
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
     }

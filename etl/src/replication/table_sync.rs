@@ -268,9 +268,6 @@ where
                         // the middle of processing.
                         info!(%table_id, "shutting down table sync during copy");
 
-                        // We notify the destination about the shutdown request.
-                        destination.shutdown().await?;
-
                         return Ok(TableSyncResult::SyncStopped);
                     }
                 }
@@ -334,9 +331,6 @@ where
     // the caller.
     if result.should_shutdown() {
         info!(%table_id, "shutting down table sync while waiting for catchup");
-
-        // We notify the destination about the shutdown request.
-        destination.shutdown().await?;
 
         return Ok(TableSyncResult::SyncStopped);
     }

@@ -590,15 +590,13 @@ where
                 // If the shutdown is being deferred, we don't want to handle it again.
                 if state.shutdown_deferred {
                     info!("shutdown already requested, continuing due to running transaction");
+
                     continue;
                 }
 
                 // If we are not inside a transaction, we can cleanly stop streaming and return.
                 if !state.handling_transaction() {
                     info!("shutting down apply loop outside transaction");
-
-                    // We notify the destination about the shutdown request.
-                    destination.shutdown().await?;
 
                     return Ok(ApplyLoopResult::Paused);
                 }
@@ -718,7 +716,6 @@ where
 
     // If we have an event, and we want to keep it, we add it to the batch and update the last
     // commit lsn (if any).
-    let is_commit_event = matches!(result.event, Some(Event::Commit(_)));
     let should_include_event = matches!(result.end_batch, None | Some(EndBatch::Inclusive));
     if let Some(event) = result.event
         && should_include_event
@@ -742,12 +739,6 @@ where
             flush_batch(state, destination, hook, max_batch_size, pipeline_id).await?;
 
         action = action.merge(flush_batch_action);
-    }
-
-    // If we processed a `COMMIT` and shutdown was deferred, we've reached the transaction boundary
-    // we were waiting for. Notify the destination about the shutdown before exiting.
-    if is_commit_event && state.shutdown_deferred {
-        destination.shutdown().await?;
     }
 
     // If we have a caught table error, we want to mark the table as errored.
