@@ -32,10 +32,8 @@ use crate::{
         },
         destinations_pipelines::{
             CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
-            UpdateDestinationPipelineRequest, ValidateDestinationPipelineRequest,
-            ValidateDestinationPipelineResponse, create_destination_and_pipeline,
+            UpdateDestinationPipelineRequest, create_destination_and_pipeline,
             delete_destination_and_pipeline, update_destination_and_pipeline,
-            validate_destination_pipeline,
         },
         health_check::health_check,
         images::{
@@ -271,8 +269,6 @@ pub async fn run(
             ValidateDestinationResponse,
             ValidatePipelineRequest,
             ValidatePipelineResponse,
-            ValidateDestinationPipelineRequest,
-            ValidateDestinationPipelineResponse,
         )),
         nest(
             (path = "/v1", api = ApiV1)
@@ -324,7 +320,6 @@ pub async fn run(
         crate::routes::destinations_pipelines::create_destination_and_pipeline,
         crate::routes::destinations_pipelines::update_destination_and_pipeline,
         crate::routes::destinations_pipelines::delete_destination_and_pipeline,
-        crate::routes::destinations_pipelines::validate_destination_pipeline,
         crate::routes::pipelines::validate_pipeline,
     ))]
     struct ApiV1;
@@ -408,8 +403,7 @@ pub async fn run(
                     //destinations-pipelines
                     .service(create_destination_and_pipeline)
                     .service(update_destination_and_pipeline)
-                    .service(delete_destination_and_pipeline)
-                    .service(validate_destination_pipeline),
+                    .service(delete_destination_and_pipeline),
             )
             .app_data(prometheus_handle.clone())
             .app_data(config.clone())

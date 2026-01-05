@@ -138,14 +138,24 @@ impl From<PipelinesDbError> for PipelineError {
 impl PipelineError {
     fn to_message(&self) -> String {
         match self {
-            // Do not expose internal database details in error messages
+            // Do not expose internal database details in error messages.
             PipelineError::SourcesDb(SourcesDbError::Database(_))
             | PipelineError::DestinationsDb(DestinationsDbError::Database(_))
             | PipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | PipelineError::ReplicatorsDb(ReplicatorsDbError::Database(_))
             | PipelineError::ImagesDb(ImagesDbError::Database(_))
             | PipelineError::Database(_) => "internal server error".to_string(),
-            // Every other message is ok, as they do not divulge sensitive information
+            // Do not expose validation error details as they may contain credential info.
+            PipelineError::Validation(ValidationError::BigQuery(_)) => {
+                "BigQuery validation failed".to_string()
+            }
+            PipelineError::Validation(ValidationError::Iceberg(_)) => {
+                "Iceberg validation failed".to_string()
+            }
+            PipelineError::Validation(ValidationError::Database(_)) => {
+                "database validation failed".to_string()
+            }
+            // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
     }

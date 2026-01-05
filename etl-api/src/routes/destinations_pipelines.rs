@@ -4,7 +4,6 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use etl_config::Environment;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::ops::DerefMut;
@@ -17,7 +16,6 @@ use crate::configs::destination::FullApiDestinationConfig;
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::FullApiPipelineConfig;
 use crate::db;
-use crate::db::connect_to_source_database_with_defaults;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::destinations_pipelines::DestinationPipelinesDbError;
 use crate::db::images::ImagesDbError;
@@ -27,10 +25,6 @@ use crate::db::pipelines::{
 use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
-use crate::validation::{
-    FailureType, ValidationContext, ValidationError, ValidationFailure,
-    validate_destination_pipeline as run_destination_pipeline_validation,
-};
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -82,9 +76,6 @@ enum DestinationPipelineError {
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
 
-    #[error(transparent)]
-    Validation(#[from] ValidationError),
-
     #[error("Failed to load environment: {0}")]
     Environment(#[from] std::io::Error),
 }
@@ -105,7 +96,7 @@ impl From<DestinationPipelinesDbError> for DestinationPipelineError {
 impl DestinationPipelineError {
     fn to_message(&self) -> String {
         match self {
-            // Do not expose internal database details in error messages
+            // Do not expose internal database details in error messages.
             DestinationPipelineError::DestinationPipelinesDb(
                 DestinationPipelinesDbError::Database(_),
             )
@@ -114,7 +105,7 @@ impl DestinationPipelineError {
             | DestinationPipelineError::SourcesDb(SourcesDbError::Database(_))
             | DestinationPipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | DestinationPipelineError::Database(_) => "internal server error".to_string(),
-            // Every other message is ok, as they do not divulge sensitive information
+            // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
     }
@@ -132,7 +123,6 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::PipelinesDb(_)
             | DestinationPipelineError::Database(_)
             | DestinationPipelineError::TrustedRootCerts(_)
-            | DestinationPipelineError::Validation(_)
             | DestinationPipelineError::Environment(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationPipelineError::TenantId(_)
             | DestinationPipelineError::SourceNotFound(_)
@@ -192,41 +182,6 @@ pub struct UpdateDestinationPipelineRequest {
     pub source_id: i64,
     #[schema(required = true)]
     pub pipeline_config: FullApiPipelineConfig,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ValidateDestinationPipelineRequest {
-    #[schema(required = true)]
-    pub destination_config: FullApiDestinationConfig,
-    #[schema(required = true, example = 1)]
-    pub source_id: i64,
-    #[schema(required = true)]
-    pub pipeline_config: FullApiPipelineConfig,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ValidationFailureResponse {
-    #[schema(example = "Publication Not Found")]
-    pub name: String,
-    #[schema(example = "Publication 'my_publication' does not exist in the source database")]
-    pub reason: String,
-    #[schema(example = "critical")]
-    pub failure_type: FailureType,
-}
-
-impl From<ValidationFailure> for ValidationFailureResponse {
-    fn from(failure: ValidationFailure) -> Self {
-        Self {
-            name: failure.name,
-            reason: failure.reason,
-            failure_type: failure.failure_type,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ValidateDestinationPipelineResponse {
-    pub validation_failures: Vec<ValidationFailureResponse>,
 }
 
 #[utoipa::path(
@@ -469,59 +424,4 @@ pub async fn delete_destination_and_pipeline(
     .await?;
 
     Ok(HttpResponse::Ok().finish())
-}
-
-#[utoipa::path(
-    summary = "Validate destination and pipeline configuration",
-    description = "Validates both destination connectivity and pipeline prerequisites.",
-    request_body = ValidateDestinationPipelineRequest,
-    params(
-        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
-    ),
-    responses(
-        (status = 200, description = "Validation completed", body = ValidateDestinationPipelineResponse),
-        (status = 400, description = "Bad request", body = ErrorMessage),
-        (status = 500, description = "Internal server error", body = ErrorMessage)
-    ),
-    tag = "Destinations and Pipelines"
-)]
-#[post("/destinations-pipelines/validate")]
-pub async fn validate_destination_pipeline(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
-    request: Json<ValidateDestinationPipelineRequest>,
-    encryption_key: Data<EncryptionKey>,
-) -> Result<impl Responder, DestinationPipelineError> {
-    let tenant_id = extract_tenant_id(&req)?;
-    let request = request.into_inner();
-
-    let source =
-        db::sources::read_source(pool.as_ref(), tenant_id, request.source_id, &encryption_key)
-            .await?
-            .ok_or(DestinationPipelineError::SourceNotFound(request.source_id))?;
-
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
-        .await?;
-    let source_config = source.config.into_connection_config(tls_config);
-
-    let environment = Environment::load()?;
-    let source_pool = connect_to_source_database_with_defaults(&source_config).await?;
-    let ctx = ValidationContext::builder(environment)
-        .source_pool(source_pool)
-        .build();
-
-    let failures = run_destination_pipeline_validation(
-        &ctx,
-        &request.destination_config,
-        &request.pipeline_config,
-    )
-    .await?;
-    let response = ValidateDestinationPipelineResponse {
-        validation_failures: failures.into_iter().map(Into::into).collect(),
-    };
-
-    Ok(Json(response))
 }

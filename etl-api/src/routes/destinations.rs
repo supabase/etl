@@ -41,11 +41,21 @@ pub enum DestinationError {
 impl DestinationError {
     pub fn to_message(&self) -> String {
         match self {
-            // Do not expose internal database details in error messages
+            // Do not expose internal database details in error messages.
             DestinationError::DestinationsDb(DestinationsDbError::Database(_)) => {
                 "internal server error".to_string()
             }
-            // Every other message is ok, as they do not divulge sensitive information
+            // Do not expose validation error details as they may contain credential info.
+            DestinationError::Validation(ValidationError::BigQuery(_)) => {
+                "BigQuery validation failed".to_string()
+            }
+            DestinationError::Validation(ValidationError::Iceberg(_)) => {
+                "Iceberg validation failed".to_string()
+            }
+            DestinationError::Validation(ValidationError::Database(_)) => {
+                "database validation failed".to_string()
+            }
+            // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
     }
