@@ -4,9 +4,9 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::types::{ArrayCell, Cell, ColumnSchema, TableRow, Type};
 use etl_destinations::iceberg::IcebergClient;
 use etl_destinations::iceberg::test_utils::LakekeeperClient;
+use etl_destinations::iceberg::test_utils::{LAKEKEEPER_URL, create_minio_props, get_catalog_url};
 use etl_telemetry::tracing::init_test_tracing;
 use uuid::Uuid;
-use etl_destinations::iceberg::test_utils::{LAKEKEEPER_URL, create_minio_props, get_catalog_url};
 
 use crate::support::iceberg::read_all_rows;
 
