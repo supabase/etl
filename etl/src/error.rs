@@ -159,6 +159,25 @@ pub enum ErrorKind {
     WithTimedRetry,
 }
 
+impl ErrorKind {
+    /// Returns true if this error kind is retryable for connection purposes.
+    ///
+    /// Retryable errors are those that may be transient and could succeed on
+    /// reconnection attempt, such as network failures, I/O errors, or database
+    /// restarts. Non-retryable errors are permanent failures like authentication
+    /// errors, permission denied, or configuration errors.
+    pub fn is_connection_retryable(&self) -> bool {
+        matches!(
+            self,
+            ErrorKind::SourceConnectionFailed
+                | ErrorKind::SourceIoError
+                | ErrorKind::SourceDatabaseShutdown
+                | ErrorKind::SourceDatabaseInRecovery
+                | ErrorKind::IoError
+        )
+    }
+}
+
 impl EtlError {
     /// Returns the [`ErrorKind`] of this error.
     ///
