@@ -39,6 +39,7 @@ where
         table_error_retry_delay_ms: 1000,
         table_error_retry_max_attempts: 2,
         max_table_sync_workers: 1,
+        reconnection: Default::default(),
     };
 
     Pipeline::new(config, store, destination)
@@ -69,6 +70,7 @@ where
         table_error_retry_delay_ms: 1000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: 1,
+        reconnection: Default::default(),
     };
 
     Pipeline::new(config, store, destination)

@@ -174,6 +174,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.bq_args.max_table_sync_workers,
+        reconnection: Default::default(),
     };
 
     // Initialize BigQuery destination with service account authentication

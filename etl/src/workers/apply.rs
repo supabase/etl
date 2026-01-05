@@ -15,6 +15,7 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::replication::apply::{ApplyLoopAction, ApplyLoopHook, start_apply_loop};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient};
+use crate::replication::reconnect::reconnection_loop;
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
@@ -123,6 +124,10 @@ where
     /// This method initializes the apply worker by determining the starting LSN,
     /// creating coordination signals, and launching the main apply loop. The worker
     /// runs asynchronously and can be monitored through the returned handle.
+    ///
+    /// When reconnection is enabled in the configuration, the apply loop is wrapped
+    /// with automatic reconnection handling that will attempt to reconnect on
+    /// transient connection failures using exponential backoff.
     async fn start(self) -> EtlResult<ApplyWorkerHandle> {
         info!("starting apply worker");
 
@@ -131,29 +136,77 @@ where
             pipeline_id = self.pipeline_id,
             publication_name = self.config.publication_name
         );
-        let apply_worker = async move {
-            let start_lsn =
-                get_start_lsn(self.pipeline_id, &self.replication_client, &self.store).await?;
 
-            start_apply_loop(
-                self.pipeline_id,
-                start_lsn,
-                self.config.clone(),
-                self.replication_client.clone(),
-                self.store.clone(),
-                self.destination.clone(),
-                ApplyWorkerHook::new(
+        // Check if reconnection is enabled
+        let reconnection_enabled = self.config.reconnection.enabled;
+
+        let apply_worker = async move {
+            if reconnection_enabled {
+                // Use reconnection loop wrapper for automatic recovery
+                let pipeline_id = self.pipeline_id;
+                let config = self.config.clone();
+                let pg_connection = self.config.pg_connection.clone();
+                let store = self.store.clone();
+                let pool = self.pool.clone();
+                let destination = self.destination.clone();
+                let shutdown_rx = self.shutdown_rx.clone();
+                let table_sync_worker_permits = self.table_sync_worker_permits.clone();
+
+                reconnection_loop::<_, _, ApplyWorkerHook<S, D>, _, _>(
+                    pipeline_id,
+                    config.clone(),
+                    store.clone(),
+                    destination.clone(),
+                    shutdown_rx.clone(),
+                    || {
+                        let pg_connection = pg_connection.clone();
+                        let store = store.clone();
+                        async move {
+                            let replication_client =
+                                PgReplicationClient::connect(pg_connection).await?;
+                            let start_lsn =
+                                get_start_lsn(pipeline_id, &replication_client, &store).await?;
+                            Ok((replication_client, start_lsn))
+                        }
+                    },
+                    || {
+                        ApplyWorkerHook::new(
+                            pipeline_id,
+                            config.clone(),
+                            pool.clone(),
+                            store.clone(),
+                            destination.clone(),
+                            shutdown_rx.clone(),
+                            table_sync_worker_permits.clone(),
+                        )
+                    },
+                )
+                .await?;
+            } else {
+                // Original behavior: direct apply loop without reconnection
+                let start_lsn =
+                    get_start_lsn(self.pipeline_id, &self.replication_client, &self.store).await?;
+
+                start_apply_loop(
                     self.pipeline_id,
-                    self.config,
-                    self.pool,
-                    self.store,
-                    self.destination,
-                    self.shutdown_rx.clone(),
-                    self.table_sync_worker_permits.clone(),
-                ),
-                self.shutdown_rx,
-            )
-            .await?;
+                    start_lsn,
+                    self.config.clone(),
+                    self.replication_client.clone(),
+                    self.store.clone(),
+                    self.destination.clone(),
+                    ApplyWorkerHook::new(
+                        self.pipeline_id,
+                        self.config,
+                        self.pool,
+                        self.store,
+                        self.destination,
+                        self.shutdown_rx.clone(),
+                        self.table_sync_worker_permits.clone(),
+                    ),
+                    self.shutdown_rx,
+                )
+                .await?;
+            }
 
             info!("apply worker completed successfully");
 

@@ -111,6 +111,7 @@ impl StoredPipelineConfig {
             table_error_retry_delay_ms: self.table_error_retry_delay_ms,
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,
             max_table_sync_workers: self.max_table_sync_workers,
+            reconnection: Default::default(),
         }
     }
 

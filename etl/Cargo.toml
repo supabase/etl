@@ -42,6 +42,7 @@ tokio-rustls = { workspace = true, default-features = false }
 tracing = { workspace = true, default-features = true }
 uuid = { workspace = true, features = ["v4"] }
 x509-cert = { workspace = true, default-features = false }
+rand = { workspace = true, features = ["thread_rng"] }
 
 [dev-dependencies]
 etl-postgres = { workspace = true, features = [
@@ -50,5 +51,3 @@ etl-postgres = { workspace = true, features = [
     "test-utils",
 ] }
 etl-telemetry = { workspace = true }
-
-rand = { workspace = true, features = ["thread_rng"] }
