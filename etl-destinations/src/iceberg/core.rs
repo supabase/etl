@@ -381,8 +381,9 @@ where
                     });
                 }
 
-                #[allow(unused_mut, unused_variables)]
+                #[cfg_attr(not(feature = "egress"), allow(unused_mut, unused_variables))]
                 let mut bytes_sent = 0;
+                #[cfg_attr(not(feature = "egress"), allow(unused_assignments))]
                 while let Some(insert_result) = join_set.join_next().await {
                     bytes_sent += insert_result
                         .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
