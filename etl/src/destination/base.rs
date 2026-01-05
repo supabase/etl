@@ -17,6 +17,14 @@ pub trait Destination {
     /// Returns the name of the destination.
     fn name() -> &'static str;
 
+    /// Propagates the shutdown signal to the destination.
+    ///
+    /// This method should be implemented only if there needs to be some bookkeeping in the destination
+    /// when the system is signaled to shut down.
+    fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send {
+        async { Ok(()) }
+    }
+
     /// Truncates all data in the specified table.
     ///
     /// This operation is called during initial table synchronization to ensure the

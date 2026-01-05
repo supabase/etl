@@ -140,13 +140,13 @@ async fn update_non_toast_values_with_default_replica_identity() {
         destination.clone(),
     );
 
-    let table_sync_done_notification = store
+    let table_ready_notify = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    table_sync_done_notification.notified().await;
+    table_ready_notify.notified().await;
 
     // Insert a row with a large text value that will be TOASTed
     // Postgres typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
@@ -272,13 +272,13 @@ async fn update_non_toast_values_with_full_replica_identity() {
         destination.clone(),
     );
 
-    let table_sync_done_notification = store
+    let table_ready_notify = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    table_sync_done_notification.notified().await;
+    table_ready_notify.notified().await;
 
     // Insert a row with a large text value that will be TOASTed
     // Postgres typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
@@ -395,13 +395,13 @@ async fn update_toast_values_with_default_replica_identity() {
         destination.clone(),
     );
 
-    let table_sync_done_notification = store
+    let table_ready_notify = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    table_sync_done_notification.notified().await;
+    table_ready_notify.notified().await;
 
     // Insert a row with a large text value that will be TOASTed
     // Postgres typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
@@ -528,13 +528,13 @@ async fn update_non_toast_values_with_none_replica_identity() {
         destination.clone(),
     );
 
-    let table_sync_done_notification = store
+    let table_ready_notify = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    table_sync_done_notification.notified().await;
+    table_ready_notify.notified().await;
 
     // Insert a row with a large text value that will be TOASTed
     // Postgres typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
@@ -674,13 +674,13 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
         destination.clone(),
     );
 
-    let table_sync_done_notification = store
+    let table_ready_notify = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    table_sync_done_notification.notified().await;
+    table_ready_notify.notified().await;
 
     // Insert a row with a large text value that will be TOASTed
     // Postgres typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
