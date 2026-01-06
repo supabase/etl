@@ -1,4 +1,4 @@
-use super::connect_to_source_database_with_defaults;
+use super::connect_to_source_database_from_api;
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::{
     FullApiPipelineConfig, PartialApiPipelineConfig, StoredPipelineConfig,
@@ -221,7 +221,7 @@ pub async fn delete_pipeline_cascading(
     destination: Option<&Destination>,
     tls_config: TlsConfig,
 ) -> Result<(), PipelinesDbError> {
-    let source_pool = connect_to_source_database_with_defaults(
+    let source_pool = connect_to_source_database_from_api(
         &source.config.clone().into_connection_config(tls_config),
     )
     .await?;

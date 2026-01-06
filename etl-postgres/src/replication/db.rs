@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::num::NonZeroI32;
 
-use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_config::shared::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions};
 use sqlx::{PgExecutor, PgPool, Row, postgres::PgPoolOptions};
 use thiserror::Error;
 
@@ -21,18 +21,22 @@ pub enum TableLookupError {
 ///
 /// Creates a Postgres connection pool with the specified minimum and maximum
 /// connection counts for accessing the source database.
+///
+/// The `options` parameter allows specifying connection-specific Postgres settings.
+/// Pass `None` to use server defaults, or `Some(&options)` to apply custom settings.
 #[cfg(feature = "replication")]
 pub async fn connect_to_source_database(
     config: &PgConnectionConfig,
     min_connections: u32,
     max_connections: u32,
+    options: Option<&PgConnectionOptions>,
 ) -> Result<PgPool, sqlx::Error> {
-    let options = config.with_db();
+    let connect_options = config.with_db(options);
 
     let pool = PgPoolOptions::new()
         .min_connections(min_connections)
         .max_connections(max_connections)
-        .connect_with(options)
+        .connect_with(connect_options)
         .await?;
 
     Ok(pool)

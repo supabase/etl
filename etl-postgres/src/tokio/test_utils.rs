@@ -545,7 +545,7 @@ pub fn id_column_schema() -> ColumnSchema {
 pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<NonZeroI32>) {
     // Create the database via a single connection
     let (client, connection) = {
-        let config: tokio_postgres::Config = config.without_db();
+        let config: tokio_postgres::Config = config.without_db(None);
         config
             .connect(NoTls)
             .await
@@ -581,7 +581,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
 pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Option<NonZeroI32>) {
     // Create a new client connected to the created database
     let (client, connection) = {
-        let config: tokio_postgres::Config = config.with_db();
+        let config: tokio_postgres::Config = config.with_db(None);
         config
             .connect(NoTls)
             .await
@@ -612,7 +612,7 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Opt
 pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Connect to the default database
     let (client, connection) = {
-        let config: tokio_postgres::Config = config.without_db();
+        let config: tokio_postgres::Config = config.without_db(None);
         match config.connect(NoTls).await {
             Ok(conn) => conn,
             Err(e) => {
