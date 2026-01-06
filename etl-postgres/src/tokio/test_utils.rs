@@ -581,7 +581,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
 pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Option<NonZeroI32>) {
     // Create a new client connected to the created database
     let (client, connection) = {
-        let config: tokio_postgres::Config = config.with_db();
+        let config: tokio_postgres::Config = config.with_db(None);
         config
             .connect(NoTls)
             .await

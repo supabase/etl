@@ -22,11 +22,17 @@ const COMMON_EXTRA_FLOAT_DIGITS: i32 = 3;
 const COMMON_CLIENT_ENCODING: &str = "UTF8";
 const COMMON_TIMEZONE: &str = "UTC";
 
-/// Application name for ETL replicator connections (used by replication and state management).
-const APP_NAME_REPLICATOR: &str = "supabase_etl_replicator";
-
 /// Application name for ETL API connections.
 const APP_NAME_API: &str = "supabase_etl_api";
+
+/// Application name for ETL replicator migration connections.
+const APP_NAME_REPLICATOR_MIGRATIONS: &str = "supabase_etl_replicator_migrations";
+
+/// Application name for ETL state management connections.
+const APP_NAME_REPLICATOR_STATE: &str = "supabase_etl_replicator_state";
+
+/// Application name for ETL logical replication streaming connections.
+const APP_NAME_REPLICATOR_STREAMING: &str = "supabase_etl_replicator_streaming";
 
 /// Connection options for logical replication streams.
 ///
@@ -42,7 +48,7 @@ pub static ETL_REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> =
         statement_timeout: 0,
         lock_timeout: 30_000,
         idle_in_transaction_session_timeout: 0,
-        application_name: APP_NAME_REPLICATOR.to_string(),
+        application_name: APP_NAME_REPLICATOR_STREAMING.to_string(),
     });
 
 /// Connection options for accessing ETL state metadata in the source database.
@@ -59,7 +65,7 @@ pub static ETL_STATE_MANAGEMENT_OPTIONS: LazyLock<PgConnectionOptions> =
         statement_timeout: 30_000,
         lock_timeout: 10_000,
         idle_in_transaction_session_timeout: 60_000,
-        application_name: APP_NAME_REPLICATOR.to_string(),
+        application_name: APP_NAME_REPLICATOR_STATE.to_string(),
     });
 
 /// Connection options for the API's metadata database.
@@ -77,6 +83,23 @@ pub static ETL_API_OPTIONS: LazyLock<PgConnectionOptions> = LazyLock::new(|| PgC
     idle_in_transaction_session_timeout: 60_000,
     application_name: APP_NAME_API.to_string(),
 });
+
+/// Connection options for database migrations.
+///
+/// Uses extended statement timeout (5 minutes) to accommodate long-running DDL operations
+/// while maintaining moderate lock and idle timeouts (10s lock, 60s idle).
+pub static ETL_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
+    LazyLock::new(|| PgConnectionOptions {
+        datestyle: COMMON_DATESTYLE.to_string(),
+        intervalstyle: COMMON_INTERVALSTYLE.to_string(),
+        extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
+        client_encoding: COMMON_CLIENT_ENCODING.to_string(),
+        timezone: COMMON_TIMEZONE.to_string(),
+        statement_timeout: 300_000,
+        lock_timeout: 10_000,
+        idle_in_transaction_session_timeout: 60_000,
+        application_name: APP_NAME_REPLICATOR_MIGRATIONS.to_string(),
+    });
 
 /// Postgres server options for ETL workloads.
 ///
