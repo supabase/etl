@@ -28,15 +28,26 @@ pub fn test_table_name(name: &str) -> TableName {
 /// This function creates connection parameters for a local Postgres instance with
 /// test-specific settings designed for isolation, reproducibility, and ease of debugging.
 /// Each invocation creates a unique database name to prevent test interference.
+///
+/// Configuration is read from environment variables:
+/// - `TESTS_DATABASE_HOST`: Postgres server hostname (required)
+/// - `TESTS_DATABASE_PORT`: Postgres server port (required)
+/// - `TESTS_DATABASE_USERNAME`: Database user (required)
+/// - `TESTS_DATABASE_PASSWORD`: Database password (optional)
 fn local_pg_connection_config() -> PgConnectionConfig {
-    // TODO: make this configurable via env variables.
     PgConnectionConfig {
-        host: "localhost".to_owned(),
-        port: 5430,
+        host: std::env::var("TESTS_DATABASE_HOST").expect("TESTS_DATABASE_HOST must be set"),
+        port: std::env::var("TESTS_DATABASE_PORT")
+            .expect("TESTS_DATABASE_PORT must be set")
+            .parse()
+            .expect("TESTS_DATABASE_PORT must be a valid port number"),
         // Generate unique database name for test isolation
         name: Uuid::new_v4().to_string(),
-        username: "postgres".to_owned(),
-        password: Some("postgres".to_owned().into()),
+        username: std::env::var("TESTS_DATABASE_USERNAME")
+            .expect("TESTS_DATABASE_USERNAME must be set"),
+        password: std::env::var("TESTS_DATABASE_PASSWORD")
+            .ok()
+            .map(Into::into),
         tls: TlsConfig {
             trusted_root_certs: String::new(),
             enabled: false,

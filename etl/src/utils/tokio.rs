@@ -250,12 +250,16 @@ mod tests {
             .set_certificate_verifier(Arc::new(AcceptAllVerifier {}));
 
         let tls = MakeRustlsConnect::new(config);
-        let (client, conn) = tokio_postgres::connect(
-            "sslmode=require host=localhost port=5430 user=postgres",
-            tls,
-        )
-        .await
-        .expect("connect");
+
+        let host = std::env::var("TESTS_DATABASE_HOST").unwrap_or_else(|_| "localhost".to_string());
+        let port = std::env::var("TESTS_DATABASE_PORT").unwrap_or_else(|_| "5430".to_string());
+        let user =
+            std::env::var("TESTS_DATABASE_USERNAME").unwrap_or_else(|_| "postgres".to_string());
+        let connection_string = format!("sslmode=require host={host} port={port} user={user}");
+
+        let (client, conn) = tokio_postgres::connect(&connection_string, tls)
+            .await
+            .expect("connect");
 
         tokio::task::spawn(async move { conn.await.map_err(|e| panic!("{e:?}")) });
 
