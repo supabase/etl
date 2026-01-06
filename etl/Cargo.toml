@@ -27,7 +27,7 @@ metrics = { workspace = true }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
-ring = { workspace = true, default-features = false }
+aws-lc-rs = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }

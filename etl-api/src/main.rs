@@ -4,14 +4,36 @@ use etl_config::{Environment, load_config, shared::PgConnectionConfig};
 use etl_telemetry::tracing::init_tracing;
 use secrecy::ExposeSecret;
 use std::env;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use tracing::{error, info};
+
+/// Ensures crypto provider is only initialized once.
+static INIT_CRYPTO: Once = Once::new();
+
+/// Installs the default cryptographic provider for rustls.
+///
+/// Uses AWS LC cryptographic provider and ensures it's only installed once
+/// across the application lifetime to avoid conflicts. This is needed because
+/// Cargo's feature unification causes rustls to have both ring and aws-lc-rs
+/// features enabled, requiring explicit selection.
+fn install_crypto_provider() {
+    INIT_CRYPTO.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("failed to install default crypto provider");
+    });
+}
 
 /// Entry point for the ETL API service.
 ///
 /// Initializes tracing, Sentry, and starts the Actix web server with command-line
 /// argument handling for both server mode and database migration.
 fn main() -> anyhow::Result<()> {
+    // Install rustls crypto provider before any TLS operations.
+    // This is needed because Cargo's feature unification causes rustls to have both
+    // ring and aws-lc-rs features enabled, and we must explicitly choose which to use.
+    install_crypto_provider();
+
     // Initialize tracing from the binary name
     let _log_flusher = init_tracing(env!("CARGO_BIN_NAME"))?;
 

@@ -21,6 +21,7 @@ anyhow = { workspace = true, features = ["std"] }
 configcat = { workspace = true }
 metrics = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 secrecy = { workspace = true }
 sentry = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

@@ -41,7 +41,8 @@ kube = { workspace = true, features = [
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 pg_escape = { workspace = true }
 rand = { workspace = true, features = ["std"] }
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 secrecy = { workspace = true }
 sentry = { workspace = true, features = ["actix"] }
 serde = { workspace = true, features = ["derive"] }
