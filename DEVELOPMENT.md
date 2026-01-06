@@ -367,7 +367,17 @@ ENABLE_TRACING=1 RUST_LOG=debug cargo test test_name -- --nocapture
 
 ### Setting Up Test Environment
 
-You can export these variables in your shell:
+#### Option 1: Inline Environment Variables (Recommended)
+
+The most reliable way is to set environment variables directly in the test command:
+
+```bash
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test -p etl-api
+```
+
+#### Option 2: Export in Current Shell Session
+
+Export variables in your current shell session, then run tests:
 
 ```bash
 # PostgreSQL test configuration
@@ -383,9 +393,14 @@ export TESTS_BIGQUERY_SA_KEY_PATH=/path/to/service-account-key.json
 # Enable test output (optional)
 export ENABLE_TRACING=1
 export RUST_LOG=info
+
+# Now run tests
+cargo test -p etl-api
 ```
 
-Or use a `.env` file and source it:
+#### Option 3: Use a `.env` File
+
+Create a `.env.test` file and source it:
 
 ```bash
 # .env.test
@@ -406,29 +421,44 @@ RUST_LOG=info
 ```
 
 ```bash
+# Source the file and run tests
 source .env.test
-cargo test
+cargo test -p etl-api
 ```
 
 ### Running Tests
 
+**Important:** Environment variables must be set in the same command as `cargo test`, or exported in your current shell session before running tests.
+
 ```bash
-# Run all tests
-cargo test
+# Run all tests (requires env variables)
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test
 
 # Run tests for a specific package
-cargo test -p etl-api
-cargo test -p etl
-cargo test -p etl-destinations
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test -p etl-api
+
+# Run tests for packages with test-utils feature (etl, etl-postgres, etl-destinations)
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test -p etl --features test-utils
 
 # Run a specific test
-cargo test test_pipeline_can_be_created
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test -p etl-api --test tenants tenant_can_be_created
 
-# Run tests with output
-cargo test -- --nocapture
+# Run tests with tracing output for debugging
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres ENABLE_TRACING=1 RUST_LOG=info cargo test -p etl-api --test tenants tenant_can_be_created -- --nocapture
 ```
 
-**Important:** Ensure PostgreSQL is running and accessible at the configured host and port before running tests. The test suite will fail if it cannot connect to the database or if the required environment variables are not set.
+**Packages requiring `--features test-utils`:**
+- `etl`
+- `etl-postgres`
+- `etl-destinations`
+
+**Packages that don't require feature flags:**
+- `etl-api`
+- `etl-config`
+- `etl-telemetry`
+- `etl-replicator`
+
+**Note:** Ensure PostgreSQL is running and accessible at the configured host and port before running tests. The test suite will fail if it cannot connect to the database or if the required environment variables are not set.
 
 ## Troubleshooting
 
