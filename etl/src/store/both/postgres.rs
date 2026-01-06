@@ -1,4 +1,4 @@
-use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_config::shared::{ETL_STATE_MANAGEMENT_OPTIONS, IntoConnectOptions, PgConnectionConfig};
 use etl_postgres::replication::{schema, state, table_mappings};
 use etl_postgres::types::{TableId, TableSchema};
 use metrics::gauge;
@@ -39,7 +39,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// and then closed when it's unnecessary since after the first table copy phase, we don't update
 /// the state so often.
 fn create_database_pool(config: &PgConnectionConfig) -> PgPool {
-    let options = config.with_db();
+    let options = config.with_db(Some(&ETL_STATE_MANAGEMENT_OPTIONS));
 
     PgPoolOptions::new()
         .min_connections(0)

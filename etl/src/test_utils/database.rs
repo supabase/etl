@@ -98,7 +98,7 @@ pub async fn spawn_source_database_for_store() -> PgDatabase<Client> {
 
     // We now connect via sqlx just to run the migrations, but we still use the original tokio postgres
     // connection for the db object returned.
-    let pool = connect_to_source_database(&config, 1, 1)
+    let pool = connect_to_source_database(&config, 1, 1, None)
         .await
         .expect("Failed to connect with sqlx");
 

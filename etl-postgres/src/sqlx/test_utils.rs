@@ -10,7 +10,7 @@ use sqlx::{Connection, Executor, PgConnection, PgPool};
 /// Panics if connection or database creation fails.
 pub async fn create_pg_database(config: &PgConnectionConfig) -> PgPool {
     // Create the database via a single connection.
-    let mut connection = PgConnection::connect_with(&config.without_db())
+    let mut connection = PgConnection::connect_with(&config.without_db(None))
         .await
         .expect("Failed to connect to Postgres");
     connection
@@ -19,7 +19,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> PgPool {
         .expect("Failed to create database");
 
     // Create a connection pool to the database.
-    PgPool::connect_with(config.with_db())
+    PgPool::connect_with(config.with_db(None))
         .await
         .expect("Failed to connect to Postgres")
 }
@@ -34,7 +34,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> PgPool {
 /// or connections can't be established.
 pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Connect to the default database.
-    let mut connection = match PgConnection::connect_with(&config.without_db()).await {
+    let mut connection = match PgConnection::connect_with(&config.without_db(None)).await {
         Ok(conn) => conn,
         Err(e) => {
             eprintln!("warning: failed to connect to Postgres for cleanup: {e}");

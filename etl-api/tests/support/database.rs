@@ -94,7 +94,7 @@ pub async fn create_test_source_database(
 /// Panics if database connection fails, schema creation fails, or migrations fail.
 pub async fn run_etl_migrations_on_source_database(source_db_config: &PgConnectionConfig) {
     // We create a pool just for the migrations.
-    let source_pool = connect_to_source_database(source_db_config, 1, 1)
+    let source_pool = connect_to_source_database(source_db_config, 1, 1, None)
         .await
         .expect("failed to connect to source database");
 

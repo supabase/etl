@@ -193,8 +193,10 @@ async fn test_orbstack_connection(client: &kube::Client) -> Result<(), K8sError>
 }
 
 /// Creates a Postgres connection pool from the provided configuration.
+///
+/// Connects to the API's own metadata database using server defaults (no custom options).
 pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
-    PgPoolOptions::new().connect_lazy_with(config.with_db())
+    PgPoolOptions::new().connect_lazy_with(config.with_db(None))
 }
 
 /// Creates and configures the HTTP server with all routes and middleware.
