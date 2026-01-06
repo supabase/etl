@@ -104,12 +104,13 @@ impl Validator for ReplicationSlotsValidator {
             Ok(vec![ValidationFailure::critical(
                 "Insufficient Replication Slots",
                 format!(
-                    "Not enough replication slots available. Found {free_slots} free slots, \
-                    but {required_slots} are required at most during initial table copy \
-                    ({used_slots}/{max_slots} currently in use). Once all tables are copied, \
-                    only 1 slot will be used. Please verify: (1) max_replication_slots in \
-                    postgresql.conf is sufficient, (2) unused replication slots can be removed, \
-                    (3) max_table_sync_workers can be reduced if needed.",
+                    "Not enough replication slots available.\n\
+                    Found {free_slots} free slots, but {required_slots} are required at most during initial table copy ({used_slots}/{max_slots} currently in use).\n\
+                    Once all tables are copied, only 1 slot will be used.\n\n\
+                    Please verify:\n\
+                    (1) max_replication_slots in postgresql.conf is sufficient\n\
+                    (2) Unused replication slots can be removed\n\
+                    (3) max_table_sync_workers can be reduced if needed",
                 ),
             )])
         }
@@ -230,7 +231,7 @@ impl Validator for PublicationHasTablesValidator {
             Ok(vec![ValidationFailure::critical(
                 "Publication Empty",
                 format!(
-                    "Publication '{}' exists but contains no tables. \
+                    "Publication '{}' exists but contains no tables.\n\n\
                     Add tables with: ALTER PUBLICATION {} ADD TABLE <table_name>",
                     self.publication_name, self.publication_name
                 ),
@@ -291,8 +292,8 @@ impl Validator for PrimaryKeysValidator {
             Ok(vec![ValidationFailure::warning(
                 "Tables Missing Primary Keys",
                 format!(
-                    "Tables without primary keys: {}. \
-                    Primary keys are required for UPDATE and DELETE replication",
+                    "Tables without primary keys: {}\n\n\
+                    Primary keys are required for UPDATE and DELETE replication.",
                     tables_without_pk.join(", ")
                 ),
             )])
@@ -354,8 +355,8 @@ impl Validator for GeneratedColumnsValidator {
             Ok(vec![ValidationFailure::warning(
                 "Tables With Generated Columns",
                 format!(
-                    "Tables with generated columns: {}. \
-                    Generated columns cannot be replicated and will be excluded from the destination",
+                    "Tables with generated columns: {}\n\n\
+                    Generated columns cannot be replicated and will be excluded from the destination.",
                     tables_with_generated.join(", ")
                 ),
             )])
@@ -440,7 +441,11 @@ impl Validator for BigQueryValidator {
             Err(_) => {
                 return Ok(vec![ValidationFailure::critical(
                     "BigQuery Authentication Failed",
-                    "Unable to authenticate with BigQuery. Please verify: (1) the service account key is valid JSON, (2) the key has not expired or been revoked, (3) the project ID is correct.",
+                    "Unable to authenticate with BigQuery.\n\n\
+                    Please verify:\n\
+                    (1) The service account key is valid JSON\n\
+                    (2) The key has not expired or been revoked\n\
+                    (3) The project ID is correct",
                 )]);
             }
         };
@@ -450,13 +455,21 @@ impl Validator for BigQueryValidator {
             Ok(false) => Ok(vec![ValidationFailure::critical(
                 "BigQuery Dataset Not Found",
                 format!(
-                    "Dataset '{}' does not exist in project '{}'. Please verify: (1) the dataset name is correct, (2) the dataset exists in the specified project, (3) the service account has permission to access it.",
+                    "Dataset '{}' does not exist in project '{}'.\n\n\
+                    Please verify:\n\
+                    (1) The dataset name is correct\n\
+                    (2) The dataset exists in the specified project\n\
+                    (3) The service account has permission to access it",
                     self.dataset_id, self.project_id
                 ),
             )]),
             Err(_) => Ok(vec![ValidationFailure::critical(
                 "BigQuery Connection Failed",
-                "Unable to connect to BigQuery. Please verify: (1) network connectivity to Google Cloud, (2) the service account has the required permissions (BigQuery Data Editor, BigQuery Job User), (3) BigQuery API is enabled for your project.",
+                "Unable to connect to BigQuery.\n\n\
+                Please verify:\n\
+                (1) Network connectivity to Google Cloud\n\
+                (2) The service account has the required permissions (BigQuery Data Editor, BigQuery Job User)\n\
+                (3) BigQuery API is enabled for your project",
             )]),
         }
     }
@@ -534,7 +547,11 @@ impl Validator for IcebergValidator {
             Err(_) => {
                 return Ok(vec![ValidationFailure::critical(
                     "Iceberg Authentication Failed",
-                    "Unable to authenticate with Iceberg. Please verify: (1) the catalog token is valid and has not expired, (2) the S3 access key and secret key are correct, (3) the catalog URI is properly formatted.",
+                    "Unable to authenticate with Iceberg.\n\n\
+                    Please verify:\n\
+                    (1) The catalog token is valid and has not expired\n\
+                    (2) The S3 access key and secret key are correct\n\
+                    (3) The catalog URI is properly formatted",
                 )]);
             }
         };
@@ -543,7 +560,12 @@ impl Validator for IcebergValidator {
             Ok(()) => Ok(vec![]),
             Err(_) => Ok(vec![ValidationFailure::critical(
                 "Iceberg Connection Failed",
-                "Unable to connect to Iceberg catalog. Please verify: (1) network connectivity to the catalog and S3, (2) the warehouse name exists in the catalog, (3) you have the required permissions to access the warehouse, (4) the S3 endpoint is reachable.",
+                "Unable to connect to Iceberg catalog.\n\n\
+                Please verify:\n\
+                (1) Network connectivity to the catalog and S3\n\
+                (2) The warehouse name exists in the catalog\n\
+                (3) You have the required permissions to access the warehouse\n\
+                (4) The S3 endpoint is reachable",
             )]),
         }
     }
