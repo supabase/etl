@@ -105,8 +105,11 @@ impl Validator for ReplicationSlotsValidator {
                 "Insufficient Replication Slots",
                 format!(
                     "Not enough replication slots available. Found {free_slots} free slots, \
-                    but {required_slots} are required ({used_slots}/{max_slots} currently in use). \
-                    Increase max_replication_slots in postgresql.conf or remove unused slots",
+                    but {required_slots} are required at most during initial table copy \
+                    ({used_slots}/{max_slots} currently in use). Once all tables are copied, \
+                    only 1 slot will be used. Please verify: (1) max_replication_slots in \
+                    postgresql.conf is sufficient, (2) unused replication slots can be removed, \
+                    (3) max_table_sync_workers can be reduced if needed.",
                 ),
             )])
         }

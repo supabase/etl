@@ -132,12 +132,11 @@ async fn validate_bigquery_dataset_not_found() {
 async fn validate_bigquery_invalid_credentials() {
     let ctx = create_validation_context();
     let config = create_bigquery_config("fake-project", "fake-dataset", "{}");
-    let result = validate_destination(&ctx, &config).await;
+    let failures = validate_destination(&ctx, &config).await.unwrap();
 
-    assert!(
-        result.is_err(),
-        "Expected validation error for invalid credentials"
-    );
+    assert!(!failures.is_empty(), "Expected validation failure");
+    assert_eq!(failures[0].name, "BigQuery Authentication Failed");
+    assert_eq!(failures[0].failure_type, FailureType::Critical);
 }
 
 #[tokio::test]
