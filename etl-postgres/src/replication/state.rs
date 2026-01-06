@@ -4,7 +4,6 @@ use sqlx::{PgExecutor, PgPool, Type, postgres::types::Oid as SqlxTableId, prelud
 use tokio_postgres::types::PgLsn;
 
 use crate::replication::schema::delete_table_schema_for_table;
-use crate::replication::table_mappings::delete_table_mappings_for_table;
 use crate::types::TableId;
 
 /// Replication state of a table during the ETL process.
@@ -294,9 +293,9 @@ pub async fn rollback_replication_state(
 
 /// Resets table replication state to initial state.
 ///
-/// Removes all existing state entries for the table, clears the table mapping
-/// and table schema, and creates a new [`TableReplicationState::Init`] entry,
-/// effectively restarting replication.
+/// Removes all existing state entries for the table, clears the table schema,
+/// and creates a new [`TableReplicationState::Init`] entry, effectively
+/// restarting replication. Table mappings are preserved for truncation on restart.
 pub async fn reset_replication_state(
     conn: &mut sqlx::PgConnection,
     pipeline_id: i64,
