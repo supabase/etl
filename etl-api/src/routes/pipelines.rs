@@ -18,7 +18,7 @@ use utoipa::ToSchema;
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
 use crate::db;
-use crate::db::connect_to_source_database_with_defaults;
+use crate::db::connect_to_source_database_from_api;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::images::ImagesDbError;
 use crate::db::pipelines::{MAX_PIPELINES_PER_TENANT, PipelinesDbError, read_pipeline_components};
@@ -1071,7 +1071,7 @@ pub async fn get_pipeline_replication_status(
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&source.config.into_connection_config(tls_config))
+        connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
             .await?;
 
     // Start transaction for all source database operations
@@ -1182,7 +1182,7 @@ pub async fn rollback_table_state(
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&source.config.into_connection_config(tls_config))
+        connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
             .await?;
 
     // Start transaction for all source database operations
@@ -1309,7 +1309,7 @@ pub async fn rollback_tables(
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&source.config.into_connection_config(tls_config))
+        connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
             .await?;
 
     // Start transaction for all source database operations
@@ -1592,7 +1592,7 @@ pub async fn validate_pipeline(
     let source_config = source.config.into_connection_config(tls_config);
 
     let environment = Environment::load().map_err(|_| PipelineError::MissingEnvironment)?;
-    let source_pool = connect_to_source_database_with_defaults(&source_config).await?;
+    let source_pool = connect_to_source_database_from_api(&source_config).await?;
     let ctx = ValidationContext::builder(environment)
         .source_pool(source_pool)
         .build();

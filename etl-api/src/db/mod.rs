@@ -1,4 +1,4 @@
-use etl_config::shared::{ETL_STATE_MANAGEMENT_OPTIONS, PgConnectionConfig};
+use etl_config::shared::{ETL_API_OPTIONS, PgConnectionConfig};
 use etl_postgres::replication::connect_to_source_database;
 use sqlx::PgPool;
 
@@ -23,14 +23,14 @@ const MAX_POOL_CONNECTIONS: u32 = 1;
 ///
 /// Uses state management options with moderate timeouts suitable for administrative queries
 /// like listing tables and reading publications.
-pub async fn connect_to_source_database_with_defaults(
+pub async fn connect_to_source_database_from_api(
     config: &PgConnectionConfig,
 ) -> Result<PgPool, sqlx::Error> {
     connect_to_source_database(
         config,
         MIN_POOL_CONNECTIONS,
         MAX_POOL_CONNECTIONS,
-        Some(&ETL_STATE_MANAGEMENT_OPTIONS),
+        Some(&ETL_API_OPTIONS),
     )
     .await
 }
