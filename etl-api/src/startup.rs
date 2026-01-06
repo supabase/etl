@@ -347,27 +347,28 @@ pub async fn run(
             .service(
                 web::scope("v1")
                     .wrap(authentication)
-                    //tenants
+                    // tenants
                     .service(create_tenant)
                     .service(create_or_update_tenant)
                     .service(read_tenant)
                     .service(update_tenant)
                     .service(delete_tenant)
                     .service(read_all_tenants)
-                    //sources
+                    // sources
                     .service(create_source)
                     .service(read_source)
                     .service(update_source)
                     .service(delete_source)
                     .service(read_all_sources)
                     //destinations
+                    .service(validate_destination)
                     .service(create_destination)
                     .service(read_destination)
                     .service(update_destination)
                     .service(delete_destination)
                     .service(read_all_destinations)
-                    .service(validate_destination)
-                    //pipelines
+                    // pipelines
+                    .service(validate_pipeline)
                     .service(create_pipeline)
                     .service(read_pipeline)
                     .service(update_pipeline)
@@ -383,24 +384,23 @@ pub async fn run(
                     .service(rollback_tables)
                     .service(update_pipeline_version)
                     .service(update_pipeline_config)
-                    .service(validate_pipeline)
-                    //tables
+                    // tables
                     .service(read_table_names)
-                    //publications
+                    // publications
                     .service(create_publication)
                     .service(read_publication)
                     .service(update_publication)
                     .service(delete_publication)
                     .service(read_all_publications)
-                    //images
+                    // images
                     .service(create_image)
                     .service(read_image)
                     .service(update_image)
                     .service(delete_image)
                     .service(read_all_images)
-                    //tenants_sources
+                    // tenants_sources
                     .service(create_tenant_and_source)
-                    //destinations-pipelines
+                    // destinations-pipelines
                     .service(create_destination_and_pipeline)
                     .service(update_destination_and_pipeline)
                     .service(delete_destination_and_pipeline),

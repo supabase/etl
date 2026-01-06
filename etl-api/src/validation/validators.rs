@@ -427,21 +427,34 @@ impl Validator for BigQueryValidator {
         &self,
         _ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let client =
-            BigQueryClient::new_with_key(self.project_id.clone(), &self.service_account_key)
-                .await
-                .map_err(|err| ValidationError::BigQuery(err.to_string()))?;
+        let client = match BigQueryClient::new_with_key(
+            self.project_id.clone(),
+            &self.service_account_key,
+        )
+        .await
+        {
+            Ok(client) => client,
+            Err(_) => {
+                return Ok(vec![ValidationFailure::critical(
+                    "BigQuery Authentication Failed",
+                    "Unable to authenticate with BigQuery. Please verify: (1) the service account key is valid JSON, (2) the key has not expired or been revoked, (3) the project ID is correct.",
+                )]);
+            }
+        };
 
         match client.dataset_exists(&self.dataset_id).await {
             Ok(true) => Ok(vec![]),
             Ok(false) => Ok(vec![ValidationFailure::critical(
                 "BigQuery Dataset Not Found",
                 format!(
-                    "Dataset '{}' does not exist in project '{}'",
+                    "Dataset '{}' does not exist in project '{}'. Please verify: (1) the dataset name is correct, (2) the dataset exists in the specified project, (3) the service account has permission to access it.",
                     self.dataset_id, self.project_id
                 ),
             )]),
-            Err(err) => Err(ValidationError::BigQuery(err.to_string())),
+            Err(_) => Ok(vec![ValidationFailure::critical(
+                "BigQuery Connection Failed",
+                "Unable to connect to BigQuery. Please verify: (1) network connectivity to Google Cloud, (2) the service account has the required permissions (BigQuery Data Editor, BigQuery Job User), (3) BigQuery API is enabled for your project.",
+            )]),
         }
     }
 }
@@ -513,13 +526,21 @@ impl Validator for IcebergValidator {
             }
         };
 
-        let client = client.map_err(|err| ValidationError::Iceberg(err.to_string()))?;
+        let client = match client {
+            Ok(client) => client,
+            Err(_) => {
+                return Ok(vec![ValidationFailure::critical(
+                    "Iceberg Authentication Failed",
+                    "Unable to authenticate with Iceberg. Please verify: (1) the catalog token is valid and has not expired, (2) the S3 access key and secret key are correct, (3) the catalog URI is properly formatted.",
+                )]);
+            }
+        };
 
         match client.validate_connectivity().await {
             Ok(()) => Ok(vec![]),
-            Err(err) => Ok(vec![ValidationFailure::critical(
+            Err(_) => Ok(vec![ValidationFailure::critical(
                 "Iceberg Connection Failed",
-                format!("Failed to connect to Iceberg catalog: {err}"),
+                "Unable to connect to Iceberg catalog. Please verify: (1) network connectivity to the catalog and S3, (2) the warehouse name exists in the catalog, (3) you have the required permissions to access the warehouse, (4) the S3 endpoint is reachable.",
             )]),
         }
     }
