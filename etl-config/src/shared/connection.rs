@@ -416,7 +416,7 @@ mod tests {
 
         assert_eq!(
             options_string,
-            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=30000 -c idle_in_transaction_session_timeout=0 -c application_name=supabase_etl_replicator"
+            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=30000 -c idle_in_transaction_session_timeout=0 -c application_name=supabase_etl_replicator_streaming"
         );
     }
 
@@ -438,7 +438,7 @@ mod tests {
         )));
         assert!(pairs.contains(&(
             "application_name".to_string(),
-            "supabase_etl_replicator".to_string()
+            "supabase_etl_replicator_state".to_string()
         )));
     }
 
