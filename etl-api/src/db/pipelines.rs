@@ -1,3 +1,4 @@
+use super::connect_to_source_database_with_defaults;
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::{
     FullApiPipelineConfig, PartialApiPipelineConfig, StoredPipelineConfig,
@@ -10,7 +11,6 @@ use crate::db::destinations::{Destination, DestinationsDbError};
 use crate::db::images::Image;
 use crate::db::replicators::{Replicator, ReplicatorsDbError, create_replicator};
 use crate::db::sources::Source;
-use crate::routes::connect_to_source_database_with_defaults;
 use crate::routes::pipelines::PipelineError;
 use etl_config::shared::TlsConfig;
 use etl_postgres::replication::{health, schema, slots, state, table_mappings};

@@ -4,6 +4,7 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
+use etl_config::Environment;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
@@ -14,6 +15,10 @@ use crate::configs::encryption::EncryptionKey;
 use crate::db;
 use crate::db::destinations::DestinationsDbError;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
+use crate::validation::{
+    FailureType, ValidationContext, ValidationError, ValidationFailure,
+    validate_destination as run_destination_validation,
+};
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
@@ -25,16 +30,32 @@ pub enum DestinationError {
 
     #[error(transparent)]
     DestinationsDb(#[from] DestinationsDbError),
+
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+
+    #[error("Failed to load environment: {0}")]
+    Environment(#[from] std::io::Error),
 }
 
 impl DestinationError {
     pub fn to_message(&self) -> String {
         match self {
-            // Do not expose internal database details in error messages
+            // Do not expose internal database details in error messages.
             DestinationError::DestinationsDb(DestinationsDbError::Database(_)) => {
                 "internal server error".to_string()
             }
-            // Every other message is ok, as they do not divulge sensitive information
+            // Do not expose validation error details as they may contain credential info.
+            DestinationError::Validation(ValidationError::BigQuery(_)) => {
+                "BigQuery validation failed".to_string()
+            }
+            DestinationError::Validation(ValidationError::Iceberg(_)) => {
+                "Iceberg validation failed".to_string()
+            }
+            DestinationError::Validation(ValidationError::Database(_)) => {
+                "database validation failed".to_string()
+            }
+            // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
     }
@@ -43,7 +64,9 @@ impl DestinationError {
 impl ResponseError for DestinationError {
     fn status_code(&self) -> StatusCode {
         match self {
-            DestinationError::DestinationsDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            DestinationError::DestinationsDb(_)
+            | DestinationError::Validation(_)
+            | DestinationError::Environment(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationError::DestinationNotFound(_) => StatusCode::NOT_FOUND,
             DestinationError::TenantId(_) => StatusCode::BAD_REQUEST,
         }
@@ -99,6 +122,37 @@ pub struct ReadDestinationResponse {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReadDestinationsResponse {
     pub destinations: Vec<ReadDestinationResponse>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidateDestinationRequest {
+    #[schema(required = true)]
+    pub config: FullApiDestinationConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidationFailureResponse {
+    #[schema(example = "BigQuery Dataset Not Found")]
+    pub name: String,
+    #[schema(example = "Dataset 'my_dataset' does not exist in project 'my_project'")]
+    pub reason: String,
+    #[schema(example = "critical")]
+    pub failure_type: FailureType,
+}
+
+impl From<ValidationFailure> for ValidationFailureResponse {
+    fn from(failure: ValidationFailure) -> Self {
+        Self {
+            name: failure.name,
+            reason: failure.reason,
+            failure_type: failure.failure_type,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidateDestinationResponse {
+    pub validation_failures: Vec<ValidationFailureResponse>,
 }
 
 #[utoipa::path(
@@ -282,6 +336,39 @@ pub async fn read_all_destinations(
     }
 
     let response = ReadDestinationsResponse { destinations };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Validate destination configuration",
+    description = "Validates that the destination is accessible and properly configured.",
+    request_body = ValidateDestinationRequest,
+    params(
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Validation completed", body = ValidateDestinationResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Destinations"
+)]
+#[post("/destinations/validate")]
+pub async fn validate_destination(
+    req: HttpRequest,
+    request: Json<ValidateDestinationRequest>,
+) -> Result<impl Responder, DestinationError> {
+    let _tenant_id = extract_tenant_id(&req)?;
+    let request = request.into_inner();
+
+    let environment = Environment::load()?;
+    let ctx = ValidationContext::builder(environment).build();
+
+    let failures = run_destination_validation(&ctx, &request.config).await?;
+    let response = ValidateDestinationResponse {
+        validation_failures: failures.into_iter().map(Into::into).collect(),
+    };
 
     Ok(Json(response))
 }

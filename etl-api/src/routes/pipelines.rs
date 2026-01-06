@@ -4,6 +4,7 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
+use etl_config::Environment;
 use etl_postgres::replication::{
     TableLookupError, get_table_names_from_table_ids, health, lag, state,
 };
@@ -17,21 +18,24 @@ use utoipa::ToSchema;
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
 use crate::db;
+use crate::db::connect_to_source_database_with_defaults;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
 use crate::db::images::ImagesDbError;
 use crate::db::pipelines::{MAX_PIPELINES_PER_TENANT, PipelinesDbError, read_pipeline_components};
 use crate::db::replicators::ReplicatorsDbError;
-use crate::db::sources::{SourcesDbError, source_exists};
+use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::core::{
     create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
     delete_pipeline_resources_in_k8s,
 };
 use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache, TrustedRootCertsError};
-use crate::routes::{
-    ErrorMessage, TenantIdError, connect_to_source_database_with_defaults, extract_tenant_id,
-};
+use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use crate::utils::parse_docker_image_tag;
+use crate::validation::{
+    FailureType, ValidationContext, ValidationError, ValidationFailure,
+    validate_pipeline as run_pipeline_validation,
+};
 use crate::{config::ApiConfig, k8s::PodStatus};
 
 #[derive(Debug, Error)]
@@ -113,6 +117,9 @@ pub enum PipelineError {
 
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
+
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
 }
 
 impl From<PipelinesDbError> for PipelineError {
@@ -131,14 +138,24 @@ impl From<PipelinesDbError> for PipelineError {
 impl PipelineError {
     fn to_message(&self) -> String {
         match self {
-            // Do not expose internal database details in error messages
+            // Do not expose internal database details in error messages.
             PipelineError::SourcesDb(SourcesDbError::Database(_))
             | PipelineError::DestinationsDb(DestinationsDbError::Database(_))
             | PipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | PipelineError::ReplicatorsDb(ReplicatorsDbError::Database(_))
             | PipelineError::ImagesDb(ImagesDbError::Database(_))
             | PipelineError::Database(_) => "internal server error".to_string(),
-            // Every other message is ok, as they do not divulge sensitive information
+            // Do not expose validation error details as they may contain credential info.
+            PipelineError::Validation(ValidationError::BigQuery(_)) => {
+                "BigQuery validation failed".to_string()
+            }
+            PipelineError::Validation(ValidationError::Iceberg(_)) => {
+                "Iceberg validation failed".to_string()
+            }
+            PipelineError::Validation(ValidationError::Database(_)) => {
+                "database validation failed".to_string()
+            }
+            // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
     }
@@ -163,7 +180,8 @@ impl ResponseError for PipelineError {
             | PipelineError::TableLookup(_)
             | PipelineError::InvalidTableReplicationState(_)
             | PipelineError::MissingEnvironment
-            | PipelineError::MissingTableReplicationState => StatusCode::INTERNAL_SERVER_ERROR,
+            | PipelineError::MissingTableReplicationState
+            | PipelineError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::PipelineNotFound(_)
             | PipelineError::EtlStateNotInitialized
             | PipelineError::ImageIdNotDefault(_)
@@ -481,6 +499,39 @@ pub struct GetPipelineVersionResponse {
     pub new_version: Option<PipelineVersion>,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidatePipelineRequest {
+    #[schema(required = true, example = 1)]
+    pub source_id: i64,
+    #[schema(required = true)]
+    pub config: FullApiPipelineConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidationFailureResponse {
+    #[schema(example = "Publication Not Found")]
+    pub name: String,
+    #[schema(example = "Publication 'my_publication' does not exist in the source database")]
+    pub reason: String,
+    #[schema(example = "critical")]
+    pub failure_type: FailureType,
+}
+
+impl From<ValidationFailure> for ValidationFailureResponse {
+    fn from(failure: ValidationFailure) -> Self {
+        Self {
+            name: failure.name,
+            reason: failure.reason,
+            failure_type: failure.failure_type,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidatePipelineResponse {
+    pub validation_failures: Vec<ValidationFailureResponse>,
+}
+
 #[utoipa::path(
     summary = "Create a pipeline",
     description = "Creates a pipeline linking a source to a destination.",
@@ -499,6 +550,7 @@ pub struct GetPipelineVersionResponse {
 pub async fn create_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
+    encryption_key: Data<EncryptionKey>,
     pipeline: Json<CreatePipelineRequest>,
     feature_flags_client: Option<Data<configcat::Client>>,
 ) -> Result<impl Responder, PipelineError> {
@@ -506,9 +558,16 @@ pub async fn create_pipeline(
     let pipeline = pipeline.into_inner();
 
     let mut txn = pool.begin().await?;
-    if !source_exists(txn.deref_mut(), tenant_id, pipeline.source_id).await? {
-        return Err(PipelineError::SourceNotFound(pipeline.source_id));
-    }
+
+    // Verify source exists
+    db::sources::read_source(
+        txn.deref_mut(),
+        tenant_id,
+        pipeline.source_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
     if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
         return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
@@ -614,15 +673,23 @@ pub async fn update_pipeline(
     pool: Data<PgPool>,
     pipeline_id: Path<i64>,
     pipeline: Json<UpdatePipelineRequest>,
+    encryption_key: Data<EncryptionKey>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
     let pipeline = pipeline.into_inner();
 
     let mut txn = pool.begin().await?;
-    if !source_exists(txn.deref_mut(), tenant_id, pipeline.source_id).await? {
-        return Err(PipelineError::SourceNotFound(pipeline.source_id));
-    }
+
+    // Verify source exists
+    db::sources::read_source(
+        txn.deref_mut(),
+        tenant_id,
+        pipeline.source_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
     if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
         return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
@@ -1483,6 +1550,56 @@ pub async fn update_pipeline_config(
 
     let response = UpdatePipelineConfigResponse {
         config: config.into(),
+    };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Validate pipeline configuration",
+    description = "Validates pipeline prerequisites against the source database.",
+    request_body = ValidatePipelineRequest,
+    params(
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Validation completed", body = ValidatePipelineResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Pipelines"
+)]
+#[post("/pipelines/validate")]
+pub async fn validate_pipeline(
+    req: HttpRequest,
+    pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    request: Json<ValidatePipelineRequest>,
+    encryption_key: Data<EncryptionKey>,
+) -> Result<impl Responder, PipelineError> {
+    let tenant_id = extract_tenant_id(&req)?;
+    let request = request.into_inner();
+
+    let source =
+        db::sources::read_source(pool.as_ref(), tenant_id, request.source_id, &encryption_key)
+            .await?
+            .ok_or(PipelineError::SourceNotFound(request.source_id))?;
+
+    let tls_config = trusted_root_certs_cache
+        .get_tls_config(api_config.source_tls_enabled)
+        .await?;
+    let source_config = source.config.into_connection_config(tls_config);
+
+    let environment = Environment::load().map_err(|_| PipelineError::MissingEnvironment)?;
+    let source_pool = connect_to_source_database_with_defaults(&source_config).await?;
+    let ctx = ValidationContext::builder(environment)
+        .source_pool(source_pool)
+        .build();
+
+    let failures = run_pipeline_validation(&ctx, &request.config).await?;
+    let response = ValidatePipelineResponse {
+        validation_failures: failures.into_iter().map(Into::into).collect(),
     };
 
     Ok(Json(response))

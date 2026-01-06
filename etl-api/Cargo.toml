@@ -15,7 +15,9 @@ path = "src/main.rs"
 name = "etl-api"
 
 [dependencies]
-etl-config = { workspace = true, features = ["utoipa"] }
+etl = { workspace = true }
+etl-config = { workspace = true, features = ["utoipa", "supabase"] }
+etl-destinations = { workspace = true, features = ["bigquery", "iceberg"] }
 etl-postgres = { workspace = true, features = ["replication"] }
 etl-telemetry = { workspace = true }
 
@@ -39,7 +41,8 @@ kube = { workspace = true, features = [
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 pg_escape = { workspace = true }
 rand = { workspace = true, features = ["std"] }
-reqwest = { workspace = true, features = ["json"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
+rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 secrecy = { workspace = true }
 sentry = { workspace = true, features = ["actix"] }
 serde = { workspace = true, features = ["derive"] }
@@ -60,6 +63,7 @@ utoipa-swagger-ui = { workspace = true, features = ["actix-web", "reqwest"] }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
+etl-destinations = { workspace = true, features = ["test-utils", "iceberg", "bigquery"] }
 etl-postgres = { workspace = true, features = ["test-utils", "sqlx"] }
 
 insta = { workspace = true, features = ["json", "redactions"] }

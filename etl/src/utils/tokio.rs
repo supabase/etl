@@ -2,6 +2,7 @@
 // available under the MIT License, which provides Rustls-based TLS support for secure asynchronous
 // Postgres connections using the tokio-postgres client.
 
+use aws_lc_rs::digest;
 use const_oid::db::{
     rfc5912::{
         ECDSA_WITH_SHA_256, ECDSA_WITH_SHA_384, ID_SHA_1, ID_SHA_256, ID_SHA_384, ID_SHA_512,
@@ -10,7 +11,6 @@ use const_oid::db::{
     },
     rfc8410::ID_ED_25519,
 };
-use ring::digest;
 use rustls::{ClientConfig, pki_types::ServerName};
 use std::io;
 use std::pin::Pin;

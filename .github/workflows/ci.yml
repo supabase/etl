@@ -99,6 +99,11 @@ jobs:
           ./etl-api/scripts/run_migrations.sh
 
       - name: Run Tests
+        env:
+          TESTS_DATABASE_HOST: localhost
+          TESTS_DATABASE_PORT: 5430
+          TESTS_DATABASE_USERNAME: postgres
+          TESTS_DATABASE_PASSWORD: postgres
         run: |
           cargo test \
             --workspace \
@@ -168,6 +173,11 @@ jobs:
 
       - name: Generate Code Coverage
         id: coverage
+        env:
+          TESTS_DATABASE_HOST: localhost
+          TESTS_DATABASE_PORT: 5430
+          TESTS_DATABASE_USERNAME: postgres
+          TESTS_DATABASE_PASSWORD: postgres
         run: |
           cargo llvm-cov test \
             --workspace --no-fail-fast \

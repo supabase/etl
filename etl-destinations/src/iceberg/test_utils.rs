@@ -1,8 +1,41 @@
-#![allow(dead_code)]
-#![cfg(feature = "iceberg")]
+//! Test utilities for Iceberg destinations.
+//!
+//! Provides a client for managing Lakekeeper warehouses and constants for
+//! connecting to local MinIO and Lakekeeper instances.
 
+use std::collections::HashMap;
+
+use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
 use uuid::Uuid;
 
+/// Default Lakekeeper URL for local testing.
+pub const LAKEKEEPER_URL: &str = "http://localhost:8182";
+
+/// Default MinIO URL for local testing.
+pub const MINIO_URL: &str = "http://localhost:9010";
+
+/// Default MinIO username for local testing.
+pub const MINIO_USERNAME: &str = "minio-admin";
+
+/// Default MinIO password for local testing.
+pub const MINIO_PASSWORD: &str = "minio-admin-password";
+
+/// Returns the Lakekeeper catalog URL.
+pub fn get_catalog_url() -> String {
+    format!("{LAKEKEEPER_URL}/catalog")
+}
+
+/// Creates S3 properties for connecting to MinIO.
+pub fn create_minio_props() -> HashMap<String, String> {
+    let mut props: HashMap<String, String> = HashMap::new();
+    props.insert(S3_ACCESS_KEY_ID.to_string(), MINIO_USERNAME.to_string());
+    props.insert(S3_SECRET_ACCESS_KEY.to_string(), MINIO_PASSWORD.to_string());
+    props.insert(S3_ENDPOINT.to_string(), MINIO_URL.to_string());
+
+    props
+}
+
+/// HTTP client for Lakekeeper warehouse management.
 pub struct LakekeeperClient {
     base_url: String,
     client: reqwest::Client,
@@ -28,7 +61,7 @@ enum CredentialType {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Type {
+enum StorageType {
     S3,
 }
 
@@ -38,7 +71,7 @@ struct StorageCredential {
     aws_access_key_id: String,
     aws_secret_access_key: String,
     credential_type: CredentialType,
-    r#type: Type,
+    r#type: StorageType,
 }
 
 #[derive(serde::Serialize)]
@@ -54,7 +87,7 @@ struct StorageProfile {
     bucket: String,
     region: String,
     sts_enabled: bool,
-    r#type: Type,
+    r#type: StorageType,
     endpoint: String,
     path_style_access: bool,
     flavor: Flavor,
@@ -77,16 +110,16 @@ impl Default for CreateWarehouseRequest {
                 r#type: DeleteProfileType::Hard,
             },
             storage_credential: StorageCredential {
-                aws_access_key_id: "minio-admin".to_string(),
-                aws_secret_access_key: "minio-admin-password".to_string(),
+                aws_access_key_id: MINIO_USERNAME.to_string(),
+                aws_secret_access_key: MINIO_PASSWORD.to_string(),
                 credential_type: CredentialType::AccessKey,
-                r#type: Type::S3,
+                r#type: StorageType::S3,
             },
             storage_profile: StorageProfile {
                 bucket: "dev-and-test".to_string(),
                 region: "local-01".to_string(),
                 sts_enabled: false,
-                r#type: Type::S3,
+                r#type: StorageType::S3,
                 endpoint: "http://minio:9000".to_string(),
                 path_style_access: true,
                 flavor: Flavor::MinIO,
@@ -100,13 +133,14 @@ impl Default for CreateWarehouseRequest {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct CreateWarehouseResponse {
-    warehouse_id: uuid::Uuid,
+    warehouse_id: Uuid,
 }
 
 const PROJECT_ID_HEADER: &str = "x-project-id";
 const PROJECT_ID: &str = "00000000-0000-0000-0000-000000000000";
 
 impl LakekeeperClient {
+    /// Creates a new Lakekeeper client.
     pub fn new(base_url: &str) -> Self {
         let trailing_slash = if base_url.ends_with('/') { "" } else { "/" };
         LakekeeperClient {
@@ -115,8 +149,8 @@ impl LakekeeperClient {
         }
     }
 
-    /// Creates a new warehouse with a random uuid as name
-    pub async fn create_warehouse(&self) -> Result<(String, uuid::Uuid), reqwest::Error> {
+    /// Creates a new warehouse with a random UUID as name.
+    pub async fn create_warehouse(&self) -> Result<(String, Uuid), reqwest::Error> {
         let url = format!("{}/warehouse", self.base_url);
 
         let warehouse = CreateWarehouseRequest::default();
@@ -133,14 +167,14 @@ impl LakekeeperClient {
         Ok((warehouse.warehouse_name, response.warehouse_id))
     }
 
-    /// Drops a warehouse
-    pub async fn drop_warehouse(&self, warehouse_id: uuid::Uuid) -> Result<(), reqwest::Error> {
+    /// Drops a warehouse with retries.
+    pub async fn drop_warehouse(&self, warehouse_id: Uuid) -> Result<(), reqwest::Error> {
         let url = format!("{}/warehouse/{warehouse_id}", self.base_url);
 
         // Even if a warehouse has no namespaces, it can still return an error from a delete
-        // request if the namespace was deleted very recently. So we make a best effort
-        // attempt to delete the warehouse with retries, but do not fail the test if it
-        // still doesn't get deleted. At worst we'll leave some warehouses around if
+        // request if the namespace was deleted very recently. So we make the best effort
+        // to attempt to delete the warehouse with retries but do not fail the test if it
+        // still doesn't get deleted. At worst, we'll leave some warehouses around if
         // that happens.
         const MAX_RETRIES: u8 = 10;
         for _ in 0..MAX_RETRIES {
@@ -149,6 +183,7 @@ impl LakekeeperClient {
             if response.status().is_success() {
                 break;
             }
+
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 

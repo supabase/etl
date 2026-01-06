@@ -22,7 +22,7 @@ use crate::db::images::ImagesDbError;
 use crate::db::pipelines::{
     MAX_PIPELINES_PER_TENANT, PipelinesDbError, count_pipelines_for_tenant, read_pipeline,
 };
-use crate::db::sources::{SourcesDbError, source_exists};
+use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
 
@@ -75,6 +75,9 @@ enum DestinationPipelineError {
 
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
+
+    #[error("Failed to load environment: {0}")]
+    Environment(#[from] std::io::Error),
 }
 
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
@@ -93,7 +96,7 @@ impl From<DestinationPipelinesDbError> for DestinationPipelineError {
 impl DestinationPipelineError {
     fn to_message(&self) -> String {
         match self {
-            // Do not expose internal database details in error messages
+            // Do not expose internal database details in error messages.
             DestinationPipelineError::DestinationPipelinesDb(
                 DestinationPipelinesDbError::Database(_),
             )
@@ -102,7 +105,7 @@ impl DestinationPipelineError {
             | DestinationPipelineError::SourcesDb(SourcesDbError::Database(_))
             | DestinationPipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | DestinationPipelineError::Database(_) => "internal server error".to_string(),
-            // Every other message is ok, as they do not divulge sensitive information
+            // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
     }
@@ -119,7 +122,8 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::SourcesDb(_)
             | DestinationPipelineError::PipelinesDb(_)
             | DestinationPipelineError::Database(_)
-            | DestinationPipelineError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | DestinationPipelineError::TrustedRootCerts(_)
+            | DestinationPipelineError::Environment(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationPipelineError::TenantId(_)
             | DestinationPipelineError::SourceNotFound(_)
             | DestinationPipelineError::DestinationNotFound(_)
@@ -208,17 +212,17 @@ pub async fn create_destination_and_pipeline(
 
     let mut txn = pool.begin().await?;
 
-    if !source_exists(
+    // Verify source exists
+    db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
+        &encryption_key,
     )
     .await?
-    {
-        return Err(DestinationPipelineError::SourceNotFound(
-            destination_and_pipeline.source_id,
-        ));
-    }
+    .ok_or(DestinationPipelineError::SourceNotFound(
+        destination_and_pipeline.source_id,
+    ))?;
 
     let max_pipelines = get_max_pipelines_per_tenant(
         feature_flags_client.as_ref(),
@@ -291,17 +295,17 @@ pub async fn update_destination_and_pipeline(
 
     let mut txn = pool.begin().await?;
 
-    if !source_exists(
+    // Verify source exists
+    db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
+        &encryption_key,
     )
     .await?
-    {
-        return Err(DestinationPipelineError::SourceNotFound(
-            destination_and_pipeline.source_id,
-        ));
-    }
+    .ok_or(DestinationPipelineError::SourceNotFound(
+        destination_and_pipeline.source_id,
+    ))?;
 
     if !destination_exists(txn.deref_mut(), tenant_id, destination_id).await? {
         return Err(DestinationPipelineError::DestinationNotFound(

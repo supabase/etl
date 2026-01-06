@@ -8,12 +8,24 @@ use etl::types::{Event, TableRow};
 use etl_config::Environment;
 use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
 use etl_destinations::bigquery::BigQueryDestination;
-use etl_destinations::encryption::install_crypto_provider;
 use etl_postgres::types::TableId;
 use etl_telemetry::tracing::init_tracing;
 use sqlx::postgres::PgPool;
 use std::error::Error;
+use std::sync::Once;
 use tracing::info;
+
+/// Ensures crypto provider is only initialized once.
+static INIT_CRYPTO: Once = Once::new();
+
+/// Installs the default cryptographic provider for rustls.
+fn install_crypto_provider() {
+    INIT_CRYPTO.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("failed to install default crypto provider");
+    });
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
