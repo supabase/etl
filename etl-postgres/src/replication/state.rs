@@ -277,13 +277,12 @@ pub async fn rollback_replication_state(
         .fetch_one(&mut *conn)
         .await?;
 
-        // If the rollback goes to `Init` or `DataSync`, we also want to clean up the table schema
-        // and table mappings; this way the rollback starts clean.
+        // If the rollback goes to `Init` or `DataSync`, we also want to clean up the table schema;
+        // this way the rollback starts clean.
         if matches!(
             restored_row.state,
             TableReplicationStateType::Init | TableReplicationStateType::DataSync
         ) {
-            delete_table_mappings_for_table(&mut *conn, pipeline_id, &table_id).await?;
             delete_table_schema_for_table(&mut *conn, pipeline_id, table_id).await?;
         }
 
@@ -315,8 +314,7 @@ pub async fn reset_replication_state(
     .execute(&mut *conn)
     .await?;
 
-    // We want to clean up the table schema and table mappings to start fresh.
-    delete_table_mappings_for_table(&mut *conn, pipeline_id, &table_id).await?;
+    // We want to clean up the table schema to start fresh.
     delete_table_schema_for_table(&mut *conn, pipeline_id, table_id).await?;
 
     // Insert a new `Init` state entry and return it
