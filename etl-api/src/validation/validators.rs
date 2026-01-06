@@ -259,17 +259,23 @@ impl Validator for PrimaryKeysValidator {
             .as_ref()
             .expect("source pool required for primary keys validation");
 
-        // Find tables without primary keys
+        // Find tables without primary keys using pg_publication_rel for direct OID access
         let tables_without_pk: Vec<String> = sqlx::query_scalar(
             r#"
-            select pt.schemaname || '.' || pt.tablename
-            from pg_publication_tables pt
-            left join pg_constraint c
-                on c.conrelid = (pt.schemaname || '.' || pt.tablename)::regclass
-                and c.contype = 'p'
-            where pt.pubname = $1
-                and c.oid is null
-            order by pt.schemaname, pt.tablename
+            select n.nspname || '.' || c.relname
+            from pg_publication_rel pr
+            join pg_publication p on p.oid = pr.prpubid
+            join pg_class c on c.oid = pr.prrelid
+            join pg_namespace n on n.oid = c.relnamespace
+            where p.pubname = $1
+              and not exists (
+                select 1
+                from pg_constraint con
+                where con.conrelid = pr.prrelid
+                  and con.contype = 'p'
+              )
+            order by n.nspname, c.relname
+            limit 100
             "#,
         )
         .bind(&self.publication_name)
@@ -314,18 +320,25 @@ impl Validator for GeneratedColumnsValidator {
             .as_ref()
             .expect("source pool required for generated columns validation");
 
-        // Find tables with generated columns
+        // Find tables with generated columns using pg_publication_rel for direct OID access
         let tables_with_generated: Vec<String> = sqlx::query_scalar(
             r#"
-            select distinct pt.schemaname || '.' || pt.tablename
-            from pg_publication_tables pt
-            join pg_attribute a
-                on a.attrelid = (pt.schemaname || '.' || pt.tablename)::regclass
-            where pt.pubname = $1
-                and a.attnum > 0
-                and not a.attisdropped
-                and a.attgenerated != ''
+            select distinct n.nspname || '.' || c.relname
+            from pg_publication_rel pr
+            join pg_publication p on p.oid = pr.prpubid
+            join pg_class c on c.oid = pr.prrelid
+            join pg_namespace n on n.oid = c.relnamespace
+            where p.pubname = $1
+              and exists (
+                select 1
+                from pg_attribute a
+                where a.attrelid = pr.prrelid
+                  and a.attnum > 0
+                  and not a.attisdropped
+                  and a.attgenerated != ''
+              )
             order by 1
+            limit 100
             "#,
         )
         .bind(&self.publication_name)
