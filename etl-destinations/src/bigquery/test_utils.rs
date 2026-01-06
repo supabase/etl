@@ -187,7 +187,7 @@ impl BigQueryDatabase {
             .collect();
 
         let ddl = format!(
-            "CREATE TABLE `{}.{}.{}` ({})",
+            "create table `{}.{}.{}` ({})",
             self.project_id,
             self.dataset_id,
             table_id,
