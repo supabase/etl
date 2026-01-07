@@ -80,6 +80,7 @@ impl Destination for MemoryDestination {
     fn name() -> &'static str {
         "memory"
     }
+
     async fn truncate_table(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,

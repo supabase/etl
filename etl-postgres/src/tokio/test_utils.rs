@@ -414,6 +414,26 @@ impl<G: GenericClient> PgDatabase<G> {
         Ok(row.get(0))
     }
 
+    /// Checks whether a Postgres replication slot is active.
+    ///
+    /// Queries the `pg_replication_slots` system catalog to determine
+    /// if a replication slot with the given name is currently active.
+    /// Returns `false` if the slot does not exist.
+    pub async fn replication_slot_is_active(
+        &self,
+        slot_name: &str,
+    ) -> Result<bool, tokio_postgres::Error> {
+        let query = "select coalesce((select active from pg_replication_slots where slot_name = $1), false)";
+        let row = self
+            .client
+            .as_ref()
+            .unwrap()
+            .query_one(query, &[&slot_name])
+            .await?;
+
+        Ok(row.get(0))
+    }
+
     /// Executes arbitrary SQL on the database.
     pub async fn run_sql(&self, sql: &str) -> Result<u64, tokio_postgres::Error> {
         self.client.as_ref().unwrap().execute(sql, &[]).await
@@ -527,7 +547,7 @@ pub fn id_column_schema() -> ColumnSchema {
 pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<NonZeroI32>) {
     // Create the database via a single connection
     let (client, connection) = {
-        let config: tokio_postgres::Config = config.without_db();
+        let config: tokio_postgres::Config = config.without_db(None);
         config
             .connect(NoTls)
             .await
@@ -563,7 +583,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
 pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Option<NonZeroI32>) {
     // Create a new client connected to the created database
     let (client, connection) = {
-        let config: tokio_postgres::Config = config.with_db();
+        let config: tokio_postgres::Config = config.with_db(None);
         config
             .connect(NoTls)
             .await
@@ -594,7 +614,7 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Opt
 pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Connect to the default database
     let (client, connection) = {
-        let config: tokio_postgres::Config = config.without_db();
+        let config: tokio_postgres::Config = config.without_db(None);
         match config.connect(NoTls).await {
             Ok(conn) => conn,
             Err(e) => {

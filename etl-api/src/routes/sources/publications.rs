@@ -10,9 +10,9 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::config::ApiConfig;
+use crate::db::connect_to_source_database_from_api;
 use crate::db::publications::PublicationsDbError;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
-use crate::routes::connect_to_source_database_with_defaults;
 use crate::{
     configs::encryption::EncryptionKey,
     db::{self, publications::Publication, sources::SourcesDbError, tables::Table},
@@ -138,7 +138,7 @@ pub async fn create_publication(
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
+        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
     let publication = publication.0;
     let publication = Publication {
@@ -185,7 +185,7 @@ pub async fn read_publication(
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
+        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
     let publications = db::publications::read_publication(&publication_name, &source_pool)
         .await?
@@ -231,7 +231,7 @@ pub async fn update_publication(
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
+        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
     let publication = publication.0;
     let publication = Publication {
@@ -278,7 +278,7 @@ pub async fn delete_publication(
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
+        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
     db::publications::drop_publication(&publication_name, &source_pool).await?;
 
@@ -318,7 +318,7 @@ pub async fn read_all_publications(
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
+        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
     let publications = db::publications::read_all_publications(&source_pool).await?;
     let response = ReadPublicationsResponse { publications };

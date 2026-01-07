@@ -1,4 +1,4 @@
-#![cfg(feature = "iceberg")]
+#![cfg(all(feature = "iceberg", feature = "test-utils"))]
 
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::spawn_source_database;
@@ -9,6 +9,7 @@ use etl::test_utils::test_schema::{
     TableSelection, TestDatabaseSchema, insert_mock_data, setup_test_database_schema,
 };
 use etl::types::{Cell, EventType, PipelineId, TableRow};
+use etl_destinations::iceberg::test_utils::LakekeeperClient;
 use etl_destinations::iceberg::{
     DestinationNamespace, IcebergClient, IcebergDestination, IcebergOperationType,
     table_name_to_iceberg_table_name,
@@ -16,8 +17,8 @@ use etl_destinations::iceberg::{
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
-use crate::support::iceberg::{LAKEKEEPER_URL, create_props, get_catalog_url, read_all_rows};
-use crate::support::lakekeeper::LakekeeperClient;
+use crate::support::iceberg::read_all_rows;
+use etl_destinations::iceberg::test_utils::{LAKEKEEPER_URL, create_minio_props, get_catalog_url};
 
 mod support;
 
@@ -48,10 +49,13 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
-            .await
-            .unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
 
     let namespace = match destination_namespace {
         DestinationNamespace::Single(ref ns) => {
@@ -195,10 +199,13 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
-            .await
-            .unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
 
     let namespace = match destination_namespace {
         DestinationNamespace::Single(ref ns) => {
@@ -499,10 +506,13 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
-    let client =
-        IcebergClient::new_with_rest_catalog(get_catalog_url(), warehouse_name, create_props())
-            .await
-            .unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
 
     let namespace = match destination_namespace {
         DestinationNamespace::Single(ref ns) => {

@@ -310,6 +310,155 @@ docker run \
 
 **Note:** While the replicator is typically deployed as a Kubernetes pod managed by the etl-api, it does not require Kubernetes to function. You can run it as a standalone process on any machine with the appropriate configuration.
 
+## Running Tests
+
+The project includes comprehensive test suites that require a PostgreSQL database. Tests use environment variables for database configuration to ensure isolation and reproducibility.
+
+### Test Environment Variables
+
+#### PostgreSQL Test Variables
+
+All tests that interact with PostgreSQL require the following environment variables to be set:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `TESTS_DATABASE_HOST` | **Yes** | PostgreSQL server hostname (e.g., `localhost`) |
+| `TESTS_DATABASE_PORT` | **Yes** | PostgreSQL server port (e.g., `5430`) |
+| `TESTS_DATABASE_USERNAME` | **Yes** | Database user (e.g., `postgres`) |
+| `TESTS_DATABASE_PASSWORD` | No | Database password (optional) |
+
+**Note:** Each test creates a unique database with a UUID-based name to ensure test isolation. The test databases are automatically cleaned up after tests complete.
+
+#### BigQuery Test Variables
+
+BigQuery destination tests require Google Cloud credentials:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `TESTS_BIGQUERY_PROJECT_ID` | **Yes** | GCP project ID for BigQuery |
+| `TESTS_BIGQUERY_SA_KEY_PATH` | **Yes** | Path to service account JSON key file |
+
+**Note:** BigQuery tests are only run when the `bigquery` and `test-utils` features are enabled. Each test creates a unique dataset with a UUID-based name for isolation.
+
+#### Iceberg Test Variables
+
+Iceberg destination tests use local MinIO and Lakekeeper instances. The following services must be running:
+
+- **Lakekeeper**: `http://localhost:8182` (REST catalog)
+- **MinIO**: `http://localhost:9010` (S3-compatible storage)
+  - Username: `minio-admin`
+  - Password: `minio-admin-password`
+
+**Note:** Iceberg tests are only run when the `iceberg` and `test-utils` features are enabled. These use hardcoded local URLs and do not require environment variables.
+
+#### Test Output and Logging
+
+| Variable | Description |
+|----------|-------------|
+| `ENABLE_TRACING=1` | Enable tracing output during test execution (useful for debugging) |
+| `RUST_LOG` | Control log level (e.g., `debug`, `info`, `warn`, `error`) |
+
+**Example:**
+```bash
+# Run tests with debug output
+ENABLE_TRACING=1 RUST_LOG=debug cargo test test_name -- --nocapture
+```
+
+### Setting Up Test Environment
+
+#### Option 1: Inline Environment Variables (Recommended)
+
+The most reliable way is to set environment variables directly in the test command:
+
+```bash
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test -p etl-api
+```
+
+#### Option 2: Export in Current Shell Session
+
+Export variables in your current shell session, then run tests:
+
+```bash
+# PostgreSQL test configuration
+export TESTS_DATABASE_HOST=localhost
+export TESTS_DATABASE_PORT=5430
+export TESTS_DATABASE_USERNAME=postgres
+export TESTS_DATABASE_PASSWORD=postgres
+
+# BigQuery test configuration (optional - only needed for BigQuery tests)
+export TESTS_BIGQUERY_PROJECT_ID=your-gcp-project-id
+export TESTS_BIGQUERY_SA_KEY_PATH=/path/to/service-account-key.json
+
+# Enable test output (optional)
+export ENABLE_TRACING=1
+export RUST_LOG=info
+
+# Now run tests
+cargo test -p etl-api
+```
+
+#### Option 3: Use a `.env` File
+
+Create a `.env.test` file and source it:
+
+```bash
+# .env.test
+
+# PostgreSQL (required for most tests)
+TESTS_DATABASE_HOST=localhost
+TESTS_DATABASE_PORT=5430
+TESTS_DATABASE_USERNAME=postgres
+TESTS_DATABASE_PASSWORD=postgres
+
+# BigQuery (optional - only for BigQuery tests)
+TESTS_BIGQUERY_PROJECT_ID=your-gcp-project-id
+TESTS_BIGQUERY_SA_KEY_PATH=/path/to/service-account-key.json
+
+# Test output (optional)
+ENABLE_TRACING=1
+RUST_LOG=info
+```
+
+```bash
+# Source the file and run tests
+source .env.test
+cargo test -p etl-api
+```
+
+### Running Tests
+
+**Important:** Environment variables must be set in the same command as `cargo test`, or exported in your current shell session before running tests.
+
+```bash
+# Run all tests (requires env variables)
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test
+
+# Run tests for a specific package
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test -p etl-api
+
+# Run tests for packages with test-utils feature (etl, etl-postgres, etl-destinations)
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test -p etl --features test-utils
+
+# Run a specific test
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test -p etl-api --test tenants tenant_can_be_created
+
+# Run tests with tracing output for debugging
+TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres ENABLE_TRACING=1 RUST_LOG=info cargo test -p etl-api --test tenants tenant_can_be_created -- --nocapture
+```
+
+**Packages requiring `--features test-utils`:**
+- `etl`
+- `etl-postgres`
+- `etl-destinations`
+
+**Packages that don't require feature flags:**
+- `etl-api`
+- `etl-config`
+- `etl-telemetry`
+- `etl-replicator`
+
+**Note:** Ensure PostgreSQL is running and accessible at the configured host and port before running tests. The test suite will fail if it cannot connect to the database or if the required environment variables are not set.
+
 ## Troubleshooting
 
 ### Database Connection Issues

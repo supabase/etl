@@ -43,7 +43,7 @@ use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
 use secrecy::ExposeSecret;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use tracing::{error, info, warn};
 
 mod config;
@@ -56,12 +56,32 @@ mod notification;
 /// The name of the environment variable which contains version information for this replicator.
 const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
 
+/// Ensures crypto provider is only initialized once.
+static INIT_CRYPTO: Once = Once::new();
+
+/// Installs the default cryptographic provider for rustls.
+///
+/// Uses AWS LC cryptographic provider and ensures it's only installed once
+/// across the application lifetime to avoid conflicts. This is needed because
+/// Cargo's feature unification causes rustls to have both ring and aws-lc-rs
+/// features enabled, requiring explicit selection.
+fn install_crypto_provider() {
+    INIT_CRYPTO.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("failed to install default crypto provider");
+    });
+}
+
 /// Entry point for the replicator service.
 ///
 /// Loads configuration, initializes tracing and Sentry, starts the async runtime,
 /// and launches the replicator pipeline. Handles all errors and ensures proper
 /// service initialization sequence.
 fn main() -> anyhow::Result<()> {
+    // Install rustls crypto provider before any TLS operations
+    install_crypto_provider();
+
     // Load replicator config
     let replicator_config = load_replicator_config()?;
 

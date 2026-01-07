@@ -17,6 +17,7 @@ default = []
 etl-config = { workspace = true }
 etl-postgres = { workspace = true, features = ["tokio", "replication"] }
 
+aws-lc-rs = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
@@ -28,7 +29,6 @@ pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
-ring = { workspace = true, default-features = false }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }

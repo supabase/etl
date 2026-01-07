@@ -148,7 +148,7 @@ async fn test_state_store_rollback() {
         .unwrap();
 
     // Verify two rows exist before rollback (init + data_sync)
-    let pool = connect_to_source_database(&database.config, 1, 1)
+    let pool = connect_to_source_database(&database.config, 1, 1, None)
         .await
         .expect("Failed to connect to source database with sqlx");
     let count_before: i64 = sqlx::query_scalar(
@@ -984,7 +984,7 @@ async fn test_replication_mask_loads_correctly_from_string_bytea() {
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
 
-    let pool = connect_to_source_database(&database.config, 1, 1)
+    let pool = connect_to_source_database(&database.config, 1, 1, None)
         .await
         .expect("Failed to connect to source database with sqlx");
 
@@ -1032,7 +1032,7 @@ async fn test_replication_mask_various_patterns() {
     let database = spawn_source_database().await;
     let pipeline_id = 1;
 
-    let pool = connect_to_source_database(&database.config, 1, 1)
+    let pool = connect_to_source_database(&database.config, 1, 1, None)
         .await
         .expect("Failed to connect to source database with sqlx");
 

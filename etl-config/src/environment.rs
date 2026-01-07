@@ -32,6 +32,7 @@ impl Environment {
     ///
     /// Defaults to [`Environment::Prod`] if the variable is not set.
     pub fn load() -> Result<Environment, Error> {
+        // TODO: maybe we want to wrap this error with its own type to make the interface more usable.
         std::env::var(APP_ENVIRONMENT_ENV_NAME)
             .unwrap_or_else(|_| PROD_ENV_NAME.into())
             .try_into()
@@ -47,6 +48,17 @@ impl Environment {
     /// Returns `true` for both [`Environment::Prod`] and [`Environment::Staging`].
     pub fn is_prod(&self) -> bool {
         matches!(self, Self::Prod | Self::Staging)
+    }
+
+    /// Returns the Supabase domain for the given environment.
+    ///
+    /// We can assume that this URL is stable and thus encoding it in code is enough.
+    #[cfg(feature = "supabase")]
+    pub fn get_supabase_domain(&self) -> &'static str {
+        match self {
+            Environment::Prod => "supabase.co",
+            Environment::Staging | Environment::Dev => "supabase.red",
+        }
     }
 }
 

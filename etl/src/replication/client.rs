@@ -1,7 +1,7 @@
 use crate::error::{ErrorKind, EtlResult};
 use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
-use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_config::shared::{ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig};
 use etl_postgres::below_version;
 use etl_postgres::replication::extract_server_version;
 use etl_postgres::types::convert_type_oid_to_type;
@@ -185,7 +185,9 @@ impl PgReplicationClient {
     ///
     /// The connection is configured for logical replication mode.
     async fn connect_no_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
-        let mut config: Config = pg_connection_config.clone().with_db();
+        let mut config: Config = pg_connection_config
+            .clone()
+            .with_db(Some(&ETL_REPLICATION_OPTIONS));
         config.replication_mode(ReplicationMode::Logical);
 
         let (client, connection) = config.connect(NoTls).await?;
@@ -208,7 +210,9 @@ impl PgReplicationClient {
     ///
     /// The connection is configured for logical replication mode
     async fn connect_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
-        let mut config: Config = pg_connection_config.clone().with_db();
+        let mut config: Config = pg_connection_config
+            .clone()
+            .with_db(Some(&ETL_REPLICATION_OPTIONS));
         config.replication_mode(ReplicationMode::Logical);
 
         let mut root_store = rustls::RootCertStore::empty();

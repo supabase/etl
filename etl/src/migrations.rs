@@ -1,10 +1,4 @@
-//! Database migration management for the ETL pipeline.
-//!
-//! Handles schema creation and migration execution for the ETL state store.
-//! Migrations are embedded at compile time and run automatically during
-//! pipeline startup.
-
-use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_config::shared::{ETL_MIGRATION_OPTIONS, IntoConnectOptions, PgConnectionConfig};
 use sqlx::{Executor, postgres::PgPoolOptions};
 use tracing::info;
 
@@ -16,7 +10,7 @@ use tracing::info;
 pub async fn apply_etl_migrations(
     connection_config: &PgConnectionConfig,
 ) -> Result<(), sqlx::Error> {
-    let options = connection_config.with_db();
+    let options = connection_config.with_db(Some(&ETL_MIGRATION_OPTIONS));
 
     let pool = PgPoolOptions::new()
         .after_connect(|conn, _meta| {
