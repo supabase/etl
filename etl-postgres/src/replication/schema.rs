@@ -103,6 +103,7 @@ define_type_mappings! {
     // Other common types
     OID => "OID",
     XML => "XML",
+    PG_LSN => "PG_LSN",
 
     // Text search types
     TS_VECTOR => "TSVECTOR",
@@ -151,7 +152,7 @@ pub async fn store_table_schema(
         insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name)
         values ($1, $2, $3, $4)
         on conflict (pipeline_id, table_id)
-        do update set 
+        do update set
             schema_name = excluded.schema_name,
             table_name = excluded.table_name,
             updated_at = now()
@@ -178,7 +179,7 @@ pub async fn store_table_schema(
 
         sqlx::query(
             r#"
-            insert into etl.table_columns 
+            insert into etl.table_columns
             (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order)
             values ($1, $2, $3, $4, $5, $6, $7)
             "#,
