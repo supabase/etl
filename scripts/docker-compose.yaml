@@ -18,7 +18,7 @@ services:
     ports:
       - "${POSTGRES_PORT:-5430}:5432"
     volumes:
-      - ${POSTGRES_DATA_VOLUME:-postgres_data}:/var/lib/postgresql/data
+      - ${POSTGRES_DATA_VOLUME:-postgres_data}:/var/lib/postgresql
     # These parameters are configured for local testing only.
     # In production, use PostgreSQL defaults or your own tuned values.
     # `wal_sender_timeout/2` is the keepalive timeout for streaming replication, we set it to 10s to make tests
@@ -38,13 +38,13 @@ services:
       retries: 5
 
   catalog-postgres:
-      image: postgres:${LAKEKEEPER_POSTGRES_VERSION:-17}
+      image: postgres:${LAKEKEEPER_POSTGRES_VERSION:-18}
       environment:
         POSTGRES_USER: ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres}
         POSTGRES_PASSWORD: ${LAKEKEEPER_POSTGRES_PASSWORD:-lakekeeper-postgres}
         POSTGRES_DB: ${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}
       volumes:
-        - ${LAKEKEEPER_POSTGRES_DATA_VOLUME:-lakekeeper_postgres_data}:/var/lib/postgresql/data
+        - ${LAKEKEEPER_POSTGRES_DATA_VOLUME:-lakekeeper_postgres_data}:/var/lib/postgresql
       restart: unless-stopped
       healthcheck:
         test: ["CMD-SHELL", "pg_isready -U ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres} -d ${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}"]
