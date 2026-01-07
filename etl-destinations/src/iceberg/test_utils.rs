@@ -120,7 +120,7 @@ impl Default for CreateWarehouseRequest {
                 region: "local-01".to_string(),
                 sts_enabled: false,
                 r#type: StorageType::S3,
-                endpoint: "http://minio:9000".to_string(),
+                endpoint: "http://object-store-minio:9000".to_string(),
                 path_style_access: true,
                 flavor: Flavor::MinIO,
                 key_prefix: Uuid::new_v4().to_string(),
