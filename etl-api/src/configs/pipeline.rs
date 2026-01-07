@@ -58,7 +58,6 @@ impl From<ApiReplicationSlotPersistence> for ReplicationSlotPersistence {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct ApiReplicationSlotConfig {
-    #[schema(example = false)]
     pub persistence: ApiReplicationSlotPersistence,
 }
 
