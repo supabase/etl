@@ -1,4 +1,4 @@
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig};
+use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig};
 use uuid::Uuid;
 
 use crate::destination::Destination;
@@ -39,6 +39,7 @@ where
         table_error_retry_delay_ms: 1000,
         table_error_retry_max_attempts: 2,
         max_table_sync_workers: 1,
+        table_sync_copy: TableSyncCopyConfig::default(),
     };
 
     Pipeline::new(config, store, destination)
@@ -69,6 +70,7 @@ where
         table_error_retry_delay_ms: 1000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: 1,
+        table_sync_copy: TableSyncCopyConfig::default(),
     };
 
     Pipeline::new(config, store, destination)
