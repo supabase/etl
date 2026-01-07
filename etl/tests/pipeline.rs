@@ -14,7 +14,7 @@ use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{
     TableSelection, assert_events_equal, build_expected_orders_inserts,
     build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
-    insert_mock_data, insert_users_data, setup_test_database_schema,
+    insert_mock_data, insert_orders_data, insert_users_data, setup_test_database_schema,
 };
 use etl::types::{Event, EventType, InsertEvent, PipelineId, Type};
 use etl_config::shared::{BatchConfig, TableSyncCopyConfig};
@@ -525,6 +525,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
 async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
     init_test_tracing();
 
+    #[derive(Debug)]
     enum TableCopyCase {
         IncludeAll,
         SkipAll,
@@ -532,33 +533,37 @@ async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
         SkipOnly,
     }
 
-    let variants = vec![
-        ("include_all_tables", TableCopyCase::IncludeAll, true),
-        ("skip_all_tables", TableCopyCase::SkipAll, false),
-        ("include_tables", TableCopyCase::IncludeOnly, true),
-        ("skip_tables", TableCopyCase::SkipOnly, false),
-    ];
-
-    for (label, selection_case, should_copy) in variants {
+    for table_copy_case in [
+        TableCopyCase::IncludeAll,
+        TableCopyCase::SkipAll,
+        TableCopyCase::IncludeOnly,
+        TableCopyCase::SkipOnly,
+    ] {
         let mut database = spawn_source_database().await;
-        let database_schema =
-            setup_test_database_schema(&database, TableSelection::UsersOnly).await;
-        let users_table_id = database_schema.users_schema().id;
+        let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
-        // We insert a single user.
-        insert_users_data(&mut database, &database_schema.users_schema().name, 0..=0).await;
+        let users_table_id = database_schema.users_schema().id;
+        let orders_table_id = database_schema.orders_schema().id;
+        let users_table_name = database_schema.users_schema().name.clone();
+        let orders_table_name = database_schema.orders_schema().name.clone();
+
+        // We insert a single user and order.
+        insert_users_data(&mut database, &users_table_name, 0..=0).await;
+        insert_orders_data(&mut database, &orders_table_name, 0..=0).await;
 
         let store = NotifyingStore::new();
         let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
         let pipeline_id: PipelineId = random();
-        let table_sync_copy = match selection_case {
+        let table_sync_copy = match table_copy_case {
             TableCopyCase::IncludeAll => TableSyncCopyConfig::IncludeAllTables,
             TableCopyCase::SkipAll => TableSyncCopyConfig::SkipAllTables,
             TableCopyCase::IncludeOnly => TableSyncCopyConfig::IncludeTables {
+                // We include only the users table.
                 table_ids: vec![users_table_id.into_inner()],
             },
             TableCopyCase::SkipOnly => TableSyncCopyConfig::SkipTables {
+                // We exclude only the users table.
                 table_ids: vec![users_table_id.into_inner()],
             },
         };
@@ -581,13 +586,14 @@ async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
 
         table_ready_notify.notified().await;
 
-        // We wait for the insert.
+        // We wait for the two inserts.
         let events_notify = destination
-            .wait_for_events_count(vec![(EventType::Insert, 1)])
+            .wait_for_events_count(vec![(EventType::Insert, 2)])
             .await;
 
         // We insert additional data.
-        insert_users_data(&mut database, &database_schema.users_schema().name, 0..=0).await;
+        insert_users_data(&mut database, &users_table_name, 1..=1).await;
+        insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
 
         events_notify.notified().await;
 
@@ -595,35 +601,39 @@ async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
 
         // We validate that the table rows are correct.
         let table_rows = destination.get_table_rows().await;
-        let copied_rows = table_rows
+        let users_table_copied_rows = table_rows
             .get(&users_table_id)
             .map(|rows| rows.len())
             .unwrap_or(0);
+        let orders_table_copied_rows = table_rows
+            .get(&orders_table_id)
+            .map(|rows| rows.len())
+            .unwrap_or(0);
 
-        let expected_rows = if should_copy { 1 } else { 0 };
-        assert_eq!(
-            copied_rows, expected_rows,
-            "expected table copy for variant {label}"
-        );
+        let (expected_users_rows, expected_orders_rows) = match table_copy_case {
+            TableCopyCase::IncludeAll => (1, 1),
+            TableCopyCase::SkipAll => (0, 0),
+            TableCopyCase::IncludeOnly => (1, 0),
+            TableCopyCase::SkipOnly => (0, 1),
+        };
+        assert_eq!(users_table_copied_rows, expected_users_rows);
+        assert_eq!(orders_table_copied_rows, expected_orders_rows);
         // We always expect the method to be called since the downstream table should be created
         // nonetheless.
-        assert!(
-            destination.write_table_rows_called().await > 0,
-            "expected write_table_rows for variant {label}"
-        );
+        assert_eq!(destination.write_table_rows_called().await, 2);
 
         // We validate that the single insert was received.
         let events = destination.get_events().await;
         let grouped_events = group_events_by_type_and_table_id(&events);
         let users_inserts = grouped_events
-            .get(&(EventType::Insert, database_schema.users_schema().id))
+            .get(&(EventType::Insert, users_table_id))
+            .unwrap();
+        let orders_inserts = grouped_events
+            .get(&(EventType::Insert, orders_table_id))
             .unwrap();
 
-        assert_eq!(
-            users_inserts.len(),
-            1,
-            "expected single insert for variant {label}"
-        );
+        assert_eq!(users_inserts.len(), 1);
+        assert_eq!(orders_inserts.len(), 1);
     }
 }
 
