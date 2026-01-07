@@ -4,6 +4,8 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "egress")]
+use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
 use etl::destination::Destination;
@@ -17,8 +19,7 @@ use etl::types::{
 use etl::{bail, etl_error};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::log::warn;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// CDC operation types for Iceberg changelog tables.
 ///
@@ -195,7 +196,8 @@ where
             // table schema is not there.
             if !is_cdc_truncate {
                 warn!(
-                    "the table schema for table {table_id} was not found in the schema store while processing truncate events for Iceberg",
+                    %table_id,
+                    "table schema not found in schema store while processing truncate events for iceberg"
                 );
 
                 return Ok(());
@@ -216,7 +218,8 @@ where
             // table mapping is not there.
             if !is_cdc_truncate {
                 warn!(
-                    "the table mapping for table {table_id} was not found in the state store while processing truncate events for Iceberg",
+                    %table_id,
+                    "table mapping not found in state store while processing truncate events for iceberg"
                 );
 
                 return Ok(());
@@ -273,21 +276,14 @@ where
         }
 
         if !table_rows.is_empty() {
+            #[allow(unused_variables)]
             let bytes_sent = self
                 .client
                 .insert_rows(namespace, iceberg_table_name, table_rows)
                 .await?;
 
-            // Logs with egress_metric = true can be used to identify egress logs.
-            // This can e.g. be used to send egress logs to a location different
-            // than the other logs. These logs should also have bytes_sent set to
-            // the number of bytes sent to the destination.
-            info!(
-                bytes_sent,
-                phase = "table_copy",
-                egress_metric = true,
-                "wrote table rows to iceberg"
-            );
+            #[cfg(feature = "egress")]
+            log_processed_bytes(Self::name(), PROCESSING_TYPE_TABLE_COPY, bytes_sent, 0);
         }
 
         Ok(())
@@ -341,7 +337,7 @@ where
                     }
                     Event::Delete(delete) => {
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
-                            info!("the `DELETE` event has no row, so it was skipped");
+                            info!("delete event has no row, skipping");
                             continue;
                         };
 
@@ -356,9 +352,9 @@ where
                             table_id_to_table_rows.entry(delete.table_id).or_default();
                         table_rows.push(old_table_row);
                     }
-                    _ => {
+                    event => {
                         // Every other event type is currently not supported.
-                        debug!("skipping unsupported event in iceberg");
+                        debug!(event_type = %event.event_type(), "skipping unsupported event type");
                     }
                 }
             }
@@ -385,22 +381,16 @@ where
                     });
                 }
 
+                #[cfg_attr(not(feature = "egress"), allow(unused_mut, unused_variables))]
                 let mut bytes_sent = 0;
+                #[cfg_attr(not(feature = "egress"), allow(unused_assignments))]
                 while let Some(insert_result) = join_set.join_next().await {
                     bytes_sent += insert_result
                         .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
                 }
 
-                // Logs with egress_metric = true can be used to identify egress logs.
-                // This can e.g. be used to send egress logs to a location different
-                // than the other logs. These logs should also have bytes_sent set to
-                // the number of bytes sent to the destination.
-                info!(
-                    bytes_sent,
-                    phase = "apply",
-                    egress_metric = true,
-                    "wrote cdc events to iceberg"
-                );
+                #[cfg(feature = "egress")]
+                log_processed_bytes(Self::name(), PROCESSING_TYPE_STREAMING, bytes_sent, 0);
             }
 
             // Collect and deduplicate all table IDs from all truncate events.
@@ -471,7 +461,7 @@ where
     }
 
     /// Creates a namespace if it is missing in the destination.
-    /// Once created adds it to the created_namesapces HashMap to
+    /// Once created adds it to the created_namespaces HashSet to
     /// avoid creating it again.
     async fn create_namespace_if_missing(
         &self,
@@ -493,7 +483,7 @@ where
     }
 
     /// Creates a table if it is missing in the destination.
-    /// Once created adds it to the created_trees HashMap to
+    /// Once created adds it to the created_tables HashSet to
     /// avoid creating it again.
     async fn create_table_if_missing(
         &self,

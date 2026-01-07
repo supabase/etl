@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use etl::config::ReplicationSlotConfig;
+use etl::config::{ReplicationSlotConfig, ReplicationSlotPersistence};
 use etl::error::ErrorKind;
 use etl::replication::client::{CreateSlotResult, PgReplicationClient};
 use etl::test_utils::database::{spawn_source_database, test_table_name};
@@ -186,7 +186,7 @@ async fn test_replication_client_temporary_slot_dropped_on_disconnect() {
     let slot_name = test_slot_name("my_slot");
     assert!(matches!(
         client
-            .create_slot(&slot_name, ReplicationSlotConfig { temporary: true })
+            .create_slot(&slot_name, ReplicationSlotConfig { persistence: ReplicationSlotPersistence::Temporary })
             .await,
         Ok(CreateSlotResult {
             consistent_point: _
@@ -204,7 +204,7 @@ async fn test_replication_client_temporary_slot_dropped_on_disconnect() {
 
     assert!(matches!(
         client
-            .create_slot(&slot_name, ReplicationSlotConfig { temporary: true })
+            .create_slot(&slot_name, ReplicationSlotConfig { persistence: ReplicationSlotPersistence::Temporary })
             .await,
         Ok(CreateSlotResult {
             consistent_point: _
@@ -223,7 +223,7 @@ async fn test_replication_client_permanent_slot_persisted_on_disconnect() {
     let slot_name = test_slot_name("my_slot");
     assert!(matches!(
         client
-            .create_slot(&slot_name, ReplicationSlotConfig { temporary: false })
+            .create_slot(&slot_name, ReplicationSlotConfig { persistence: ReplicationSlotPersistence::Permanent })
             .await,
         Ok(CreateSlotResult {
             consistent_point: _
@@ -240,7 +240,7 @@ async fn test_replication_client_permanent_slot_persisted_on_disconnect() {
         .unwrap();
 
     assert!(matches!(
-        client.create_slot(&slot_name, ReplicationSlotConfig { temporary: false }).await,
+        client.create_slot(&slot_name, ReplicationSlotConfig { persistence: ReplicationSlotPersistence::Permanent }).await,
         Err(ref err) if err.kind() == ErrorKind::ReplicationSlotAlreadyExists,
     ));
 }
@@ -275,7 +275,7 @@ async fn test_table_schema_copy_is_consistent() {
 
     // We use the transaction to consistently read the table schemas.
     let table_1_schema = transaction
-        .get_table_schemas(&[table_1_id], None)
+        .get_table_schema(table_1_id, None)
         .await
         .unwrap();
     transaction.commit().await.unwrap();
@@ -327,7 +327,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
 
     // We use the transaction to consistently read the table schemas.
     let table_1_schema = transaction
-        .get_table_schemas(&[table_1_id], None)
+        .get_table_schema(table_1_id, None)
         .await
         .unwrap();
     transaction.commit().await.unwrap();
@@ -362,11 +362,11 @@ async fn test_table_schema_copy_across_multiple_connections() {
 
     // We use the transaction to consistently read the table schemas.
     let table_1_schema = transaction
-        .get_table_schemas(&[table_1_id], None)
+        .get_table_schema(table_1_id, None)
         .await
         .unwrap();
     let table_2_schema = transaction
-        .get_table_schemas(&[table_2_id], None)
+        .get_table_schema(table_2_id, None)
         .await
         .unwrap();
     transaction.commit().await.unwrap();
@@ -588,12 +588,12 @@ async fn test_table_copy_stream_respects_column_filter() {
         .unwrap();
 
     // Get table schema with the publication - should only include published columns.
-    let table_schemas = transaction
-        .get_table_schemas(&[test_table_id], Some(publication_name))
+    let table_schema = transaction
+        .get_table_schema(test_table_id, Some(publication_name))
         .await
         .unwrap();
     assert_table_schema(
-        &table_schemas,
+        &table_schema,
         test_table_id,
         test_table_name,
         &[
@@ -619,7 +619,7 @@ async fn test_table_copy_stream_respects_column_filter() {
     let stream = transaction
         .get_table_copy_stream(
             test_table_id,
-            &table_schemas[&test_table_id].column_schemas,
+            &table_schema.column_schemas,
             Some("test_pub"),
         )
         .await

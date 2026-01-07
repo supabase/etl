@@ -9,9 +9,9 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::config::ApiConfig;
+use crate::db::connect_to_source_database_from_api;
 use crate::db::tables::TablesDbError;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
-use crate::routes::connect_to_source_database_with_defaults;
 use crate::{
     configs::encryption::EncryptionKey,
     db::{self, sources::SourcesDbError, tables::Table},
@@ -116,7 +116,7 @@ pub async fn read_table_names(
         .get_tls_config(api_config.source_tls_enabled)
         .await?;
     let source_pool =
-        connect_to_source_database_with_defaults(&source_config.into_connection_config(tls_config))
+        connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
     let tables = db::tables::get_tables(&source_pool).await?;
     let response = ReadTablesResponse { tables };

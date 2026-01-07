@@ -4,6 +4,9 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_number};
 use etl::{bail, etl_error};
+
+#[cfg(feature = "egress")]
+use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use gcp_bigquery_client::storage::TableDescriptor;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -177,8 +180,35 @@ pub struct BigQueryDestination<S> {
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore,
+    S: StateStore + SchemaStore + Send + Sync,
 {
+    /// Creates a new [`BigQueryDestination`] with a pre-configured client.
+    ///
+    /// Accepts an existing [`BigQueryClient`] instance, allowing the caller to control
+    /// client creation separately from destination initialization. This is useful for
+    /// validation scenarios where you want to create and validate the client first.
+    pub fn new(
+        client: BigQueryClient,
+        dataset_id: BigQueryDatasetId,
+        max_staleness_mins: Option<u16>,
+        max_concurrent_streams: usize,
+        store: S,
+    ) -> Self {
+        let inner = Inner {
+            created_tables: HashSet::new(),
+            created_views: HashMap::new(),
+        };
+
+        Self {
+            client,
+            dataset_id,
+            max_staleness_mins,
+            max_concurrent_streams,
+            store,
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+
     /// Creates a new [`BigQueryDestination`] using a service account key file path.
     ///
     /// Initializes the BigQuery client with the provided credentials and project settings.
@@ -358,10 +388,11 @@ where
             // Add the sequenced table to the cache.
             Self::add_to_created_tables_cache(&mut inner, &sequenced_bigquery_table_id);
 
-            debug!("sequenced table {sequenced_bigquery_table_id} added to creation cache");
+            debug!(%sequenced_bigquery_table_id, "sequenced table added to creation cache");
         } else {
             debug!(
-                "sequenced table {sequenced_bigquery_table_id} found in creation cache, skipping existence check"
+                %sequenced_bigquery_table_id,
+                "sequenced table found in creation cache, skipping existence check"
             );
         }
 
@@ -438,8 +469,9 @@ where
             && current_target == target_table_id
         {
             debug!(
-                "view {} already points to {}, skipping creation",
-                view_name, target_table_id
+                %view_name,
+                %target_table_id,
+                "view already points to target, skipping creation"
             );
 
             return Ok(false);
@@ -455,8 +487,9 @@ where
             .insert(view_name.clone(), target_table_id.clone());
 
         debug!(
-            "view {} created/updated to point to {}",
-            view_name, target_table_id
+            %view_name,
+            %target_table_id,
+            "view created/updated to point to target"
         );
 
         Ok(true)
@@ -501,21 +534,18 @@ where
 
         // Stream all the batches concurrently.
         if !table_batches.is_empty() {
+            #[allow(unused_variables)]
             let (bytes_sent, bytes_received) = self
                 .client
                 .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
                 .await?;
 
-            // Logs with egress_metric = true can be used to identify egress logs.
-            // This can e.g. be used to send egress logs to a location different
-            // than the other logs. These logs should also have bytes_sent set to
-            // the number of bytes sent to the destination.
-            info!(
-                bytes_sent,
-                bytes_received,
-                phase = "table_copy",
-                egress_metric = true,
-                "wrote table rows to bigquery"
+            #[cfg(feature = "egress")]
+            log_processed_bytes(
+                Self::name(),
+                PROCESSING_TYPE_TABLE_COPY,
+                bytes_sent as u64,
+                bytes_received as u64,
             );
         }
 
@@ -568,7 +598,7 @@ where
                     }
                     Event::Delete(delete) => {
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
-                            info!("the `DELETE` event has no row, so it was skipped");
+                            info!("delete event has no row, skipping");
                             continue;
                         };
 
@@ -583,9 +613,9 @@ where
                             table_id_to_table_rows.entry(delete.table_id).or_default();
                         table_rows.push(old_table_row);
                     }
-                    _ => {
+                    event => {
                         // Every other event type is currently not supported.
-                        debug!("skipping unsupported event in BigQuery");
+                        debug!(event_type = %event.event_type(), "skipping unsupported event type");
                     }
                 }
             }
@@ -608,21 +638,18 @@ where
                 }
 
                 if !table_batches.is_empty() {
+                    #[allow(unused_variables)]
                     let (bytes_sent, bytes_received) = self
                         .client
                         .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
                         .await?;
 
-                    // Logs with egress_metric = true can be used to identify egress logs.
-                    // This can e.g. be used to send egress logs to a location different
-                    // than the other logs. These logs should also have bytes_sent set to
-                    // the number of bytes sent to the destination.
-                    info!(
-                        bytes_sent,
-                        bytes_received,
-                        phase = "apply",
-                        egress_metric = true,
-                        "wrote cdc events to bigquery"
+                    #[cfg(feature = "egress")]
+                    log_processed_bytes(
+                        Self::name(),
+                        PROCESSING_TYPE_STREAMING,
+                        bytes_sent as u64,
+                        bytes_received as u64,
                     );
                 }
             }
@@ -673,7 +700,8 @@ where
             // CDC, it's a problem if the schema disappears while streaming, so we error out.
             if !is_cdc_truncate {
                 warn!(
-                    "the table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery",
+                    %table_id,
+                    "table schema not found in schema store while processing truncate events for bigquery"
                 );
 
                 continue;
@@ -703,8 +731,9 @@ where
             let next_sequenced_bigquery_table_id = sequenced_bigquery_table_id.next();
 
             info!(
-                "processing truncate for table {}: creating new version {}",
-                table_id, next_sequenced_bigquery_table_id
+                %table_id,
+                %next_sequenced_bigquery_table_id,
+                "processing truncate, creating new version"
             );
 
             // Create or replace the new table.
@@ -749,8 +778,9 @@ where
             //   is successfully processed, the system should be consistent.
 
             info!(
-                "successfully processed truncate for {}: new table {}, view updated",
-                table_id, next_sequenced_bigquery_table_id
+                %table_id,
+                %next_sequenced_bigquery_table_id,
+                "successfully processed truncate, view updated"
             );
 
             // We remove the old table from the cache since it's no longer necessary.
@@ -767,13 +797,14 @@ where
                     .await
                 {
                     warn!(
-                        "failed to drop previous table {}: {}",
-                        sequenced_bigquery_table_id, err
+                        %sequenced_bigquery_table_id,
+                        error = %err,
+                        "failed to drop previous table"
                     );
                 } else {
                     info!(
-                        "successfully cleaned up previous table {}",
-                        sequenced_bigquery_table_id
+                        %sequenced_bigquery_table_id,
+                        "successfully cleaned up previous table"
                     );
                 }
             });

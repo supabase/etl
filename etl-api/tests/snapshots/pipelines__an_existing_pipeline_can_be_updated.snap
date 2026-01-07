@@ -4,9 +4,6 @@ expression: response.config
 ---
 FullApiPipelineConfig {
     publication_name: "updated_publication",
-    replication_slot: ApiReplicationSlotConfig {
-        temporary: false,
-    },
     batch: Some(
         ApiBatchConfig {
             max_size: Some(
@@ -25,6 +22,14 @@ FullApiPipelineConfig {
     ),
     max_table_sync_workers: Some(
         4,
+    ),
+    table_sync_copy: Some(
+        IncludeAllTables,
+    ),
+    replication_slot: Some(
+        ApiReplicationSlotConfig {
+            persistence: Permanent,
+        },
     ),
     log_level: Some(
         Info,

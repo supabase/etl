@@ -7,14 +7,28 @@ use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::notify::NotifyingStore;
 use etl::types::{Event, TableRow};
 use etl_config::Environment;
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
+use etl_config::shared::{
+    BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig, TlsConfig,
+};
 use etl_destinations::bigquery::BigQueryDestination;
-use etl_destinations::encryption::install_crypto_provider;
 use etl_postgres::types::TableId;
 use etl_telemetry::tracing::init_tracing;
 use sqlx::postgres::PgPool;
 use std::error::Error;
+use std::sync::Once;
 use tracing::info;
+
+/// Ensures crypto provider is only initialized once.
+static INIT_CRYPTO: Once = Once::new();
+
+/// Installs the default cryptographic provider for rustls.
+fn install_crypto_provider() {
+    INIT_CRYPTO.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("failed to install default crypto provider");
+    });
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -249,7 +263,7 @@ struct PrepareArgs {
 }
 
 async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
-    info!("Preparing benchmark environment...");
+    info!("preparing benchmark environment");
 
     // Build connection string
     let mut connection_string = format!(
@@ -271,12 +285,12 @@ async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
         connection_string.push_str("?sslmode=disable");
     }
 
-    info!("Connecting to database at {}:{}", args.host, args.port);
+    info!(host = %args.host, port = %args.port, "connecting to database");
 
     // Connect to the database
     let pool = PgPool::connect(&connection_string).await?;
 
-    info!("Cleaning up existing replication slots...");
+    info!("cleaning up existing replication slots");
 
     // Execute the cleanup SQL
     let cleanup_sql = r#"
@@ -293,7 +307,7 @@ async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
 
     sqlx::query(cleanup_sql).execute(&pool).await?;
 
-    info!("Replication slots cleanup completed successfully!");
+    info!("replication slots cleanup completed");
 
     // Close the connection
     pool.close().await;
@@ -302,13 +316,16 @@ async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
 }
 
 async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
-    info!("Starting ETL pipeline benchmark");
+    info!("starting etl pipeline benchmark");
     info!(
-        "Database: {}@{}:{}/{}",
-        args.username, args.host, args.port, args.database
+        username = %args.username,
+        host = %args.host,
+        port = %args.port,
+        database = %args.database,
+        "connecting to database"
     );
-    info!("Table IDs: {:?}", args.table_ids);
-    info!("Destination: {:?}", args.destination);
+    info!(table_ids = ?args.table_ids, "target tables");
+    info!(destination = ?args.destination, "destination type");
 
     let pg_connection_config = PgConnectionConfig {
         host: args.host,
@@ -337,6 +354,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.max_table_sync_workers,
+        table_sync_copy: TableSyncCopyConfig::default(),
     };
 
     // Create the appropriate destination based on the argument
@@ -382,21 +400,21 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     }
 
     let mut pipeline = Pipeline::new(pipeline_config, store, destination);
-    info!("Starting pipeline...");
+    info!("starting pipeline");
     pipeline.start().await?;
 
     info!(
-        "Waiting for all {} tables to complete copy phase...",
-        args.table_ids.len()
+        table_count = args.table_ids.len(),
+        "waiting for tables to complete copy phase"
     );
     for notification in table_copied_notifications {
         notification.notified().await;
     }
-    info!("All tables completed copy phase");
+    info!("all tables completed copy phase");
 
-    info!("Shutting down pipeline...");
+    info!("shutting down pipeline");
     pipeline.shutdown_and_wait().await?;
-    info!("ETL pipeline benchmark completed successfully");
+    info!("etl pipeline benchmark completed");
 
     Ok(())
 }

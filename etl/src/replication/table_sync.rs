@@ -7,11 +7,10 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::pin;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::signal::SignalTx;
 use crate::concurrency::stream::TimeoutBatchStream;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -65,13 +64,12 @@ pub async fn start_table_sync<S, D>(
     store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
-    force_syncing_tables_tx: SignalTx,
 ) -> EtlResult<TableSyncResult>
 where
     S: StateStore + SchemaStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
 {
-    info!("starting table sync for table {}", table_id);
+    info!(%table_id, "starting initial table sync");
 
     // We are safe to keep the lock only for this section, since we know that the state will be changed by the
     // apply worker only if `SyncWait` is set, which is not the case if we arrive here, so we are
@@ -86,10 +84,7 @@ where
             phase_type,
             TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
         ) {
-            info!(
-                "table {} sync not required, already in phase '{:?}'",
-                table_id, phase_type
-            );
+            info!(%table_id, %phase_type, "initial table sync not required");
 
             return Ok(TableSyncResult::SyncNotRequired);
         }
@@ -102,10 +97,7 @@ where
                 | TableReplicationPhaseType::DataSync
                 | TableReplicationPhaseType::FinishedCopy
         ) {
-            warn!(
-                "invalid replication phase '{:?}' for table {}, cannot perform table sync",
-                phase_type, table_id
-            );
+            warn!(%table_id, %phase_type, "invalid replication phase for table sync");
 
             bail!(
                 ErrorKind::InvalidState,
@@ -165,7 +157,7 @@ where
             destination.truncate_table(table_id).await?;
 
             // We are ready to start copying table data, and we update the state accordingly.
-            info!("starting data copy for table {}", table_id);
+            info!(%table_id, "starting data copy");
             {
                 let mut inner = table_sync_worker_state.lock().await;
                 inner
@@ -193,7 +185,7 @@ where
             //  for correct decoding, thus we rely on our own state store to preserve this information.
             // - Destination -> we write here because some consumers might want to have the schema of incoming
             //  data.
-            info!("fetching table schema for table {}", table_id);
+            info!(%table_id, "fetching table schema");
             let table_schema = transaction
                 .get_table_schema(table_id, Some(&config.publication_name))
                 .await?;
@@ -210,93 +202,97 @@ where
             // pipeline is restarted, since it's outside the lifecycle of the pipeline.
             store.store_table_schema(table_schema.clone()).await?;
 
-            // We create the copy table stream.
-            let table_copy_stream = transaction
-                .get_table_copy_stream(
-                    table_id,
-                    &table_schema.column_schemas,
-                    Some(&config.publication_name),
-                )
-                .await?;
-            let table_copy_stream =
-                TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
-            let table_copy_stream = TimeoutBatchStream::wrap(
-                table_copy_stream,
-                config.batch.clone(),
-                shutdown_rx.clone(),
-            );
-            pin!(table_copy_stream);
-
-            info!("starting table copy stream for table {}", table_id);
-
             let table_copy_start = Instant::now();
             let mut total_rows_copied = 0;
             let mut table_rows_written = false;
 
-            // We start consuming the table stream. If any error occurs, we will bail the entire copy since
-            // we want to be fully consistent.
-            while let Some(result) = table_copy_stream.next().await {
-                match result {
-                    ShutdownResult::Ok(table_rows) => {
-                        let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
-                        let table_rows_copied_batch = table_rows.len();
-                        total_rows_copied += table_rows_copied_batch;
+            // We check if the table should be copied, or we can skip it.
+            if config
+                .table_sync_copy
+                .should_copy_table(table_id.into_inner())
+            {
+                // We create the copy table stream.
+                let table_copy_stream = transaction
+                    .get_table_copy_stream(
+                        table_id,
+                        &table_schema.column_schemas,
+                        Some(&config.publication_name),
+                    )
+                    .await?;
+                let table_copy_stream = TableCopyStream::wrap(
+                    table_copy_stream,
+                    &table_schema.column_schemas,
+                    pipeline_id,
+                );
+                let table_copy_stream = TimeoutBatchStream::wrap(
+                    table_copy_stream,
+                    config.batch.clone(),
+                    shutdown_rx.clone(),
+                );
+                pin!(table_copy_stream);
 
-                        let before_sending = Instant::now();
+                info!(%table_id, "starting table copy stream");
 
-                        destination.write_table_rows(table_id, table_rows).await?;
-                        table_rows_written = true;
+                // We start consuming the table stream. If any error occurs, we will bail the entire copy since
+                // we want to be fully consistent.
+                while let Some(result) = table_copy_stream.next().await {
+                    match result {
+                        ShutdownResult::Ok(table_rows) => {
+                            let table_rows =
+                                table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
+                            let table_rows_copied_batch = table_rows.len();
+                            total_rows_copied += table_rows_copied_batch;
 
-                        metrics::counter!(
-                            ETL_EVENTS_PROCESSED_TOTAL,
-                            WORKER_TYPE_LABEL => "table_sync",
-                            ACTION_LABEL => "table_copy",
-                            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                            DESTINATION_LABEL => D::name(),
-                        )
-                        .increment(table_rows_copied_batch as u64);
+                            let before_sending = Instant::now();
 
-                        let send_duration_seconds = before_sending.elapsed().as_secs_f64();
-                        histogram!(
-                            ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-                            WORKER_TYPE_LABEL => "table_sync",
-                            ACTION_LABEL => "table_copy",
-                            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                            DESTINATION_LABEL => D::name(),
-                        )
-                        .record(send_duration_seconds);
+                            destination.write_table_rows(table_id, table_rows).await?;
+                            table_rows_written = true;
 
-                        // Fail point to test when the table sync fails after copying one batch.
-                        #[cfg(feature = "failpoints")]
-                        etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC)?;
-                    }
-                    ShutdownResult::Shutdown(_) => {
-                        // If we received a shutdown in the middle of a table copy, we bail knowing
-                        // that the system can automatically recover if a table copy has failed in
-                        // the middle of processing.
-                        info!(
-                            "shutting down table sync worker for table {} during table copy",
-                            table_id
-                        );
+                            metrics::counter!(
+                                ETL_EVENTS_PROCESSED_TOTAL,
+                                WORKER_TYPE_LABEL => "table_sync",
+                                ACTION_LABEL => "table_copy",
+                                PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                                DESTINATION_LABEL => D::name(),
+                            )
+                            .increment(table_rows_copied_batch as u64);
 
-                        return Ok(TableSyncResult::SyncStopped);
+                            let send_duration_seconds = before_sending.elapsed().as_secs_f64();
+                            histogram!(
+                                ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+                                WORKER_TYPE_LABEL => "table_sync",
+                                ACTION_LABEL => "table_copy",
+                                PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                                DESTINATION_LABEL => D::name(),
+                            )
+                            .record(send_duration_seconds);
+
+                            // Fail point to test when the table sync fails after copying one batch.
+                            #[cfg(feature = "failpoints")]
+                            etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC)?;
+                        }
+                        ShutdownResult::Shutdown(_) => {
+                            // If we received a shutdown in the middle of a table copy, we bail knowing
+                            // that the system can automatically recover if a table copy has failed in
+                            // the middle of processing.
+                            info!(%table_id, "shutting down table sync during copy");
+
+                            return Ok(TableSyncResult::SyncStopped);
+                        }
                     }
                 }
-            }
-
-            // If no table rows were written, we call the method nonetheless with no rows, to kickstart
-            // table creation.
-            if !table_rows_written {
-                destination.write_table_rows(table_id, vec![]).await?;
-                info!(
-                    "writing empty table rows since table {} was empty",
-                    table_id
-                );
             }
 
             // We commit the transaction before starting the apply loop, otherwise it will fail
             // since no transactions can be running while replication is started.
             transaction.commit().await?;
+
+            // If no table rows were written, we call the method nonetheless with no rows, to kickstart
+            // table creation.
+            if !table_rows_written {
+                destination.write_table_rows(table_id, vec![]).await?;
+                info!(%table_id, "writing empty table rows for empty table");
+            }
 
             // Record the table copy duration.
             let table_copy_duration = table_copy_start.elapsed().as_secs_f64();
@@ -306,10 +302,7 @@ where
             )
             .record(table_copy_duration);
 
-            info!(
-                "completed table copy for table {} ({} rows copied)",
-                table_id, total_rows_copied
-            );
+            info!(%table_id, total_rows_copied, "completed table copy");
 
             // We mark that we finished the copy of the table schema and data.
             {
@@ -323,10 +316,7 @@ where
         }
         TableReplicationPhaseType::FinishedCopy => {
             let slot = replication_client.get_slot(&slot_name).await?;
-            info!(
-                "resuming table sync for table {} from lsn {}",
-                table_id, slot.confirmed_flush_lsn
-            );
+            info!(%table_id, confirmed_flush_lsn = %slot.confirmed_flush_lsn, "resuming table sync");
 
             slot.confirmed_flush_lsn
         }
@@ -340,15 +330,6 @@ where
         inner
             .set_and_store(TableReplicationPhase::SyncWait, &store)
             .await?;
-
-        // We notify the main apply worker to force syncing tables. In this way, the `Catchup` phase
-        // will be started even if no events are flowing in the main apply loop.
-        if force_syncing_tables_tx.send(()).is_err() {
-            error!(
-                "error while forcing syncing tables during '{:?}' phase of the table sync worker, the apply worker was likely shutdown",
-                TableReplicationPhaseType::SyncWait
-            );
-        }
     }
 
     // We also wait to be signaled to catch up with the main apply worker up to a specific lsn.
@@ -359,15 +340,12 @@ where
     // If we are told to shut down while waiting for a phase change, we will signal this to
     // the caller.
     if result.should_shutdown() {
-        info!(
-            "shutting down table sync worker for table {} while waiting for catchup",
-            table_id
-        );
+        info!(%table_id, "shutting down table sync while waiting for catchup");
 
         return Ok(TableSyncResult::SyncStopped);
     }
 
-    info!("table sync for table {} completed", table_id);
+    info!(%table_id, "table sync completed, starting streaming");
 
     Ok(TableSyncResult::SyncCompleted { start_lsn })
 }

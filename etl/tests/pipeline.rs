@@ -6,16 +6,18 @@ use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
-use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
+use etl::test_utils::pipeline::{
+    create_pipeline, create_pipeline_with_batch_config, create_pipeline_with_table_sync_copy_config,
+};
 use etl::test_utils::table::assert_table_schema;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{
     TableSelection, assert_events_equal, build_expected_orders_inserts,
     build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
-    insert_mock_data, insert_users_data, setup_test_database_schema,
+    insert_mock_data, insert_orders_data, insert_users_data, setup_test_database_schema,
 };
 use etl::types::{Event, EventType, InsertEvent, PipelineId, Type};
-use etl_config::shared::BatchConfig;
+use etl_config::shared::{BatchConfig, TableSyncCopyConfig};
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
@@ -25,6 +27,46 @@ use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::time::Duration;
 use tokio::time::sleep;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_shutdown_calls_destination_shutdown() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Wait for the table to be ready.
+    let table_ready_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready_notify.notified().await;
+
+    // Shutdown should not have been called yet.
+    assert!(!destination.shutdown_called().await);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify that shutdown was called on the destination.
+    assert!(destination.shutdown_called().await);
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
@@ -45,29 +87,19 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
         destination.clone(),
     );
 
-    // Wait for the table to finish syncing (not in Init state anymore).
-    let sync_done_notify = store
+    // Wait for the table to be ready.
+    let table_ready_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
     pipeline.start().await.unwrap();
 
-    sync_done_notify.notified().await;
+    table_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
-
-    // Verify that the table is in SyncDone state (not Init).
-    let table_states = store.get_table_replication_states().await;
-    assert_eq!(
-        table_states
-            .get(&database_schema.users_schema().id)
-            .unwrap()
-            .as_type(),
-        TableReplicationPhaseType::SyncDone
-    );
 
     // Verify that the replication slot for the apply worker exists.
     let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
@@ -78,6 +110,15 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
         .await
         .unwrap();
     assert!(slot_exists, "Apply slot should exist after pipeline start");
+
+    // Wait for Postgres to mark the slot as inactive before dropping it.
+    while database
+        .replication_slot_is_active(&apply_slot_name)
+        .await
+        .unwrap()
+    {
+        sleep(Duration::from_millis(100)).await;
+    }
 
     // Delete the apply worker slot to simulate slot loss.
     database
@@ -149,13 +190,13 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -165,24 +206,6 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     orders_state_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
-
-    // We check that the states are correctly set.
-    let table_replication_states = store.get_table_replication_states().await;
-    assert_eq!(table_replication_states.len(), 2);
-    assert_eq!(
-        table_replication_states
-            .get(&database_schema.users_schema().id)
-            .unwrap()
-            .as_type(),
-        TableReplicationPhaseType::SyncDone
-    );
-    assert_eq!(
-        table_replication_states
-            .get(&database_schema.orders_schema().id)
-            .unwrap()
-            .as_type(),
-        TableReplicationPhaseType::SyncDone
-    );
 
     // We check that the table schemas have been stored.
     let table_schemas = store.get_table_schemas().await;
@@ -287,18 +310,18 @@ async fn publication_changes_are_correctly_handled() {
         destination.clone(),
     );
 
-    // Wait for initial copy completion (SyncDone) for both tables.
-    let table_1_done = store
-        .notify_on_table_state_type(table_1_id, TableReplicationPhaseType::SyncDone)
+    // Wait for initial copy completion (Ready) for both tables.
+    let table_1_ready_notify = store
+        .notify_on_table_state_type(table_1_id, TableReplicationPhaseType::Ready)
         .await;
-    let table_2_done = store
-        .notify_on_table_state_type(table_2_id, TableReplicationPhaseType::SyncDone)
+    let table_2_ready_notify = store
+        .notify_on_table_state_type(table_2_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    table_1_done.notified().await;
-    table_2_done.notified().await;
+    table_1_ready_notify.notified().await;
+    table_2_ready_notify.notified().await;
 
     // Insert one row in each table and wait for two insert events.
     let inserts_notify = destination
@@ -347,13 +370,13 @@ async fn publication_changes_are_correctly_handled() {
     );
 
     // Wait for the table_3 to be done.
-    let table_3_done = store
-        .notify_on_table_state_type(table_3_id, TableReplicationPhaseType::SyncDone)
+    let table_3_ready_notify = store
+        .notify_on_table_state_type(table_3_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    table_3_done.notified().await;
+    table_3_ready_notify.notified().await;
 
     // Insert one row in table_1 and wait for it. (We wait for 4 inserts since it keeps the previous
     // ones).
@@ -440,13 +463,13 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         destination.clone(),
     );
 
-    let sync_done = store
-        .notify_on_table_state_type(table_1_id, TableReplicationPhaseType::SyncDone)
+    let table_ready_notify = store
+        .notify_on_table_state_type(table_1_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    sync_done.notified().await;
+    table_ready_notify.notified().await;
 
     // Create a new table in the same schema and insert a row.
     let table_2 = test_table_name("table_2");
@@ -480,13 +503,13 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         destination.clone(),
     );
 
-    let sync_done = store
-        .notify_on_table_state_type(table_2_id, TableReplicationPhaseType::SyncDone)
+    let table_ready_notify = store
+        .notify_on_table_state_type(table_2_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    sync_done.notified().await;
+    table_ready_notify.notified().await;
 
     // Shutdown and verify no errors occurred.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -496,6 +519,122 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     assert_eq!(table_schemas.len(), 2);
     assert!(table_schemas.contains_key(&table_1_id));
     assert!(table_schemas.contains_key(&table_2_id));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
+    init_test_tracing();
+
+    #[derive(Debug)]
+    enum TableCopyCase {
+        IncludeAll,
+        SkipAll,
+        IncludeOnly,
+        SkipOnly,
+    }
+
+    for table_copy_case in [
+        TableCopyCase::IncludeAll,
+        TableCopyCase::SkipAll,
+        TableCopyCase::IncludeOnly,
+        TableCopyCase::SkipOnly,
+    ] {
+        let mut database = spawn_source_database().await;
+        let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+
+        let users_table_id = database_schema.users_schema().id;
+        let orders_table_id = database_schema.orders_schema().id;
+        let users_table_name = database_schema.users_schema().name.clone();
+        let orders_table_name = database_schema.orders_schema().name.clone();
+
+        // We insert a single user and order.
+        insert_users_data(&mut database, &users_table_name, 0..=0).await;
+        insert_orders_data(&mut database, &orders_table_name, 0..=0).await;
+
+        let store = NotifyingStore::new();
+        let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+        let pipeline_id: PipelineId = random();
+        let table_sync_copy = match table_copy_case {
+            TableCopyCase::IncludeAll => TableSyncCopyConfig::IncludeAllTables,
+            TableCopyCase::SkipAll => TableSyncCopyConfig::SkipAllTables,
+            TableCopyCase::IncludeOnly => TableSyncCopyConfig::IncludeTables {
+                // We include only the users table.
+                table_ids: vec![users_table_id.into_inner()],
+            },
+            TableCopyCase::SkipOnly => TableSyncCopyConfig::SkipTables {
+                // We exclude only the users table.
+                table_ids: vec![users_table_id.into_inner()],
+            },
+        };
+
+        let mut pipeline = create_pipeline_with_table_sync_copy_config(
+            &database.config,
+            pipeline_id,
+            database_schema.publication_name(),
+            store.clone(),
+            destination.clone(),
+            table_sync_copy,
+        );
+
+        // We wait for the table to be ready for streaming.
+        let table_ready_notify = store
+            .notify_on_table_state_type(users_table_id, TableReplicationPhaseType::Ready)
+            .await;
+
+        pipeline.start().await.unwrap();
+
+        table_ready_notify.notified().await;
+
+        // We wait for the two inserts.
+        let events_notify = destination
+            .wait_for_events_count(vec![(EventType::Insert, 2)])
+            .await;
+
+        // We insert additional data.
+        insert_users_data(&mut database, &users_table_name, 1..=1).await;
+        insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
+
+        events_notify.notified().await;
+
+        pipeline.shutdown_and_wait().await.unwrap();
+
+        // We validate that the table rows are correct.
+        let table_rows = destination.get_table_rows().await;
+        let users_table_copied_rows = table_rows
+            .get(&users_table_id)
+            .map(|rows| rows.len())
+            .unwrap_or(0);
+        let orders_table_copied_rows = table_rows
+            .get(&orders_table_id)
+            .map(|rows| rows.len())
+            .unwrap_or(0);
+
+        let (expected_users_rows, expected_orders_rows) = match table_copy_case {
+            TableCopyCase::IncludeAll => (1, 1),
+            TableCopyCase::SkipAll => (0, 0),
+            TableCopyCase::IncludeOnly => (1, 0),
+            TableCopyCase::SkipOnly => (0, 1),
+        };
+        assert_eq!(users_table_copied_rows, expected_users_rows);
+        assert_eq!(orders_table_copied_rows, expected_orders_rows);
+        // We always expect the method to be called since the downstream table should be created
+        // nonetheless.
+        assert_eq!(destination.write_table_rows_called().await, 2);
+
+        // We validate that the single insert was received.
+        let events = destination.get_events().await;
+        let grouped_events = group_events_by_type_and_table_id(&events);
+        let users_inserts = grouped_events
+            .get(&(EventType::Insert, users_table_id))
+            .unwrap();
+        let orders_inserts = grouped_events
+            .get(&(EventType::Insert, orders_table_id))
+            .unwrap();
+
+        assert_eq!(users_inserts.len(), 1);
+        assert_eq!(orders_inserts.len(), 1);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -532,13 +671,13 @@ async fn table_copy_replicates_existing_data() {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -619,13 +758,13 @@ async fn table_copy_and_sync_streams_new_data() {
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -770,20 +909,20 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
         max_size: 1000,
         max_fill_ms: 1000,
     };
-    let mut pipeline = create_pipeline_with(
+    let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
-        Some(batch_config),
+        batch_config,
     );
 
     // Register notifications for initial table copy completion.
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -855,20 +994,20 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
         max_size: 1000,
         max_fill_ms: 1000,
     };
-    let mut pipeline = create_pipeline_with(
+    let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
-        Some(batch_config),
+        batch_config,
     );
 
     // Register notifications for initial table copy completion.
     let users_state_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -935,7 +1074,7 @@ async fn table_processing_with_schema_change_errors_table() {
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::SyncDone,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -1140,14 +1279,14 @@ async fn pipeline_respects_column_level_publication() {
         destination.clone(),
     );
 
-    // Wait for the table to finish syncing.
-    let sync_done_notify = state_store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+    // Wait for the table to be ready.
+    let table_ready_notify = state_store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
     pipeline.start().await.unwrap();
 
-    sync_done_notify.notified().await;
+    table_ready_notify.notified().await;
 
     // Wait for two insert events to be processed.
     let insert_events_notify = destination
@@ -1240,19 +1379,20 @@ async fn empty_tables_are_created_at_destination() {
 
     pipeline.start().await.unwrap();
 
-    // Wait for the table to be synced.
-    let table_synced_notify = state_store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+    // Wait for the table to be ready.
+    let table_ready_notify = state_store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
-    table_synced_notify.notified().await;
+    table_ready_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify the table schema was stored.
     let table_schemas = state_store.get_table_schemas().await;
+    let table_schema = table_schemas.get(&table_id).unwrap();
     assert_table_schema(
-        &table_schemas,
+        table_schema,
         table_id,
         table_name,
         &[

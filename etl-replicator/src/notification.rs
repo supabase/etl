@@ -97,7 +97,7 @@ impl ErrorNotificationClient {
         info!(
             pipeline_id = %self.pipeline_id,
             error_hash = %notification.error_hash,
-            "sending error notification to Supabase API"
+            "sending error notification to supabase api"
         );
 
         match self.send_notification(notification).await {

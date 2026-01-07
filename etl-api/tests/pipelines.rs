@@ -94,7 +94,7 @@ async fn create_table_with_state_chain(
     for (i, (state, metadata)) in state_chain.iter().enumerate() {
         let is_current = i == state_chain.len() - 1;
         let id = sqlx::query_scalar::<_, i64>(
-            "INSERT INTO etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current) VALUES ($1, $2, $3::etl.table_state, $4::jsonb, $5, $6) RETURNING id"
+            "insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current) values ($1, $2, $3::etl.table_state, $4::jsonb, $5, $6) returning id"
         )
         .bind(pipeline_id)
         .bind(table_oid)
@@ -126,7 +126,7 @@ async fn create_tables_with_states(
         let table_oid = create_test_table(source_db_pool, table_name).await;
 
         sqlx::query(
-            "INSERT INTO etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current) VALUES ($1, $2, $3::etl.table_state, $4::jsonb, NULL, true)"
+            "insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current) values ($1, $2, $3::etl.table_state, $4::jsonb, NULL, true)"
         )
         .bind(pipeline_id)
         .bind(table_oid)
@@ -1114,7 +1114,7 @@ async fn rollback_tables_with_full_reset_succeeds() {
 
     // Insert a table schema for this table
     let table_schema_id: i64 = sqlx::query_scalar(
-        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'test', 'test_users') RETURNING id"
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'test', 'test_users') returning id"
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1122,14 +1122,14 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .await
     .unwrap();
 
-    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'id', 'INT4', -1, false, true, 0)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) values ($1, 'id', 'INT4', -1, false, true, 0)")
         .bind(table_schema_id)
         .execute(&source_db_pool)
         .await
         .unwrap();
 
     // Insert a table mapping for this table
-    sqlx::query("INSERT INTO etl.table_mappings (pipeline_id, source_table_id, destination_table_id) VALUES ($1, $2, 'dest_test_users')")
+    sqlx::query("insert into etl.table_mappings (pipeline_id, source_table_id, destination_table_id) values ($1, $2, 'dest_test_users')")
         .bind(pipeline_id)
         .bind(table_oid)
         .execute(&source_db_pool)
@@ -1198,7 +1198,7 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .unwrap();
     assert_eq!(schema_count_after, 0);
 
-    // Verify table mapping was deleted
+    // Verify table mapping was NOT deleted (kept for truncation on restart)
     let mapping_count_after: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
     )
@@ -1207,13 +1207,13 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(mapping_count_after, 0);
+    assert_eq!(mapping_count_after, 1);
 
     drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_to_init_cleans_up_schemas_and_mappings() {
+async fn rollback_to_init_cleans_up_schemas_but_keeps_mappings() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1235,7 +1235,7 @@ async fn rollback_to_init_cleans_up_schemas_and_mappings() {
 
     // Insert table schema and mapping
     let table_schema_id: i64 = sqlx::query_scalar(
-        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'test', 'test_users') RETURNING id"
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'test', 'test_users') returning id"
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1243,13 +1243,13 @@ async fn rollback_to_init_cleans_up_schemas_and_mappings() {
     .await
     .unwrap();
 
-    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'id', 'INT4', -1, false, true, 0)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) values ($1, 'id', 'INT4', -1, false, true, 0)")
         .bind(table_schema_id)
         .execute(&source_db_pool)
         .await
         .unwrap();
 
-    sqlx::query("INSERT INTO etl.table_mappings (pipeline_id, source_table_id, destination_table_id) VALUES ($1, $2, 'dest_test_users')")
+    sqlx::query("insert into etl.table_mappings (pipeline_id, source_table_id, destination_table_id) values ($1, $2, 'dest_test_users')")
         .bind(pipeline_id)
         .bind(table_oid)
         .execute(&source_db_pool)
@@ -1285,7 +1285,7 @@ async fn rollback_to_init_cleans_up_schemas_and_mappings() {
     .unwrap();
     assert_eq!(schema_count, 0);
 
-    // Verify table mapping was deleted
+    // Verify table mapping was NOT deleted (kept for truncation on restart)
     let mapping_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
     )
@@ -1294,7 +1294,7 @@ async fn rollback_to_init_cleans_up_schemas_and_mappings() {
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(mapping_count, 0);
+    assert_eq!(mapping_count, 1);
 
     drop_pg_database(&source_db_config).await;
 }
@@ -1322,7 +1322,7 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_mappings() {
 
     // Insert table schema and mapping
     let table_schema_id: i64 = sqlx::query_scalar(
-        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'test', 'test_users') RETURNING id"
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'test', 'test_users') returning id"
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1330,13 +1330,13 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_mappings() {
     .await
     .unwrap();
 
-    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'id', 'INT4', -1, false, true, 0)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) values ($1, 'id', 'INT4', -1, false, true, 0)")
         .bind(table_schema_id)
         .execute(&source_db_pool)
         .await
         .unwrap();
 
-    sqlx::query("INSERT INTO etl.table_mappings (pipeline_id, source_table_id, destination_table_id) VALUES ($1, $2, 'dest_test_users')")
+    sqlx::query("insert into etl.table_mappings (pipeline_id, source_table_id, destination_table_id) values ($1, $2, 'dest_test_users')")
         .bind(pipeline_id)
         .bind(table_oid)
         .execute(&source_db_pool)
@@ -1436,18 +1436,18 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
 
     // Insert table schemas using production schema
     let table_schema_id_1 = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'public', 'test_users') RETURNING id"
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'public', 'test_users') returning id"
     ).bind(pipeline_id).bind(table1_oid).fetch_one(&source_db_pool).await.unwrap();
 
     let table_schema_id_2 = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO etl.table_schemas (pipeline_id, table_id, schema_name, table_name) VALUES ($1, $2, 'public', 'test_orders') RETURNING id"
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'public', 'test_orders') returning id"
     ).bind(pipeline_id).bind(table2_oid).fetch_one(&source_db_pool).await.unwrap();
 
     // Insert multiple columns for each table to test CASCADE behavior
-    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'id', 'INT4', -1, false, true, 0), ($1, 'name', 'TEXT', -1, true, false, 1)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) values ($1, 'id', 'INT4', -1, false, true, 0), ($1, 'name', 'TEXT', -1, true, false, 1)")
         .bind(table_schema_id_1).execute(&source_db_pool).await.unwrap();
 
-    sqlx::query("INSERT INTO etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) VALUES ($1, 'order_id', 'INT8', -1, false, true, 0), ($1, 'amount', 'NUMERIC', -1, false, false, 1)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) values ($1, 'order_id', 'INT8', -1, false, true, 0), ($1, 'amount', 'NUMERIC', -1, false, false, 1)")
         .bind(table_schema_id_2).execute(&source_db_pool).await.unwrap();
 
     // Verify data exists before deletion

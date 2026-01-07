@@ -77,7 +77,7 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
             // Shutdown handling takes priority over all other operations to ensure
             // graceful termination. We return any accumulated items with shutdown indication.
             if this.shutdown_rx.has_changed().unwrap_or(false) {
-                info!("the stream has been forcefully stopped");
+                info!("stream forcefully stopped due to shutdown signal");
 
                 // Mark stream as permanently stopped to prevent further polling.
                 *this.stream_stopped = true;
@@ -158,100 +158,5 @@ impl<B, S: Stream<Item = B>> Stream for TimeoutBatchStream<B, S> {
 
         // No conditions met for batch emission - wait for more items or timeout.
         Poll::Pending
-    }
-}
-
-/// Result of polling a [`TimeoutStream`].
-///
-/// This enum indicates whether the inner stream produced a value or a
-/// timeout occurred because no item arrived within the configured duration.
-pub enum TimeoutStreamResult<T> {
-    /// A value produced by the inner stream.
-    Value(T),
-    /// A timeout occurred before the inner stream yielded a new item.
-    Timeout,
-}
-
-pin_project! {
-    /// A stream adapter that yields timeout markers when idle.
-    ///
-    /// This wrapper polls the inner stream and returns either produced values
-    /// or [`TimeoutStreamResult::Timeout`] when no value arrives within
-    /// `max_batch_fill_duration`.
-    #[must_use = "streams do nothing unless polled"]
-    #[derive(Debug)]
-    pub struct TimeoutStream<B, S: Stream<Item = B>> {
-        #[pin]
-        stream: S,
-        #[pin]
-        deadline: Option<tokio::time::Sleep>,
-        reset_timer: bool,
-        max_batch_fill_duration: Duration,
-    }
-}
-
-impl<B, S: Stream<Item = B>> TimeoutStream<B, S> {
-    /// Wraps a stream to emit timeouts when idle.
-    ///
-    /// The returned stream yields [`TimeoutStreamResult::Value`] for items from
-    /// the inner stream or [`TimeoutStreamResult::Timeout`] when the configured
-    /// `max_batch_fill_duration` elapses without a new item.
-    pub fn wrap(stream: S, max_batch_fill_duration: Duration) -> Self {
-        Self {
-            stream,
-            deadline: None,
-            reset_timer: true,
-            max_batch_fill_duration,
-        }
-    }
-
-    /// Returns a pinned mutable reference to the inner stream.
-    ///
-    /// Use this to interact with the wrapped stream when a mutable reference is required
-    /// while preserving pinning guarantees.
-    pub fn get_inner(self: Pin<&mut Self>) -> Pin<&mut S> {
-        self.project().stream
-    }
-
-    /// Marks the timer to be reset in the next poll.
-    ///
-    /// This method should be called when you want to tell the stream to restart the timer in the
-    /// next poll.
-    pub fn mark_reset_timer(self: Pin<&mut Self>) {
-        let this = self.project();
-        *this.reset_timer = true;
-    }
-}
-
-impl<B, S: Stream<Item = B>> Stream for TimeoutStream<B, S> {
-    type Item = TimeoutStreamResult<B>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut this = self.project();
-
-        // If the timer should be reset, it means that we want to start counting down again.
-        if *this.reset_timer {
-            let sleep = tokio::time::sleep(*this.max_batch_fill_duration);
-            this.deadline.set(Some(sleep));
-            *this.reset_timer = false;
-        }
-
-        // Check if timeout has already expired.
-        let timeout_expired = this
-            .deadline
-            .as_mut()
-            .as_pin_mut()
-            .map(|deadline| deadline.poll(cx).is_ready())
-            .unwrap_or(false);
-
-        match this.stream.poll_next(cx) {
-            Poll::Ready(Some(value)) => Poll::Ready(Some(TimeoutStreamResult::Value(value))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending if timeout_expired => {
-                *this.reset_timer = true;
-                Poll::Ready(Some(TimeoutStreamResult::Timeout))
-            }
-            Poll::Pending => Poll::Pending,
-        }
     }
 }

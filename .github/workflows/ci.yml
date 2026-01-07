@@ -63,7 +63,7 @@ jobs:
       contents: read
     strategy:
       matrix:
-        postgres_version: [17, 16, 15, 14]
+        postgres_version: [18, 17, 16, 15, 14]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -99,6 +99,11 @@ jobs:
           ./etl-api/scripts/run_migrations.sh
 
       - name: Run Tests
+        env:
+          TESTS_DATABASE_HOST: localhost
+          TESTS_DATABASE_PORT: 5430
+          TESTS_DATABASE_USERNAME: postgres
+          TESTS_DATABASE_PASSWORD: postgres
         run: |
           cargo test \
             --workspace \
@@ -122,7 +127,7 @@ jobs:
       id-token: write
     strategy:
       matrix:
-        postgres_version: [17, 16, 15, 14]
+        postgres_version: [18, 17, 16, 15, 14]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -168,6 +173,11 @@ jobs:
 
       - name: Generate Code Coverage
         id: coverage
+        env:
+          TESTS_DATABASE_HOST: localhost
+          TESTS_DATABASE_PORT: 5430
+          TESTS_DATABASE_USERNAME: postgres
+          TESTS_DATABASE_PASSWORD: postgres
         run: |
           cargo llvm-cov test \
             --workspace --no-fail-fast \

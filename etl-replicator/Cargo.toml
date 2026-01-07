@@ -7,9 +7,13 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+default = []
+egress = ["etl/egress", "etl-destinations/egress"]
+
 [dependencies]
 etl = { workspace = true }
-etl-config = { workspace = true }
+etl-config = { workspace = true, features = ["supabase"] }
 etl-destinations = { workspace = true, features = ["bigquery", "iceberg"] }
 etl-telemetry = { workspace = true }
 
@@ -17,6 +21,7 @@ anyhow = { workspace = true, features = ["std"] }
 configcat = { workspace = true }
 metrics = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 secrecy = { workspace = true }
 sentry = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

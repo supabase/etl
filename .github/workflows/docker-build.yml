@@ -35,6 +35,10 @@ on:
         description: "Build experimental image (main branch excluded)"
         type: boolean
         default: false
+      build_args:
+        description: "Docker build arguments (newline-separated KEY=VALUE pairs)"
+        type: string
+        default: ""
     secrets:
       PROD_AWS_ROLE:
         description: "AWS IAM role ARN for ECR push access"
@@ -107,6 +111,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           provenance: false
           outputs: type=image,name=${{ inputs.image }},push-by-digest=true,name-canonical=true
+          build-args: ${{ inputs.build_args }}
 
       - name: Export Digest
         id: export-digest

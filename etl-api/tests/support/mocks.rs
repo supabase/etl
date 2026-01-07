@@ -228,6 +228,7 @@ pub mod pipelines {
         log::LogLevel,
         pipeline::{ApiBatchConfig, ApiReplicationSlotConfig},
     };
+    use etl_config::shared::TableSyncCopyConfig;
 
     /// Returns a default pipeline config.
     pub fn new_pipeline_config() -> FullApiPipelineConfig {
@@ -240,8 +241,9 @@ pub mod pipelines {
             table_error_retry_delay_ms: Some(10000),
             table_error_retry_max_attempts: Some(5),
             max_table_sync_workers: Some(2),
+            table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             log_level: Some(LogLevel::Info),
-            replication_slot: ApiReplicationSlotConfig::default(),
+            replication_slot: Some(ApiReplicationSlotConfig::default()),
         }
     }
 
@@ -256,8 +258,9 @@ pub mod pipelines {
             table_error_retry_delay_ms: Some(20000),
             table_error_retry_max_attempts: Some(10),
             max_table_sync_workers: Some(4),
+            table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             log_level: Some(LogLevel::Info),
-            replication_slot: ApiReplicationSlotConfig::default(),
+            replication_slot: Some(ApiReplicationSlotConfig::default()),
         }
     }
 
@@ -281,6 +284,7 @@ pub mod pipelines {
                 table_error_retry_delay_ms: None,
                 table_error_retry_max_attempts: None,
                 max_table_sync_workers: None,
+                table_sync_copy: None,
                 log_level: None,
             },
             ConfigUpdateType::TableErrorRetryDelayMs(table_error_retry_delay_ms) => {
@@ -290,6 +294,7 @@ pub mod pipelines {
                     table_error_retry_delay_ms: Some(table_error_retry_delay_ms),
                     table_error_retry_max_attempts: None,
                     max_table_sync_workers: None,
+                    table_sync_copy: None,
                     log_level: None,
                 }
             }
@@ -300,6 +305,7 @@ pub mod pipelines {
                     table_error_retry_delay_ms: None,
                     table_error_retry_max_attempts: Some(max_attempts),
                     max_table_sync_workers: None,
+                    table_sync_copy: None,
                     log_level: None,
                 }
             }
@@ -309,6 +315,7 @@ pub mod pipelines {
                 table_error_retry_delay_ms: None,
                 table_error_retry_max_attempts: None,
                 max_table_sync_workers: Some(n),
+                table_sync_copy: None,
                 log_level: None,
             },
             ConfigUpdateType::LogLevel(log_level) => PartialApiPipelineConfig {
@@ -317,6 +324,7 @@ pub mod pipelines {
                 table_error_retry_delay_ms: None,
                 table_error_retry_max_attempts: None,
                 max_table_sync_workers: None,
+                table_sync_copy: None,
                 log_level,
             },
         }
@@ -333,6 +341,7 @@ pub mod pipelines {
             table_error_retry_delay_ms: Some(10000),
             table_error_retry_max_attempts: Some(6),
             max_table_sync_workers: Some(8),
+            table_sync_copy: None,
             log_level: None,
         }
     }

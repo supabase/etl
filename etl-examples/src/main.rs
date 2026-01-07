@@ -33,16 +33,29 @@ The pipeline will automatically:
 
 use clap::{Args, Parser};
 use etl::config::{
-    BatchConfig, PgConnectionConfig, PipelineConfig, ReplicationSlotConfig, TlsConfig,
+    BatchConfig, PgConnectionConfig, PipelineConfig, ReplicationSlotConfig, TableSyncCopyConfig,
+    TlsConfig,
 };
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
 use etl_destinations::bigquery::BigQueryDestination;
-use etl_destinations::encryption::install_crypto_provider;
 use std::error::Error;
+use std::sync::Once;
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Ensures crypto provider is only initialized once.
+static INIT_CRYPTO: Once = Once::new();
+
+/// Installs the default cryptographic provider for rustls.
+fn install_crypto_provider() {
+    INIT_CRYPTO.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("failed to install default crypto provider");
+    });
+}
 
 // Main application arguments combining database and BigQuery configurations
 #[derive(Debug, Parser)]
@@ -177,6 +190,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.bq_args.max_table_sync_workers,
         replication_slot: ReplicationSlotConfig::default(),
+        table_sync_copy: TableSyncCopyConfig::default(),
     };
 
     // Initialize BigQuery destination with service account authentication
@@ -205,29 +219,29 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // 4. Begin streaming replication data
     pipeline.start().await?;
 
-    info!("Pipeline started successfully! Data replication is now active. Press Ctrl+C to stop.");
+    info!("pipeline started, data replication is now active, press ctrl+c to stop");
 
     // Set up signal handler for graceful shutdown on Ctrl+C
     let shutdown_signal = async {
         signal::ctrl_c()
             .await
             .expect("Failed to install Ctrl+C handler");
-        info!("Received Ctrl+C signal, initiating graceful shutdown...");
+        info!("received ctrl+c signal, initiating graceful shutdown");
     };
 
     // Wait for either the pipeline to complete naturally or receive a shutdown signal
     // The pipeline will run indefinitely unless an error occurs or it's manually stopped
     tokio::select! {
         result = pipeline.wait() => {
-            info!("Pipeline completed normally (this usually indicates an error condition)");
+            info!("pipeline completed normally (this usually indicates an error condition)");
             result?;
         }
         _ = shutdown_signal => {
-            info!("Gracefully shutting down pipeline and cleaning up resources...");
+            info!("gracefully shutting down pipeline and cleaning up resources");
         }
     }
 
-    info!("Pipeline stopped successfully. All resources cleaned up.");
+    info!("pipeline stopped, all resources cleaned up");
 
     Ok(())
 }

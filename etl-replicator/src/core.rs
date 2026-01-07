@@ -13,7 +13,6 @@ use etl_config::Environment;
 use etl_config::shared::{
     BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
 };
-use etl_destinations::encryption::install_crypto_provider;
 use etl_destinations::iceberg::{
     DestinationNamespace, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
 };
@@ -60,8 +59,6 @@ pub async fn start_replicator_with_config(
             max_staleness_mins,
             max_concurrent_streams,
         } => {
-            install_crypto_provider();
-
             let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
                 dataset_id.clone(),
@@ -87,15 +84,10 @@ pub async fn start_replicator_with_config(
                     s3_region,
                 },
         } => {
-            install_crypto_provider();
-
-            let supabase_domain = match Environment::load()? {
-                Environment::Prod => "supabase.co",
-                Environment::Staging | Environment::Dev => "supabase.red",
-            };
+            let env = Environment::load()?;
             let client = IcebergClient::new_with_supabase_catalog(
                 project_ref,
-                supabase_domain,
+                env.get_supabase_domain(),
                 catalog_token.expose_secret().to_string(),
                 warehouse_name.clone(),
                 s3_access_key_id.expose_secret().to_string(),
@@ -202,7 +194,7 @@ fn log_destination_config(config: &DestinationConfig) {
         } => {
             debug!(
                 namespace,
-                project_ref, warehouse_name, s3_region, "using Supabase iceberg destination config"
+                project_ref, warehouse_name, s3_region, "using supabase iceberg destination config"
             )
         }
         DestinationConfig::Iceberg {
@@ -221,7 +213,7 @@ fn log_destination_config(config: &DestinationConfig) {
                 warehouse_name,
                 namespace,
                 s3_endpoint,
-                "using generic REST iceberg destination config"
+                "using generic rest iceberg destination config"
             )
         }
     }
@@ -297,15 +289,15 @@ where
 
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                info!("SIGINT (Ctrl+C) received, shutting down pipeline");
+                info!("sigint (ctrl+c) received, shutting down pipeline");
             }
             _ = sigterm.recv() => {
-                info!("SIGTERM received, shutting down pipeline");
+                info!("sigterm received, shutting down pipeline");
             }
         }
 
         if let Err(e) = shutdown_tx.shutdown() {
-            warn!("failed to send shutdown signal: {:?}", e);
+            warn!(error = ?e, "failed to send shutdown signal");
             return;
         }
 

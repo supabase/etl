@@ -1,4 +1,7 @@
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, ReplicationSlotConfig};
+use etl::config::ReplicationSlotPersistence;
+use etl_config::shared::{
+    BatchConfig, PgConnectionConfig, PipelineConfig, ReplicationSlotConfig, TableSyncCopyConfig,
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -26,16 +29,43 @@ pub struct ApiBatchConfig {
     pub max_fill_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiReplicationSlotPersistence {
+    #[default]
+    Permanent,
+    Temporary,
+}
+
+impl From<ReplicationSlotPersistence> for ApiReplicationSlotPersistence {
+    fn from(value: ReplicationSlotPersistence) -> Self {
+        match value {
+            ReplicationSlotPersistence::Permanent => ApiReplicationSlotPersistence::Permanent,
+            ReplicationSlotPersistence::Temporary => ApiReplicationSlotPersistence::Temporary,
+        }
+    }
+}
+
+impl From<ApiReplicationSlotPersistence> for ReplicationSlotPersistence {
+    fn from(value: ApiReplicationSlotPersistence) -> Self {
+        match value {
+            ApiReplicationSlotPersistence::Permanent => ReplicationSlotPersistence::Permanent,
+            ApiReplicationSlotPersistence::Temporary => ReplicationSlotPersistence::Temporary,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+#[serde(rename_all = "snake_case")]
 pub struct ApiReplicationSlotConfig {
     #[schema(example = false)]
-    pub temporary: bool,
+    pub persistence: ApiReplicationSlotPersistence,
 }
 
 impl From<ReplicationSlotConfig> for ApiReplicationSlotConfig {
     fn from(value: ReplicationSlotConfig) -> Self {
         ApiReplicationSlotConfig {
-            temporary: value.temporary,
+            persistence: value.persistence.into(),
         }
     }
 }
@@ -43,7 +73,7 @@ impl From<ReplicationSlotConfig> for ApiReplicationSlotConfig {
 impl From<ApiReplicationSlotConfig> for ReplicationSlotConfig {
     fn from(value: ApiReplicationSlotConfig) -> Self {
         ReplicationSlotConfig {
-            temporary: value.temporary,
+            persistence: value.persistence.into(),
         }
     }
 }
@@ -53,7 +83,6 @@ pub struct FullApiPipelineConfig {
     #[schema(example = "my_publication")]
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub publication_name: String,
-    pub replication_slot: ApiReplicationSlotConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<ApiBatchConfig>,
     #[schema(example = 1000)]
@@ -65,6 +94,10 @@ pub struct FullApiPipelineConfig {
     #[schema(example = 4)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_sync_copy: Option<TableSyncCopyConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication_slot: Option<ApiReplicationSlotConfig>,
     pub log_level: Option<LogLevel>,
 }
 
@@ -72,7 +105,6 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
     fn from(value: StoredPipelineConfig) -> Self {
         Self {
             publication_name: value.publication_name,
-            replication_slot: value.replication_slot.into(),
             batch: Some(ApiBatchConfig {
                 max_size: Some(value.batch.max_size),
                 max_fill_ms: Some(value.batch.max_fill_ms),
@@ -80,6 +112,8 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
             table_error_retry_delay_ms: Some(value.table_error_retry_delay_ms),
             table_error_retry_max_attempts: Some(value.table_error_retry_max_attempts),
             max_table_sync_workers: Some(value.max_table_sync_workers),
+            table_sync_copy: Some(value.table_sync_copy),
+            replication_slot: Some(value.replication_slot.into()),
             log_level: value.log_level,
         }
     }
@@ -107,6 +141,8 @@ pub struct PartialApiPipelineConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_sync_copy: Option<TableSyncCopyConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub log_level: Option<LogLevel>,
 }
 
@@ -120,6 +156,8 @@ pub struct StoredPipelineConfig {
     #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
     pub max_table_sync_workers: u16,
+    #[serde(default)]
+    pub table_sync_copy: TableSyncCopyConfig,
     pub log_level: Option<LogLevel>,
 }
 
@@ -138,6 +176,7 @@ impl StoredPipelineConfig {
             table_error_retry_delay_ms: self.table_error_retry_delay_ms,
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,
             max_table_sync_workers: self.max_table_sync_workers,
+            table_sync_copy: self.table_sync_copy,
         }
     }
 
@@ -167,6 +206,10 @@ impl StoredPipelineConfig {
             self.max_table_sync_workers = value;
         }
 
+        if let Some(value) = partial.table_sync_copy {
+            self.table_sync_copy = value;
+        }
+
         self.log_level = partial.log_level
     }
 }
@@ -188,7 +231,7 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
 
         Self {
             publication_name: value.publication_name,
-            replication_slot: value.replication_slot.into(),
+            replication_slot: value.replication_slot.unwrap_or_default().into(),
             batch,
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
@@ -199,6 +242,7 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
             max_table_sync_workers: value
                 .max_table_sync_workers
                 .unwrap_or(DEFAULT_MAX_TABLE_SYNC_WORKERS),
+            table_sync_copy: value.table_sync_copy.unwrap_or_default(),
             log_level: value.log_level,
         }
     }
@@ -221,6 +265,7 @@ mod tests {
             table_error_retry_delay_ms: 2000,
             table_error_retry_max_attempts: 7,
             max_table_sync_workers: 4,
+            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             log_level: None,
         };
 
@@ -251,8 +296,9 @@ mod tests {
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
+            table_sync_copy: None,
+            replication_slot: None,
             log_level: Some(LogLevel::Debug),
-            replication_slot: ApiReplicationSlotConfig::default(),
         };
 
         let stored: StoredPipelineConfig = full_config.clone().into();
@@ -265,11 +311,12 @@ mod tests {
     fn test_full_api_pipeline_config_defaults() {
         let full_config = FullApiPipelineConfig {
             publication_name: "test_publication".to_string(),
-            replication_slot: ApiReplicationSlotConfig::default(),
             batch: None,
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
+            table_sync_copy: None,
+            replication_slot: None,
             log_level: None,
         };
 
@@ -303,6 +350,7 @@ mod tests {
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 3,
             max_table_sync_workers: 2,
+            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             log_level: None,
         };
 
@@ -315,6 +363,7 @@ mod tests {
             table_error_retry_delay_ms: Some(5000),
             table_error_retry_max_attempts: Some(9),
             max_table_sync_workers: None,
+            table_sync_copy: Some(TableSyncCopyConfig::SkipAllTables),
             log_level: None,
         };
 
@@ -326,5 +375,6 @@ mod tests {
         assert_eq!(stored.table_error_retry_delay_ms, 5000);
         assert_eq!(stored.table_error_retry_max_attempts, 9);
         assert_eq!(stored.max_table_sync_workers, 2);
+        assert_eq!(stored.table_sync_copy, TableSyncCopyConfig::SkipAllTables);
     }
 }

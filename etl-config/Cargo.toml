@@ -9,6 +9,7 @@ homepage.workspace = true
 
 [features]
 utoipa = ["dep:utoipa"]
+supabase = []
 
 [dependencies]
 config = { workspace = true, features = ["yaml", "json"] }

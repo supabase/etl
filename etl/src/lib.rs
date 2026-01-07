@@ -49,7 +49,7 @@
 //!
 //! ```rust,no_run
 //! use etl::{
-//!     config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig, ReplicationSlotConfig},
+//!     config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig, TableSyncCopyConfig, ReplicationSlotConfig},
 //!     destination::memory::MemoryDestination,
 //!     pipeline::Pipeline,
 //!     store::both::memory::MemoryStore,
@@ -82,6 +82,7 @@
 //!         table_error_retry_delay_ms: 10000,
 //!         table_error_retry_max_attempts: 5,
 //!         max_table_sync_workers: 4,
+//!         table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
 //!     };
 //!
 //!     // Create and start the pipeline
@@ -104,6 +105,8 @@ mod concurrency;
 pub mod config;
 mod conversions;
 pub mod destination;
+#[cfg(feature = "egress")]
+pub mod egress;
 pub mod error;
 #[cfg(feature = "failpoints")]
 pub mod failpoints;

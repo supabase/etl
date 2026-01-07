@@ -26,8 +26,9 @@ use crate::{
     routes::{
         destinations::{
             CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
-            ReadDestinationsResponse, UpdateDestinationRequest, create_destination,
-            delete_destination, read_all_destinations, read_destination, update_destination,
+            ReadDestinationsResponse, UpdateDestinationRequest, ValidateDestinationRequest,
+            ValidateDestinationResponse, create_destination, delete_destination,
+            read_all_destinations, read_destination, update_destination, validate_destination,
         },
         destinations_pipelines::{
             CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
@@ -45,11 +46,12 @@ use crate::{
             CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
             GetPipelineStatusResponse, GetPipelineVersionResponse, ReadPipelineResponse,
             ReadPipelinesResponse, SimpleTableReplicationState, TableReplicationStatus,
-            UpdatePipelineRequest, UpdatePipelineVersionRequest, create_pipeline, delete_pipeline,
+            UpdatePipelineRequest, UpdatePipelineVersionRequest, ValidatePipelineRequest,
+            ValidatePipelineResponse, create_pipeline, delete_pipeline,
             get_pipeline_replication_status, get_pipeline_status, get_pipeline_version,
             read_all_pipelines, read_pipeline, rollback_table_state, rollback_tables,
             start_pipeline, stop_all_pipelines, stop_pipeline, update_pipeline,
-            update_pipeline_config, update_pipeline_version,
+            update_pipeline_config, update_pipeline_version, validate_pipeline,
         },
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
@@ -123,8 +125,8 @@ impl Application {
             Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
             Err(e) => {
                 warn!(
-                    "Failed to create Kubernetes client: {}. Running without Kubernetes support.",
-                    e
+                    error = %e,
+                    "failed to create kubernetes client, running without kubernetes support"
                 );
                 None
             }
@@ -174,13 +176,14 @@ async fn test_orbstack_connection(client: &kube::Client) -> Result<(), K8sError>
     match client.apiserver_version().await {
         Ok(version) => {
             info!(
-                "successfully connected to orbstack kubernetes api server version: {}.{}",
-                version.major, version.minor
+                major = %version.major,
+                minor = %version.minor,
+                "connected to orbstack kubernetes api server"
             );
         }
         Err(e) => {
             error!(
-                "failed to connect to orbstack, make sure you have orbstack installed and kubernetes enabled in it."
+                "failed to connect to orbstack, ensure orbstack is installed and kubernetes is enabled"
             );
             return Err(e.into());
         }
@@ -190,8 +193,10 @@ async fn test_orbstack_connection(client: &kube::Client) -> Result<(), K8sError>
 }
 
 /// Creates a Postgres connection pool from the provided configuration.
+///
+/// Connects to the API's own metadata database using server defaults (no custom options).
 pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
-    PgPoolOptions::new().connect_lazy_with(config.with_db())
+    PgPoolOptions::new().connect_lazy_with(config.with_db(None))
 }
 
 /// Creates and configures the HTTP server with all routes and middleware.
@@ -263,6 +268,10 @@ pub async fn run(
             CreateDestinationPipelineRequest,
             CreateDestinationPipelineResponse,
             UpdateDestinationPipelineRequest,
+            ValidateDestinationRequest,
+            ValidateDestinationResponse,
+            ValidatePipelineRequest,
+            ValidatePipelineResponse,
         )),
         nest(
             (path = "/v1", api = ApiV1)
@@ -309,10 +318,12 @@ pub async fn run(
         crate::routes::destinations::update_destination,
         crate::routes::destinations::delete_destination,
         crate::routes::destinations::read_all_destinations,
+        crate::routes::destinations::validate_destination,
         crate::routes::tenants_sources::create_tenant_and_source,
         crate::routes::destinations_pipelines::create_destination_and_pipeline,
         crate::routes::destinations_pipelines::update_destination_and_pipeline,
         crate::routes::destinations_pipelines::delete_destination_and_pipeline,
+        crate::routes::pipelines::validate_pipeline,
     ))]
     struct ApiV1;
 
@@ -339,26 +350,28 @@ pub async fn run(
             .service(
                 web::scope("v1")
                     .wrap(authentication)
-                    //tenants
+                    // tenants
                     .service(create_tenant)
                     .service(create_or_update_tenant)
                     .service(read_tenant)
                     .service(update_tenant)
                     .service(delete_tenant)
                     .service(read_all_tenants)
-                    //sources
+                    // sources
                     .service(create_source)
                     .service(read_source)
                     .service(update_source)
                     .service(delete_source)
                     .service(read_all_sources)
                     //destinations
+                    .service(validate_destination)
                     .service(create_destination)
                     .service(read_destination)
                     .service(update_destination)
                     .service(delete_destination)
                     .service(read_all_destinations)
-                    //pipelines
+                    // pipelines
+                    .service(validate_pipeline)
                     .service(create_pipeline)
                     .service(read_pipeline)
                     .service(update_pipeline)
@@ -374,23 +387,23 @@ pub async fn run(
                     .service(rollback_tables)
                     .service(update_pipeline_version)
                     .service(update_pipeline_config)
-                    //tables
+                    // tables
                     .service(read_table_names)
-                    //publications
+                    // publications
                     .service(create_publication)
                     .service(read_publication)
                     .service(update_publication)
                     .service(delete_publication)
                     .service(read_all_publications)
-                    //images
+                    // images
                     .service(create_image)
                     .service(read_image)
                     .service(update_image)
                     .service(delete_image)
                     .service(read_all_images)
-                    //tenants_sources
+                    // tenants_sources
                     .service(create_tenant_and_source)
-                    //destinations-pipelines
+                    // destinations-pipelines
                     .service(create_destination_and_pipeline)
                     .service(update_destination_and_pipeline)
                     .service(delete_destination_and_pipeline),

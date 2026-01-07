@@ -1,7 +1,9 @@
 use crate::error::{ErrorKind, EtlResult};
 use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
-use etl_config::shared::{IntoConnectOptions, PgConnectionConfig, ReplicationSlotConfig};
+use etl_config::shared::{
+    ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig, ReplicationSlotConfig, ReplicationSlotPersistence,
+};
 use etl_postgres::replication::extract_server_version;
 use etl_postgres::types::convert_type_oid_to_type;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
@@ -11,7 +13,6 @@ use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
 use rustls::pki_types::{CertificateDer, pem::PemObject};
-use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroI32;
 use std::sync::Arc;
@@ -35,8 +36,8 @@ where
         let result = connection.await;
 
         match result {
-            Err(err) => error!("an error occurred during the postgres connection: {}", err),
-            Ok(()) => info!("postgres connection terminated successfully"),
+            Err(err) => error!(error = %err, "postgres connection error"),
+            Ok(()) => info!("postgres connection terminated"),
         }
     }
     .instrument(span);
@@ -110,20 +111,6 @@ impl PgReplicationSlotTransaction {
         Ok(Self { client })
     }
 
-    /// Retrieves the schema information for the specified tables.
-    ///
-    /// If a publication is specified, only columns of the tables included in that publication
-    /// will be returned.
-    pub async fn get_table_schemas(
-        &self,
-        table_ids: &[TableId],
-        publication_name: Option<&str>,
-    ) -> EtlResult<HashMap<TableId, TableSchema>> {
-        self.client
-            .get_table_schemas(table_ids, publication_name)
-            .await
-    }
-
     /// Retrieves the schema information for the supplied table.
     ///
     /// If a publication is specified, only columns included in that publication
@@ -195,7 +182,9 @@ impl PgReplicationClient {
     ///
     /// The connection is configured for logical replication mode.
     async fn connect_no_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
-        let mut config: Config = pg_connection_config.clone().with_db();
+        let mut config: Config = pg_connection_config
+            .clone()
+            .with_db(Some(&ETL_REPLICATION_OPTIONS));
         config.replication_mode(ReplicationMode::Logical);
 
         let (client, connection) = config.connect(NoTls).await?;
@@ -206,7 +195,7 @@ impl PgReplicationClient {
 
         spawn_postgres_connection::<NoTls>(connection);
 
-        info!("successfully connected to postgres without tls");
+        info!("connected to postgres without tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
@@ -218,7 +207,9 @@ impl PgReplicationClient {
     ///
     /// The connection is configured for logical replication mode
     async fn connect_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
-        let mut config: Config = pg_connection_config.clone().with_db();
+        let mut config: Config = pg_connection_config
+            .clone()
+            .with_db(Some(&ETL_REPLICATION_OPTIONS));
         config.replication_mode(ReplicationMode::Logical);
 
         let mut root_store = rustls::RootCertStore::empty();
@@ -243,7 +234,7 @@ impl PgReplicationClient {
 
         spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
-        info!("successfully connected to postgres with tls");
+        info!("connected to postgres with tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
@@ -329,12 +320,12 @@ impl PgReplicationClient {
     ) -> EtlResult<GetOrCreateSlotResult> {
         match self.get_slot(slot_name).await {
             Ok(slot) => {
-                info!("using existing replication slot '{}'", slot_name);
+                info!(slot_name, "using existing replication slot");
 
                 Ok(GetOrCreateSlotResult::GetSlot(slot))
             }
             Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
-                info!("creating new replication slot '{}'", slot_name);
+                info!(slot_name, "creating new replication slot");
 
                 let create_result = self.create_slot_internal(slot_name, false, config).await?;
 
@@ -348,7 +339,7 @@ impl PgReplicationClient {
     ///
     /// Returns an error if the slot doesn't exist or if there are any issues with the deletion.
     pub async fn delete_slot(&self, slot_name: &str) -> EtlResult<()> {
-        info!("deleting replication slot '{}'", slot_name);
+        info!(slot_name, "deleting replication slot");
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let query = format!(
             r#"DROP_REPLICATION_SLOT {} WAIT;"#,
@@ -357,7 +348,7 @@ impl PgReplicationClient {
 
         match self.client.simple_query(&query).await {
             Ok(_) => {
-                info!("successfully deleted replication slot '{}'", slot_name);
+                info!(slot_name, "deleted replication slot");
 
                 Ok(())
             }
@@ -366,8 +357,8 @@ impl PgReplicationClient {
                     && *code == SqlState::UNDEFINED_OBJECT
                 {
                     warn!(
-                        "attempted to delete non-existent replication slot '{}'",
-                        slot_name
+                        slot_name,
+                        "attempted to delete non-existent replication slot"
                     );
 
                     bail!(
@@ -380,7 +371,7 @@ impl PgReplicationClient {
                     );
                 }
 
-                error!("failed to delete replication slot '{}': {}", slot_name, err);
+                error!(slot_name, error = %err, "failed to delete replication slot");
 
                 Err(err.into())
             }
@@ -543,10 +534,7 @@ impl PgReplicationClient {
         slot_name: &str,
         start_lsn: PgLsn,
     ) -> EtlResult<LogicalReplicationStream> {
-        info!(
-            "starting logical replication from publication '{}' with slot named '{}' at lsn {}",
-            publication_name, slot_name, start_lsn
-        );
+        info!(publication_name, slot_name, %start_lsn, "starting logical replication");
 
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let options = format!(
@@ -611,9 +599,9 @@ impl PgReplicationClient {
         } else {
             "NOEXPORT_SNAPSHOT"
         };
-        let temporary = match config.temporary {
-            true => " TEMPORARY ",
-            false => " ",
+        let temporary = match config.persistence {
+            ReplicationSlotPersistence::Temporary => " TEMPORARY ",
+            ReplicationSlotPersistence::Permanent => " ",
         };
         let query = format!(
             r#"CREATE_REPLICATION_SLOT {}{}LOGICAL pgoutput {}"#,
@@ -659,36 +647,6 @@ impl PgReplicationClient {
             ErrorKind::ReplicationSlotNotCreated,
             "Replication slot creation failed"
         ))
-    }
-
-    /// Retrieves schema information for multiple tables.
-    ///
-    /// Tables without primary keys will be skipped and logged with a warning.
-    async fn get_table_schemas(
-        &self,
-        table_ids: &[TableId],
-        publication_name: Option<&str>,
-    ) -> EtlResult<HashMap<TableId, TableSchema>> {
-        let mut table_schemas = HashMap::new();
-
-        // TODO: consider if we want to fail when at least one table was missing or not.
-        for table_id in table_ids {
-            let table_schema = self.get_table_schema(*table_id, publication_name).await?;
-
-            // TODO: this warning and skipping should not happen in this method,
-            //  but rather higher in the stack.
-            if !table_schema.has_primary_keys() {
-                warn!(
-                    "table {} with id {} will not be copied because it has no primary key",
-                    table_schema.name, table_schema.id
-                );
-                continue;
-            }
-
-            table_schemas.insert(table_schema.id, table_schema);
-        }
-
-        Ok(table_schemas)
     }
 
     /// Retrieves the schema for a single table.
@@ -822,7 +780,8 @@ impl PgReplicationClient {
     /// Retrieves schema information for all columns in a table.
     ///
     /// If a publication is specified, only columns included in that publication
-    /// will be returned.
+    /// will be returned. Generated columns are always excluded since they are not
+    /// supported in PostgreSQL logical replication.
     async fn get_column_schemas(
         &self,
         table_id: TableId,
@@ -882,6 +841,40 @@ impl PgReplicationClient {
             publication_ctes = publication_filter.ctes,
             publication_predicate = publication_filter.predicate,
         );
+
+        // Check for generated columns so we can warn if there are any.
+        let generated_columns_check_query = format!(
+            r#"select exists (
+                select 1
+                from pg_attribute
+                where attrelid = {table_id}
+                    and attnum > 0
+                    and not attisdropped
+                    and attgenerated != ''
+            ) as has_generated;"#
+        );
+
+        for message in self
+            .client
+            .simple_query(&generated_columns_check_query)
+            .await?
+        {
+            if let SimpleQueryMessage::Row(row) = message {
+                let has_generated_columns =
+                    Self::get_row_value::<String>(&row, "has_generated", "pg_attribute").await?
+                        == "t";
+                if has_generated_columns {
+                    warn!(
+                        "Table {} contains generated columns that will NOT be replicated. \
+                         Generated columns are not supported in PostgreSQL logical replication and will \
+                         be excluded from the ETL schema. These columns will NOT appear in the destination.",
+                        table_id
+                    );
+                }
+                // Explicity break for clarity; this query returns a single SimpleQueryMessage::Row.
+                break;
+            }
+        }
 
         let mut column_schemas = vec![];
         for message in self.client.simple_query(&column_info_query).await? {

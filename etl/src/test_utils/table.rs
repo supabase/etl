@@ -1,5 +1,4 @@
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
-use std::collections::HashMap;
 
 /// Asserts that a table schema matches the expected schema.
 ///
@@ -9,15 +8,13 @@ use std::collections::HashMap;
 ///
 /// # Panics
 ///
-/// Panics if the table ID doesn't exist in the provided schemas, or if any aspect
-/// of the schema doesn't match the expected values.
+/// Panics if any aspect of the schema doesn't match the expected values.
 pub fn assert_table_schema(
-    table_schemas: &HashMap<TableId, TableSchema>,
+    table_schema: &TableSchema,
     table_id: TableId,
     expected_table_name: TableName,
     expected_columns: &[ColumnSchema],
 ) {
-    let table_schema = table_schemas.get(&table_id).unwrap();
     assert_eq!(table_schema.id, table_id);
     assert_eq!(table_schema.name, expected_table_name);
 

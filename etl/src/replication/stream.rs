@@ -4,6 +4,7 @@ use futures::{Stream, ready};
 use pin_project_lite::pin_project;
 use postgres_replication::LogicalReplicationStream;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use std::fmt::{Display, Formatter};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -14,7 +15,10 @@ use tracing::debug;
 use crate::conversions::table_row::parse_table_row_from_postgres_copy_bytes;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
-use crate::metrics::{ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL, PIPELINE_ID_LABEL};
+use crate::metrics::{
+    ETL_BYTES_PROCESSED_TOTAL, ETL_STATUS_UPDATES_SKIPPED_TOTAL, ETL_STATUS_UPDATES_TOTAL,
+    EVENT_TYPE_LABEL, FORCED_LABEL, PIPELINE_ID_LABEL, STATUS_UPDATE_TYPE_LABEL,
+};
 use crate::types::{PipelineId, TableRow};
 use metrics::counter;
 
@@ -98,22 +102,52 @@ impl<'a> Stream for TableCopyStream<'a> {
     }
 }
 
+/// The status update type when sending a status update message back to Postgres.
+#[derive(Debug)]
+pub enum StatusUpdateType {
+    /// Represents an update requested by Postgres.
+    KeepAlive,
+}
+
+impl StatusUpdateType {
+    /// Returns `true` whether this status update type requires a reply from Postgres, `false` otherwise.
+    fn request_reply(&self) -> bool {
+        match self {
+            Self::KeepAlive => false,
+        }
+    }
+}
+
+impl Display for StatusUpdateType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KeepAlive => write!(f, "keep_alive"),
+        }
+    }
+}
+
 pin_project! {
+    /// A stream that yields replication events from a Postgres logical replication stream and keeps
+    /// track of last sent status updates.
     pub struct EventsStream {
         #[pin]
         stream: LogicalReplicationStream,
         last_update: Option<Instant>,
+        last_write_lsn: Option<PgLsn>,
         last_flush_lsn: Option<PgLsn>,
+        pipeline_id: PipelineId,
     }
 }
 
 impl EventsStream {
     /// Creates a new [`EventsStream`] from a [`LogicalReplicationStream`].
-    pub fn wrap(stream: LogicalReplicationStream) -> Self {
+    pub fn wrap(stream: LogicalReplicationStream, pipeline_id: PipelineId) -> Self {
         Self {
             stream,
             last_update: None,
+            last_write_lsn: None,
             last_flush_lsn: None,
+            pipeline_id,
         }
     }
 
@@ -124,19 +158,33 @@ impl EventsStream {
     /// error scenarios and edge cases related to time synchronization and network communication.
     pub async fn send_status_update(
         self: Pin<&mut Self>,
-        write_lsn: PgLsn,
+        mut write_lsn: PgLsn,
         mut flush_lsn: PgLsn,
         force: bool,
+        status_update_type: StatusUpdateType,
     ) -> EtlResult<()> {
         let this = self.project();
+        let pipeline_id = *this.pipeline_id;
 
-        // If the new LSN is less than the last one, we can safely ignore it, since we only want
-        // to report monotonically increasing LSN values.
+        // If the new write lsn is less than the last one, we can safely ignore it, since we only want
+        // to report monotonically increasing values.
+        if let Some(last_write_lsn) = this.last_write_lsn
+            && write_lsn < *last_write_lsn
+        {
+            write_lsn = *last_write_lsn;
+        }
+
+        // If the new flush lsn is less than the last one, we can safely ignore it, since we only want
+        // to report monotonically increasing values.
         if let Some(last_flush_lsn) = this.last_flush_lsn
             && flush_lsn < *last_flush_lsn
         {
             flush_lsn = *last_flush_lsn;
         }
+
+        // This invariant is important since if `flush_lsn` becomes bigger, it means that there
+        // was a problem during replication.
+        debug_assert!(write_lsn >= flush_lsn);
 
         // If we are not forced to send an update, we can willingly do so based on a set of conditions.
         if !force
@@ -154,6 +202,20 @@ impl EventsStream {
             // when they are not requested, simply because the `write_lsn` is updated for every
             // incoming message in the apply loop.
             if flush_lsn == *last_flush && last_update.elapsed() < STATUS_UPDATE_INTERVAL {
+                counter!(
+                    ETL_STATUS_UPDATES_SKIPPED_TOTAL,
+                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                    STATUS_UPDATE_TYPE_LABEL => status_update_type.to_string(),
+                )
+                .increment(1);
+
+                debug!(
+                    %flush_lsn,
+                    last_update_elapsed_secs = last_update.elapsed().as_secs(),
+                    %status_update_type,
+                    "skipping status update"
+                );
+
                 return Ok(());
             }
         }
@@ -175,17 +237,31 @@ impl EventsStream {
         // them as Postgres does. The reason is that `apply_lsn` is used to mark when an LSN is both
         // durable and visible, but from ETL's perspective we are fine with just it being durable, which
         // is marked via the `flush_lsn`.
+        let request_reply: u8 = status_update_type.request_reply().into();
         this.stream
-            .standby_status_update(write_lsn, flush_lsn, flush_lsn, ts, 0)
+            .standby_status_update(write_lsn, flush_lsn, flush_lsn, ts, request_reply)
             .await?;
 
+        counter!(
+            ETL_STATUS_UPDATES_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+            FORCED_LABEL => force.to_string(),
+            STATUS_UPDATE_TYPE_LABEL => status_update_type.to_string(),
+        )
+        .increment(1);
+
         debug!(
-            "status update successfully sent (write_lsn = {}, flush_lsn = {}, apply_lsn = {})",
-            write_lsn, flush_lsn, flush_lsn
+            %write_lsn,
+            %flush_lsn,
+            apply_lsn = %flush_lsn,
+            force,
+            %status_update_type,
+            "status update sent"
         );
 
         // Update the state after successful send.
         *this.last_update = Some(Instant::now());
+        *this.last_write_lsn = Some(write_lsn);
         *this.last_flush_lsn = Some(flush_lsn);
 
         Ok(())

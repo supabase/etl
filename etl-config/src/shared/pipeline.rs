@@ -1,8 +1,53 @@
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "utoipa")]
+use utoipa::ToSchema;
 
 use crate::shared::{
     PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError, batch::BatchConfig,
 };
+
+/// Selection rules for tables participating in replication.
+///
+/// Controls which tables are eligible for initial table copy and streaming.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+#[serde(tag = "type")]
+pub enum TableSyncCopyConfig {
+    /// Performs the initial copy for all tables.
+    IncludeAllTables,
+    /// Skips the initial copy for all tables.
+    SkipAllTables,
+    /// Performs the initial copy for the specified table ids.
+    IncludeTables {
+        /// Table ids of the table for which copy should be performed.
+        table_ids: Vec<u32>,
+    },
+    /// Skips the initial copy for the specified table ids.
+    SkipTables {
+        /// Table ids of the table for which copy should be skipped.
+        table_ids: Vec<u32>,
+    },
+}
+
+impl TableSyncCopyConfig {
+    /// Returns `true` if the table should be copied during initial sync, `false` otherwise.
+    pub fn should_copy_table(&self, table_id: u32) -> bool {
+        match self {
+            TableSyncCopyConfig::IncludeAllTables => true,
+            TableSyncCopyConfig::SkipAllTables => false,
+            TableSyncCopyConfig::IncludeTables { table_ids } => table_ids.contains(&table_id),
+            TableSyncCopyConfig::SkipTables { table_ids } => !table_ids.contains(&table_id),
+        }
+    }
+}
+
+impl Default for TableSyncCopyConfig {
+    fn default() -> Self {
+        Self::IncludeAllTables
+    }
+}
+
 /// Configuration for an ETL pipeline.
 ///
 /// Contains all settings required to run a replication pipeline including
@@ -32,6 +77,8 @@ pub struct PipelineConfig {
     pub table_error_retry_max_attempts: u32,
     /// Maximum number of table sync workers that can run at a time
     pub max_table_sync_workers: u16,
+    /// Selection rules for tables participating in replication.
+    pub table_sync_copy: TableSyncCopyConfig,
 }
 
 impl PipelineConfig {
@@ -78,6 +125,8 @@ pub struct PipelineConfigWithoutSecrets {
     pub table_error_retry_max_attempts: u32,
     /// Maximum number of table sync workers that can run at a time
     pub max_table_sync_workers: u16,
+    /// Selection rules for tables participating in replication.
+    pub table_sync_copy: TableSyncCopyConfig,
 }
 
 impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
@@ -91,6 +140,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             table_error_retry_delay_ms: value.table_error_retry_delay_ms,
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
             max_table_sync_workers: value.max_table_sync_workers,
+            table_sync_copy: value.table_sync_copy,
         }
     }
 }
@@ -98,5 +148,49 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct ReplicationSlotConfig {
-    pub temporary: bool,
+    pub persistence: ReplicationSlotPersistence,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicationSlotPersistence {
+    #[default]
+    Permanent,
+    Temporary,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_table_sync_copy_serialization_skip_all() {
+        let selection = TableSyncCopyConfig::SkipAllTables;
+        let json = serde_json::to_string(&selection).unwrap();
+        let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(selection, decoded);
+    }
+
+    #[test]
+    fn test_table_sync_copy_serialization_include_tables() {
+        let selection = TableSyncCopyConfig::IncludeTables {
+            table_ids: vec![1, 2, 3],
+        };
+        let json = serde_json::to_string(&selection).unwrap();
+        let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(selection, decoded);
+    }
+
+    #[test]
+    fn test_table_sync_copy_serialization_exclude_tables() {
+        let selection = TableSyncCopyConfig::SkipTables {
+            table_ids: vec![4, 5],
+        };
+        let json = serde_json::to_string(&selection).unwrap();
+        let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(selection, decoded);
+    }
 }

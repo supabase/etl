@@ -35,7 +35,7 @@ pub struct CommitEvent {
     /// Transaction commit flags from Postgres.
     pub flags: i8,
     /// Final LSN position after the transaction.
-    pub end_lsn: u64,
+    pub end_lsn: PgLsn,
     /// Transaction commit timestamp in Postgres format.
     pub timestamp: i64,
 }
