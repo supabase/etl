@@ -2,7 +2,8 @@ use crate::error::{ErrorKind, EtlResult};
 use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
 use etl_config::shared::{
-    ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig, ReplicationSlotConfig, ReplicationSlotPersistence,
+    ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig, ReplicationSlotConfig,
+    ReplicationSlotPersistence,
 };
 use etl_postgres::replication::extract_server_version;
 use etl_postgres::types::convert_type_oid_to_type;
