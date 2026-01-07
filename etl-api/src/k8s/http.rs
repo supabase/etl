@@ -1155,7 +1155,7 @@ mod tests {
                 table_error_retry_delay_ms: 500,
                 table_error_retry_max_attempts: 3,
                 max_table_sync_workers: 4,
-                table_sync_copy: TableSyncCopyConfig::AllTables,
+                table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             },
             sentry: None,
             supabase: None,

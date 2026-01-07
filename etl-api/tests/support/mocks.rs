@@ -238,7 +238,7 @@ pub mod pipelines {
             table_error_retry_delay_ms: Some(10000),
             table_error_retry_max_attempts: Some(5),
             max_table_sync_workers: Some(2),
-            table_sync_copy: Some(TableSyncCopyConfig::AllTables),
+            table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             log_level: Some(LogLevel::Info),
         }
     }
@@ -254,7 +254,7 @@ pub mod pipelines {
             table_error_retry_delay_ms: Some(20000),
             table_error_retry_max_attempts: Some(10),
             max_table_sync_workers: Some(4),
-            table_sync_copy: Some(TableSyncCopyConfig::AllTables),
+            table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             log_level: Some(LogLevel::Info),
         }
     }

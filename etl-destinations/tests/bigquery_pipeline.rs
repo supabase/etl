@@ -6,7 +6,7 @@ use etl::error::ErrorKind;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::notify::NotifyingStore;
-use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
+use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with_batch_config};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 use etl::types::{EventType, PgNumeric, PipelineId};
@@ -407,7 +407,7 @@ async fn table_truncate_with_batching() {
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
-    let mut pipeline = create_pipeline_with(
+    let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
@@ -415,10 +415,10 @@ async fn table_truncate_with_batching() {
         destination.clone(),
         // We use a batch size > 1, so that we can make sure that interleaved truncate statements
         // work well with multiple batches of events.
-        Some(BatchConfig {
+        BatchConfig {
             max_size: 10,
             max_fill_ms: 1000,
-        }),
+        },
     );
 
     // Register notifications for table copy completion.

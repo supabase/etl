@@ -15,16 +15,16 @@ use crate::shared::{
 #[serde(tag = "type")]
 pub enum TableSyncCopyConfig {
     /// Performs the initial copy for all tables.
-    AllTables,
+    IncludeAllTables,
     /// Skips the initial copy for all tables.
-    ExcludeAllTables,
+    SkipAllTables,
     /// Performs the initial copy for the specified table ids.
     IncludeTables {
         /// Table ids of the table for which copy should be performed.
         table_ids: Vec<u32>,
     },
     /// Skips the initial copy for the specified table ids.
-    ExcludeTables {
+    SkipTables {
         /// Table ids of the table for which copy should be skipped.
         table_ids: Vec<u32>,
     },
@@ -34,17 +34,17 @@ impl TableSyncCopyConfig {
     /// Returns `true` if the table should be copied during initial sync, `false` otherwise.
     pub fn should_copy_table(&self, table_id: u32) -> bool {
         match self {
-            TableSyncCopyConfig::AllTables => true,
-            TableSyncCopyConfig::ExcludeAllTables => false,
+            TableSyncCopyConfig::IncludeAllTables => true,
+            TableSyncCopyConfig::SkipAllTables => false,
             TableSyncCopyConfig::IncludeTables { table_ids } => table_ids.contains(&table_id),
-            TableSyncCopyConfig::ExcludeTables { table_ids } => !table_ids.contains(&table_id),
+            TableSyncCopyConfig::SkipTables { table_ids } => !table_ids.contains(&table_id),
         }
     }
 }
 
 impl Default for TableSyncCopyConfig {
     fn default() -> Self {
-        Self::AllTables
+        Self::IncludeAllTables
     }
 }
 
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_table_sync_copy_serialization_skip_all() {
-        let selection = TableSyncCopyConfig::ExcludeAllTables;
+        let selection = TableSyncCopyConfig::SkipAllTables;
         let json = serde_json::to_string(&selection).unwrap();
         let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
 
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_table_sync_copy_serialization_exclude_tables() {
-        let selection = TableSyncCopyConfig::ExcludeTables {
+        let selection = TableSyncCopyConfig::SkipTables {
             table_ids: vec![4, 5],
         };
         let json = serde_json::to_string(&selection).unwrap();

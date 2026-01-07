@@ -81,7 +81,7 @@
 //!         table_error_retry_delay_ms: 10000,
 //!         table_error_retry_max_attempts: 5,
 //!         max_table_sync_workers: 4,
-//!         table_sync_copy: TableSyncCopyConfig::AllTables,
+//!         table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
 //!     };
 //!
 //!     // Create and start the pipeline

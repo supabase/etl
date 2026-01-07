@@ -192,6 +192,8 @@ async fn update_non_toast_values_with_default_replica_identity() {
 
     update_event_notify.notified().await;
 
+    pipeline.shutdown_and_wait().await.unwrap();
+
     // Verify the update behavior - the large_text should be replaced with
     // default value (empty string) and small_int should be updated
     let parsed_table_rows_after_update =
@@ -200,8 +202,6 @@ async fn update_non_toast_values_with_default_replica_identity() {
 
     let expected_updated_row = ToastTable::new(1, "", updated_int_value);
     assert_eq!(parsed_table_rows_after_update, vec![expected_updated_row]);
-
-    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 /// Tests that TOAST values are preserved when updating non-TOAST columns with full replica identity.
@@ -324,6 +324,8 @@ async fn update_non_toast_values_with_full_replica_identity() {
 
     update_event_notify.notified().await;
 
+    pipeline.shutdown_and_wait().await.unwrap();
+
     // Verify the update behavior - the large_text should not be replaced with
     // a default value and small_int should be updated
     let parsed_table_rows_after_update =
@@ -332,8 +334,6 @@ async fn update_non_toast_values_with_full_replica_identity() {
 
     let expected_updated_row = ToastTable::new(1, &large_text_value, updated_int_value);
     assert_eq!(parsed_table_rows_after_update, vec![expected_updated_row]);
-
-    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 /// Tests that TOAST values are correctly updated when directly modifying TOAST columns
@@ -448,6 +448,8 @@ async fn update_toast_values_with_default_replica_identity() {
 
     update_event_notify.notified().await;
 
+    pipeline.shutdown_and_wait().await.unwrap();
+
     // Verify that the large_text is updated
     let parsed_table_rows_after_update =
         materialize_events::<ToastTable>(&destination.get_events().await, None).await;
@@ -455,8 +457,6 @@ async fn update_toast_values_with_default_replica_identity() {
 
     let expected_updated_row = ToastTable::new(1, &updated_large_text_value, initial_int_value);
     assert_eq!(parsed_table_rows_after_update, vec![expected_updated_row]);
-
-    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 /// Tests that Postgres rejects update operations when replica identity is set to none.
@@ -556,6 +556,8 @@ async fn update_non_toast_values_with_none_replica_identity() {
 
     insert_event_notify.notified().await;
 
+    pipeline.shutdown_and_wait().await.unwrap();
+
     // Verify the initial insert worked correctly
     let parsed_table_rows =
         materialize_events::<ToastTable>(&destination.get_events().await, None).await;
@@ -591,8 +593,6 @@ async fn update_non_toast_values_with_none_replica_identity() {
         "cannot update table \"toast_values_test\" because it does not have a replica identity and publishes updates",
         "Expected replica identity error, got: {error_message}"
     );
-
-    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 /// Tests that TOAST values are replaced with default values when the table uses
@@ -727,6 +727,8 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
 
     update_event_notify.notified().await;
 
+    pipeline.shutdown_and_wait().await.unwrap();
+
     // Verify the update behavior - the large_text should be replaced with
     // default value (empty string) and small_int should be updated
     let parsed_table_rows_after_update =
@@ -735,6 +737,4 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
 
     let expected_updated_row = ToastTable::new(1, "", updated_int_value);
     assert_eq!(parsed_table_rows_after_update[0], expected_updated_row);
-
-    pipeline.shutdown_and_wait().await.unwrap();
 }

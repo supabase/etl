@@ -205,7 +205,7 @@ mod tests {
             table_error_retry_delay_ms: 2000,
             table_error_retry_max_attempts: 7,
             max_table_sync_workers: 4,
-            table_sync_copy: TableSyncCopyConfig::AllTables,
+            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             log_level: None,
         };
 
@@ -287,7 +287,7 @@ mod tests {
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 3,
             max_table_sync_workers: 2,
-            table_sync_copy: TableSyncCopyConfig::AllTables,
+            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             log_level: None,
         };
 
@@ -300,7 +300,7 @@ mod tests {
             table_error_retry_delay_ms: Some(5000),
             table_error_retry_max_attempts: Some(9),
             max_table_sync_workers: None,
-            table_sync_copy: Some(TableSyncCopyConfig::ExcludeAllTables),
+            table_sync_copy: Some(TableSyncCopyConfig::SkipAllTables),
             log_level: None,
         };
 
@@ -312,9 +312,6 @@ mod tests {
         assert_eq!(stored.table_error_retry_delay_ms, 5000);
         assert_eq!(stored.table_error_retry_max_attempts, 9);
         assert_eq!(stored.max_table_sync_workers, 2);
-        assert_eq!(
-            stored.table_sync_copy,
-            TableSyncCopyConfig::ExcludeAllTables
-        );
+        assert_eq!(stored.table_sync_copy, TableSyncCopyConfig::SkipAllTables);
     }
 }

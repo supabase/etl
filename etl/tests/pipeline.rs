@@ -6,7 +6,9 @@ use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
-use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
+use etl::test_utils::pipeline::{
+    create_pipeline, create_pipeline_with_batch_config, create_pipeline_with_table_sync_copy_config,
+};
 use etl::test_utils::table::assert_table_schema;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{
@@ -15,7 +17,7 @@ use etl::test_utils::test_schema::{
     insert_mock_data, insert_users_data, setup_test_database_schema,
 };
 use etl::types::{Event, EventType, InsertEvent, PipelineId, Type};
-use etl_config::shared::BatchConfig;
+use etl_config::shared::{BatchConfig, TableSyncCopyConfig};
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
@@ -520,6 +522,112 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
+    init_test_tracing();
+
+    enum TableCopyCase {
+        IncludeAll,
+        SkipAll,
+        IncludeOnly,
+        SkipOnly,
+    }
+
+    let variants = vec![
+        ("include_all_tables", TableCopyCase::IncludeAll, true),
+        ("skip_all_tables", TableCopyCase::SkipAll, false),
+        ("include_tables", TableCopyCase::IncludeOnly, true),
+        ("skip_tables", TableCopyCase::SkipOnly, false),
+    ];
+
+    for (label, selection_case, should_copy) in variants {
+        let mut database = spawn_source_database().await;
+        let database_schema =
+            setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+        let users_table_id = database_schema.users_schema().id;
+
+        // We insert a single user.
+        insert_users_data(&mut database, &database_schema.users_schema().name, 0..=0).await;
+
+        let store = NotifyingStore::new();
+        let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+        let pipeline_id: PipelineId = random();
+        let table_sync_copy = match selection_case {
+            TableCopyCase::IncludeAll => TableSyncCopyConfig::IncludeAllTables,
+            TableCopyCase::SkipAll => TableSyncCopyConfig::SkipAllTables,
+            TableCopyCase::IncludeOnly => TableSyncCopyConfig::IncludeTables {
+                table_ids: vec![users_table_id.into_inner()],
+            },
+            TableCopyCase::SkipOnly => TableSyncCopyConfig::SkipTables {
+                table_ids: vec![users_table_id.into_inner()],
+            },
+        };
+
+        let mut pipeline = create_pipeline_with_table_sync_copy_config(
+            &database.config,
+            pipeline_id,
+            database_schema.publication_name(),
+            store.clone(),
+            destination.clone(),
+            table_sync_copy,
+        );
+
+        // We wait for the table to be ready for streaming.
+        let table_ready_notify = store
+            .notify_on_table_state_type(users_table_id, TableReplicationPhaseType::Ready)
+            .await;
+
+        pipeline.start().await.unwrap();
+
+        table_ready_notify.notified().await;
+
+        // We wait for the insert.
+        let events_notify = destination
+            .wait_for_events_count(vec![(EventType::Insert, 1)])
+            .await;
+
+        // We insert additional data.
+        insert_users_data(&mut database, &database_schema.users_schema().name, 0..=0).await;
+
+        events_notify.notified().await;
+
+        pipeline.shutdown_and_wait().await.unwrap();
+
+        // We validate that the table rows are correct.
+        let table_rows = destination.get_table_rows().await;
+        let copied_rows = table_rows
+            .get(&users_table_id)
+            .map(|rows| rows.len())
+            .unwrap_or(0);
+
+        let expected_rows = if should_copy { 1 } else { 0 };
+        assert_eq!(
+            copied_rows, expected_rows,
+            "expected table copy for variant {label}"
+        );
+        // We always expect the method to be called since the downstream table should be created
+        // nonetheless.
+        assert!(
+            destination.write_table_rows_called().await > 0,
+            "expected write_table_rows for variant {label}"
+        );
+
+        // We validate that the single insert was received.
+        let events = destination.get_events().await;
+        let grouped_events = group_events_by_type_and_table_id(&events);
+        let users_inserts = grouped_events
+            .get(&(EventType::Insert, database_schema.users_schema().id))
+            .unwrap();
+
+        assert_eq!(
+            users_inserts.len(),
+            1,
+            "expected single insert for variant {label}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_copy_replicates_existing_data() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
@@ -791,13 +899,13 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
         max_size: 1000,
         max_fill_ms: 1000,
     };
-    let mut pipeline = create_pipeline_with(
+    let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
-        Some(batch_config),
+        batch_config,
     );
 
     // Register notifications for initial table copy completion.
@@ -876,13 +984,13 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
         max_size: 1000,
         max_fill_ms: 1000,
     };
-    let mut pipeline = create_pipeline_with(
+    let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
-        Some(batch_config),
+        batch_config,
     );
 
     // Register notifications for initial table copy completion.

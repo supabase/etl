@@ -32,7 +32,9 @@ The pipeline will automatically:
 */
 
 use clap::{Args, Parser};
-use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig, TlsConfig};
+use etl::config::{
+    BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig, TlsConfig,
+};
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
 use etl_destinations::bigquery::BigQueryDestination;
