@@ -8,9 +8,36 @@ use utoipa::ToSchema;
 #[serde(rename_all = "snake_case")]
 pub struct BatchConfig {
     /// Maximum number of items in a batch for table copy and event streaming.
-    #[cfg_attr(feature = "utoipa", schema(example = 1000))]
+    #[serde(default = "default_batch_max_size")]
+    #[cfg_attr(feature = "utoipa", schema(example = 10000))]
     pub max_size: usize,
     /// Maximum time, in milliseconds, to wait for a batch to fill before processing.
-    #[cfg_attr(feature = "utoipa", schema(example = 1000))]
+    #[serde(default = "default_batch_max_fill_ms")]
+    #[cfg_attr(feature = "utoipa", schema(example = 0))]
     pub max_fill_ms: u64,
+}
+
+impl BatchConfig {
+    /// Default maximum batch size for table copy and event streaming.
+    pub const DEFAULT_MAX_SIZE: usize = 10000;
+
+    /// Default maximum fill time in milliseconds.
+    pub const DEFAULT_MAX_FILL_MS: u64 = 0;
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self {
+            max_size: default_batch_max_size(),
+            max_fill_ms: default_batch_max_fill_ms(),
+        }
+    }
+}
+
+fn default_batch_max_size() -> usize {
+    BatchConfig::DEFAULT_MAX_SIZE
+}
+
+fn default_batch_max_fill_ms() -> u64 {
+    BatchConfig::DEFAULT_MAX_FILL_MS
 }

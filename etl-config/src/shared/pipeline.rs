@@ -68,18 +68,32 @@ pub struct PipelineConfig {
     /// replication.
     pub pg_connection: PgConnectionConfig,
     /// Batch processing configuration.
+    #[serde(default)]
     pub batch: BatchConfig,
     /// Number of milliseconds between one retry and another when a table error occurs.
+    #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
     /// Maximum number of automatic retry attempts before requiring manual intervention.
+    #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
     /// Maximum number of table sync workers that can run at a time
+    #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
     /// Selection rules for tables participating in replication.
+    #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
 }
 
 impl PipelineConfig {
+    /// Default retry delay in milliseconds between table error retries.
+    pub const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 1000;
+
+    /// Default maximum number of retry attempts for table errors.
+    pub const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: u32 = 5;
+
+    /// Default maximum number of concurrent table sync workers.
+    pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 10;
+
     /// Validates pipeline configuration settings.
     ///
     /// Checks connection settings and ensures worker count is non-zero.
@@ -98,6 +112,18 @@ impl PipelineConfig {
     }
 }
 
+fn default_table_error_retry_delay_ms() -> u64 {
+    PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
+}
+
+fn default_table_error_retry_max_attempts() -> u32 {
+    PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
+}
+
+fn default_max_table_sync_workers() -> u16 {
+    PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
+}
+
 /// Same as [`PipelineConfig`] but without secrets. This type
 /// implements [`Serialize`] because it does not contains secrets
 /// so is safe to serialize.
@@ -114,14 +140,19 @@ pub struct PipelineConfigWithoutSecrets {
     /// replication.
     pub pg_connection: PgConnectionConfigWithoutSecrets,
     /// Batch processing configuration.
+    #[serde(default)]
     pub batch: BatchConfig,
     /// Number of milliseconds between one retry and another when a table error occurs.
+    #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
     /// Maximum number of automatic retry attempts before requiring manual intervention.
+    #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
     /// Maximum number of table sync workers that can run at a time
+    #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
     /// Selection rules for tables participating in replication.
+    #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
 }
 

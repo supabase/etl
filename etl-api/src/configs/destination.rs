@@ -10,7 +10,13 @@ use crate::configs::encryption::{
 };
 use crate::configs::store::Store;
 
+// API-specific default for BigQuery max concurrent streams
 const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 8;
+
+/// Returns the default maximum concurrent streams for BigQuery destinations.
+pub const fn default_max_concurrent_streams() -> usize {
+    DEFAULT_MAX_CONCURRENT_STREAMS
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -105,7 +111,9 @@ pub enum StoredDestinationConfig {
         project_id: String,
         dataset_id: String,
         service_account_key: SerializableSecretString,
+        #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
+        #[serde(default = "default_max_concurrent_streams")]
         max_concurrent_streams: usize,
     },
     Iceberg {
