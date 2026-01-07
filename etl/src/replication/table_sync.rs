@@ -202,76 +202,90 @@ where
             // pipeline is restarted, since it's outside the lifecycle of the pipeline.
             store.store_table_schema(table_schema.clone()).await?;
 
-            // We create the copy table stream.
-            let table_copy_stream = transaction
-                .get_table_copy_stream(
-                    table_id,
-                    &table_schema.column_schemas,
-                    Some(&config.publication_name),
-                )
-                .await?;
-            let table_copy_stream =
-                TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
-            let table_copy_stream = TimeoutBatchStream::wrap(
-                table_copy_stream,
-                config.batch.clone(),
-                shutdown_rx.clone(),
-            );
-            pin!(table_copy_stream);
-
-            info!(%table_id, "starting table copy stream");
-
             let table_copy_start = Instant::now();
             let mut total_rows_copied = 0;
             let mut table_rows_written = false;
 
-            // We start consuming the table stream. If any error occurs, we will bail the entire copy since
-            // we want to be fully consistent.
-            while let Some(result) = table_copy_stream.next().await {
-                match result {
-                    ShutdownResult::Ok(table_rows) => {
-                        let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
-                        let table_rows_copied_batch = table_rows.len();
-                        total_rows_copied += table_rows_copied_batch;
+            // We check if the table should be copied, or we can skip it.
+            if config
+                .table_sync_copy
+                .should_copy_table(table_id.into_inner())
+            {
+                // We create the copy table stream.
+                let table_copy_stream = transaction
+                    .get_table_copy_stream(
+                        table_id,
+                        &table_schema.column_schemas,
+                        Some(&config.publication_name),
+                    )
+                    .await?;
+                let table_copy_stream = TableCopyStream::wrap(
+                    table_copy_stream,
+                    &table_schema.column_schemas,
+                    pipeline_id,
+                );
+                let table_copy_stream = TimeoutBatchStream::wrap(
+                    table_copy_stream,
+                    config.batch.clone(),
+                    shutdown_rx.clone(),
+                );
+                pin!(table_copy_stream);
 
-                        let before_sending = Instant::now();
+                info!(%table_id, "starting table copy stream");
 
-                        destination.write_table_rows(table_id, table_rows).await?;
-                        table_rows_written = true;
+                // We start consuming the table stream. If any error occurs, we will bail the entire copy since
+                // we want to be fully consistent.
+                while let Some(result) = table_copy_stream.next().await {
+                    match result {
+                        ShutdownResult::Ok(table_rows) => {
+                            let table_rows =
+                                table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
+                            let table_rows_copied_batch = table_rows.len();
+                            total_rows_copied += table_rows_copied_batch;
 
-                        metrics::counter!(
-                            ETL_EVENTS_PROCESSED_TOTAL,
-                            WORKER_TYPE_LABEL => "table_sync",
-                            ACTION_LABEL => "table_copy",
-                            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                            DESTINATION_LABEL => D::name(),
-                        )
-                        .increment(table_rows_copied_batch as u64);
+                            let before_sending = Instant::now();
 
-                        let send_duration_seconds = before_sending.elapsed().as_secs_f64();
-                        histogram!(
-                            ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-                            WORKER_TYPE_LABEL => "table_sync",
-                            ACTION_LABEL => "table_copy",
-                            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                            DESTINATION_LABEL => D::name(),
-                        )
-                        .record(send_duration_seconds);
+                            destination.write_table_rows(table_id, table_rows).await?;
+                            table_rows_written = true;
 
-                        // Fail point to test when the table sync fails after copying one batch.
-                        #[cfg(feature = "failpoints")]
-                        etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC)?;
-                    }
-                    ShutdownResult::Shutdown(_) => {
-                        // If we received a shutdown in the middle of a table copy, we bail knowing
-                        // that the system can automatically recover if a table copy has failed in
-                        // the middle of processing.
-                        info!(%table_id, "shutting down table sync during copy");
+                            metrics::counter!(
+                                ETL_EVENTS_PROCESSED_TOTAL,
+                                WORKER_TYPE_LABEL => "table_sync",
+                                ACTION_LABEL => "table_copy",
+                                PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                                DESTINATION_LABEL => D::name(),
+                            )
+                            .increment(table_rows_copied_batch as u64);
 
-                        return Ok(TableSyncResult::SyncStopped);
+                            let send_duration_seconds = before_sending.elapsed().as_secs_f64();
+                            histogram!(
+                                ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+                                WORKER_TYPE_LABEL => "table_sync",
+                                ACTION_LABEL => "table_copy",
+                                PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                                DESTINATION_LABEL => D::name(),
+                            )
+                            .record(send_duration_seconds);
+
+                            // Fail point to test when the table sync fails after copying one batch.
+                            #[cfg(feature = "failpoints")]
+                            etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC)?;
+                        }
+                        ShutdownResult::Shutdown(_) => {
+                            // If we received a shutdown in the middle of a table copy, we bail knowing
+                            // that the system can automatically recover if a table copy has failed in
+                            // the middle of processing.
+                            info!(%table_id, "shutting down table sync during copy");
+
+                            return Ok(TableSyncResult::SyncStopped);
+                        }
                     }
                 }
             }
+
+            // We commit the transaction before starting the apply loop, otherwise it will fail
+            // since no transactions can be running while replication is started.
+            transaction.commit().await?;
 
             // If no table rows were written, we call the method nonetheless with no rows, to kickstart
             // table creation.
@@ -279,10 +293,6 @@ where
                 destination.write_table_rows(table_id, vec![]).await?;
                 info!(%table_id, "writing empty table rows for empty table");
             }
-
-            // We commit the transaction before starting the apply loop, otherwise it will fail
-            // since no transactions can be running while replication is started.
-            transaction.commit().await?;
 
             // Record the table copy duration.
             let table_copy_duration = table_copy_start.elapsed().as_secs_f64();

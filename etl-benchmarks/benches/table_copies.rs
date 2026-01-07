@@ -6,7 +6,9 @@ use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::notify::NotifyingStore;
 use etl::types::{Event, TableRow};
 use etl_config::Environment;
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
+use etl_config::shared::{
+    BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig, TlsConfig,
+};
 use etl_destinations::bigquery::BigQueryDestination;
 use etl_postgres::types::TableId;
 use etl_telemetry::tracing::init_tracing;
@@ -350,6 +352,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.max_table_sync_workers,
+        table_sync_copy: TableSyncCopyConfig::default(),
     };
 
     // Create the appropriate destination based on the argument
