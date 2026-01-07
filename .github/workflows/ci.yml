@@ -63,7 +63,7 @@ jobs:
       contents: read
     strategy:
       matrix:
-        postgres_version: [17, 16, 15, 14]
+        postgres_version: [18, 17, 16, 15, 14]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -127,7 +127,7 @@ jobs:
       id-token: write
     strategy:
       matrix:
-        postgres_version: [17, 16, 15, 14]
+        postgres_version: [18, 17, 16, 15, 14]
     steps:
       - name: Checkout
         uses: actions/checkout@v4

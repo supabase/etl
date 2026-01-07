@@ -6,7 +6,7 @@ This guide covers the essential Postgres concepts and configuration needed for l
 
 ## Prerequisites
 
-- **PostgreSQL 14, 15, 16, or 17** (officially supported and tested versions)
+- **PostgreSQL 14, 15, 16, 17, or 18** (officially supported and tested versions)
   - PostgreSQL 15+ recommended for advanced publication filtering (column-level, row-level, `FOR ALL TABLES IN SCHEMA`)
   - PostgreSQL 14 supported with table-level filtering only
 - Superuser access to the Postgres server
@@ -215,7 +215,7 @@ DROP PUBLICATION my_publication;
 
 ## Version-Specific Features
 
-ETL supports PostgreSQL versions 14 through 17, with enhanced features available in newer versions:
+ETL supports PostgreSQL versions 14 through 18, with enhanced features available in newer versions:
 
 ### PostgreSQL 15+ Features
 
