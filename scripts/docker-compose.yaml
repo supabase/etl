@@ -1,16 +1,16 @@
 x-lakekeeper-env: &lakekeeper-env
   environment:
     - LAKEKEEPER__PG_ENCRYPTION_KEY=insecure-encryption-key
-    - LAKEKEEPER__PG_DATABASE_URL_READ=postgresql://lakekeeper-postgres:lakekeeper-postgres@lakekeeper-postgres:5432/iceberg-catalog
-    - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://lakekeeper-postgres:lakekeeper-postgres@lakekeeper-postgres:5432/iceberg-catalog
+    - LAKEKEEPER__PG_DATABASE_URL_READ=postgresql://${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres}:${LAKEKEEPER_POSTGRES_PASSWORD:-lakekeeper-postgres}@catalog-postgres:5432/${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}
+    - LAKEKEEPER__PG_DATABASE_URL_WRITE=postgresql://${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres}:${LAKEKEEPER_POSTGRES_PASSWORD:-lakekeeper-postgres}@catalog-postgres:5432/${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}
     - RUST_LOG=info
 
-name: etl-pg-${POSTGRES_VERSION:-17}
+name: etl-stack-pg-${POSTGRES_VERSION:-18}
 
 services:
   # Start Postgres
-  postgres:
-    image: postgres:${POSTGRES_VERSION:-17}
+  source-postgres:
+    image: postgres:${POSTGRES_VERSION:-18}
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -18,7 +18,7 @@ services:
     ports:
       - "${POSTGRES_PORT:-5430}:5432"
     volumes:
-      - ${POSTGRES_DATA_VOLUME:-postgres_data}:/var/lib/postgresql/data
+      - ${POSTGRES_DATA_VOLUME:-postgres_data}:/var/lib/postgresql
     # These parameters are configured for local testing only.
     # In production, use PostgreSQL defaults or your own tuned values.
     # `wal_sender_timeout/2` is the keepalive timeout for streaming replication, we set it to 10s to make tests
@@ -37,14 +37,14 @@ services:
       timeout: 5s
       retries: 5
 
-  lakekeeper-postgres:
-      image: postgres:17
+  catalog-postgres:
+      image: postgres:${LAKEKEEPER_POSTGRES_VERSION:-18}
       environment:
         POSTGRES_USER: ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres}
         POSTGRES_PASSWORD: ${LAKEKEEPER_POSTGRES_PASSWORD:-lakekeeper-postgres}
         POSTGRES_DB: ${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}
       volumes:
-        - ${LAKEKEEPER_POSTGRES_DATA_VOLUME:-lakekeeper_postgres_data}:/var/lib/postgresql/data
+        - ${LAKEKEEPER_POSTGRES_DATA_VOLUME:-lakekeeper_postgres_data}:/var/lib/postgresql
       restart: unless-stopped
       healthcheck:
         test: ["CMD-SHELL", "pg_isready -U ${LAKEKEEPER_POSTGRES_USER:-lakekeeper-postgres} -d ${LAKEKEEPER_POSTGRES_DB:-iceberg-catalog}"]
@@ -53,7 +53,7 @@ services:
         retries: 5
 
   # Start MinIO for S3-compatible object storage
-  minio:
+  object-store-minio:
     image: minio/minio:latest
     environment:
       MINIO_ROOT_USER: minio-admin
@@ -71,35 +71,35 @@ services:
       retries: 10
 
   # Create MinIO bucket
-  create-bucket:
+  object-store-minio-init:
     image: minio/mc:latest
     depends_on:
-      minio:
+      object-store-minio:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c "
-      mc alias set iceberg http://minio:9000 minio-admin minio-admin-password;
+      mc alias set iceberg http://object-store-minio:9000 minio-admin minio-admin-password;
       mc mb iceberg/dev-and-test;
       exit 0;
       "
 
   # Migrate lakekeeper database
-  migrate-lakekeeper:
+  catalog-lakekeeper-migrate:
     image: quay.io/lakekeeper/catalog:latest-main
     <<: *lakekeeper-env
     restart: "no"
     command: ["migrate"]
     depends_on:
-      lakekeeper-postgres:
+      catalog-postgres:
         condition: service_healthy
 
   # Start lakekeeper, an iceberg REST catalog
-  lakekeeper:
+  catalog-lakekeeper-api:
     image: quay.io/lakekeeper/catalog:latest-main
     depends_on:
-      migrate-lakekeeper:
+      catalog-lakekeeper-migrate:
         condition: service_completed_successfully
-      create-bucket:
+      object-store-minio-init:
         condition: service_completed_successfully
     <<: *lakekeeper-env
     command: ["serve"]
@@ -113,10 +113,10 @@ services:
       - "8182:8181"
 
   # Bootstrap lakekeeper. After deployment, lakekeeper needs to be bootstrapped.
-  bootstrap-lakekeeper:
+  catalog-lakekeeper-bootstrap:
     image: curlimages/curl
     depends_on:
-      lakekeeper:
+      catalog-lakekeeper-api:
         condition: service_healthy
     restart: "no"
     command:
@@ -125,7 +125,7 @@ services:
       - "-X"
       - "POST"
       - "-v"
-      - "http://lakekeeper:8181/management/v1/bootstrap"
+      - "http://catalog-lakekeeper-api:8181/management/v1/bootstrap"
       - "-H"
       - "Content-Type: application/json"
       - "--data"
@@ -135,14 +135,14 @@ services:
       # - "--fail-with-body"
 
   # Create a warehouse for development and testing
-  create-warehouse:
+  catalog-lakekeeper-warehouse-init:
     image: curlimages/curl
     depends_on:
-      lakekeeper:
+      catalog-lakekeeper-api:
         condition: service_healthy
-      bootstrap-lakekeeper:
+      catalog-lakekeeper-bootstrap:
         condition: service_completed_successfully
-      create-bucket:
+      object-store-minio-init:
         condition: service_completed_successfully
     restart: "no"
     command:
@@ -151,7 +151,7 @@ services:
       - "-X"
       - "POST"
       - "-v"
-      - "http://lakekeeper:8181/management/v1/warehouse"
+      - "http://catalog-lakekeeper-api:8181/management/v1/warehouse"
       - "-H"
       - "Content-Type: application/json"
       - "--data"

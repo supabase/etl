@@ -51,7 +51,7 @@ ETL is a Rust framework by [Supabase](https://supabase.com) for building high‑
 
 ## Requirements
 
-**PostgreSQL Version:** ETL officially supports and tests against **PostgreSQL 14, 15, 16, and 17**.
+**PostgreSQL Version:** ETL officially supports and tests against **PostgreSQL 14, 15, 16, 17, and 18**.
 
 - **PostgreSQL 15+** is recommended for access to advanced publication features including:
   - Column-level filtering
