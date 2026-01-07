@@ -64,7 +64,7 @@ pub struct PipelineConfig {
     pub id: u64,
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
-    /// Whether to use a temporary replication slot
+    /// Configuration for the replication slot used
     pub replication_slot: ReplicationSlotConfig,
     /// The connection configuration for the Postgres instance to which the pipeline connects for
     /// replication.
@@ -112,7 +112,7 @@ pub struct PipelineConfigWithoutSecrets {
     pub id: u64,
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
-    /// Whether to use a temporary replication slot
+    /// Configuration for the replication slot used
     pub replication_slot: ReplicationSlotConfig,
     /// The connection configuration for the Postgres instance to which the pipeline connects for
     /// replication.
