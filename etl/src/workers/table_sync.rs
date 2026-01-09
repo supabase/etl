@@ -159,6 +159,7 @@ impl TableSyncWorkerStateInner {
 /// specific phase transitions, making it suitable for complex multi-worker scenarios.
 #[derive(Debug, Clone)]
 pub struct TableSyncWorkerState {
+    // TODO: regarding the usage of inner it might be interesting to use a RwLock instead of a Mutex
     inner: Arc<Mutex<TableSyncWorkerStateInner>>,
 }
 
@@ -771,7 +772,7 @@ where
 {
     /// Tries to advance the [`TableReplicationPhase`] of this table based on the current lsn.
     ///
-    /// Returns `Ok(false)` when the worker is done with its work, signaling the caller that the apply
+    /// Returns `ApplyLoopAction::Complete` when the worker is done with its work, signaling the caller that the apply
     /// loop should be stopped.
     async fn try_advance_phase(
         &self,
@@ -821,10 +822,10 @@ where
     /// and if it is greater than or equal to the `Catchup` `lsn`:
     ///
     /// * Marks the table as sync done in state store if `update_state` is true.
-    /// * Returns Ok(false) to indicate to the callers that this table has been marked sync done,
+    /// * Returns ApplyLoopAction::Complete to indicate to the callers that this table has been marked sync done,
     ///   meaning that the apply loop should not continue.
     ///
-    /// In all other cases it returns Ok(true)
+    /// In all other cases it returns ApplyLoopAction::Continue
     /// Processes the table's synchronization state based on current LSN progress.
     ///
     /// This method compares the current LSN against the table's catchup LSN and
@@ -832,8 +833,8 @@ where
     /// If `update_state` is true, it persists the state change; otherwise, it
     /// performs a lookahead check.
     ///
-    /// Returns `Ok(false)` when the table sync is complete and the worker should
-    /// terminate, `Ok(true)` otherwise.
+    /// Returns `ApplyLoopAction::Complete` when the table sync is complete and the worker should
+    /// terminate, `ApplyLoopAction::Continue` otherwise.
     async fn process_syncing_tables(
         &self,
         current_lsn: PgLsn,

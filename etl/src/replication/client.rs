@@ -280,8 +280,7 @@ impl PgReplicationClient {
                     &row,
                     "confirmed_flush_lsn",
                     "pg_replication_slots",
-                )
-                .await?;
+                )?;
                 let slot = GetSlotResult {
                     confirmed_flush_lsn,
                 };
@@ -302,10 +301,7 @@ impl PgReplicationClient {
     /// This method first attempts to get the slot by name. If the slot doesn't exist,
     /// it creates a new one.
     ///
-    /// Returns a tuple containing:
-    /// - A boolean indicating whether the slot was created (true) or already existed (false)
-    /// - The slot result containing either the confirmed_flush_lsn (for existing slots)
-    ///   or the consistent_point (for newly created slots)
+    /// Returns an enum indicating whether the slot was created or already existed.
     pub async fn get_or_create_slot(&self, slot_name: &str) -> EtlResult<GetOrCreateSlotResult> {
         match self.get_slot(slot_name).await {
             Ok(slot) => {
@@ -342,9 +338,7 @@ impl PgReplicationClient {
                 Ok(())
             }
             Err(err) => {
-                if let Some(code) = err.code()
-                    && *code == SqlState::UNDEFINED_OBJECT
-                {
+                if let Some(&SqlState::UNDEFINED_OBJECT) = err.code() {
                     warn!(
                         slot_name,
                         "attempted to delete non-existent replication slot"
@@ -395,7 +389,7 @@ impl PgReplicationClient {
         for msg in self.client.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
                 let pubviaroot =
-                    Self::get_row_value::<String>(&row, "pubviaroot", "pg_publication").await?;
+                    Self::get_row_value::<String>(&row, "pubviaroot", "pg_publication")?;
                 return Ok(pubviaroot == "t");
             }
         }
@@ -449,11 +443,9 @@ impl PgReplicationClient {
         for msg in self.client.simple_query(&publication_query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
                 let schema =
-                    Self::get_row_value::<String>(&row, "schemaname", "pg_publication_tables")
-                        .await?;
+                    Self::get_row_value::<String>(&row, "schemaname", "pg_publication_tables")?;
                 let name =
-                    Self::get_row_value::<String>(&row, "tablename", "pg_publication_tables")
-                        .await?;
+                    Self::get_row_value::<String>(&row, "tablename", "pg_publication_tables")?;
 
                 table_names.push(TableName { schema, name })
             }
@@ -506,7 +498,7 @@ impl PgReplicationClient {
         let mut roots = vec![];
         for msg in self.client.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
-                let table_id = Self::get_row_value::<TableId>(&row, "oid", "pg_class").await?;
+                let table_id = Self::get_row_value::<TableId>(&row, "oid", "pg_class")?;
                 roots.push(table_id);
             }
         }
@@ -600,8 +592,7 @@ impl PgReplicationClient {
                             &row,
                             "consistent_point",
                             "pg_replication_slots",
-                        )
-                        .await?;
+                        )?;
                         let slot = CreateSlotResult { consistent_point };
 
                         return Ok(slot);
@@ -665,9 +656,8 @@ impl PgReplicationClient {
         for message in self.client.simple_query(&table_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let schema_name =
-                    Self::get_row_value::<String>(&row, "schema_name", "pg_namespace").await?;
-                let table_name =
-                    Self::get_row_value::<String>(&row, "table_name", "pg_class").await?;
+                    Self::get_row_value::<String>(&row, "schema_name", "pg_namespace")?;
+                let table_name = Self::get_row_value::<String>(&row, "table_name", "pg_class")?;
 
                 return Ok(TableName {
                     schema: schema_name,
@@ -844,8 +834,7 @@ impl PgReplicationClient {
         {
             if let SimpleQueryMessage::Row(row) = message {
                 let has_generated_columns =
-                    Self::get_row_value::<String>(&row, "has_generated", "pg_attribute").await?
-                        == "t";
+                    Self::get_row_value::<String>(&row, "has_generated", "pg_attribute")? == "t";
                 if has_generated_columns {
                     warn!(
                         "Table {} contains generated columns that will NOT be replicated. \
@@ -860,16 +849,16 @@ impl PgReplicationClient {
         }
 
         let mut column_schemas = vec![];
+        // TODO: there's a lot of code using simple_query but only checking for SimpleQueryMessage::Row, a small optimization could be done here if we upgraded tokio-postgres to a newer version
+        // in order to use https://docs.rs/tokio-postgres/0.7.15/tokio_postgres/struct.Client.html#method.simple_query_raw to filter on SimpleQueryMessage::Row and avoid useless allocations
         for message in self.client.simple_query(&column_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
-                let name = Self::get_row_value::<String>(&row, "attname", "pg_attribute").await?;
-                let type_oid = Self::get_row_value::<u32>(&row, "atttypid", "pg_attribute").await?;
-                let modifier =
-                    Self::get_row_value::<i32>(&row, "atttypmod", "pg_attribute").await?;
+                let name = Self::get_row_value::<String>(&row, "attname", "pg_attribute")?;
+                let type_oid = Self::get_row_value::<u32>(&row, "atttypid", "pg_attribute")?;
+                let modifier = Self::get_row_value::<i32>(&row, "atttypmod", "pg_attribute")?;
                 let nullable =
-                    Self::get_row_value::<String>(&row, "attnotnull", "pg_attribute").await? == "f";
-                let primary =
-                    Self::get_row_value::<String>(&row, "primary", "pg_index").await? == "t";
+                    Self::get_row_value::<String>(&row, "attnotnull", "pg_attribute")? == "f";
+                let primary = Self::get_row_value::<String>(&row, "primary", "pg_index")? == "t";
 
                 let typ = convert_type_oid_to_type(type_oid);
 
@@ -906,10 +895,10 @@ impl PgReplicationClient {
         // This uses the same query as the `pg_publication_tables`, but with some minor tweaks (COALESCE, only return the rowfilter,
         // filter on oid and pubname). All of these are available >= Postgres 15.
         let row_filter_query = format!(
-            "select pt.rowfilter as row_filter 
-                from pg_publication_tables pt 
-                join pg_namespace n on n.nspname = pt.schemaname 
-                join pg_class c on c.relnamespace = n.oid AND c.relname = pt.tablename 
+            "select pt.rowfilter as row_filter
+                from pg_publication_tables pt
+                join pg_namespace n on n.nspname = pt.schemaname
+                join pg_class c on c.relnamespace = n.oid AND c.relname = pt.tablename
                 where pt.pubname = {} and c.oid = {};",
             quote_literal(publication),
             table_id,
@@ -972,7 +961,7 @@ impl PgReplicationClient {
     /// Helper function to extract a value from a SimpleQueryMessage::Row
     ///
     /// Returns an error if the column is not found or if the value cannot be parsed to the target type.
-    async fn get_row_value<T: std::str::FromStr>(
+    fn get_row_value<T: std::str::FromStr>(
         row: &SimpleQueryRow,
         column_name: &str,
         table_name: &str,
