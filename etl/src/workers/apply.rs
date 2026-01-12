@@ -492,7 +492,12 @@ where
 
         for (table_id, table_replication_phase) in active_table_replication_states {
             let action = self
-                .process_single_syncing_table(table_id, table_replication_phase, current_lsn, update_state)
+                .process_single_syncing_table(
+                    table_id,
+                    table_replication_phase,
+                    current_lsn,
+                    update_state,
+                )
                 .await?;
 
             // If the action is terminating, stop iterating and return immediately.
