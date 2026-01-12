@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::types::{Event, TableId, TableRow};
+use crate::types::{Event, ReplicatedTableSchema, TableId, TableRow};
 
 #[derive(Debug)]
 struct Inner {
@@ -81,25 +81,27 @@ impl Destination for MemoryDestination {
         "memory"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
         // For truncation, we simulate removing all table rows for a specific table and also the events
         // of that table.
         let mut inner = self.inner.lock().await;
 
+        let table_id = replicated_table_schema.id();
         info!(%table_id, "truncating table");
 
         inner.table_rows.remove(&table_id);
         inner.events.retain_mut(|event| {
             let has_table_id = event.has_table_id(&table_id);
-            if let Event::Truncate(event) = event
+            if let Event::Truncate(truncate_event) = event
                 && has_table_id
             {
-                let Some(index) = event.rel_ids.iter().position(|&id| table_id.0 == id) else {
-                    return true;
-                };
-
-                event.rel_ids.remove(index);
-                if event.rel_ids.is_empty() {
+                truncate_event
+                    .truncated_tables
+                    .retain(|s| s.id() != table_id);
+                if truncate_event.truncated_tables.is_empty() {
                     return false;
                 }
 
@@ -114,10 +116,11 @@ impl Destination for MemoryDestination {
 
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
+        let table_id = replicated_table_schema.id();
 
         info!(%table_id, row_count = table_rows.len(), "writing table rows");
         inner.table_rows.insert(table_id, table_rows);

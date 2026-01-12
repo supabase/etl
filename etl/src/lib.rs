@@ -111,6 +111,7 @@ pub mod error;
 pub mod failpoints;
 pub mod macros;
 pub mod metrics;
+pub mod migrations;
 pub mod pipeline;
 pub mod replication;
 pub mod state;
