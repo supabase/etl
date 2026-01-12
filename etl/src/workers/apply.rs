@@ -3,7 +3,7 @@ use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::sync::{MutexGuard, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info};
@@ -22,7 +22,7 @@ use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle};
-use crate::workers::pool::TableSyncWorkerPool;
+use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 
 /// Handle for monitoring and controlling the apply worker.
@@ -329,7 +329,7 @@ where
     /// terminate based on the table's processing outcome.
     async fn process_single_syncing_table(
         &self,
-        pool: &mut tokio::sync::MutexGuard<'_, crate::workers::pool::TableSyncWorkerPoolInner>,
+        pool: &mut MutexGuard<'_, TableSyncWorkerPoolInner>,
         table_id: TableId,
         store_phase: TableReplicationPhase,
         current_lsn: PgLsn,
@@ -344,8 +344,8 @@ where
         // of the state at this moment.
         if let Some(worker_state) = active_worker_state {
             // Lock the worker state once and read the effective phase.
-            let mut inner = worker_state.lock().await;
-            let active_phase = inner.replication_phase();
+            let mut worker_state_guard = worker_state.lock().await;
+            let active_phase = worker_state_guard.replication_phase();
 
             // Handle SyncDone tables by promoting them to Ready when the apply worker
             // has caught up to their sync LSN.
@@ -370,7 +370,7 @@ where
                         "table sync worker is waiting to catchup, starting catchup",
                     );
 
-                    inner
+                    worker_state_guard
                         .set_and_store(
                             TableReplicationPhase::Catchup { lsn: current_lsn },
                             &self.store,
@@ -381,6 +381,9 @@ where
                         %table_id,
                         "catchup was started, waiting for table sync worker to complete sync",
                     );
+
+                    // We drop the guard before waiting for a phase, to let the workers make progress.
+                    drop(worker_state_guard);
 
                     // Wait for the table to be in `SyncDone` or `Errored`.
                     let result = worker_state
@@ -437,7 +440,7 @@ where
                     }
                 }
                 _ => {
-                    // Start a new worker for this table.
+                    // Start a new worker for this table for any other state.
                     let table_sync_worker = self.build_table_sync_worker(table_id).await;
                     if let Err(err) = pool.start_worker(table_sync_worker).await {
                         error!(
