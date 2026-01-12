@@ -330,7 +330,7 @@ where
     async fn process_single_syncing_table(
         &self,
         table_id: TableId,
-        store_phase: TableReplicationPhase,
+        table_replication_phase: TableReplicationPhase,
         current_lsn: PgLsn,
         update_state: bool,
     ) -> EtlResult<ApplyLoopAction> {
@@ -429,7 +429,7 @@ where
             }
         } else {
             // No active worker exists, use the store phase and potentially start a new worker.
-            match store_phase {
+            match table_replication_phase {
                 TableReplicationPhase::SyncDone { lsn } => {
                     if current_lsn >= lsn && update_state {
                         info!(
@@ -490,9 +490,9 @@ where
             .into_iter()
             .filter(|(_, state)| !state.as_type().is_done());
 
-        for (table_id, store_phase) in active_table_replication_states {
+        for (table_id, table_replication_phase) in active_table_replication_states {
             let action = self
-                .process_single_syncing_table(table_id, store_phase, current_lsn, update_state)
+                .process_single_syncing_table(table_id, table_replication_phase, current_lsn, update_state)
                 .await?;
 
             // If the action is terminating, stop iterating and return immediately.
