@@ -88,6 +88,8 @@ POSTGRES_DATA_VOLUME=/path/to/data ./scripts/init.sh
 | `POSTGRES_DATA_VOLUME` | (empty) | Path for persistent storage |
 | `REPLICATOR_IMAGE` | `ramsup/etl-replicator:latest` | Default replicator image |
 
+PostgreSQL 18+ containers store data under `/var/lib/postgresql/<major>/data`, so the Docker Compose setup mounts the parent `/var/lib/postgresql` directory to keep upgrades compatible.
+
 ### Manual Setup
 
 If you prefer manual setup or have an existing PostgreSQL instance:

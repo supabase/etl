@@ -6,7 +6,7 @@
 //!
 //! # Supported Versions
 //!
-//! ETL officially supports PostgreSQL versions 14, 15, 16, and 17.
+//! ETL officially supports PostgreSQL versions 14, 15, 16, 17, and 18.
 
 use std::num::NonZeroI32;
 
@@ -14,6 +14,7 @@ pub const POSTGRES_14: i32 = 140000;
 pub const POSTGRES_15: i32 = 150000;
 pub const POSTGRES_16: i32 = 160000;
 pub const POSTGRES_17: i32 = 170000;
+pub const POSTGRES_18: i32 = 180000;
 
 /// Returns [`true`] if the server version meets or exceeds the required version.
 ///
@@ -56,6 +57,7 @@ mod tests {
         assert_eq!(POSTGRES_15, 150000);
         assert_eq!(POSTGRES_16, 160000);
         assert_eq!(POSTGRES_17, 170000);
+        assert_eq!(POSTGRES_18, 180000);
     }
 
     #[test]
@@ -65,6 +67,7 @@ mod tests {
         assert!(meets_version(version, POSTGRES_15));
         assert!(!meets_version(version, POSTGRES_16));
         assert!(!meets_version(version, POSTGRES_17));
+        assert!(!meets_version(version, POSTGRES_18));
     }
 
     #[test]
@@ -72,6 +75,8 @@ mod tests {
         assert!(!meets_version(None, POSTGRES_14));
         assert!(!meets_version(None, POSTGRES_15));
         assert!(!meets_version(None, POSTGRES_16));
+        assert!(!meets_version(None, POSTGRES_17));
+        assert!(!meets_version(None, POSTGRES_18));
     }
 
     #[test]
@@ -87,6 +92,7 @@ mod tests {
         assert!(requires_version!(version, POSTGRES_15));
         assert!(requires_version!(version, POSTGRES_16));
         assert!(!requires_version!(version, POSTGRES_17));
+        assert!(!requires_version!(version, POSTGRES_18));
     }
 
     #[test]
@@ -96,11 +102,13 @@ mod tests {
         assert!(below_version!(version, POSTGRES_15));
         assert!(below_version!(version, POSTGRES_16));
         assert!(below_version!(version, POSTGRES_17));
+        assert!(below_version!(version, POSTGRES_18));
     }
 
     #[test]
     fn test_requires_version_with_none() {
         let version: Option<NonZeroI32> = None;
         assert!(!requires_version!(version, POSTGRES_14));
+        assert!(!requires_version!(version, POSTGRES_18));
     }
 }

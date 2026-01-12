@@ -6,16 +6,18 @@ use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notify::NotifyingStore;
-use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with};
+use etl::test_utils::pipeline::{
+    create_pipeline, create_pipeline_with_batch_config, create_pipeline_with_table_sync_copy_config,
+};
 use etl::test_utils::schema::assert_table_schema_columns;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{
     TableSelection, assert_events_equal, build_expected_orders_inserts,
     build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
-    insert_mock_data, insert_users_data, setup_test_database_schema,
+    insert_mock_data, insert_orders_data, insert_users_data, setup_test_database_schema,
 };
 use etl::types::{Event, EventType, InsertEvent, PipelineId, Type};
-use etl_config::shared::BatchConfig;
+use etl_config::shared::{BatchConfig, TableSyncCopyConfig};
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::tokio::test_utils::id_column_schema;
@@ -590,6 +592,122 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
+    init_test_tracing();
+
+    #[derive(Debug)]
+    enum TableCopyCase {
+        IncludeAll,
+        SkipAll,
+        IncludeOnly,
+        SkipOnly,
+    }
+
+    for table_copy_case in [
+        TableCopyCase::IncludeAll,
+        TableCopyCase::SkipAll,
+        TableCopyCase::IncludeOnly,
+        TableCopyCase::SkipOnly,
+    ] {
+        let mut database = spawn_source_database().await;
+        let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+
+        let users_table_id = database_schema.users_schema().id;
+        let orders_table_id = database_schema.orders_schema().id;
+        let users_table_name = database_schema.users_schema().name.clone();
+        let orders_table_name = database_schema.orders_schema().name.clone();
+
+        // We insert a single user and order.
+        insert_users_data(&mut database, &users_table_name, 0..=0).await;
+        insert_orders_data(&mut database, &orders_table_name, 0..=0).await;
+
+        let store = NotifyingStore::new();
+        let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+        let pipeline_id: PipelineId = random();
+        let table_sync_copy = match table_copy_case {
+            TableCopyCase::IncludeAll => TableSyncCopyConfig::IncludeAllTables,
+            TableCopyCase::SkipAll => TableSyncCopyConfig::SkipAllTables,
+            TableCopyCase::IncludeOnly => TableSyncCopyConfig::IncludeTables {
+                // We include only the users table.
+                table_ids: vec![users_table_id.into_inner()],
+            },
+            TableCopyCase::SkipOnly => TableSyncCopyConfig::SkipTables {
+                // We exclude only the users table.
+                table_ids: vec![users_table_id.into_inner()],
+            },
+        };
+
+        let mut pipeline = create_pipeline_with_table_sync_copy_config(
+            &database.config,
+            pipeline_id,
+            database_schema.publication_name(),
+            store.clone(),
+            destination.clone(),
+            table_sync_copy,
+        );
+
+        // We wait for the table to be ready for streaming.
+        let table_ready_notify = store
+            .notify_on_table_state_type(users_table_id, TableReplicationPhaseType::Ready)
+            .await;
+
+        pipeline.start().await.unwrap();
+
+        table_ready_notify.notified().await;
+
+        // We wait for the two inserts.
+        let events_notify = destination
+            .wait_for_events_count(vec![(EventType::Insert, 2)])
+            .await;
+
+        // We insert additional data.
+        insert_users_data(&mut database, &users_table_name, 1..=1).await;
+        insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
+
+        events_notify.notified().await;
+
+        pipeline.shutdown_and_wait().await.unwrap();
+
+        // We validate that the table rows are correct.
+        let table_rows = destination.get_table_rows().await;
+        let users_table_copied_rows = table_rows
+            .get(&users_table_id)
+            .map(|rows| rows.len())
+            .unwrap_or(0);
+        let orders_table_copied_rows = table_rows
+            .get(&orders_table_id)
+            .map(|rows| rows.len())
+            .unwrap_or(0);
+
+        let (expected_users_rows, expected_orders_rows) = match table_copy_case {
+            TableCopyCase::IncludeAll => (1, 1),
+            TableCopyCase::SkipAll => (0, 0),
+            TableCopyCase::IncludeOnly => (1, 0),
+            TableCopyCase::SkipOnly => (0, 1),
+        };
+        assert_eq!(users_table_copied_rows, expected_users_rows);
+        assert_eq!(orders_table_copied_rows, expected_orders_rows);
+        // We always expect the method to be called since the downstream table should be created
+        // nonetheless.
+        assert_eq!(destination.write_table_rows_called().await, 2);
+
+        // We validate that the single insert was received.
+        let events = destination.get_events().await;
+        let grouped_events = group_events_by_type_and_table_id(&events);
+        let users_inserts = grouped_events
+            .get(&(EventType::Insert, users_table_id))
+            .unwrap();
+        let orders_inserts = grouped_events
+            .get(&(EventType::Insert, orders_table_id))
+            .unwrap();
+
+        assert_eq!(users_inserts.len(), 1);
+        assert_eq!(orders_inserts.len(), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_copy_replicates_existing_data() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
@@ -861,13 +979,13 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
         max_size: 1000,
         max_fill_ms: 1000,
     };
-    let mut pipeline = create_pipeline_with(
+    let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
-        Some(batch_config),
+        batch_config,
     );
 
     // Register notifications for initial table copy completion.
@@ -946,13 +1064,13 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
         max_size: 1000,
         max_fill_ms: 1000,
     };
-    let mut pipeline = create_pipeline_with(
+    let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
         pipeline_id,
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
-        Some(batch_config),
+        batch_config,
     );
 
     // Register notifications for initial table copy completion.

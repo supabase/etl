@@ -6,11 +6,11 @@
         "bucket": "dev-and-test",
         "key-prefix": "initial-warehouse",
         "assume-role-arn": null,
-        "endpoint": "http://minio:9000",
+        "endpoint": "http://object-store-minio:9000",
         "region": "local-01",
         "path-style-access": true,
         "flavor": "minio",
-        "sts-enabled": true
+        "sts-enabled": false
     },
     "storage-credential": {
         "type": "s3",

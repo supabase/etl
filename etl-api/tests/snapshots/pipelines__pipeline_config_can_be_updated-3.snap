@@ -23,5 +23,8 @@ FullApiPipelineConfig {
     max_table_sync_workers: Some(
         2,
     ),
+    table_sync_copy: Some(
+        IncludeAllTables,
+    ),
     log_level: None,
 }
