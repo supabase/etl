@@ -12,4 +12,7 @@ pub enum ValidationError {
     /// TLS is enabled but no trusted root certificates are provided.
     #[error("Invalid TLS config: `trusted_root_certs` must be set when `enabled` is true")]
     MissingTrustedRootCerts,
+    /// Invalid heartbeat configuration.
+    #[error("Invalid heartbeat config: {0}")]
+    HeartbeatConfig(String),
 }

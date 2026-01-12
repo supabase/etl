@@ -15,6 +15,13 @@ pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
 
+// Heartbeat metrics (for replica mode)
+pub const ETL_HEARTBEAT_EMISSIONS_TOTAL: &str = "etl_heartbeat_emissions_total";
+pub const ETL_HEARTBEAT_FAILURES_TOTAL: &str = "etl_heartbeat_failures_total";
+pub const ETL_HEARTBEAT_DURATION_SECONDS: &str = "etl_heartbeat_duration_seconds";
+pub const ETL_HEARTBEAT_CONNECTION_STATE: &str = "etl_heartbeat_connection_state";
+pub const ETL_HEARTBEAT_LAST_SUCCESS_TIMESTAMP: &str = "etl_heartbeat_last_success_timestamp";
+
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
 /// Label key for the ETL worker type ("table_sync" or "apply").
@@ -95,6 +102,37 @@ pub(crate) fn register_metrics() {
             ETL_STATUS_UPDATES_SKIPPED_TOTAL,
             Unit::Count,
             "Total number of status updates skipped due to throttling, labeled by pipeline_id"
+        );
+
+        // Heartbeat metrics (for replica mode)
+        describe_counter!(
+            ETL_HEARTBEAT_EMISSIONS_TOTAL,
+            Unit::Count,
+            "Total heartbeat messages emitted to primary database, labeled by pipeline_id"
+        );
+
+        describe_counter!(
+            ETL_HEARTBEAT_FAILURES_TOTAL,
+            Unit::Count,
+            "Total heartbeat failures, labeled by pipeline_id and error_type"
+        );
+
+        describe_histogram!(
+            ETL_HEARTBEAT_DURATION_SECONDS,
+            Unit::Seconds,
+            "Time taken to emit a heartbeat message, labeled by pipeline_id"
+        );
+
+        describe_gauge!(
+            ETL_HEARTBEAT_CONNECTION_STATE,
+            Unit::Count,
+            "Current heartbeat connection state (0=disconnected, 1=connecting, 2=connected, 3=reconnecting, 4=degraded), labeled by pipeline_id"
+        );
+
+        describe_gauge!(
+            ETL_HEARTBEAT_LAST_SUCCESS_TIMESTAMP,
+            Unit::Seconds,
+            "Unix timestamp of last successful heartbeat, labeled by pipeline_id"
         );
     });
 }
