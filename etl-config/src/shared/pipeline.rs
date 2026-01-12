@@ -96,16 +96,22 @@ impl PipelineConfig {
 
     /// Validates pipeline configuration settings.
     ///
-    /// Checks connection settings and ensures worker count is non-zero.
+    /// Checks batch configuration and ensures worker counts and retry attempts are non-zero.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        self.pg_connection.tls.validate()?;
+        self.batch.validate()?;
 
         if self.max_table_sync_workers == 0 {
-            return Err(ValidationError::MaxTableSyncWorkersZero);
+            return Err(ValidationError::InvalidFieldValue {
+                field: "max_table_sync_workers".to_string(),
+                constraint: "must be greater than 0".to_string(),
+            });
         }
 
         if self.table_error_retry_max_attempts == 0 {
-            return Err(ValidationError::TableErrorRetryMaxAttemptsZero);
+            return Err(ValidationError::InvalidFieldValue {
+                field: "table_error_retry_max_attempts".to_string(),
+                constraint: "must be greater than 0".to_string(),
+            });
         }
 
         Ok(())

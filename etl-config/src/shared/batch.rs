@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
+use crate::shared::ValidationError;
+
 /// Batch processing configuration for pipelines.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -23,6 +25,20 @@ impl BatchConfig {
 
     /// Default maximum fill time in milliseconds.
     pub const DEFAULT_MAX_FILL_MS: u64 = 0;
+
+    /// Validates batch configuration settings.
+    ///
+    /// Ensures max_size is non-zero.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.max_size == 0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "batch.max_size".to_string(),
+                constraint: "must be greater than 0".to_string(),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for BatchConfig {
