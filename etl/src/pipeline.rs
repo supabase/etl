@@ -16,6 +16,7 @@ use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
+use crate::workers::heartbeat::{HeartbeatWorker, HeartbeatWorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 use etl_config::shared::PipelineConfig;
 use etl_postgres::types::TableId;
@@ -38,6 +39,8 @@ enum PipelineState {
         //  with workers management, which should not be done in the pipeline.
         apply_worker: ApplyWorkerHandle,
         pool: TableSyncWorkerPool,
+        /// Heartbeat worker for replica mode (only present when primary_connection is configured).
+        heartbeat_worker: Option<HeartbeatWorkerHandle>,
     },
 }
 
@@ -162,7 +165,32 @@ where
         .start()
         .await?;
 
-        self.state = PipelineState::Started { apply_worker, pool };
+        // Start heartbeat worker if replica mode is enabled (primary_connection is configured)
+        let heartbeat_worker = if let Some(ref primary_connection) = self.config.primary_connection
+        {
+            info!(
+                pipeline_id = %self.config.id,
+                "replica mode enabled, starting heartbeat worker"
+            );
+
+            let heartbeat_config = self.config.heartbeat_config();
+            let worker = HeartbeatWorker::new(
+                self.config.id,
+                heartbeat_config,
+                primary_connection.clone(),
+                self.shutdown_tx.subscribe(),
+            );
+
+            Some(worker.start())
+        } else {
+            None
+        };
+
+        self.state = PipelineState::Started {
+            apply_worker,
+            pool,
+            heartbeat_worker,
+        };
 
         Ok(())
     }
@@ -178,7 +206,12 @@ where
     /// 2. All table sync workers complete
     /// 3. Any errors from workers are aggregated and returned
     pub async fn wait(self) -> EtlResult<()> {
-        let PipelineState::Started { apply_worker, pool } = self.state else {
+        let PipelineState::Started {
+            apply_worker,
+            pool,
+            heartbeat_worker,
+        } = self.state
+        else {
             info!("pipeline was not started, skipping wait");
 
             return Ok(());
@@ -219,6 +252,21 @@ where
             errors.push(err);
 
             info!(error_count = errors_number, "table sync workers failed");
+        }
+
+        // Wait for heartbeat worker if it was started
+        if let Some(heartbeat) = heartbeat_worker {
+            info!("waiting for heartbeat worker to complete");
+            if let Err(err) = heartbeat.wait().await {
+                errors.push(err);
+                info!("heartbeat worker failed");
+            }
+        }
+
+        // Once all workers completed, we notify the destination of shutting down.
+        info!("shutting down destination");
+        if let Err(err) = self.destination.shutdown().await {
+            errors.push(err);
         }
 
         if !errors.is_empty() {
