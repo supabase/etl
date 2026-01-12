@@ -193,6 +193,7 @@ impl Inner {
 pub struct PostgresStore {
     pipeline_id: PipelineId,
     pool: PgPool,
+    // TODO: I think this mutex can also be replaced by RwLock, I think it's often called to read the data but not to write
     inner: Arc<Mutex<Inner>>,
 }
 

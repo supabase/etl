@@ -144,6 +144,7 @@ impl TableSyncWorkerPoolInner {
 /// for completion of all synchronization operations.
 #[derive(Debug, Clone)]
 pub struct TableSyncWorkerPool {
+    // TODO: I think it would also benefit from RwLock
     inner: Arc<Mutex<TableSyncWorkerPoolInner>>,
 }
 
