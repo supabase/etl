@@ -86,7 +86,7 @@ where
                 | TableReplicationPhaseType::Ready
                 | TableReplicationPhaseType::Errored
         ) {
-            info!(%table_id, %phase_type, "initial table sync not required");
+            warn!(%table_id, %phase_type, "initial table sync not required");
 
             return Ok(TableSyncResult::SyncNotRequired);
         }

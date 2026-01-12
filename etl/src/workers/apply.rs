@@ -3,7 +3,7 @@ use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
 use std::sync::Arc;
-use tokio::sync::{MutexGuard, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, debug, error, info};
@@ -22,7 +22,7 @@ use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::base::{Worker, WorkerHandle};
-use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
+use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 
 /// Handle for monitoring and controlling the apply worker.
@@ -329,7 +329,6 @@ where
     /// terminate based on the table's processing outcome.
     async fn process_single_syncing_table(
         &self,
-        pool: &mut MutexGuard<'_, TableSyncWorkerPoolInner>,
         table_id: TableId,
         store_phase: TableReplicationPhase,
         current_lsn: PgLsn,
@@ -337,19 +336,21 @@ where
     ) -> EtlResult<ApplyLoopAction> {
         // Request the active worker state once per table. This is the single source of
         // truth for the current state if a worker exists.
-        let active_worker_state = pool.get_active_worker_state(table_id);
+        let worker_state = {
+            let pool_guard = self.pool.lock().await;
+            pool_guard.get_active_worker_state(table_id)
+        };
 
         // If an active worker exists, lock its state once to read the phase for this
         // loop cycle. This ensures we make all decisions based on a consistent snapshot
         // of the state at this moment.
-        if let Some(worker_state) = active_worker_state {
+        if let Some(worker_state) = worker_state {
             // Lock the worker state once and read the effective phase.
             let mut worker_state_guard = worker_state.lock().await;
-            let active_phase = worker_state_guard.replication_phase();
 
-            // Handle SyncDone tables by promoting them to Ready when the apply worker
+            // Handle `SyncDone` tables by promoting them to Ready when the apply worker
             // has caught up to their sync LSN.
-            match active_phase {
+            match worker_state_guard.replication_phase() {
                 TableReplicationPhase::SyncDone { lsn } => {
                     if current_lsn >= lsn && update_state {
                         info!(
@@ -363,7 +364,7 @@ where
                     }
                 }
                 TableReplicationPhase::SyncWait => {
-                    // Transition worker from SyncWait to Catchup.
+                    // Transition worker from `SyncWait` to `Catchup`.
                     info!(
                         %table_id,
                         %current_lsn,
@@ -382,7 +383,7 @@ where
                         "catchup was started, waiting for table sync worker to complete sync",
                     );
 
-                    // We drop the guard before waiting for a phase, to let the workers make progress.
+                    // We drop the guard before waiting for a phase to let the workers make progress.
                     drop(worker_state_guard);
 
                     // Wait for the table to be in `SyncDone` or `Errored`.
@@ -396,25 +397,27 @@ where
                         )
                         .await;
 
-                    // If we are told to shut down while waiting, signal to cancel the apply loop.
-                    if result.should_shutdown() {
-                        info!(
-                            %table_id,
-                            "table sync worker interrupted by shutdown signal",
-                        );
+                    match result {
+                        ShutdownResult::Ok(result) => {
+                            // If the table sync worker errored, skip this table and continue.
+                            if result.replication_phase().as_type().is_errored() {
+                                info!(
+                                    %table_id,
+                                    "table sync worker errored, skipping table",
+                                );
 
-                        return Ok(ApplyLoopAction::Pause);
-                    }
-
-                    // If the table sync worker errored, skip this table and continue.
-                    if let ShutdownResult::Ok(inner) = &result {
-                        if inner.replication_phase().as_type().is_errored() {
+                                return Ok(ApplyLoopAction::Continue);
+                            }
+                        }
+                        ShutdownResult::Shutdown(_) => {
+                            // If we are told to shut down while waiting, signal to cancel the
+                            // apply loop.
                             info!(
                                 %table_id,
-                                "table sync worker errored, skipping table",
+                                "table sync worker interrupted by shutdown signal",
                             );
 
-                            return Ok(ApplyLoopAction::Continue);
+                            return Ok(ApplyLoopAction::Pause);
                         }
                     }
 
@@ -442,7 +445,8 @@ where
                 _ => {
                     // Start a new worker for this table for any other state.
                     let table_sync_worker = self.build_table_sync_worker(table_id).await;
-                    if let Err(err) = pool.start_worker(table_sync_worker).await {
+                    let mut pool_guard = self.pool.lock().await;
+                    if let Err(err) = pool_guard.start_worker(table_sync_worker).await {
                         error!(
                             %table_id,
                             error = %err,
@@ -486,20 +490,9 @@ where
             .into_iter()
             .filter(|(_, state)| !state.as_type().is_done());
 
-        // Lock the pool before iteration to ensure consistency. This prevents race conditions
-        // where a worker finishes between loading states and processing them. The lock is
-        // held for the entire iteration to maintain a consistent view of worker states.
-        let mut pool = self.pool.lock().await;
-
         for (table_id, store_phase) in active_table_replication_states {
             let action = self
-                .process_single_syncing_table(
-                    &mut pool,
-                    table_id,
-                    store_phase,
-                    current_lsn,
-                    update_state,
-                )
+                .process_single_syncing_table(table_id, store_phase, current_lsn, update_state)
                 .await?;
 
             // If the action is terminating, stop iterating and return immediately.
@@ -552,18 +545,21 @@ where
         table_id: TableId,
         remote_final_lsn: PgLsn,
     ) -> EtlResult<bool> {
-        let pool = self.pool.lock().await;
+        let pool_guard = self.pool.lock().await;
 
         // We try to load the state first from memory, if we don't find it, we try to load from the
         // state store.
-        let replication_phase = match pool.get_active_worker_state(table_id) {
-            Some(state) => {
-                let inner = state.lock().await;
+        let worker_state = pool_guard.get_active_worker_state(table_id);
+        let replication_phase = match worker_state {
+            Some(worker_state) => {
+                let inner = worker_state.lock().await;
                 inner.replication_phase()
             }
             None => {
-                let Some(state) = self.store.get_table_replication_state(table_id).await? else {
-                    // If we don't even find the state for this table, we skip the event entirely.
+                let Some(table_replication_phase) =
+                    self.store.get_table_replication_state(table_id).await?
+                else {
+                    // If we don't even find the phase for this table, we skip the event entirely.
                     debug!(
                         %table_id,
                         worker_type = %self.worker_type(),
@@ -574,7 +570,7 @@ where
                     return Ok(false);
                 };
 
-                state
+                table_replication_phase
             }
         };
 
