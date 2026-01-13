@@ -157,7 +157,8 @@ where
             // We try to truncate the table also during `Init` because we support state rollback and
             // a table might be there from a previous run. We only truncate if we have a schema
             // loaded for the table, otherwise we skip this step.
-            if store.get_table_schema(table_id).await?.is_some() {
+            let existing_table_schema = store.get_table_schema(&table_id).await?;
+            if existing_table_schema.is_some() {
                 destination.truncate_table(table_id).await?;
             }
 
