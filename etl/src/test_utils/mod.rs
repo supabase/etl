@@ -8,6 +8,7 @@ pub mod database;
 pub mod event;
 pub mod materialize;
 pub mod notify;
+pub mod notifying_store;
 pub mod pipeline;
 pub mod table;
 pub mod test_destination_wrapper;

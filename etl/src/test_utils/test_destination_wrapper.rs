@@ -8,6 +8,7 @@ use tokio::sync::{Notify, RwLock};
 use crate::destination::Destination;
 use crate::error::EtlResult;
 use crate::test_utils::event::{check_events_count, deduplicate_events};
+use crate::test_utils::notify::TimedNotify;
 use crate::types::{Event, EventType, TableRow};
 
 type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
@@ -110,8 +111,11 @@ impl<D> TestDestinationWrapper<D> {
         deduplicate_events(&events)
     }
 
-    /// Wait for a specific condition on events
-    pub async fn notify_on_events<F>(&self, condition: F) -> Arc<Notify>
+    /// Registers a notification that fires when events match a specific condition.
+    ///
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// condition is not met. This prevents tests from hanging indefinitely.
+    pub async fn notify_on_events<F>(&self, condition: F) -> TimedNotify
     where
         F: Fn(&[Event]) -> bool + Send + Sync + 'static,
     {
@@ -121,20 +125,29 @@ impl<D> TestDestinationWrapper<D> {
             .event_conditions
             .push((Box::new(condition), notify.clone()));
 
-        notify
+        // Check conditions immediately in case they're already satisfied
+        inner.check_conditions().await;
+
+        TimedNotify::new(notify)
     }
 
-    /// Wait for a specific number of events of given types.
-    pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> Arc<Notify> {
+    /// Registers a notification that fires when a specific number of events of given types are received.
+    ///
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// expected event count is not reached. This prevents tests from hanging indefinitely.
+    pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
         self.notify_on_events(move |events| check_events_count(events, conditions.clone()))
             .await
     }
 
-    /// Wait for a specific number of events of given types after de-duplicating by full event equality.
+    /// Registers a notification that fires when a specific number of events of given types are received after de-duplicating.
+    ///
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// expected event count is not reached. This prevents tests from hanging indefinitely.
     pub async fn wait_for_events_count_deduped(
         &self,
         conditions: Vec<(EventType, u64)>,
-    ) -> Arc<Notify> {
+    ) -> TimedNotify {
         self.notify_on_events(move |events| {
             let deduped = deduplicate_events(events);
             check_events_count(&deduped, conditions.clone())
