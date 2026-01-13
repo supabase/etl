@@ -5,7 +5,7 @@ use etl::error::ErrorKind;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
-use etl::test_utils::notify::NotifyingStore;
+use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{
     create_pipeline, create_pipeline_with_batch_config, create_pipeline_with_table_sync_copy_config,
 };
@@ -584,7 +584,7 @@ async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
 
         pipeline.start().await.unwrap();
 
-        table_ready_notify.notified().await;
+        table_ready_notify.try_notified().await;
 
         // We wait for the two inserts.
         let events_notify = destination
@@ -595,7 +595,7 @@ async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
         insert_users_data(&mut database, &users_table_name, 1..=1).await;
         insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
 
-        events_notify.notified().await;
+        events_notify.try_notified().await;
 
         pipeline.shutdown_and_wait().await.unwrap();
 

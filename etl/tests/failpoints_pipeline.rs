@@ -7,7 +7,7 @@ use etl::failpoints::{
 };
 use etl::state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType};
 use etl::test_utils::database::spawn_source_database;
-use etl::test_utils::notify::NotifyingStore;
+use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_users_data, setup_test_database_schema};
