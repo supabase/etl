@@ -131,6 +131,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.88.0
@@ -190,4 +192,6 @@ jobs:
           fail-on-error: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path-to-lcov: lcov.info
+          format: lcov
+          base-path: ${{ github.workspace }}
           debug: true
