@@ -15,12 +15,12 @@ pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
 
-// Heartbeat metrics (for replica mode)
+// Heartbeat metrics
 pub const ETL_HEARTBEAT_EMISSIONS_TOTAL: &str = "etl_heartbeat_emissions_total";
 pub const ETL_HEARTBEAT_FAILURES_TOTAL: &str = "etl_heartbeat_failures_total";
-pub const ETL_HEARTBEAT_DURATION_SECONDS: &str = "etl_heartbeat_duration_seconds";
-pub const ETL_HEARTBEAT_CONNECTION_STATE: &str = "etl_heartbeat_connection_state";
-pub const ETL_HEARTBEAT_LAST_SUCCESS_TIMESTAMP: &str = "etl_heartbeat_last_success_timestamp";
+pub const ETL_HEARTBEAT_CONNECTION_ATTEMPTS_TOTAL: &str = "etl_heartbeat_connection_attempts_total";
+pub const ETL_HEARTBEAT_LAST_EMISSION_TIMESTAMP: &str = "etl_heartbeat_last_emission_timestamp";
+pub const ETL_HEARTBEAT_CONSECUTIVE_FAILURES: &str = "etl_heartbeat_consecutive_failures";
 
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
@@ -104,35 +104,35 @@ pub(crate) fn register_metrics() {
             "Total number of status updates skipped due to throttling, labeled by pipeline_id"
         );
 
-        // Heartbeat metrics (for replica mode)
+        // Heartbeat metrics
         describe_counter!(
             ETL_HEARTBEAT_EMISSIONS_TOTAL,
             Unit::Count,
-            "Total heartbeat messages emitted to primary database, labeled by pipeline_id"
+            "Total number of heartbeat messages emitted to the primary database"
         );
 
         describe_counter!(
             ETL_HEARTBEAT_FAILURES_TOTAL,
             Unit::Count,
-            "Total heartbeat failures, labeled by pipeline_id and error_type"
+            "Total number of heartbeat emission failures"
         );
 
-        describe_histogram!(
-            ETL_HEARTBEAT_DURATION_SECONDS,
-            Unit::Seconds,
-            "Time taken to emit a heartbeat message, labeled by pipeline_id"
-        );
-
-        describe_gauge!(
-            ETL_HEARTBEAT_CONNECTION_STATE,
+        describe_counter!(
+            ETL_HEARTBEAT_CONNECTION_ATTEMPTS_TOTAL,
             Unit::Count,
-            "Current heartbeat connection state (0=disconnected, 1=connecting, 2=connected, 3=reconnecting, 4=degraded), labeled by pipeline_id"
+            "Total number of connection attempts to the primary database for heartbeats"
         );
 
         describe_gauge!(
-            ETL_HEARTBEAT_LAST_SUCCESS_TIMESTAMP,
+            ETL_HEARTBEAT_LAST_EMISSION_TIMESTAMP,
             Unit::Seconds,
-            "Unix timestamp of last successful heartbeat, labeled by pipeline_id"
+            "Unix timestamp of the last successful heartbeat emission"
+        );
+
+        describe_gauge!(
+            ETL_HEARTBEAT_CONSECUTIVE_FAILURES,
+            Unit::Count,
+            "Current count of consecutive heartbeat failures"
         );
     });
 }

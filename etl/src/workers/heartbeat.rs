@@ -1,386 +1,413 @@
-//! Heartbeat worker for read replica replication support.
+//! Heartbeat worker for read replica support.
 //!
-//! When streaming from a read replica, the heartbeat worker maintains a connection
-//! to the primary database and periodically sends heartbeat messages via
-//! `pg_logical_emit_message()` to prevent WAL accumulation.
+//! When ETL pipelines connect to a read replica, the replication slot on the replica
+//! can become invalidated if the primary database recycles WAL segments before the
+//! replica consumes them. The heartbeat worker prevents this by periodically emitting
+//! messages to the primary database using `pg_logical_emit_message()`.
+//!
+//! # How It Works
+//!
+//! 1. The worker maintains a connection to the **primary** database (not the replica)
+//! 2. Periodically calls `pg_logical_emit_message(false, 'etl_heartbeat', '')`
+//! 3. This generates WAL activity that flows to replicas
+//! 4. The WAL activity prevents the primary from recycling segments the replica needs
+//!
+//! # PostgreSQL Version Requirements
+//!
+//! - **PostgreSQL 14**: `pg_logical_emit_message()` requires superuser privileges
+//! - **PostgreSQL 15+**: Function available to users with `pg_write_server_files` role
+//!
+//! This worker requires PostgreSQL 15 or later to function properly.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use etl_config::shared::{
-    ETL_HEARTBEAT_OPTIONS, HeartbeatConfig, IntoConnectOptions, PgConnectionConfig,
-};
-use metrics::{counter, gauge, histogram};
-use tokio::sync::watch;
+use etl_config::shared::{ETL_HEARTBEAT_OPTIONS, HeartbeatConfig, IntoConnectOptions, PgConnectionConfig};
+use metrics::{counter, gauge};
+use rand::Rng;
+use thiserror::Error;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tokio_postgres::{Client, Config as TokioPgConfig, NoTls};
-use tracing::{debug, error, info, info_span, warn};
+use tokio_postgres::Client;
+use tracing::{debug, error, info, warn};
 
-use crate::error::{ErrorKind, EtlResult};
+use crate::concurrency::shutdown::ShutdownRx;
+use crate::error::{EtlError, EtlResult};
+use crate::metrics::{
+    ETL_HEARTBEAT_CONNECTION_ATTEMPTS_TOTAL, ETL_HEARTBEAT_CONSECUTIVE_FAILURES,
+    ETL_HEARTBEAT_EMISSIONS_TOTAL, ETL_HEARTBEAT_FAILURES_TOTAL,
+    ETL_HEARTBEAT_LAST_EMISSION_TIMESTAMP, PIPELINE_ID_LABEL,
+};
+use crate::replication::tls::create_tls_connector;
 use crate::types::PipelineId;
+use crate::workers::base::WorkerHandle;
 
-/// Heartbeat metric names.
-pub const ETL_HEARTBEAT_EMISSIONS_TOTAL: &str = "etl_heartbeat_emissions_total";
-pub const ETL_HEARTBEAT_FAILURES_TOTAL: &str = "etl_heartbeat_failures_total";
-pub const ETL_HEARTBEAT_DURATION_SECONDS: &str = "etl_heartbeat_duration_seconds";
-pub const ETL_HEARTBEAT_CONNECTION_STATE: &str = "etl_heartbeat_connection_state";
-pub const ETL_HEARTBEAT_LAST_SUCCESS_TIMESTAMP: &str = "etl_heartbeat_last_success_timestamp";
+/// Minimum PostgreSQL version required for heartbeat functionality.
+///
+/// PostgreSQL 15 relaxed the privilege requirements for `pg_logical_emit_message()`,
+/// making it available to users with the `pg_write_server_files` role rather than
+/// requiring superuser privileges.
+const MIN_PG_VERSION: i32 = 15_00_00;
 
-/// Label key for pipeline id.
-pub const PIPELINE_ID_LABEL: &str = "pipeline_id";
-/// Label key for error type.
-pub const ERROR_TYPE_LABEL: &str = "error_type";
+/// Errors that can occur during heartbeat operations.
+#[derive(Debug, Error)]
+pub enum HeartbeatError {
+    /// Failed to connect to the primary database.
+    #[error("failed to connect to primary database: {0}")]
+    ConnectionFailed(#[source] tokio_postgres::Error),
 
-/// Connection states for the heartbeat worker.
+    /// Failed to create TLS connector.
+    #[error("failed to create TLS connector: {0}")]
+    TlsError(String),
+
+    /// PostgreSQL version is too old for heartbeat functionality.
+    #[error("PostgreSQL version {0} is below minimum required version 15")]
+    UnsupportedVersion(String),
+
+    /// Failed to emit heartbeat message.
+    #[error("failed to emit heartbeat: {0}")]
+    EmitFailed(#[source] tokio_postgres::Error),
+
+    /// Failed to query PostgreSQL version.
+    #[error("failed to query PostgreSQL version: {0}")]
+    VersionQueryFailed(#[source] tokio_postgres::Error),
+}
+
+impl From<HeartbeatError> for EtlError {
+    fn from(err: HeartbeatError) -> Self {
+        EtlError::new(
+            crate::error::ErrorKind::ConnectionError,
+            "Heartbeat error",
+            err.to_string(),
+        )
+    }
+}
+
+/// Connection state for the heartbeat worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum HeartbeatConnectionState {
-    /// Initial state, no connection attempted.
-    Disconnected = 0,
-    /// Actively establishing connection.
-    Connecting = 1,
-    /// Connection active, heartbeats being sent.
-    Connected = 2,
-    /// Connection lost, attempting to reconnect with backoff.
-    Reconnecting = 3,
-    /// Heartbeat disabled due to PostgreSQL version < 15.
-    Degraded = 4,
+    /// Not connected to the primary database.
+    Disconnected,
+    /// Attempting to establish a connection.
+    Connecting,
+    /// Connected and ready to emit heartbeats.
+    Connected,
+    /// Currently emitting a heartbeat message.
+    Emitting,
 }
 
-impl From<u8> for HeartbeatConnectionState {
-    fn from(value: u8) -> Self {
-        match value {
-            0 => Self::Disconnected,
-            1 => Self::Connecting,
-            2 => Self::Connected,
-            3 => Self::Reconnecting,
-            4 => Self::Degraded,
-            _ => Self::Disconnected,
+impl std::fmt::Display for HeartbeatConnectionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HeartbeatConnectionState::Disconnected => write!(f, "disconnected"),
+            HeartbeatConnectionState::Connecting => write!(f, "connecting"),
+            HeartbeatConnectionState::Connected => write!(f, "connected"),
+            HeartbeatConnectionState::Emitting => write!(f, "emitting"),
         }
     }
 }
 
-/// Shared state for the heartbeat worker.
-#[derive(Debug)]
-pub struct HeartbeatState {
-    state: AtomicU8,
-}
-
-impl HeartbeatState {
-    fn new() -> Self {
-        Self {
-            state: AtomicU8::new(HeartbeatConnectionState::Disconnected as u8),
+impl From<HeartbeatConnectionState> for &'static str {
+    fn from(state: HeartbeatConnectionState) -> Self {
+        match state {
+            HeartbeatConnectionState::Disconnected => "disconnected",
+            HeartbeatConnectionState::Connecting => "connecting",
+            HeartbeatConnectionState::Connected => "connected",
+            HeartbeatConnectionState::Emitting => "emitting",
         }
     }
-
-    /// Returns the current connection state.
-    pub fn connection_state(&self) -> HeartbeatConnectionState {
-        self.state.load(Ordering::Relaxed).into()
-    }
-
-    fn set_state(&self, state: HeartbeatConnectionState) {
-        self.state.store(state as u8, Ordering::Relaxed);
-    }
 }
 
-/// Handle to a running heartbeat worker.
-#[derive(Debug)]
-pub struct HeartbeatWorkerHandle {
-    state: Arc<HeartbeatState>,
-    join_handle: JoinHandle<EtlResult<()>>,
-}
-
-impl HeartbeatWorkerHandle {
-    /// Returns the current connection state.
-    pub fn state(&self) -> HeartbeatConnectionState {
-        self.state.connection_state()
-    }
-
-    /// Waits for the worker to complete.
-    pub async fn wait(self) -> EtlResult<()> {
-        self.join_handle.await.map_err(|e| {
-            crate::error::EtlError::from((
-                ErrorKind::InvalidState,
-                "Heartbeat worker panicked",
-                e.to_string(),
-            ))
-        })?
-    }
-}
-
-/// Heartbeat worker for sending periodic heartbeats to the primary database.
+/// Worker that emits periodic heartbeat messages to prevent replication slot invalidation.
+///
+/// This worker is designed for read replica configurations where the ETL pipeline
+/// connects to a replica but needs to keep the primary's WAL segments from being
+/// recycled prematurely.
 pub struct HeartbeatWorker {
     pipeline_id: PipelineId,
-    config: HeartbeatConfig,
-    connection_config: PgConnectionConfig,
-    shutdown_rx: watch::Receiver<()>,
+    primary_config: PgConnectionConfig,
+    heartbeat_config: HeartbeatConfig,
+    shutdown_rx: ShutdownRx,
 }
 
 impl HeartbeatWorker {
     /// Creates a new heartbeat worker.
+    ///
+    /// # Arguments
+    ///
+    /// * `pipeline_id` - The pipeline identifier for metrics labeling
+    /// * `primary_config` - Connection configuration for the primary database
+    /// * `heartbeat_config` - Configuration for heartbeat timing and retries
+    /// * `shutdown_rx` - Receiver for shutdown signals
     pub fn new(
         pipeline_id: PipelineId,
-        config: HeartbeatConfig,
-        connection_config: PgConnectionConfig,
-        shutdown_rx: watch::Receiver<()>,
+        primary_config: PgConnectionConfig,
+        heartbeat_config: HeartbeatConfig,
+        shutdown_rx: ShutdownRx,
     ) -> Self {
         Self {
             pipeline_id,
-            config,
-            connection_config,
+            primary_config,
+            heartbeat_config,
             shutdown_rx,
         }
     }
 
-    /// Starts the heartbeat worker and returns a handle.
-    pub fn start(self) -> HeartbeatWorkerHandle {
-        let state = Arc::new(HeartbeatState::new());
-        let state_clone = state.clone();
+    /// Starts the heartbeat worker in a background task.
+    ///
+    /// Returns a handle that can be used to wait for the worker to complete.
+    pub async fn start(self) -> EtlResult<HeartbeatWorkerHandle> {
+        let pipeline_id = self.pipeline_id;
+        let (ready_tx, ready_rx) = oneshot::channel();
 
-        let join_handle = tokio::spawn(async move { self.run(state_clone).await });
+        let join_handle = tokio::spawn(async move {
+            // Signal that we're starting (not necessarily connected yet)
+            let _ = ready_tx.send(());
+            self.run().await
+        });
 
-        HeartbeatWorkerHandle { state, join_handle }
+        // Wait for the worker to signal it has started
+        let _ = ready_rx.await;
+
+        Ok(HeartbeatWorkerHandle {
+            pipeline_id,
+            join_handle,
+        })
     }
 
-    async fn run(mut self, state: Arc<HeartbeatState>) -> EtlResult<()> {
-        let span = info_span!(
-            "heartbeat_worker",
+    /// Main run loop for the heartbeat worker.
+    async fn run(mut self) -> EtlResult<()> {
+        let pipeline_id_str = self.pipeline_id.to_string();
+        let mut consecutive_failures: u64 = 0;
+        let mut current_backoff_secs = self.heartbeat_config.initial_backoff_secs;
+
+        info!(
             pipeline_id = %self.pipeline_id,
+            interval_secs = %self.heartbeat_config.interval_secs,
+            "heartbeat worker started"
         );
-        let _guard = span.enter();
-
-        info!("starting heartbeat worker");
-
-        let mut consecutive_failures: u32 = 0;
-        let mut last_heartbeat_warning: Option<Instant> = None;
 
         loop {
-            // Check for shutdown
-            if self.shutdown_rx.has_changed().unwrap_or(true) {
-                info!("shutdown signal received, stopping heartbeat worker");
-                state.set_state(HeartbeatConnectionState::Disconnected);
-                break;
-            }
-
-            // Try to connect
-            state.set_state(if consecutive_failures > 0 {
-                HeartbeatConnectionState::Reconnecting
-            } else {
-                HeartbeatConnectionState::Connecting
-            });
-
-            self.update_state_metric(&state);
-
-            match self
-                .connect_and_run_loop(
-                    &state,
-                    &mut consecutive_failures,
-                    &mut last_heartbeat_warning,
-                )
-                .await
-            {
-                Ok(should_continue) => {
-                    if !should_continue {
-                        break;
-                    }
+            // Try to connect and emit heartbeats
+            match self.connect_and_run(&pipeline_id_str).await {
+                Ok(()) => {
+                    // Clean shutdown requested
+                    info!(pipeline_id = %self.pipeline_id, "heartbeat worker shutting down");
+                    return Ok(());
                 }
-                Err(e) => {
+                Err(err) => {
                     consecutive_failures += 1;
-                    let backoff = self.calculate_backoff(consecutive_failures);
+                    gauge!(ETL_HEARTBEAT_CONSECUTIVE_FAILURES, PIPELINE_ID_LABEL => pipeline_id_str.clone())
+                        .set(consecutive_failures as f64);
+                    counter!(ETL_HEARTBEAT_FAILURES_TOTAL, PIPELINE_ID_LABEL => pipeline_id_str.clone())
+                        .increment(1);
 
-                    warn!(
-                        error = %e,
-                        consecutive_failures,
-                        backoff_secs = backoff.as_secs(),
-                        "heartbeat connection failed, will retry"
+                    error!(
+                        pipeline_id = %self.pipeline_id,
+                        error = %err,
+                        consecutive_failures = %consecutive_failures,
+                        "heartbeat connection/emission failed"
                     );
 
-                    counter!(ETL_HEARTBEAT_FAILURES_TOTAL, PIPELINE_ID_LABEL => self.pipeline_id.to_string(), ERROR_TYPE_LABEL => "connection").increment(1);
-                    state.set_state(HeartbeatConnectionState::Reconnecting);
-                    self.update_state_metric(&state);
+                    // Calculate backoff with jitter
+                    let backoff = self.calculate_backoff(current_backoff_secs);
 
-                    // Wait before retrying, but check shutdown
+                    warn!(
+                        pipeline_id = %self.pipeline_id,
+                        backoff_secs = %backoff.as_secs_f64(),
+                        "waiting before reconnection attempt"
+                    );
+
+                    // Wait for backoff or shutdown
                     tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {}
-                        _ = self.shutdown_rx.changed() => {
-                            info!("shutdown during backoff, stopping heartbeat worker");
-                            state.set_state(HeartbeatConnectionState::Disconnected);
-                            break;
+                        _ = tokio::time::sleep(backoff) => {
+                            // Update backoff for next iteration (exponential)
+                            current_backoff_secs = std::cmp::min(
+                                current_backoff_secs * 2,
+                                self.heartbeat_config.max_backoff_secs
+                            );
+                        }
+                        _ = self.shutdown_rx.wait_for_shutdown() => {
+                            info!(pipeline_id = %self.pipeline_id, "shutdown received during backoff");
+                            return Ok(());
                         }
                     }
                 }
             }
         }
-
-        info!("heartbeat worker stopped");
-        Ok(())
     }
 
-    async fn connect_and_run_loop(
-        &mut self,
-        state: &Arc<HeartbeatState>,
-        consecutive_failures: &mut u32,
-        last_heartbeat_warning: &mut Option<Instant>,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        // Connect to primary
-        let connect_options: TokioPgConfig =
-            self.connection_config.with_db(Some(&ETL_HEARTBEAT_OPTIONS));
+    /// Connects to the primary database and runs the heartbeat loop.
+    ///
+    /// Returns `Ok(())` if shutdown was requested, or an error if the connection
+    /// failed or was lost.
+    async fn connect_and_run(&mut self, pipeline_id_str: &str) -> Result<(), HeartbeatError> {
+        counter!(ETL_HEARTBEAT_CONNECTION_ATTEMPTS_TOTAL, PIPELINE_ID_LABEL => pipeline_id_str.to_string())
+            .increment(1);
 
-        let (client, connection) = connect_options.connect(NoTls).await?;
+        debug!(pipeline_id = %self.pipeline_id, "connecting to primary database");
 
-        // Spawn connection handler
-        let conn_handle = tokio::spawn(async move {
+        let client = self.connect().await?;
+
+        // Verify PostgreSQL version
+        self.verify_pg_version(&client).await?;
+
+        info!(
+            pipeline_id = %self.pipeline_id,
+            host = %self.primary_config.host,
+            port = %self.primary_config.port,
+            "connected to primary database for heartbeats"
+        );
+
+        // Reset consecutive failures on successful connection
+        gauge!(ETL_HEARTBEAT_CONSECUTIVE_FAILURES, PIPELINE_ID_LABEL => pipeline_id_str.to_string())
+            .set(0.0);
+
+        // Run heartbeat loop
+        self.heartbeat_loop(&client, pipeline_id_str).await
+    }
+
+    /// Establishes a connection to the primary database.
+    async fn connect(&self) -> Result<Client, HeartbeatError> {
+        let config = self
+            .primary_config
+            .with_db(Some(&ETL_HEARTBEAT_OPTIONS));
+
+        let tls_connector = create_tls_connector(&self.primary_config.tls)
+            .map_err(|e| HeartbeatError::TlsError(e.to_string()))?;
+
+        let (client, connection) = config
+            .connect(tls_connector)
+            .await
+            .map_err(HeartbeatError::ConnectionFailed)?;
+
+        // Spawn connection task to handle async messages
+        tokio::spawn(async move {
             if let Err(e) = connection.await {
                 error!(error = %e, "heartbeat connection error");
             }
         });
 
-        // Check PostgreSQL version
-        let pg_version = self.get_pg_version(&client).await?;
-        if pg_version < 15 {
-            warn!(
-                pg_version,
-                "PostgreSQL version < 15 detected. pg_logical_emit_message() is not available. \
-                 Heartbeat disabled. WAL management must be done manually."
-            );
-            state.set_state(HeartbeatConnectionState::Degraded);
-            self.update_state_metric(state);
-
-            // In degraded mode, just wait for shutdown
-            let _ = self.shutdown_rx.changed().await;
-            drop(client);
-            conn_handle.abort();
-            return Ok(false);
-        }
-
-        // Verify this is the primary (not a replica)
-        if self.is_in_recovery(&client).await? {
-            error!(
-                "primary_connection points to a replica (pg_is_in_recovery() = true). \
-                    Heartbeat requires connection to the actual primary database."
-            );
-            return Err(
-                "primary_connection must point to the primary database, not a replica".into(),
-            );
-        }
-
-        info!(pg_version, "connected to primary database");
-        state.set_state(HeartbeatConnectionState::Connected);
-        self.update_state_metric(state);
-        *consecutive_failures = 0;
-
-        // Run heartbeat loop
-        let interval = Duration::from_secs(self.config.interval_secs);
-        let mut interval_timer = tokio::time::interval(interval);
-        interval_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            tokio::select! {
-                _ = interval_timer.tick() => {
-                    match self.emit_heartbeat(&client).await {
-                        Ok(()) => {
-                            debug!("heartbeat emitted successfully");
-                            *last_heartbeat_warning = None;
-                        }
-                        Err(e) => {
-                            error!(error = %e, "failed to emit heartbeat");
-                            counter!(ETL_HEARTBEAT_FAILURES_TOTAL, PIPELINE_ID_LABEL => self.pipeline_id.to_string(), ERROR_TYPE_LABEL => "emit").increment(1);
-
-                            // Check if we should warn about missed heartbeats
-                            let now = Instant::now();
-                            let warn_threshold = Duration::from_secs(300); // 5 minutes
-                            if last_heartbeat_warning.is_none_or(|t| now.duration_since(t) > warn_threshold) {
-                                warn!(
-                                    "no successful heartbeat for over 5 minutes. \
-                                     WAL may accumulate on primary. Check primary connection."
-                                );
-                                *last_heartbeat_warning = Some(now);
-                            }
-
-                            // Connection might be broken, exit loop to reconnect
-                            drop(client);
-                            conn_handle.abort();
-                            return Ok(true);
-                        }
-                    }
-                }
-                _ = self.shutdown_rx.changed() => {
-                    info!("shutdown received, stopping heartbeat loop");
-                    drop(client);
-                    conn_handle.abort();
-                    return Ok(false);
-                }
-            }
-        }
+        Ok(client)
     }
 
-    async fn emit_heartbeat(&self, client: &Client) -> Result<(), tokio_postgres::Error> {
-        let start = Instant::now();
+    /// Verifies that the PostgreSQL version supports heartbeat functionality.
+    async fn verify_pg_version(&self, client: &Client) -> Result<(), HeartbeatError> {
+        let row = client
+            .query_one("SHOW server_version_num", &[])
+            .await
+            .map_err(HeartbeatError::VersionQueryFailed)?;
 
-        // pg_logical_emit_message(transactional bool, prefix text, content text)
-        // transactional=false means it's written immediately without waiting for transaction commit
-        client
-            .execute(
-                "SELECT pg_logical_emit_message(false, 'etl_heartbeat', '')",
-                &[],
-            )
-            .await?;
+        let version_str: &str = row.get(0);
+        let version: i32 = version_str
+            .parse()
+            .unwrap_or(0);
 
-        let duration = start.elapsed();
-        histogram!(ETL_HEARTBEAT_DURATION_SECONDS, PIPELINE_ID_LABEL => self.pipeline_id.to_string()).record(duration.as_secs_f64());
-        counter!(ETL_HEARTBEAT_EMISSIONS_TOTAL, PIPELINE_ID_LABEL => self.pipeline_id.to_string())
-            .increment(1);
-        gauge!(ETL_HEARTBEAT_LAST_SUCCESS_TIMESTAMP, PIPELINE_ID_LABEL => self.pipeline_id.to_string()).set(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs_f64()
+        if version < MIN_PG_VERSION {
+            return Err(HeartbeatError::UnsupportedVersion(version_str.to_string()));
+        }
+
+        debug!(
+            pipeline_id = %self.pipeline_id,
+            pg_version = %version_str,
+            "PostgreSQL version verified for heartbeat support"
         );
 
         Ok(())
     }
 
-    async fn get_pg_version(&self, client: &Client) -> Result<i32, tokio_postgres::Error> {
-        let row = client.query_one("SHOW server_version_num", &[]).await?;
-        let version_str: &str = row.get(0);
-        // server_version_num is like "150000" for PG 15.0
-        let version: i32 = version_str.parse().unwrap_or(0) / 10000;
-        Ok(version)
+    /// Runs the heartbeat emission loop.
+    ///
+    /// Emits heartbeats at the configured interval until shutdown is requested
+    /// or an error occurs.
+    async fn heartbeat_loop(
+        &mut self,
+        client: &Client,
+        pipeline_id_str: &str,
+    ) -> Result<(), HeartbeatError> {
+        let interval = Duration::from_secs(self.heartbeat_config.interval_secs);
+
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {
+                    self.emit_heartbeat(client, pipeline_id_str).await?;
+                }
+                _ = self.shutdown_rx.wait_for_shutdown() => {
+                    debug!(pipeline_id = %self.pipeline_id, "shutdown requested, stopping heartbeat loop");
+                    return Ok(());
+                }
+            }
+        }
     }
 
-    async fn is_in_recovery(&self, client: &Client) -> Result<bool, tokio_postgres::Error> {
-        let row = client.query_one("SELECT pg_is_in_recovery()", &[]).await?;
-        Ok(row.get(0))
+    /// Emits a single heartbeat message to the primary database.
+    async fn emit_heartbeat(
+        &self,
+        client: &Client,
+        pipeline_id_str: &str,
+    ) -> Result<(), HeartbeatError> {
+        debug!(pipeline_id = %self.pipeline_id, "emitting heartbeat");
+
+        // Use pg_logical_emit_message with transient=false to generate WAL
+        // The message is minimal - we just need WAL activity
+        client
+            .execute(
+                "SELECT pg_logical_emit_message(false, 'etl_heartbeat', '')",
+                &[],
+            )
+            .await
+            .map_err(HeartbeatError::EmitFailed)?;
+
+        // Update metrics
+        counter!(ETL_HEARTBEAT_EMISSIONS_TOTAL, PIPELINE_ID_LABEL => pipeline_id_str.to_string())
+            .increment(1);
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        gauge!(ETL_HEARTBEAT_LAST_EMISSION_TIMESTAMP, PIPELINE_ID_LABEL => pipeline_id_str.to_string())
+            .set(timestamp);
+
+        debug!(pipeline_id = %self.pipeline_id, "heartbeat emitted successfully");
+
+        Ok(())
     }
 
-    fn calculate_backoff(&self, consecutive_failures: u32) -> Duration {
-        let base_secs = self.config.initial_backoff_secs as f64;
-        let max_secs = self.config.max_backoff_secs as f64;
-
-        // Exponential backoff: initial * 2^(failures-1)
-        let backoff_secs = base_secs * 2.0_f64.powi(consecutive_failures.saturating_sub(1) as i32);
-        let clamped_secs = backoff_secs.min(max_secs);
-
-        // Add jitter using simple time-based pseudo-random
-        // This avoids requiring the rand crate as a dependency
-        let jitter_factor = self.config.jitter_percent as f64 / 100.0;
-        let jitter_range = clamped_secs * jitter_factor;
-        let now_nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as f64;
-        // Simple hash-like value from 0.0 to 1.0
-        let jitter_ratio = (now_nanos % 1_000_000.0) / 1_000_000.0;
-        // Map to range [-jitter_range, +jitter_range]
-        let jitter = (jitter_ratio * 2.0 - 1.0) * jitter_range;
-
-        Duration::from_secs_f64((clamped_secs + jitter).max(0.1))
+    /// Calculates the backoff duration with jitter.
+    fn calculate_backoff(&self, base_secs: u64) -> Duration {
+        let jitter_range = (base_secs as f64 * self.heartbeat_config.jitter_percent as f64) / 100.0;
+        let jitter = rand::rng().random_range(-jitter_range..=jitter_range);
+        let backoff_secs = (base_secs as f64 + jitter).max(0.0);
+        Duration::from_secs_f64(backoff_secs)
     }
+}
 
-    fn update_state_metric(&self, state: &Arc<HeartbeatState>) {
-        gauge!(ETL_HEARTBEAT_CONNECTION_STATE, PIPELINE_ID_LABEL => self.pipeline_id.to_string())
-            .set(state.connection_state() as u8 as f64);
+/// Handle for a running heartbeat worker.
+///
+/// Use this handle to wait for the worker to complete or to monitor its status.
+#[derive(Debug)]
+pub struct HeartbeatWorkerHandle {
+    pipeline_id: PipelineId,
+    join_handle: JoinHandle<EtlResult<()>>,
+}
+
+impl WorkerHandle for HeartbeatWorkerHandle {
+    async fn wait(self) -> EtlResult<()> {
+        match self.join_handle.await {
+            Ok(result) => result,
+            Err(join_error) => {
+                error!(
+                    pipeline_id = %self.pipeline_id,
+                    error = %join_error,
+                    "heartbeat worker task panicked"
+                );
+                Err(EtlError::new(
+                    crate::error::ErrorKind::InternalError,
+                    "Heartbeat worker panic",
+                    join_error.to_string(),
+                ))
+            }
+        }
     }
 }
 
@@ -389,94 +416,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_connection_state_conversion() {
-        assert_eq!(
-            HeartbeatConnectionState::from(0),
-            HeartbeatConnectionState::Disconnected
-        );
-        assert_eq!(
-            HeartbeatConnectionState::from(1),
-            HeartbeatConnectionState::Connecting
-        );
-        assert_eq!(
-            HeartbeatConnectionState::from(2),
-            HeartbeatConnectionState::Connected
-        );
-        assert_eq!(
-            HeartbeatConnectionState::from(3),
-            HeartbeatConnectionState::Reconnecting
-        );
-        assert_eq!(
-            HeartbeatConnectionState::from(4),
-            HeartbeatConnectionState::Degraded
-        );
-        // Unknown values default to Disconnected
-        assert_eq!(
-            HeartbeatConnectionState::from(255),
-            HeartbeatConnectionState::Disconnected
-        );
+    fn test_connection_state_display() {
+        assert_eq!(HeartbeatConnectionState::Disconnected.to_string(), "disconnected");
+        assert_eq!(HeartbeatConnectionState::Connecting.to_string(), "connecting");
+        assert_eq!(HeartbeatConnectionState::Connected.to_string(), "connected");
+        assert_eq!(HeartbeatConnectionState::Emitting.to_string(), "emitting");
     }
 
     #[test]
-    fn test_calculate_backoff() {
+    fn test_connection_state_into_str() {
+        let state: &'static str = HeartbeatConnectionState::Disconnected.into();
+        assert_eq!(state, "disconnected");
+
+        let state: &'static str = HeartbeatConnectionState::Connected.into();
+        assert_eq!(state, "connected");
+    }
+
+    #[test]
+    fn test_calculate_backoff_bounds() {
+        use crate::concurrency::shutdown::create_shutdown_channel;
+
         let config = HeartbeatConfig {
             interval_secs: 30,
-            initial_backoff_secs: 1,
+            initial_backoff_secs: 10,
             max_backoff_secs: 60,
-            jitter_percent: 0, // No jitter for predictable tests
+            jitter_percent: 25,
         };
 
-        let (_tx, rx) = watch::channel(());
-        let worker = HeartbeatWorker::new(
-            1,
-            config,
-            PgConnectionConfig {
-                host: "localhost".to_string(),
-                port: 5432,
-                name: "test".to_string(),
-                username: "test".to_string(),
-                password: None,
-                tls: etl_config::shared::TlsConfig::disabled(),
-                keepalive: None,
-            },
-            rx,
-        );
+        let primary_config = PgConnectionConfig {
+            host: "localhost".to_string(),
+            port: 5432,
+            name: "test".to_string(),
+            username: "test".to_string(),
+            password: None,
+            tls: etl_config::shared::TlsConfig::disabled(),
+            keepalive: None,
+        };
 
-        // First failure: 1 second
-        let backoff = worker.calculate_backoff(1);
-        assert_eq!(backoff.as_secs(), 1);
+        let (shutdown_tx, _) = create_shutdown_channel();
+        let worker = HeartbeatWorker::new(1, primary_config, config, shutdown_tx.subscribe());
 
-        // Second failure: 2 seconds
-        let backoff = worker.calculate_backoff(2);
-        assert_eq!(backoff.as_secs(), 2);
-
-        // Third failure: 4 seconds
-        let backoff = worker.calculate_backoff(3);
-        assert_eq!(backoff.as_secs(), 4);
-
-        // Capped at max (60 seconds)
-        let backoff = worker.calculate_backoff(10);
-        assert_eq!(backoff.as_secs(), 60);
+        // Test that backoff is within expected bounds
+        for _ in 0..100 {
+            let backoff = worker.calculate_backoff(10);
+            let secs = backoff.as_secs_f64();
+            // With 25% jitter on 10 seconds: 7.5 to 12.5 seconds
+            assert!(secs >= 7.5, "backoff {secs} should be >= 7.5");
+            assert!(secs <= 12.5, "backoff {secs} should be <= 12.5");
+        }
     }
 
     #[test]
-    fn test_heartbeat_state() {
-        let state = HeartbeatState::new();
-        assert_eq!(
-            state.connection_state(),
-            HeartbeatConnectionState::Disconnected
-        );
-
-        state.set_state(HeartbeatConnectionState::Connected);
-        assert_eq!(
-            state.connection_state(),
-            HeartbeatConnectionState::Connected
-        );
-
-        state.set_state(HeartbeatConnectionState::Reconnecting);
-        assert_eq!(
-            state.connection_state(),
-            HeartbeatConnectionState::Reconnecting
-        );
+    fn test_min_pg_version() {
+        // PostgreSQL 15.0.0 should be the minimum
+        assert_eq!(MIN_PG_VERSION, 15_00_00);
     }
 }
