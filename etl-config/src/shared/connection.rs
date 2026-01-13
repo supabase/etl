@@ -6,7 +6,6 @@ use std::time::Duration;
 use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPgSslMode};
 
 use crate::Config;
-use crate::shared::ValidationError;
 
 /// Common Postgres settings shared across all ETL connection types.
 ///
@@ -33,6 +32,9 @@ const APP_NAME_REPLICATOR_STATE: &str = "supabase_etl_replicator_state";
 
 /// Application name for ETL logical replication streaming connections.
 const APP_NAME_REPLICATOR_STREAMING: &str = "supabase_etl_replicator_streaming";
+
+/// Application name for ETL heartbeat connections to the primary database.
+const APP_NAME_HEARTBEAT: &str = "supabase_etl_heartbeat";
 
 /// Connection options for the API's metadata database.
 ///
@@ -99,6 +101,23 @@ pub static ETL_STATE_MANAGEMENT_OPTIONS: LazyLock<PgConnectionOptions> =
         lock_timeout: 10_000,
         idle_in_transaction_session_timeout: 60_000,
         application_name: APP_NAME_REPLICATOR_STATE.to_string(),
+    });
+
+/// Connection options for heartbeat connections to the primary database.
+///
+/// Uses short timeouts (5s statement, 5s lock, 30s idle) since heartbeat operations
+/// should be quick and we want fast failure detection for reconnection logic.
+pub static ETL_HEARTBEAT_OPTIONS: LazyLock<PgConnectionOptions> =
+    LazyLock::new(|| PgConnectionOptions {
+        datestyle: COMMON_DATESTYLE.to_string(),
+        intervalstyle: COMMON_INTERVALSTYLE.to_string(),
+        extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
+        client_encoding: COMMON_CLIENT_ENCODING.to_string(),
+        timezone: COMMON_TIMEZONE.to_string(),
+        statement_timeout: 5_000,
+        lock_timeout: 5_000,
+        idle_in_transaction_session_timeout: 30_000,
+        application_name: APP_NAME_HEARTBEAT.to_string(),
     });
 
 /// Postgres server options for ETL workloads.
@@ -199,7 +218,6 @@ pub struct PgConnectionConfig {
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
     /// When `None`, TCP keepalives are disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
@@ -224,7 +242,6 @@ pub struct PgConnectionConfigWithoutSecrets {
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
     /// When `None`, TCP keepalives are disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
@@ -257,21 +274,6 @@ impl TlsConfig {
             trusted_root_certs: "".to_string(),
             enabled: false,
         }
-    }
-
-    /// Validates TLS configuration consistency.
-    ///
-    /// Ensures that when TLS is enabled, trusted root certificates are provided.
-    /// This validation is required because the TLS implementation uses `rustls`,
-    /// which does not automatically fall back to system CA certificates. An empty
-    /// root certificate store would cause all TLS handshakes to fail since no
-    /// server certificates would be trusted.
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.enabled && self.trusted_root_certs.is_empty() {
-            return Err(ValidationError::MissingTrustedRootCerts);
-        }
-
-        Ok(())
     }
 }
 
@@ -445,5 +447,13 @@ mod tests {
     #[test]
     fn test_api_options_application_name() {
         assert_eq!(ETL_API_OPTIONS.application_name, "supabase_etl_api");
+    }
+
+    #[test]
+    fn test_heartbeat_options_timeouts() {
+        assert_eq!(ETL_HEARTBEAT_OPTIONS.statement_timeout, 5_000);
+        assert_eq!(ETL_HEARTBEAT_OPTIONS.lock_timeout, 5_000);
+        assert_eq!(ETL_HEARTBEAT_OPTIONS.idle_in_transaction_session_timeout, 30_000);
+        assert_eq!(ETL_HEARTBEAT_OPTIONS.application_name, "supabase_etl_heartbeat");
     }
 }
