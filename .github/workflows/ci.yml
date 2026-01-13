@@ -131,8 +131,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@1.88.0
@@ -184,8 +182,16 @@ jobs:
           cargo llvm-cov test \
             --workspace --no-fail-fast \
             --all-features \
-            --remap-path-prefix \
             --lcov --output-path lcov.info
+
+      - name: Fix LCOV Paths for Coveralls
+        run: |
+          # Convert absolute paths to relative paths
+          # This allows Coveralls to fetch source from GitHub
+          sed -i "s|^SF:${{ github.workspace }}/|SF:|g" lcov.info
+
+          echo "Sample of fixed paths:"
+          grep "^SF:" lcov.info | head -5
 
       - name: Upload Coverage to Coveralls
         uses: coverallsapp/github-action@v2
@@ -193,6 +199,4 @@ jobs:
           fail-on-error: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path-to-lcov: lcov.info
-          format: lcov
-          base-path: ${{ github.workspace }}
           debug: true
