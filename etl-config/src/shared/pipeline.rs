@@ -7,7 +7,7 @@ use crate::shared::{
     batch::BatchConfig,
 };
 
-/// Selection rules for tables participating in replication.
+/// c copy should be performed.Selection rules for tables participating in replication.
 ///
 /// Controls which tables are eligible for initial table copy and streaming.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
