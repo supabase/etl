@@ -82,6 +82,8 @@
 //!         table_error_retry_max_attempts: 5,
 //!         max_table_sync_workers: 4,
 //!         table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
+//!         primary_connection: None,
+//!         heartbeat: None,
 //!     };
 //!
 //!     // Create and start the pipeline
@@ -120,3 +122,6 @@ pub mod test_utils;
 pub mod types;
 mod utils;
 pub mod workers;
+
+// Re-export HeartbeatWorkerHandle for external use.
+pub use workers::heartbeat::HeartbeatWorkerHandle;
