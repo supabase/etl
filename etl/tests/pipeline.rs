@@ -562,8 +562,8 @@ async fn table_sync_copy_include_all_tables() {
 
     pipeline.start().await.unwrap();
 
-    users_table_ready_notify.try_notified().await;
-    orders_table_ready_notify.try_notified().await;
+    users_table_ready_notify.notified().await;
+    orders_table_ready_notify.notified().await;
 
     // We wait for the two inserts.
     let events_notify = destination
@@ -574,7 +574,7 @@ async fn table_sync_copy_include_all_tables() {
     insert_users_data(&mut database, &users_table_name, 1..=1).await;
     insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
 
-    events_notify.try_notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -650,8 +650,8 @@ async fn table_sync_copy_skip_all_tables() {
 
     pipeline.start().await.unwrap();
 
-    users_table_ready_notify.try_notified().await;
-    orders_table_ready_notify.try_notified().await;
+    users_table_ready_notify.notified().await;
+    orders_table_ready_notify.notified().await;
 
     // We wait for the two inserts.
     let events_notify = destination
@@ -662,7 +662,7 @@ async fn table_sync_copy_skip_all_tables() {
     insert_users_data(&mut database, &users_table_name, 1..=1).await;
     insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
 
-    events_notify.try_notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -741,8 +741,8 @@ async fn table_sync_copy_include_only_specified_tables() {
 
     pipeline.start().await.unwrap();
 
-    users_table_ready_notify.try_notified().await;
-    orders_table_ready_notify.try_notified().await;
+    users_table_ready_notify.notified().await;
+    orders_table_ready_notify.notified().await;
 
     // We wait for the two inserts.
     let events_notify = destination
@@ -753,7 +753,7 @@ async fn table_sync_copy_include_only_specified_tables() {
     insert_users_data(&mut database, &users_table_name, 1..=1).await;
     insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
 
-    events_notify.try_notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -832,8 +832,8 @@ async fn table_sync_copy_skip_only_specified_tables() {
 
     pipeline.start().await.unwrap();
 
-    users_table_ready_notify.try_notified().await;
-    orders_table_ready_notify.try_notified().await;
+    users_table_ready_notify.notified().await;
+    orders_table_ready_notify.notified().await;
 
     // We wait for the two inserts.
     let events_notify = destination
@@ -844,7 +844,7 @@ async fn table_sync_copy_skip_only_specified_tables() {
     insert_users_data(&mut database, &users_table_name, 1..=1).await;
     insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
 
-    events_notify.try_notified().await;
+    events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
