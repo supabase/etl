@@ -3,7 +3,7 @@ use etl::destination::Destination;
 use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
 use etl::state::table::TableReplicationPhaseType;
-use etl::test_utils::notify::NotifyingStore;
+use etl::test_utils::notifying_store::NotifyingStore;
 use etl::types::{Event, TableRow};
 use etl_config::Environment;
 use etl_config::shared::{
@@ -345,6 +345,8 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         id: 1,
         publication_name: args.publication_name,
         pg_connection: pg_connection_config,
+        primary_connection: None,
+        heartbeat: None,
         batch: BatchConfig {
             max_size: args.batch_max_size,
             max_fill_ms: args.batch_max_fill_ms,
