@@ -30,9 +30,9 @@ impl PgReplicationClient {
         let config = Self::build_config(&pg_connection_config, ETL_REPLICATION_OPTIONS, true);
 
         let client = if pg_connection_config.tls.enabled {
-            Self::connect_tls(config, &pg_connection_config).await?
+            Self::connect_with_tls(config, &pg_connection_config, "replication mode").await?
         } else {
-            Self::connect_no_tls(config).await?
+            Self::connect_no_tls(config, "replication mode").await?
         };
 
         Ok(ReplicationClient::new(client))
@@ -46,9 +46,9 @@ impl PgReplicationClient {
         let config = Self::build_config(&pg_connection_config, ETL_HEARTBEAT_OPTIONS, false);
 
         let client = if pg_connection_config.tls.enabled {
-            Self::connect_regular_tls(config, &pg_connection_config).await?
+            Self::connect_with_tls(config, &pg_connection_config, "regular mode").await?
         } else {
-            Self::connect_no_tls(config).await?
+            Self::connect_no_tls(config, "regular mode").await?
         };
 
         Ok(client)
@@ -80,10 +80,11 @@ impl PgReplicationClient {
         config
     }
 
-    /// Connects with TLS for replication mode.
-    async fn connect_tls(
+    /// Connects with TLS, shared implementation for both modes.
+    async fn connect_with_tls(
         config: Config,
         pg_connection_config: &PgConnectionConfig,
+        mode: &'static str,
     ) -> EtlResult<Client> {
         let root_cert_store = Self::build_root_cert_store(pg_connection_config)?;
 
@@ -96,49 +97,25 @@ impl PgReplicationClient {
 
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                tracing::error!(error = %e, "replication connection error");
+                tracing::error!(error = %e, "{mode} connection error");
             }
         });
 
-        info!("connected to PostgreSQL with TLS (replication mode)");
-        Ok(client)
-    }
-
-    /// Connects with TLS for regular (non-replication) mode.
-    async fn connect_regular_tls(
-        config: Config,
-        pg_connection_config: &PgConnectionConfig,
-    ) -> EtlResult<Client> {
-        let root_cert_store = Self::build_root_cert_store(pg_connection_config)?;
-
-        let tls_config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_cert_store)
-            .with_no_client_auth();
-
-        let tls = MakeRustlsConnect::new(tls_config);
-        let (client, connection) = config.connect(tls).await?;
-
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                tracing::error!(error = %e, "regular connection error");
-            }
-        });
-
-        info!("connected to PostgreSQL with TLS (regular mode)");
+        info!("connected to PostgreSQL with TLS ({mode})");
         Ok(client)
     }
 
     /// Connects without TLS.
-    async fn connect_no_tls(config: Config) -> EtlResult<Client> {
+    async fn connect_no_tls(config: Config, mode: &'static str) -> EtlResult<Client> {
         let (client, connection) = config.connect(NoTls).await?;
 
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                tracing::error!(error = %e, "connection error");
+                tracing::error!(error = %e, "{mode} connection error");
             }
         });
 
-        info!("connected to PostgreSQL without TLS");
+        info!("connected to PostgreSQL without TLS ({mode})");
         Ok(client)
     }
 
