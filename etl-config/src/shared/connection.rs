@@ -6,6 +6,7 @@ use std::time::Duration;
 use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPgSslMode};
 
 use crate::Config;
+use crate::shared::ValidationError;
 
 /// Common Postgres settings shared across all ETL connection types.
 ///
@@ -216,6 +217,8 @@ pub struct PgConnectionConfig {
     pub password: Option<SecretString>,
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
+    /// TCP keepalive configuration for connection health monitoring.
+    /// When `None`, TCP keepalives are disabled.
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
@@ -238,6 +241,8 @@ pub struct PgConnectionConfigWithoutSecrets {
     pub username: String,
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
+    /// TCP keepalive configuration for connection health monitoring.
+    /// When `None`, TCP keepalives are disabled.
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
@@ -270,6 +275,21 @@ impl TlsConfig {
             trusted_root_certs: "".to_string(),
             enabled: false,
         }
+    }
+
+    /// Validates TLS configuration consistency.
+    ///
+    /// Ensures that when TLS is enabled, trusted root certificates are provided.
+    /// This validation is required because the TLS implementation uses `rustls`,
+    /// which does not automatically fall back to system CA certificates. An empty
+    /// root certificate store would cause all TLS handshakes to fail since no
+    /// server certificates would be trusted.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.enabled && self.trusted_root_certs.is_empty() {
+            return Err(ValidationError::MissingTrustedRootCerts);
+        }
+
+        Ok(())
     }
 }
 
