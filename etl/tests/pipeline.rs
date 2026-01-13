@@ -584,7 +584,7 @@ async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
 
         pipeline.start().await.unwrap();
 
-        table_ready_notify.notified().await;
+        table_ready_notify.try_notified().await;
 
         // We wait for the two inserts.
         let events_notify = destination
@@ -595,7 +595,7 @@ async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
         insert_users_data(&mut database, &users_table_name, 1..=1).await;
         insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
 
-        events_notify.notified().await;
+        events_notify.try_notified().await;
 
         pipeline.shutdown_and_wait().await.unwrap();
 
