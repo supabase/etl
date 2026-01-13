@@ -208,7 +208,12 @@ where
     /// 3. Heartbeat worker completes (if running)
     /// 4. Any errors from workers are aggregated and returned
     pub async fn wait(self) -> EtlResult<()> {
-        let PipelineState::Started { apply_worker, pool, heartbeat_worker } = self.state else {
+        let PipelineState::Started {
+            apply_worker,
+            pool,
+            heartbeat_worker,
+        } = self.state
+        else {
             info!("pipeline was not started, skipping wait");
 
             return Ok(());
