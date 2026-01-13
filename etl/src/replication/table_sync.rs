@@ -82,9 +82,11 @@ where
         // successfully return.
         if matches!(
             phase_type,
-            TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
+            TableReplicationPhaseType::SyncDone
+                | TableReplicationPhaseType::Ready
+                | TableReplicationPhaseType::Errored
         ) {
-            info!(%table_id, %phase_type, "initial table sync not required");
+            warn!(%table_id, %phase_type, "initial table sync not required");
 
             return Ok(TableSyncResult::SyncNotRequired);
         }

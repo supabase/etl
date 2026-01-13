@@ -5,7 +5,7 @@ use etl::error::ErrorKind;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
-use etl::test_utils::notify::NotifyingStore;
+use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{
     create_pipeline, create_pipeline_with_batch_config, create_pipeline_with_table_sync_copy_config,
 };
@@ -21,7 +21,7 @@ use etl_config::shared::{BatchConfig, TableSyncCopyConfig};
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
-use etl_postgres::types::ColumnSchema;
+use etl_postgres::types::{ColumnSchema, TableId};
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
@@ -521,120 +521,134 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     assert!(table_schemas.contains_key(&table_2_id));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
+async fn run_table_sync_copy_case<F>(
+    table_sync_copy_fn: F,
+    expected_users_copied_rows: usize,
+    expected_orders_copied_rows: usize,
+) where
+    F: FnOnce(TableId, TableId) -> TableSyncCopyConfig,
+{
     init_test_tracing();
 
-    #[derive(Debug)]
-    enum TableCopyCase {
-        IncludeAll,
-        SkipAll,
-        IncludeOnly,
-        SkipOnly,
-    }
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
-    for table_copy_case in [
-        TableCopyCase::IncludeAll,
-        TableCopyCase::SkipAll,
-        TableCopyCase::IncludeOnly,
-        TableCopyCase::SkipOnly,
-    ] {
-        let mut database = spawn_source_database().await;
-        let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+    let users_table_id = database_schema.users_schema().id;
+    let orders_table_id = database_schema.orders_schema().id;
+    let users_table_name = database_schema.users_schema().name.clone();
+    let orders_table_name = database_schema.orders_schema().name.clone();
 
-        let users_table_id = database_schema.users_schema().id;
-        let orders_table_id = database_schema.orders_schema().id;
-        let users_table_name = database_schema.users_schema().name.clone();
-        let orders_table_name = database_schema.orders_schema().name.clone();
+    // We insert a single user and order.
+    insert_users_data(&mut database, &users_table_name, 0..=0).await;
+    insert_orders_data(&mut database, &orders_table_name, 0..=0).await;
 
-        // We insert a single user and order.
-        insert_users_data(&mut database, &users_table_name, 0..=0).await;
-        insert_orders_data(&mut database, &orders_table_name, 0..=0).await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
-        let store = NotifyingStore::new();
-        let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let pipeline_id: PipelineId = random();
+    let table_sync_copy = table_sync_copy_fn(users_table_id, orders_table_id);
+    let mut pipeline = create_pipeline_with_table_sync_copy_config(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+        table_sync_copy,
+    );
 
-        let pipeline_id: PipelineId = random();
-        let table_sync_copy = match table_copy_case {
-            TableCopyCase::IncludeAll => TableSyncCopyConfig::IncludeAllTables,
-            TableCopyCase::SkipAll => TableSyncCopyConfig::SkipAllTables,
-            TableCopyCase::IncludeOnly => TableSyncCopyConfig::IncludeTables {
-                // We include only the users table.
-                table_ids: vec![users_table_id.into_inner()],
-            },
-            TableCopyCase::SkipOnly => TableSyncCopyConfig::SkipTables {
-                // We exclude only the users table.
-                table_ids: vec![users_table_id.into_inner()],
-            },
-        };
+    // We wait for both tables to be ready for streaming.
+    let users_table_ready_notify = store
+        .notify_on_table_state_type(users_table_id, TableReplicationPhaseType::Ready)
+        .await;
+    let orders_table_ready_notify = store
+        .notify_on_table_state_type(orders_table_id, TableReplicationPhaseType::Ready)
+        .await;
 
-        let mut pipeline = create_pipeline_with_table_sync_copy_config(
-            &database.config,
-            pipeline_id,
-            database_schema.publication_name(),
-            store.clone(),
-            destination.clone(),
-            table_sync_copy,
-        );
+    pipeline.start().await.unwrap();
 
-        // We wait for the table to be ready for streaming.
-        let table_ready_notify = store
-            .notify_on_table_state_type(users_table_id, TableReplicationPhaseType::Ready)
-            .await;
+    users_table_ready_notify.notified().await;
+    orders_table_ready_notify.notified().await;
 
-        pipeline.start().await.unwrap();
+    // We wait for the two inserts.
+    let events_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 2)])
+        .await;
 
-        table_ready_notify.notified().await;
+    // We insert additional data.
+    insert_users_data(&mut database, &users_table_name, 1..=1).await;
+    insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
 
-        // We wait for the two inserts.
-        let events_notify = destination
-            .wait_for_events_count(vec![(EventType::Insert, 2)])
-            .await;
+    events_notify.notified().await;
 
-        // We insert additional data.
-        insert_users_data(&mut database, &users_table_name, 1..=1).await;
-        insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
+    pipeline.shutdown_and_wait().await.unwrap();
 
-        events_notify.notified().await;
+    // We validate that the table rows are correct.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_copied_rows = table_rows
+        .get(&users_table_id)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    let orders_table_copied_rows = table_rows
+        .get(&orders_table_id)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    assert_eq!(users_table_copied_rows, expected_users_copied_rows);
+    assert_eq!(orders_table_copied_rows, expected_orders_copied_rows);
+    // We always expect the method to be called since the downstream table should be created
+    // nonetheless.
+    assert_eq!(destination.write_table_rows_called().await, 2);
 
-        pipeline.shutdown_and_wait().await.unwrap();
-
-        // We validate that the table rows are correct.
-        let table_rows = destination.get_table_rows().await;
-        let users_table_copied_rows = table_rows
-            .get(&users_table_id)
-            .map(|rows| rows.len())
-            .unwrap_or(0);
-        let orders_table_copied_rows = table_rows
-            .get(&orders_table_id)
-            .map(|rows| rows.len())
-            .unwrap_or(0);
-
-        let (expected_users_rows, expected_orders_rows) = match table_copy_case {
-            TableCopyCase::IncludeAll => (1, 1),
-            TableCopyCase::SkipAll => (0, 0),
-            TableCopyCase::IncludeOnly => (1, 0),
-            TableCopyCase::SkipOnly => (0, 1),
-        };
-        assert_eq!(users_table_copied_rows, expected_users_rows);
-        assert_eq!(orders_table_copied_rows, expected_orders_rows);
-        // We always expect the method to be called since the downstream table should be created
-        // nonetheless.
-        assert_eq!(destination.write_table_rows_called().await, 2);
-
-        // We validate that the single insert was received.
-        let events = destination.get_events().await;
-        let grouped_events = group_events_by_type_and_table_id(&events);
-        let users_inserts = grouped_events
+    // We validate that the single insert was received.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    assert_eq!(
+        grouped_events
             .get(&(EventType::Insert, users_table_id))
-            .unwrap();
-        let orders_inserts = grouped_events
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        grouped_events
             .get(&(EventType::Insert, orders_table_id))
-            .unwrap();
+            .unwrap()
+            .len(),
+        1
+    );
+}
 
-        assert_eq!(users_inserts.len(), 1);
-        assert_eq!(orders_inserts.len(), 1);
-    }
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_copy_include_all_tables() {
+    run_table_sync_copy_case(|_, _| TableSyncCopyConfig::IncludeAllTables, 1, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_copy_skip_all_tables() {
+    run_table_sync_copy_case(|_, _| TableSyncCopyConfig::SkipAllTables, 0, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_copy_include_only_specified_tables() {
+    run_table_sync_copy_case(
+        |users_table_id, _| TableSyncCopyConfig::IncludeTables {
+            table_ids: vec![users_table_id.into_inner()],
+        },
+        1,
+        0,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_copy_skip_only_specified_tables() {
+    run_table_sync_copy_case(
+        |users_table_id, _| TableSyncCopyConfig::SkipTables {
+            table_ids: vec![users_table_id.into_inner()],
+        },
+        0,
+        1,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
