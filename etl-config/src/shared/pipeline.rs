@@ -7,18 +7,32 @@ use crate::shared::{
     batch::BatchConfig,
 };
 
+/// Selection rules for tables participating in replication.
+///
+/// Controls which tables are eligible for initial table copy and streaming.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
 pub enum TableSyncCopyConfig {
+    /// Performs the initial copy for all tables.
     IncludeAllTables,
+    /// Skips the initial copy for all tables.
     SkipAllTables,
-    IncludeTables { table_ids: Vec<u32> },
-    SkipTables { table_ids: Vec<u32> },
+    /// Performs the initial copy for the specified table ids.
+    IncludeTables {
+        /// Table ids of the table for which copy should be performed.
+        table_ids: Vec<u32>,
+    },
+    /// Skips the initial copy for the specified table ids.
+    SkipTables {
+        /// Table ids of the table for which copy should be skipped.
+        table_ids: Vec<u32>,
+    },
 }
 
 impl TableSyncCopyConfig {
+    /// Returns `true` if the table should be copied during initial sync, `false` otherwise.
     pub fn should_copy_table(&self, table_id: u32) -> bool {
         match self {
             TableSyncCopyConfig::IncludeAllTables => true,
@@ -35,15 +49,34 @@ impl Default for TableSyncCopyConfig {
     }
 }
 
+/// Configuration for an ETL pipeline.
+///
+/// Contains all settings required to run a replication pipeline including
+/// source database connection, batching parameters, and worker limits.
+///
+/// This intentionally does not implement [`Serialize`] to avoid accidentally
+/// leaking secrets in the config into serialized forms.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PipelineConfig {
+    /// The unique identifier for this pipeline.
+    ///
+    /// A pipeline id determines isolation between pipelines, in terms of replication slots and state
+    /// store.
     pub id: u64,
+    /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
+    /// The connection configuration for the Postgres instance to which the pipeline connects for
+    /// replication.
     pub pg_connection: PgConnectionConfig,
     /// Optional connection to the primary database for read replica mode.
+    ///
+    /// When replicating from a read replica, this connection is used to emit heartbeat
+    /// messages to the primary to keep the replication slot active.
     #[serde(default)]
     pub primary_connection: Option<PgConnectionConfig>,
     /// Heartbeat configuration for read replica mode.
+    ///
+    /// Controls the interval and backoff settings for heartbeat emissions to the primary.
     #[serde(default)]
     pub heartbeat: Option<HeartbeatConfig>,
     /// Batch processing configuration.
@@ -74,6 +107,9 @@ impl PipelineConfig {
     pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
 
     /// Returns `true` if the pipeline is configured for read replica mode.
+    ///
+    /// Read replica mode is active when a primary connection is configured,
+    /// enabling heartbeat emissions to keep the replication slot active.
     pub fn is_replica_mode(&self) -> bool {
         self.primary_connection.is_some()
     }
@@ -95,12 +131,14 @@ impl PipelineConfig {
                 constraint: "must be greater than 0".to_string(),
             });
         }
+
         if self.table_error_retry_max_attempts == 0 {
             return Err(ValidationError::InvalidFieldValue {
                 field: "table_error_retry_max_attempts".to_string(),
                 constraint: "must be greater than 0".to_string(),
             });
         }
+
         Ok(())
     }
 }
@@ -122,11 +160,20 @@ fn default_max_table_sync_workers() -> u16 {
 /// so is safe to serialize.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PipelineConfigWithoutSecrets {
+    /// The unique identifier for this pipeline.
+    ///
+    /// A pipeline id determines isolation between pipelines, in terms of replication slots and state
+    /// store.
     pub id: u64,
+    /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
+    /// The connection configuration for the Postgres instance to which the pipeline connects for
+    /// replication.
     pub pg_connection: PgConnectionConfigWithoutSecrets,
+    /// Optional connection to the primary database for read replica mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_connection: Option<PgConnectionConfigWithoutSecrets>,
+    /// Heartbeat configuration for read replica mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat: Option<HeartbeatConfig>,
     /// Batch processing configuration.
@@ -172,14 +219,29 @@ mod tests {
         let selection = TableSyncCopyConfig::SkipAllTables;
         let json = serde_json::to_string(&selection).unwrap();
         let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
+
         assert_eq!(selection, decoded);
     }
 
     #[test]
     fn test_table_sync_copy_serialization_include_tables() {
-        let selection = TableSyncCopyConfig::IncludeTables { table_ids: vec![1, 2, 3] };
+        let selection = TableSyncCopyConfig::IncludeTables {
+            table_ids: vec![1, 2, 3],
+        };
         let json = serde_json::to_string(&selection).unwrap();
         let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(selection, decoded);
+    }
+
+    #[test]
+    fn test_table_sync_copy_serialization_exclude_tables() {
+        let selection = TableSyncCopyConfig::SkipTables {
+            table_ids: vec![4, 5],
+        };
+        let json = serde_json::to_string(&selection).unwrap();
+        let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
+
         assert_eq!(selection, decoded);
     }
 }
