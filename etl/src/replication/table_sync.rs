@@ -144,6 +144,20 @@ where
                 }
             }
 
+            // We must truncate the destination table before starting a copy to avoid data inconsistencies.
+            // Example scenario:
+            // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
+            // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
+            // 3. While down, the source deletes row id = 1 and inserts row id = 2.
+            // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
+            // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
+            // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
+            // Fix: Always truncate the destination table before starting a copy.
+            //
+            // We try to truncate the table also during `Init` because we support state rollback and
+            // a table might be there from a previous run.
+            destination.truncate_table(table_id).await?;
+
             // We are ready to start copying table data, and we update the state accordingly.
             info!(%table_id, "starting data copy");
             {
@@ -189,24 +203,6 @@ where
             // We store the table schema in the schema store to be able to retrieve it even when the
             // pipeline is restarted, since it's outside the lifecycle of the pipeline.
             store.store_table_schema(table_schema.clone()).await?;
-
-            // We must truncate the destination table before starting a copy to avoid data inconsistencies.
-            // Example scenario:
-            // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
-            // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
-            // 3. While down, the source deletes row id = 1 and inserts row id = 2.
-            // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
-            // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
-            // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
-            // Fix: Always truncate the destination table before starting a copy.
-            //
-            // We unconditionally truncate the table because we support state rollback and a table
-            // might be there from a previous run.
-            //
-            // For now, we are doing truncation after loading the schema since the schema is read in the
-            // destination for properly processing truncation. In future PRs, this will be handled
-            // better.
-            destination.truncate_table(table_id).await?;
 
             let table_copy_start = Instant::now();
             let mut total_rows_copied = 0;
