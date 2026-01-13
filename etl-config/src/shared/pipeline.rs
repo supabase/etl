@@ -86,13 +86,13 @@ pub struct PipelineConfig {
 
 impl PipelineConfig {
     /// Default retry delay in milliseconds between table error retries.
-    pub const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 1000;
+    pub const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
 
     /// Default maximum number of retry attempts for table errors.
     pub const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: u32 = 5;
 
     /// Default maximum number of concurrent table sync workers.
-    pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 10;
+    pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
 
     /// Validates pipeline configuration settings.
     ///

@@ -1,6 +1,10 @@
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
+fn default_max_concurrent_streams() -> usize {
+    DestinationConfig::DEFAULT_MAX_CONCURRENT_STREAMS
+}
+
 /// Configuration for supported ETL data destinations.
 ///
 /// Specifies the destination type and its associated configuration parameters.
@@ -29,7 +33,7 @@ pub enum DestinationConfig {
         ///
         /// If not set, the default staleness behavior is used. See
         /// <https://cloud.google.com/bigquery/docs/change-data-capture#create-max-staleness>.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
         /// Maximum number of concurrent streams for BigQuery append operations.
         ///
@@ -41,12 +45,18 @@ pub enum DestinationConfig {
         /// - the number of tables being replicated,
         /// - the volume of events processed by the ETL,
         /// - and the configured batch size.
+        #[serde(default = "default_max_concurrent_streams")]
         max_concurrent_streams: usize,
     },
     Iceberg {
         #[serde(flatten)]
         config: IcebergConfig,
     },
+}
+
+impl DestinationConfig {
+    /// Default maximum number of concurrent streams for BigQuery destinations.
+    pub const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 8;
 }
 
 /// Configuration for the iceberg destination with two variants
@@ -67,6 +77,7 @@ pub enum IcebergConfig {
         /// If present, the iceberg catalog namespace where tables will be created.
         /// If missing, multiple catlog namespaces will be created, one per source
         /// schema.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
         /// Catalog authentication token
         catalog_token: SecretString,
@@ -85,6 +96,7 @@ pub enum IcebergConfig {
         /// If present, the iceberg catalog namespace where tables will be created.
         /// If missing, multiple catlog namespaces will be created, one per source
         /// schema.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
         /// The S3 access key id
         s3_access_key_id: SecretString,
@@ -109,6 +121,7 @@ pub enum IcebergConfigWithoutSecrets {
         /// If present, the iceberg catalog namespace where tables will be created.
         /// If missing, multiple catlog namespaces will be created, one per source
         /// schema.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
         /// The S3 region
         s3_region: String,
@@ -119,6 +132,7 @@ pub enum IcebergConfigWithoutSecrets {
         /// Name of the warehouse in the catalog
         warehouse_name: String,
         /// Iceberg catalog namespace where tables will be created
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         namespace: Option<String>,
         /// The S3 endpoint
         s3_endpoint: String,
@@ -181,7 +195,7 @@ pub enum DestinationConfigWithoutSecrets {
         ///
         /// If not set, the default staleness behavior is used. See
         /// <https://cloud.google.com/bigquery/docs/change-data-capture#create-max-staleness>.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
         /// Maximum number of concurrent streams for BigQuery append operations.
         ///
@@ -193,6 +207,7 @@ pub enum DestinationConfigWithoutSecrets {
         /// - the number of tables being replicated,
         /// - the volume of events processed by the ETL,
         /// - and the configured batch size.
+        #[serde(default = "default_max_concurrent_streams")]
         max_concurrent_streams: usize,
     },
     Iceberg {

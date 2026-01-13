@@ -21,10 +21,10 @@ pub struct BatchConfig {
 
 impl BatchConfig {
     /// Default maximum batch size for table copy and event streaming.
-    pub const DEFAULT_MAX_SIZE: usize = 10000;
+    pub const DEFAULT_MAX_SIZE: usize = 100000;
 
     /// Default maximum fill time in milliseconds.
-    pub const DEFAULT_MAX_FILL_MS: u64 = 0;
+    pub const DEFAULT_MAX_FILL_MS: u64 = 10000;
 
     /// Validates batch configuration settings.
     ///

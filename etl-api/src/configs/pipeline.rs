@@ -4,7 +4,6 @@ use utoipa::ToSchema;
 
 use crate::configs::{log::LogLevel, store::Store};
 
-// Use shared library defaults for consistency across the application
 const fn default_table_error_retry_max_attempts() -> u32 {
     PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
 }

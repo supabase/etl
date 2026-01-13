@@ -71,6 +71,7 @@ pub struct StoredSourceConfig {
     pub port: u16,
     pub name: String,
     pub username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<SerializableSecretString>,
 }
 
