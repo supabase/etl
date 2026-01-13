@@ -6,7 +6,6 @@ use std::time::Duration;
 use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPgSslMode};
 
 use crate::Config;
-use crate::shared::ValidationError;
 
 /// Common Postgres settings shared across all ETL connection types.
 const COMMON_DATESTYLE: &str = "ISO";
@@ -141,7 +140,8 @@ pub struct PgConnectionConfig {
     pub username: String,
     pub password: Option<SecretString>,
     pub tls: TlsConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// TCP keepalive configuration for connection health monitoring.
+    /// When `None`, TCP keepalives are disabled.
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
@@ -156,6 +156,8 @@ pub struct PgConnectionConfigWithoutSecrets {
     pub name: String,
     pub username: String,
     pub tls: TlsConfig,
+    /// TCP keepalive configuration for connection health monitoring.
+    /// When `None`, TCP keepalives are disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
@@ -185,13 +187,6 @@ impl TlsConfig {
             trusted_root_certs: "".to_string(),
             enabled: false,
         }
-    }
-
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.enabled && self.trusted_root_certs.is_empty() {
-            return Err(ValidationError::MissingTrustedRootCerts);
-        }
-        Ok(())
     }
 }
 

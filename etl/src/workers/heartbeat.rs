@@ -3,7 +3,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use metrics::{counter, gauge};
-use rand::Rng;
 use thiserror::Error;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -111,7 +110,7 @@ impl HeartbeatWorker {
         let mut current_backoff = Duration::from_secs(self.heartbeat_config.initial_backoff_secs);
 
         loop {
-            if self.shutdown_rx.is_shutdown() {
+            if self.shutdown_rx.has_changed().unwrap_or(false) {
                 info!(pipeline_id = %self.pipeline_id, "heartbeat worker shutting down");
                 return Ok(());
             }
@@ -144,7 +143,7 @@ impl HeartbeatWorker {
 
                     tokio::select! {
                         _ = sleep(jittered_backoff) => {},
-                        _ = self.shutdown_rx.wait_for_shutdown() => {
+                        _ = self.shutdown_rx.changed() => {
                             info!(pipeline_id = %self.pipeline_id, "heartbeat worker shutting down during backoff");
                             return Ok(());
                         }
@@ -210,7 +209,7 @@ impl HeartbeatWorker {
         Ok(())
     }
 
-    async fn heartbeat_loop(&self, client: &Client) -> Result<(), HeartbeatError> {
+    async fn heartbeat_loop(&mut self, client: &Client) -> Result<(), HeartbeatError> {
         let mut heartbeat_interval = interval(Duration::from_secs(self.heartbeat_config.interval_secs));
 
         loop {
@@ -218,7 +217,7 @@ impl HeartbeatWorker {
                 _ = heartbeat_interval.tick() => {
                     self.emit_heartbeat(client).await?;
                 }
-                _ = self.shutdown_rx.wait_for_shutdown() => {
+                _ = self.shutdown_rx.changed() => {
                     info!(pipeline_id = %self.pipeline_id, "heartbeat loop received shutdown signal");
                     return Ok(());
                 }
@@ -252,10 +251,18 @@ impl HeartbeatWorker {
     }
 
     fn calculate_backoff(&self, base_backoff: Duration) -> Duration {
+        // Simple jitter using timestamp nanoseconds as pseudo-random source
         let jitter_fraction = self.heartbeat_config.jitter_percent as f64 / 100.0;
         let jitter_range = base_backoff.as_secs_f64() * jitter_fraction;
-        let mut rng = rand::rng();
-        let jitter = rng.random_range(-jitter_range..=jitter_range);
+
+        // Use nanoseconds from current time as a simple source of variation
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let normalized = (nanos as f64 / u32::MAX as f64) * 2.0 - 1.0; // -1.0 to 1.0
+        let jitter = normalized * jitter_range;
+
         let jittered_secs = (base_backoff.as_secs_f64() + jitter).max(0.1);
         Duration::from_secs_f64(jittered_secs)
     }

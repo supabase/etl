@@ -13,6 +13,25 @@ pub fn test_slot_name(slot_name: &str) -> String {
     format!("test_{slot_name}_{uuid}")
 }
 
+/// Builder for creating test pipelines with configurable options.
+///
+/// This builder provides a fluent interface for constructing `Pipeline` instances
+/// with custom configurations. All configuration options have sensible defaults,
+/// allowing you to only specify the options you need to customize.
+///
+/// # Examples
+///
+/// ```ignore
+/// // Create a pipeline with default settings
+/// let pipeline = PipelineBuilder::new(pg_config, id, pub_name, store, dest)
+///     .build();
+///
+/// // Create a pipeline with custom batch and retry configurations
+/// let pipeline = PipelineBuilder::new(pg_config, id, pub_name, store, dest)
+///     .with_batch_config(BatchConfig { max_size: 100, max_fill_ms: 5000 })
+///     .with_retry_config(2000, 10)
+///     .build();
+/// ```
 pub struct PipelineBuilder<S, D> {
     pg_connection_config: PgConnectionConfig,
     pipeline_id: PipelineId,
