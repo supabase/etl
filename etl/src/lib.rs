@@ -49,7 +49,7 @@
 //!
 //! ```rust,no_run
 //! use etl::{
-//!     config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig},
+//!     config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig, TableSyncCopyConfig},
 //!     destination::memory::MemoryDestination,
 //!     pipeline::Pipeline,
 //!     store::both::memory::MemoryStore,
@@ -77,10 +77,13 @@
 //!         id: 1,
 //!         publication_name: "my_publication".to_string(),
 //!         pg_connection: pg_config,
+//!         primary_connection: None, // Not using replica mode
+//!         heartbeat: None,
 //!         batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
 //!         table_error_retry_delay_ms: 10000,
 //!         table_error_retry_max_attempts: 5,
 //!         max_table_sync_workers: 4,
+//!         table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
 //!     };
 //!
 //!     // Create and start the pipeline
