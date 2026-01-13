@@ -6,14 +6,28 @@ use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::notify::NotifyingStore;
 use etl::types::{Event, TableRow};
 use etl_config::Environment;
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
+use etl_config::shared::{
+    BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig, TlsConfig,
+};
 use etl_destinations::bigquery::BigQueryDestination;
-use etl_destinations::encryption::install_crypto_provider;
 use etl_postgres::types::TableId;
 use etl_telemetry::tracing::init_tracing;
 use sqlx::postgres::PgPool;
 use std::error::Error;
+use std::sync::Once;
 use tracing::info;
+
+/// Ensures crypto provider is only initialized once.
+static INIT_CRYPTO: Once = Once::new();
+
+/// Installs the default cryptographic provider for rustls.
+fn install_crypto_provider() {
+    INIT_CRYPTO.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("failed to install default crypto provider");
+    });
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -331,6 +345,8 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         id: 1,
         publication_name: args.publication_name,
         pg_connection: pg_connection_config,
+        primary_connection: None,
+        heartbeat: None,
         batch: BatchConfig {
             max_size: args.batch_max_size,
             max_fill_ms: args.batch_max_fill_ms,
@@ -338,6 +354,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.max_table_sync_workers,
+        table_sync_copy: TableSyncCopyConfig::default(),
     };
 
     // Create the appropriate destination based on the argument

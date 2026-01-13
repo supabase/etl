@@ -32,15 +32,29 @@ The pipeline will automatically:
 */
 
 use clap::{Args, Parser};
-use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
+use etl::config::{
+    BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig, TlsConfig,
+};
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
 use etl_destinations::bigquery::BigQueryDestination;
-use etl_destinations::encryption::install_crypto_provider;
 use std::error::Error;
+use std::sync::Once;
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Ensures crypto provider is only initialized once.
+static INIT_CRYPTO: Once = Once::new();
+
+/// Installs the default cryptographic provider for rustls.
+fn install_crypto_provider() {
+    INIT_CRYPTO.call_once(|| {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .expect("failed to install default crypto provider");
+    });
+}
 
 // Main application arguments combining database and BigQuery configurations
 #[derive(Debug, Parser)]
@@ -167,6 +181,8 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         id: 1, // Using a simple ID for the example
         publication_name: args.publication,
         pg_connection: pg_connection_config,
+        primary_connection: None, // Not using replica mode in this example
+        heartbeat: None,
         batch: BatchConfig {
             max_size: args.bq_args.max_batch_size,
             max_fill_ms: args.bq_args.max_batch_fill_duration_ms,
@@ -174,6 +190,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.bq_args.max_table_sync_workers,
+        table_sync_copy: TableSyncCopyConfig::default(),
     };
 
     // Initialize BigQuery destination with service account authentication
