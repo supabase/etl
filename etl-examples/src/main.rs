@@ -181,7 +181,9 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         id: 1, // Using a simple ID for the example
         publication_name: args.publication,
         pg_connection: pg_connection_config,
+        // Primary database connection for replica mode (None = replicating from primary directly)
         primary_connection: None,
+        // Heartbeat config for keeping replication slot active in replica mode
         heartbeat: None,
         batch: BatchConfig {
             max_size: args.bq_args.max_batch_size,
