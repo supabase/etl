@@ -7,16 +7,15 @@ use crate::shared::{
     batch::BatchConfig,
 };
 
-/// c copy should be performed.Selection rules for tables participating in replication.
+/// Selection rules for tables participating in replication.
 ///
 /// Controls which tables are eligible for initial table copy and streaming.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
 pub enum TableSyncCopyConfig {
     /// Performs the initial copy for all tables.
-    #[default]
     IncludeAllTables,
     /// Skips the initial copy for all tables.
     SkipAllTables,
@@ -44,6 +43,12 @@ impl TableSyncCopyConfig {
     }
 }
 
+impl Default for TableSyncCopyConfig {
+    fn default() -> Self {
+        Self::IncludeAllTables
+    }
+}
+
 /// Configuration for an ETL pipeline.
 ///
 /// Contains all settings required to run a replication pipeline including
@@ -63,17 +68,17 @@ pub struct PipelineConfig {
     /// The connection configuration for the Postgres instance to which the pipeline connects for
     /// replication.
     pub pg_connection: PgConnectionConfig,
-    /// Optional connection to the primary database for heartbeat operations.
+    /// Optional connection to the primary database when `pg_connection` points to a read replica.
     ///
-    /// When streaming from a read replica, this connection is used to send periodic
-    /// heartbeat messages via `pg_logical_emit_message()` to prevent WAL accumulation.
-    /// If not set, the pipeline operates in single-connection mode.
+    /// When set, enables heartbeat emission to prevent replication slot invalidation on the replica.
+    /// The heartbeat worker will connect to this primary database and periodically emit WAL messages
+    /// to prevent the primary from recycling WAL segments needed by the replica's replication slot.
     #[serde(default)]
     pub primary_connection: Option<PgConnectionConfig>,
-    /// Heartbeat configuration for replica mode.
+    /// Heartbeat configuration for read replica support.
     ///
-    /// Controls heartbeat interval and reconnection behavior. Only used when
-    /// `primary_connection` is configured. Defaults are applied if not specified.
+    /// Only used when `primary_connection` is set. Controls the frequency and retry behavior
+    /// of heartbeat emissions to the primary database.
     #[serde(default)]
     pub heartbeat: Option<HeartbeatConfig>,
     /// Batch processing configuration.
@@ -100,13 +105,6 @@ impl PipelineConfig {
             primary.tls.validate()?;
         }
 
-        // Validate heartbeat config if provided
-        if let Some(ref heartbeat) = self.heartbeat {
-            heartbeat
-                .validate()
-                .map_err(|e| ValidationError::HeartbeatConfig(e.to_string()))?;
-        }
-
         if self.max_table_sync_workers == 0 {
             return Err(ValidationError::MaxTableSyncWorkersZero);
         }
@@ -118,14 +116,17 @@ impl PipelineConfig {
         Ok(())
     }
 
-    /// Returns true if replica mode is enabled (primary_connection is configured).
+    /// Returns `true` if the pipeline is configured for read replica mode.
+    ///
+    /// Read replica mode is enabled when a `primary_connection` is configured,
+    /// which enables heartbeat emission to prevent replication slot invalidation.
     pub fn is_replica_mode(&self) -> bool {
         self.primary_connection.is_some()
     }
 
-    /// Returns the heartbeat configuration, using defaults if not specified.
+    /// Returns the heartbeat configuration, using defaults if not explicitly set.
     ///
-    /// Only meaningful when `is_replica_mode()` returns true.
+    /// Only meaningful when `is_replica_mode()` returns `true`.
     pub fn heartbeat_config(&self) -> HeartbeatConfig {
         self.heartbeat.clone().unwrap_or_default()
     }
@@ -146,10 +147,10 @@ pub struct PipelineConfigWithoutSecrets {
     /// The connection configuration for the Postgres instance to which the pipeline connects for
     /// replication.
     pub pg_connection: PgConnectionConfigWithoutSecrets,
-    /// Optional connection to the primary database for heartbeat operations.
+    /// Optional connection to the primary database when `pg_connection` points to a read replica.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub primary_connection: Option<PgConnectionConfigWithoutSecrets>,
-    /// Heartbeat configuration for replica mode.
+    /// Heartbeat configuration for read replica support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat: Option<HeartbeatConfig>,
     /// Batch processing configuration.
