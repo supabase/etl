@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::shared::{
-    PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError, batch::BatchConfig,
+    HeartbeatConfig, PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError,
+    batch::BatchConfig,
 };
 
 /// c copy should be performed.Selection rules for tables participating in replication.
@@ -82,6 +83,19 @@ pub struct PipelineConfig {
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
+    /// Connection configuration for the primary database when replicating from a read replica.
+    ///
+    /// When set, enables replica mode where the pipeline connects to a read replica for
+    /// replication while maintaining the replication slot on the primary via heartbeat
+    /// messages.
+    #[serde(default)]
+    pub primary_connection: Option<PgConnectionConfig>,
+    /// Configuration for the heartbeat worker.
+    ///
+    /// Only used when `primary_connection` is set (replica mode). The heartbeat worker
+    /// periodically emits WAL messages to the primary to keep the replication slot active.
+    #[serde(default)]
+    pub heartbeat: Option<HeartbeatConfig>,
 }
 
 impl PipelineConfig {
@@ -96,9 +110,14 @@ impl PipelineConfig {
 
     /// Validates pipeline configuration settings.
     ///
-    /// Checks batch configuration and ensures worker counts and retry attempts are non-zero.
+    /// Checks batch configuration, heartbeat configuration (if present),
+    /// and ensures worker counts and retry attempts are non-zero.
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.batch.validate()?;
+
+        if let Some(ref heartbeat) = self.heartbeat {
+            heartbeat.validate()?;
+        }
 
         if self.max_table_sync_workers == 0 {
             return Err(ValidationError::InvalidFieldValue {
@@ -115,6 +134,18 @@ impl PipelineConfig {
         }
 
         Ok(())
+    }
+
+    /// Returns `true` if the pipeline is configured to replicate from a read replica.
+    pub fn is_replica_mode(&self) -> bool {
+        self.primary_connection.is_some()
+    }
+
+    /// Returns the heartbeat configuration, using defaults if not specified.
+    ///
+    /// Only meaningful when `is_replica_mode()` returns `true`.
+    pub fn heartbeat_config(&self) -> HeartbeatConfig {
+        self.heartbeat.clone().unwrap_or_default()
     }
 }
 
@@ -160,6 +191,12 @@ pub struct PipelineConfigWithoutSecrets {
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
+    /// Connection configuration for the primary database when replicating from a read replica.
+    #[serde(default)]
+    pub primary_connection: Option<PgConnectionConfigWithoutSecrets>,
+    /// Configuration for the heartbeat worker.
+    #[serde(default)]
+    pub heartbeat: Option<HeartbeatConfig>,
 }
 
 impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
@@ -173,6 +210,8 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
             max_table_sync_workers: value.max_table_sync_workers,
             table_sync_copy: value.table_sync_copy,
+            primary_connection: value.primary_connection.map(|c| c.into()),
+            heartbeat: value.heartbeat,
         }
     }
 }
