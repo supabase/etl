@@ -15,6 +15,13 @@ pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
 
+// Heartbeat metrics
+pub const ETL_HEARTBEAT_EMISSIONS_TOTAL: &str = "etl_heartbeat_emissions_total";
+pub const ETL_HEARTBEAT_FAILURES_TOTAL: &str = "etl_heartbeat_failures_total";
+pub const ETL_HEARTBEAT_CONNECTION_ATTEMPTS_TOTAL: &str = "etl_heartbeat_connection_attempts_total";
+pub const ETL_HEARTBEAT_LAST_EMISSION_TIMESTAMP: &str = "etl_heartbeat_last_emission_timestamp";
+pub const ETL_HEARTBEAT_CONSECUTIVE_FAILURES: &str = "etl_heartbeat_consecutive_failures";
+
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
 /// Label key for the ETL worker type ("table_sync" or "apply").
@@ -31,6 +38,8 @@ pub const EVENT_TYPE_LABEL: &str = "event_type";
 pub const FORCED_LABEL: &str = "forced";
 /// Label key for the status update type.
 pub const STATUS_UPDATE_TYPE_LABEL: &str = "status_update_type";
+/// Label key for heartbeat connection state.
+pub const CONNECTION_STATE_LABEL: &str = "connection_state";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaranteed to register the
@@ -95,6 +104,37 @@ pub(crate) fn register_metrics() {
             ETL_STATUS_UPDATES_SKIPPED_TOTAL,
             Unit::Count,
             "Total number of status updates skipped due to throttling, labeled by pipeline_id"
+        );
+
+        // Heartbeat metrics
+        describe_counter!(
+            ETL_HEARTBEAT_EMISSIONS_TOTAL,
+            Unit::Count,
+            "Total number of successful heartbeat emissions to the primary database"
+        );
+
+        describe_counter!(
+            ETL_HEARTBEAT_FAILURES_TOTAL,
+            Unit::Count,
+            "Total number of failed heartbeat attempts, labeled by failure type"
+        );
+
+        describe_counter!(
+            ETL_HEARTBEAT_CONNECTION_ATTEMPTS_TOTAL,
+            Unit::Count,
+            "Total number of connection attempts to the primary database for heartbeats"
+        );
+
+        describe_gauge!(
+            ETL_HEARTBEAT_LAST_EMISSION_TIMESTAMP,
+            Unit::Seconds,
+            "Unix timestamp of the last successful heartbeat emission"
+        );
+
+        describe_gauge!(
+            ETL_HEARTBEAT_CONSECUTIVE_FAILURES,
+            Unit::Count,
+            "Number of consecutive heartbeat failures (resets on success)"
         );
     });
 }
