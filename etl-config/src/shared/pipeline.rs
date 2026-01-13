@@ -110,9 +110,14 @@ impl PipelineConfig {
 
     /// Validates pipeline configuration settings.
     ///
-    /// Checks batch configuration and ensures worker counts and retry attempts are non-zero.
+    /// Checks batch configuration, heartbeat configuration (if present),
+    /// and ensures worker counts and retry attempts are non-zero.
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.batch.validate()?;
+
+        if let Some(ref heartbeat) = self.heartbeat {
+            heartbeat.validate()?;
+        }
 
         if self.max_table_sync_workers == 0 {
             return Err(ValidationError::InvalidFieldValue {

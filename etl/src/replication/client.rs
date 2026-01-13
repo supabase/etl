@@ -222,11 +222,7 @@ impl PgReplicationClient {
             .with_db(Some(&ETL_REPLICATION_OPTIONS));
         config.replication_mode(ReplicationMode::Logical);
 
-        let root_store = if pg_connection_config.tls.enabled {
-            build_root_cert_store(&pg_connection_config.tls.trusted_root_certs)?
-        } else {
-            rustls::RootCertStore::empty()
-        };
+        let root_store = build_root_cert_store(&pg_connection_config.tls.trusted_root_certs)?;
 
         let tls_config = ClientConfig::builder()
             .with_root_certificates(root_store)
@@ -286,11 +282,7 @@ impl PgReplicationClient {
             .clone()
             .with_db(Some(&ETL_HEARTBEAT_OPTIONS));
 
-        let root_store = if pg_connection_config.tls.enabled {
-            build_root_cert_store(&pg_connection_config.tls.trusted_root_certs)?
-        } else {
-            rustls::RootCertStore::empty()
-        };
+        let root_store = build_root_cert_store(&pg_connection_config.tls.trusted_root_certs)?;
 
         let tls_config = ClientConfig::builder()
             .with_root_certificates(root_store)

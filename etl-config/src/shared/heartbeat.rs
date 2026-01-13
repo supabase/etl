@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
+use crate::shared::ValidationError;
+
 /// Configuration for the heartbeat worker.
 ///
 /// The heartbeat worker periodically emits `pg_logical_emit_message()` calls to
@@ -38,6 +40,33 @@ pub struct HeartbeatConfig {
     /// Default: 25.
     #[serde(default = "default_jitter_percent")]
     pub jitter_percent: u8,
+}
+
+impl HeartbeatConfig {
+    /// Validates heartbeat configuration settings.
+    ///
+    /// Checks that jitter_percent is within 0-100 range and that
+    /// min_backoff_ms does not exceed max_backoff_ms.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.jitter_percent > 100 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "jitter_percent".to_string(),
+                constraint: "must be between 0 and 100".to_string(),
+            });
+        }
+
+        if self.min_backoff_ms > self.max_backoff_ms {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "min_backoff_ms".to_string(),
+                constraint: format!(
+                    "must be less than or equal to max_backoff_ms ({})",
+                    self.max_backoff_ms
+                ),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 impl Default for HeartbeatConfig {
@@ -94,5 +123,66 @@ mod tests {
         assert_eq!(config.min_backoff_ms, decoded.min_backoff_ms);
         assert_eq!(config.max_backoff_ms, decoded.max_backoff_ms);
         assert_eq!(config.jitter_percent, decoded.jitter_percent);
+    }
+
+    #[test]
+    fn test_validate_valid_config() {
+        let config = HeartbeatConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_jitter_percent_too_high() {
+        let config = HeartbeatConfig {
+            jitter_percent: 150,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(ValidationError::InvalidFieldValue { field, .. }) = result {
+            assert_eq!(field, "jitter_percent");
+        }
+    }
+
+    #[test]
+    fn test_validate_min_greater_than_max_backoff() {
+        let config = HeartbeatConfig {
+            min_backoff_ms: 10_000,
+            max_backoff_ms: 5_000,
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(result.is_err());
+        if let Err(ValidationError::InvalidFieldValue { field, .. }) = result {
+            assert_eq!(field, "min_backoff_ms");
+        }
+    }
+
+    #[test]
+    fn test_validate_boundary_jitter_percent() {
+        // 100 should be valid
+        let config = HeartbeatConfig {
+            jitter_percent: 100,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // 0 should be valid
+        let config = HeartbeatConfig {
+            jitter_percent: 0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_equal_backoff_values() {
+        // min == max should be valid
+        let config = HeartbeatConfig {
+            min_backoff_ms: 5_000,
+            max_backoff_ms: 5_000,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
     }
 }
