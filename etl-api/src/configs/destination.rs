@@ -108,7 +108,7 @@ pub enum StoredDestinationConfig {
         project_id: String,
         dataset_id: String,
         service_account_key: SerializableSecretString,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
         #[serde(default = "default_max_concurrent_streams")]
         max_concurrent_streams: usize,

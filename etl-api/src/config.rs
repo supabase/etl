@@ -32,13 +32,11 @@ pub struct ApiConfig {
     /// When provided, this URL is passed to replicators to enable
     /// error notifications to the Supabase API. The API key will be
     /// injected as a Kubernetes secret named `supabase_api_key`.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub supabase_api_url: Option<String>,
     /// Optional ConfigCat SDK key for feature flag integration.
     ///
     /// If provided, enables ConfigCat feature flag evaluation.
     /// If `None`, the API operates without feature flag support.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub configcat_sdk_key: Option<String>,
     /// Whether TLS is enabled for source database connections.
     ///

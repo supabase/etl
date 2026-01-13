@@ -198,7 +198,6 @@ pub struct PgConnectionConfig {
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
     /// When `None`, TCP keepalives are disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
@@ -223,7 +222,7 @@ pub struct PgConnectionConfigWithoutSecrets {
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
     /// When `None`, TCP keepalives are disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
