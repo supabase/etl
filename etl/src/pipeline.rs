@@ -16,6 +16,7 @@ use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::base::{Worker, WorkerHandle};
+use crate::workers::heartbeat::{HeartbeatWorker, HeartbeatWorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 use etl_config::shared::PipelineConfig;
 use etl_postgres::types::TableId;
@@ -38,6 +39,7 @@ enum PipelineState {
         //  with workers management, which should not be done in the pipeline.
         apply_worker: ApplyWorkerHandle,
         pool: TableSyncWorkerPool,
+        heartbeat_worker: Option<HeartbeatWorkerHandle>,
     },
 }
 
@@ -53,6 +55,10 @@ enum PipelineState {
 ///
 /// Multiple table sync workers run in parallel during the initial phase, while a single
 /// apply worker processes the replication stream of table that were already copied.
+///
+/// When configured for read replica mode (with `primary_connection` set), the pipeline
+/// also starts a heartbeat worker that emits periodic messages to the primary database
+/// to keep the replication slot active.
 #[derive(Debug)]
 pub struct Pipeline<S, D> {
     config: Arc<PipelineConfig>,
@@ -115,10 +121,14 @@ where
     /// This method initializes the connection to Postgres, sets up table mappings and schemas,
     /// creates the worker pool for table synchronization, and starts the apply worker for
     /// processing replication stream events.
+    ///
+    /// When configured for read replica mode (with `primary_connection` set), this method
+    /// also starts a heartbeat worker that maintains replication slot activity on the primary.
     pub async fn start(&mut self) -> EtlResult<()> {
         info!(
             publication_name = %self.config.publication_name,
             pipeline_id = %self.config.id,
+            replica_mode = %self.config.is_replica_mode(),
             "starting pipeline"
         );
 
@@ -162,7 +172,26 @@ where
         .start()
         .await?;
 
-        self.state = PipelineState::Started { apply_worker, pool };
+        // Start heartbeat worker if configured for read replica mode
+        let heartbeat_worker = if let Some(primary_config) = &self.config.primary_connection {
+            info!(pipeline_id = %self.config.id, "replica mode enabled, starting heartbeat worker");
+            let heartbeat_config = self.config.heartbeat_config();
+            let worker = HeartbeatWorker::new(
+                self.config.id,
+                primary_config.clone(),
+                heartbeat_config,
+                self.shutdown_tx.subscribe(),
+            );
+            Some(worker.start())
+        } else {
+            None
+        };
+
+        self.state = PipelineState::Started {
+            apply_worker,
+            pool,
+            heartbeat_worker,
+        };
 
         Ok(())
     }
@@ -176,9 +205,15 @@ where
     /// The wait process ensures proper shutdown ordering:
     /// 1. Apply worker completes first (may spawn additional table sync workers)
     /// 2. All table sync workers complete
-    /// 3. Any errors from workers are aggregated and returned
+    /// 3. Heartbeat worker completes (if running)
+    /// 4. Any errors from workers are aggregated and returned
     pub async fn wait(self) -> EtlResult<()> {
-        let PipelineState::Started { apply_worker, pool } = self.state else {
+        let PipelineState::Started {
+            apply_worker,
+            pool,
+            heartbeat_worker,
+        } = self.state
+        else {
             info!("pipeline was not started, skipping wait");
 
             return Ok(());
@@ -219,6 +254,14 @@ where
             errors.push(err);
 
             info!(error_count = errors_number, "table sync workers failed");
+        }
+
+        // Wait for heartbeat worker if it was running
+        if let Some(heartbeat_handle) = heartbeat_worker {
+            info!("waiting for heartbeat worker to complete");
+            if let Err(err) = heartbeat_handle.wait().await {
+                error!(error = %err, "heartbeat worker failed");
+            }
         }
 
         // Once all workers completed, we notify the destination of shutting down.
