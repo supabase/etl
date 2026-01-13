@@ -3,7 +3,6 @@ use std::{fmt, sync::Arc};
 
 use tokio::sync::Notify;
 use tokio::time::timeout;
-use tracing::warn;
 
 /// Default timeout duration for notifications.
 ///
@@ -46,20 +45,6 @@ impl TimedNotify {
             Ok(()) => {}
             Err(_) => {
                 panic!(
-                    "Test notification timed out after {:?}. \
-                     This likely indicates the expected state was never reached. \
-                     Check if the pipeline is running correctly or if the condition is reachable.",
-                    self.timeout_duration
-                );
-            }
-        }
-    }
-
-    pub async fn try_notified(&self) {
-        match timeout(self.timeout_duration, self.notify.notified()).await {
-            Ok(()) => {}
-            Err(_) => {
-                warn!(
                     "Test notification timed out after {:?}. \
                      This likely indicates the expected state was never reached. \
                      Check if the pipeline is running correctly or if the condition is reachable.",
