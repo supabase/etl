@@ -34,7 +34,7 @@ const APP_NAME_REPLICATOR_STATE: &str = "supabase_etl_replicator_state";
 /// Application name for ETL logical replication streaming connections.
 const APP_NAME_REPLICATOR_STREAMING: &str = "supabase_etl_replicator_streaming";
 
-/// Application name for ETL heartbeat connections to primary database.
+/// Application name for ETL heartbeat connections to the primary database.
 const APP_NAME_HEARTBEAT: &str = "supabase_etl_heartbeat";
 
 /// Connection options for the API's metadata database.
@@ -106,9 +106,8 @@ pub static ETL_STATE_MANAGEMENT_OPTIONS: LazyLock<PgConnectionOptions> =
 
 /// Connection options for heartbeat connections to the primary database.
 ///
-/// Uses short timeouts (5s statement, 5s lock, 30s idle) since heartbeat operations
-/// are quick single-statement calls to `pg_logical_emit_message()`. The connection
-/// should fail fast if the primary is unavailable rather than blocking.
+/// Uses short timeouts (5s statement, 5s lock, 30s idle) to fail fast and allow
+/// quick reconnection. Heartbeat queries are simple and should complete immediately.
 pub static ETL_HEARTBEAT_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions {
         datestyle: COMMON_DATESTYLE.to_string(),
@@ -466,5 +465,17 @@ mod tests {
     #[test]
     fn test_api_options_application_name() {
         assert_eq!(ETL_API_OPTIONS.application_name, "supabase_etl_api");
+    }
+
+    #[test]
+    fn test_heartbeat_options_application_name() {
+        assert_eq!(ETL_HEARTBEAT_OPTIONS.application_name, "supabase_etl_heartbeat");
+    }
+
+    #[test]
+    fn test_heartbeat_options_short_timeouts() {
+        assert_eq!(ETL_HEARTBEAT_OPTIONS.statement_timeout, 5_000);
+        assert_eq!(ETL_HEARTBEAT_OPTIONS.lock_timeout, 5_000);
+        assert_eq!(ETL_HEARTBEAT_OPTIONS.idle_in_transaction_session_timeout, 30_000);
     }
 }
