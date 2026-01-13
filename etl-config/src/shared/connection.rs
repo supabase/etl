@@ -216,8 +216,6 @@ pub struct PgConnectionConfig {
     pub password: Option<SecretString>,
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
-    /// TCP keepalive configuration for connection health monitoring.
-    /// When `None`, TCP keepalives are disabled.
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
@@ -240,8 +238,6 @@ pub struct PgConnectionConfigWithoutSecrets {
     pub username: String,
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
-    /// TCP keepalive configuration for connection health monitoring.
-    /// When `None`, TCP keepalives are disabled.
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
