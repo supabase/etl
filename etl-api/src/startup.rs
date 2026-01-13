@@ -49,9 +49,9 @@ use crate::{
             UpdatePipelineRequest, UpdatePipelineVersionRequest, ValidatePipelineRequest,
             ValidatePipelineResponse, create_pipeline, delete_pipeline,
             get_pipeline_replication_status, get_pipeline_status, get_pipeline_version,
-            read_all_pipelines, read_pipeline, rollback_table_state, rollback_tables,
-            start_pipeline, stop_all_pipelines, stop_pipeline, update_pipeline,
-            update_pipeline_config, update_pipeline_version, validate_pipeline,
+            read_all_pipelines, read_pipeline, rollback_tables, start_pipeline, stop_all_pipelines,
+            stop_pipeline, update_pipeline, update_pipeline_config, update_pipeline_version,
+            validate_pipeline,
         },
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
@@ -294,7 +294,6 @@ pub async fn run(
         crate::routes::pipelines::get_pipeline_status,
         crate::routes::pipelines::get_pipeline_version,
         crate::routes::pipelines::get_pipeline_replication_status,
-        crate::routes::pipelines::rollback_table_state,
         crate::routes::pipelines::update_pipeline_version,
         crate::routes::tenants::create_tenant,
         crate::routes::tenants::create_or_update_tenant,
@@ -383,7 +382,6 @@ pub async fn run(
                     .service(get_pipeline_status)
                     .service(get_pipeline_version)
                     .service(get_pipeline_replication_status)
-                    .service(rollback_table_state)
                     .service(rollback_tables)
                     .service(update_pipeline_version)
                     .service(update_pipeline_config)
