@@ -1,54 +1,37 @@
 [package]
 name = "etl"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
+authors.workspace = true
+repository.workspace = true
 license.workspace = true
 rust-version.workspace = true
-repository.workspace = true
-homepage.workspace = true
 
 [features]
-test-utils = ["etl-postgres/test-utils"]
-failpoints = ["fail/failpoints"]
-egress = []
 default = []
+test-utils = []
 
 [dependencies]
-etl-config = { workspace = true }
-etl-postgres = { workspace = true, features = ["tokio", "replication"] }
-
-aws-lc-rs = { workspace = true }
-byteorder = { workspace = true }
+async-trait = { workspace = true }
 bytes = { workspace = true }
-chrono = { workspace = true }
-const-oid = { workspace = true, default-features = false }
-fail = { workspace = true }
+etl-config = { workspace = true }
+etl-postgres = { workspace = true }
 futures = { workspace = true }
 metrics = { workspace = true }
-pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tokio-postgres = { workspace = true, features = [
     "runtime",
-    "with-chrono-0_4",
-    "with-uuid-1",
     "with-serde_json-1",
 ] }
-tokio-rustls = { workspace = true, default-features = false }
-tracing = { workspace = true, default-features = true }
-uuid = { workspace = true, features = ["v4"] }
-x509-cert = { workspace = true, default-features = false }
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }
+webpki-roots = { workspace = true }
 
 [dev-dependencies]
-etl-postgres = { workspace = true, features = [
-    "tokio",
-    "replication",
-    "test-utils",
-] }
-etl-telemetry = { workspace = true }
-
-rand = { workspace = true, features = ["thread_rng"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
