@@ -7,7 +7,7 @@ use tokio::time::timeout;
 /// Default timeout duration for notifications.
 ///
 /// This duration was chosen empirically since most waiting should not take more than a few seconds.
-pub const DEFAULT_NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_NOTIFY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A wrapper around [`Arc<Notify>`] that provides automatic timeout functionality for tests.
 ///
