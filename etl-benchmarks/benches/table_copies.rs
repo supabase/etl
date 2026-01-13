@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use etl::config::ReplicationSlotConfig;
 use etl::destination::Destination;
 use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
@@ -344,6 +345,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     let pipeline_config = PipelineConfig {
         id: 1,
         publication_name: args.publication_name,
+        replication_slot: ReplicationSlotConfig::default(),
         pg_connection: pg_connection_config,
         batch: BatchConfig {
             max_size: args.batch_max_size,

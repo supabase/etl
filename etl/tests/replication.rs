@@ -2,8 +2,9 @@
 
 use std::collections::HashSet;
 
+use etl::config::{ReplicationSlotConfig, ReplicationSlotPersistence};
 use etl::error::ErrorKind;
-use etl::replication::client::PgReplicationClient;
+use etl::replication::client::{CreateSlotResult, PgReplicationClient};
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::test_slot_name;
 use etl::test_utils::table::assert_table_schema;
@@ -93,7 +94,10 @@ async fn test_replication_client_creates_slot() {
         .unwrap();
 
     let slot_name = test_slot_name("my_slot");
-    let create_slot = client.create_slot(&slot_name).await.unwrap();
+    let create_slot = client
+        .create_slot(&slot_name, ReplicationSlotConfig::default())
+        .await
+        .unwrap();
     assert!(!create_slot.consistent_point.to_string().is_empty());
 
     let get_slot = client.get_slot(&slot_name).await.unwrap();
@@ -116,7 +120,10 @@ async fn test_create_and_delete_slot() {
     let slot_name = test_slot_name("my_slot");
 
     // Create the slot and verify it exists
-    let create_slot = client.create_slot(&slot_name).await.unwrap();
+    let create_slot = client
+        .create_slot(&slot_name, ReplicationSlotConfig::default())
+        .await
+        .unwrap();
     assert!(!create_slot.consistent_point.to_string().is_empty());
 
     let get_slot = client.get_slot(&slot_name).await.unwrap();
@@ -156,10 +163,100 @@ async fn test_replication_client_doesnt_recreate_slot() {
         .unwrap();
 
     let slot_name = test_slot_name("my_slot");
-    assert!(client.create_slot(&slot_name).await.is_ok());
+    assert!(
+        client
+            .create_slot(&slot_name, ReplicationSlotConfig::default())
+            .await
+            .is_ok()
+    );
     assert!(matches!(
-        client.create_slot(&slot_name).await,
+        client.create_slot(&slot_name, ReplicationSlotConfig::default()).await,
         Err(ref err) if err.kind() == ErrorKind::ReplicationSlotAlreadyExists
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replication_client_temporary_slot_dropped_on_disconnect() {
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let slot_name = test_slot_name("my_slot");
+    assert!(matches!(
+        client
+            .create_slot(
+                &slot_name,
+                ReplicationSlotConfig {
+                    persistence: ReplicationSlotPersistence::Temporary
+                }
+            )
+            .await,
+        Ok(CreateSlotResult {
+            consistent_point: _
+        })
+    ));
+
+    // Dropping the client should close the connection, causing our replication
+    // slot to be cleaned up
+    drop(client);
+
+    // This means that we should be able to execute the exact same sequence again, and create the same replication slot again
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        client
+            .create_slot(
+                &slot_name,
+                ReplicationSlotConfig {
+                    persistence: ReplicationSlotPersistence::Temporary
+                }
+            )
+            .await,
+        Ok(CreateSlotResult {
+            consistent_point: _
+        })
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replication_client_permanent_slot_persisted_on_disconnect() {
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let slot_name = test_slot_name("my_slot");
+    assert!(matches!(
+        client
+            .create_slot(
+                &slot_name,
+                ReplicationSlotConfig {
+                    persistence: ReplicationSlotPersistence::Permanent
+                }
+            )
+            .await,
+        Ok(CreateSlotResult {
+            consistent_point: _
+        })
+    ));
+
+    // Dropping the client should close the connection. Since we use a persisted replication slot
+    // it should still be present when we start a fresh connection
+    drop(client);
+
+    // This means that we should be able to execute the exact same sequence again, and the slot should still exist (i.e., we fail to create a new one)
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        client.create_slot(&slot_name, ReplicationSlotConfig { persistence: ReplicationSlotPersistence::Permanent }).await,
+        Err(ref err) if err.kind() == ErrorKind::ReplicationSlotAlreadyExists,
     ));
 }
 
@@ -187,7 +284,7 @@ async fn test_table_schema_copy_is_consistent() {
 
     // We create the slot when the database schema contains only 'table_1'.
     let (transaction, _) = client
-        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -239,7 +336,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
 
     // We create the slot when the database schema contains only 'table_1'.
     let (transaction, _) = first_client
-        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -274,7 +371,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
 
     // We create the slot when the database schema contains both 'table_1' and 'table_2'.
     let (transaction, _) = second_client
-        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -338,7 +435,7 @@ async fn test_table_copy_stream_is_consistent() {
 
     // We create the slot when the database schema contains only 'table_1' data.
     let (transaction, _) = parent_client
-        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -414,7 +511,7 @@ async fn test_table_copy_stream_respects_row_filter() {
 
     // We create the slot when the database schema contains only 'table_1' data.
     let (transaction, _) = parent_client
-        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -501,7 +598,7 @@ async fn test_table_copy_stream_respects_column_filter() {
 
     // Create the slot when the database schema contains the test data.
     let (transaction, _) = parent_client
-        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -589,7 +686,7 @@ async fn test_table_copy_stream_no_row_filter() {
 
     // We create the slot when the database schema contains only 'table_1' data.
     let (transaction, _) = parent_client
-        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .create_slot_with_transaction(&test_slot_name("my_slot"), ReplicationSlotConfig::default())
         .await
         .unwrap();
 
@@ -716,7 +813,10 @@ async fn test_start_logical_replication() {
 
     // We create a slot which is going to replicate data before we insert the data.
     let slot_name = test_slot_name("my_slot");
-    let slot = parent_client.create_slot(&slot_name).await.unwrap();
+    let slot = parent_client
+        .create_slot(&slot_name, ReplicationSlotConfig::default())
+        .await
+        .unwrap();
 
     // We create a table with a publication and 10 entries.
     database
