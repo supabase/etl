@@ -175,7 +175,9 @@ where
         // Start heartbeat worker if configured for read replica mode
         let heartbeat_worker = if let Some(primary_config) = &self.config.primary_connection {
             info!(pipeline_id = %self.config.id, "replica mode enabled, starting heartbeat worker");
-            let heartbeat_config = self.config.heartbeat_config();
+            // Safe to unwrap: heartbeat_config() returns Some when primary_connection is set
+            let heartbeat_config = self.config.heartbeat_config()
+                .expect("heartbeat_config must be Some when primary_connection is set");
             let worker = HeartbeatWorker::new(
                 self.config.id,
                 primary_config.clone(),
@@ -256,7 +258,10 @@ where
             info!(error_count = errors_number, "table sync workers failed");
         }
 
-        // Wait for heartbeat worker if it was running
+        // Wait for heartbeat worker if it was running.
+        // Heartbeat failures are intentionally non-fatal: the pipeline can continue operating
+        // even if heartbeat emission fails. Failures are logged for observability but not
+        // propagated to the errors collection to avoid shutting down an otherwise healthy pipeline.
         if let Some(heartbeat_handle) = heartbeat_worker {
             info!("waiting for heartbeat worker to complete");
             if let Err(err) = heartbeat_handle.wait().await {
