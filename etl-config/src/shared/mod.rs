@@ -1,17 +1,17 @@
-mod base;
+//! Shared configuration types used across ETL components.
+
 mod batch;
 mod connection;
-mod destination;
+mod heartbeat;
 mod pipeline;
-mod replicator;
-mod sentry;
-mod supabase;
+mod tls;
+mod validation;
 
-pub use base::*;
-pub use batch::*;
-pub use connection::*;
-pub use destination::*;
-pub use pipeline::*;
-pub use replicator::*;
-pub use sentry::*;
-pub use supabase::*;
+pub use batch::BatchConfig;
+pub use connection::{PgConnectionConfig, PgConnectionConfigWithoutSecrets};
+pub use heartbeat::{HeartbeatConfig, ETL_HEARTBEAT_OPTIONS};
+pub use pipeline::{
+    PipelineConfig, PipelineConfigWithoutSecrets, TableSyncCopyConfig,
+};
+pub use tls::TlsConfig;
+pub use validation::ValidationError;

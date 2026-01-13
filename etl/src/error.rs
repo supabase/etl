@@ -133,6 +133,7 @@ pub enum ErrorKind {
     InvalidState,
     ApplyWorkerPanic,
     TableSyncWorkerPanic,
+    HeartbeatWorkerPanic,
     StateRollbackError,
 
     // Replication Errors
