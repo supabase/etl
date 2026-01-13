@@ -122,9 +122,9 @@ fn default_jitter_percent() -> u8 {
 /// health checks that should fail fast.
 pub const ETL_HEARTBEAT_OPTIONS: &str = concat!(
     "application_name=etl_heartbeat",
-    " statement_timeout=5000",
-    " lock_timeout=5000",
-    " idle_in_transaction_session_timeout=30000",
+    " ", "statement_timeout=5000",
+    " ", "lock_timeout=5000",
+    " ", "idle_in_transaction_session_timeout=30000",
 );
 
 #[cfg(test)]
@@ -144,6 +144,10 @@ mod tests {
     fn test_heartbeat_options() {
         assert!(ETL_HEARTBEAT_OPTIONS.contains("application_name=etl_heartbeat"));
         assert!(ETL_HEARTBEAT_OPTIONS.contains("statement_timeout=5000"));
+        // Verify options are properly space-separated
+        assert!(ETL_HEARTBEAT_OPTIONS.contains(" statement_timeout="));
+        assert!(ETL_HEARTBEAT_OPTIONS.contains(" lock_timeout="));
+        assert!(ETL_HEARTBEAT_OPTIONS.contains(" idle_in_transaction_session_timeout="));
     }
 
     #[test]

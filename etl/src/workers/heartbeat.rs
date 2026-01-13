@@ -17,6 +17,7 @@ use crate::types::PipelineId;
 use crate::workers::base::WorkerHandle;
 use etl_config::shared::{HeartbeatConfig, PgConnectionConfig};
 use metrics::{counter, gauge};
+use rand::Rng;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::task::JoinHandle;
@@ -281,21 +282,18 @@ impl HeartbeatWorker {
         self.apply_jitter(base_backoff)
     }
 
-    /// Applies jitter to a duration.
+    /// Applies jitter to a duration using the configured jitter percentage.
+    ///
+    /// Uses the `rand` crate for proper randomization to prevent thundering herd.
     fn apply_jitter(&self, base_backoff: Duration) -> Duration {
-        // Simple jitter using timestamp nanoseconds as pseudo-random source.
         let jitter_fraction = self.heartbeat_config.jitter_percent as f64 / 100.0;
         let jitter_range = base_backoff.as_secs_f64() * jitter_fraction;
 
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
+        // Use rand crate for proper randomization.
+        let mut rng = rand::thread_rng();
+        let jitter = rng.gen_range(-jitter_range..jitter_range);
 
-        // subsec_nanos() returns 0..1_000_000_000, normalize to -1.0..1.0.
-        let normalized = (nanos as f64 / 1_000_000_000.0) * 2.0 - 1.0;
-        let jitter = normalized * jitter_range;
-
+        // Apply jitter and clamp to minimum of 0.1 seconds.
         let jittered_secs = (base_backoff.as_secs_f64() + jitter).max(0.1);
         Duration::from_secs_f64(jittered_secs)
     }
