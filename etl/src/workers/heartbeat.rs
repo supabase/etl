@@ -5,7 +5,8 @@
 //! `pg_logical_emit_message()` calls to the primary to keep the slot active.
 
 use crate::concurrency::shutdown::ShutdownRx;
-use crate::error::EtlResult;
+use crate::error::ErrorKind;
+use crate::etl_error;
 use crate::metrics::{
     ETL_HEARTBEAT_CONSECUTIVE_FAILURES, ETL_HEARTBEAT_CONNECTION_ATTEMPTS_TOTAL,
     ETL_HEARTBEAT_EMISSIONS_TOTAL, ETL_HEARTBEAT_FAILURES_TOTAL,
@@ -13,11 +14,11 @@ use crate::metrics::{
 };
 use crate::replication::client::PgReplicationClient;
 use crate::types::PipelineId;
+use crate::workers::base::WorkerHandle;
 use etl_config::shared::{HeartbeatConfig, PgConnectionConfig};
 use metrics::{counter, gauge};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -37,34 +38,34 @@ pub enum HeartbeatError {
     Shutdown,
 }
 
-/// Represents the current state of the heartbeat connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConnectionState {
-    /// Not currently connected to the primary.
-    Disconnected,
-    /// Attempting to establish a connection.
-    Connecting,
-    /// Connected and actively sending heartbeats.
-    Connected,
-    /// Connection failed, waiting before retry.
-    Backoff,
-}
-
 /// Handle to a running heartbeat worker.
 ///
 /// Provides methods to wait for worker completion.
 pub struct HeartbeatWorkerHandle {
-    join_handle: JoinHandle<()>,
+    join_handle: Option<JoinHandle<()>>,
 }
 
-impl HeartbeatWorkerHandle {
+impl WorkerHandle<()> for HeartbeatWorkerHandle {
+    /// Returns the state of the heartbeat worker (unit type as heartbeat has no state).
+    fn state(&self) -> () {}
+
     /// Waits for the heartbeat worker to complete.
     ///
     /// Returns when the worker has shut down, either gracefully or due to an error.
-    pub async fn wait(self) {
-        if let Err(e) = self.join_handle.await {
-            error!(error = %e, "heartbeat worker task panicked");
-        }
+    async fn wait(mut self) -> crate::error::EtlResult<()> {
+        let Some(handle) = self.join_handle.take() else {
+            return Ok(());
+        };
+
+        handle.await.map_err(|err| {
+            etl_error!(
+                ErrorKind::HeartbeatWorkerPanic,
+                "Heartbeat worker panicked",
+                err
+            )
+        })?;
+
+        Ok(())
     }
 }
 
@@ -113,7 +114,9 @@ impl HeartbeatWorker {
             self.run().await;
         });
 
-        HeartbeatWorkerHandle { join_handle }
+        HeartbeatWorkerHandle {
+            join_handle: Some(join_handle),
+        }
     }
 
     /// Main loop for the heartbeat worker.
@@ -256,7 +259,7 @@ impl HeartbeatWorker {
                 Ok(())
             }
             Err(e) => {
-                self.record_failure();
+                // Note: record_failure() is called by the caller in run() to avoid double counting
                 Err(HeartbeatError::EmitFailed(e.to_string()))
             }
         }
