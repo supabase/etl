@@ -144,9 +144,11 @@ impl PipelineConfig {
             });
         }
 
-        // Validate heartbeat config if present
-        if let Some(ref heartbeat) = self.heartbeat {
-            heartbeat.validate()?;
+        // Only validate heartbeat config when replica mode is enabled (primary_connection is set)
+        if self.primary_connection.is_some() {
+            if let Some(ref heartbeat) = self.heartbeat {
+                heartbeat.validate()?;
+            }
         }
 
         Ok(())

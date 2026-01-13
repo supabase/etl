@@ -217,6 +217,8 @@ impl HeartbeatWorker {
     }
 
     /// Runs the heartbeat emission loop.
+    ///
+    /// Emits an initial heartbeat immediately, then continues emitting at the configured interval.
     async fn heartbeat_loop(
         &mut self,
         client: &tokio_postgres::Client,
@@ -224,12 +226,7 @@ impl HeartbeatWorker {
         let interval = Duration::from_millis(self.heartbeat_config.interval_ms);
 
         loop {
-            // Wait for interval or shutdown.
-            if self.wait_with_shutdown(interval).await {
-                return Ok(());
-            }
-
-            // Check if connection is still alive.
+            // Check if connection is still alive before emitting.
             if client.is_closed() {
                 return Err(HeartbeatError::ConnectionFailed(
                     "connection closed unexpectedly".to_string(),
@@ -238,6 +235,11 @@ impl HeartbeatWorker {
 
             // Emit heartbeat message.
             self.emit_heartbeat(client).await?;
+
+            // Wait for interval or shutdown.
+            if self.wait_with_shutdown(interval).await {
+                return Ok(());
+            }
         }
     }
 

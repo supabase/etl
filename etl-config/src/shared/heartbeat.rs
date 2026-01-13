@@ -54,7 +54,8 @@ impl HeartbeatConfig {
 
     /// Validates the heartbeat configuration.
     ///
-    /// Ensures interval_ms > 0, jitter_percent <= 100, and min_backoff_ms <= max_backoff_ms.
+    /// Ensures interval_ms > 0, jitter_percent <= 100, min_backoff_ms > 0,
+    /// and min_backoff_ms <= max_backoff_ms.
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.interval_ms == 0 {
             return Err(ValidationError::InvalidFieldValue {
@@ -67,6 +68,13 @@ impl HeartbeatConfig {
             return Err(ValidationError::InvalidFieldValue {
                 field: "jitter_percent".to_string(),
                 constraint: "must be <= 100".to_string(),
+            });
+        }
+
+        if self.min_backoff_ms == 0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "min_backoff_ms".to_string(),
+                constraint: "must be greater than 0".to_string(),
             });
         }
 
@@ -167,6 +175,15 @@ mod tests {
         let config = HeartbeatConfig {
             min_backoff_ms: 10_000,
             max_backoff_ms: 1_000,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_zero_min_backoff() {
+        let config = HeartbeatConfig {
+            min_backoff_ms: 0,
             ..Default::default()
         };
         assert!(config.validate().is_err());
