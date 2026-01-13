@@ -149,6 +149,8 @@ where
             id: self.pipeline_id,
             publication_name: self.publication_name,
             pg_connection: self.pg_connection_config,
+            primary_connection: None,
+            heartbeat: None,
             batch: self.batch.unwrap_or(BatchConfig {
                 max_size: 1,
                 max_fill_ms: 1000,
