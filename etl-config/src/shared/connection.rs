@@ -34,6 +34,9 @@ const APP_NAME_REPLICATOR_STATE: &str = "supabase_etl_replicator_state";
 /// Application name for ETL logical replication streaming connections.
 const APP_NAME_REPLICATOR_STREAMING: &str = "supabase_etl_replicator_streaming";
 
+/// Application name for ETL heartbeat connections to primary database.
+const APP_NAME_HEARTBEAT: &str = "supabase_etl_heartbeat";
+
 /// Connection options for the API's metadata database.
 ///
 /// Uses strict timeouts (30s statement, 5s lock, 60s idle) to maintain responsiveness
@@ -99,6 +102,23 @@ pub static ETL_STATE_MANAGEMENT_OPTIONS: LazyLock<PgConnectionOptions> =
         lock_timeout: 10_000,
         idle_in_transaction_session_timeout: 60_000,
         application_name: APP_NAME_REPLICATOR_STATE.to_string(),
+    });
+
+/// Connection options for heartbeat operations to the primary database.
+///
+/// Uses short timeouts (5s statement, 5s lock, 30s idle) since heartbeat operations
+/// are lightweight and should fail fast to allow quick reconnection attempts.
+pub static ETL_HEARTBEAT_OPTIONS: LazyLock<PgConnectionOptions> =
+    LazyLock::new(|| PgConnectionOptions {
+        datestyle: COMMON_DATESTYLE.to_string(),
+        intervalstyle: COMMON_INTERVALSTYLE.to_string(),
+        extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
+        client_encoding: COMMON_CLIENT_ENCODING.to_string(),
+        timezone: COMMON_TIMEZONE.to_string(),
+        statement_timeout: 5_000,
+        lock_timeout: 5_000,
+        idle_in_transaction_session_timeout: 30_000,
+        application_name: APP_NAME_HEARTBEAT.to_string(),
     });
 
 /// Postgres server options for ETL workloads.
@@ -199,7 +219,6 @@ pub struct PgConnectionConfig {
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
     /// When `None`, TCP keepalives are disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
@@ -224,7 +243,6 @@ pub struct PgConnectionConfigWithoutSecrets {
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
     /// When `None`, TCP keepalives are disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive: Option<TcpKeepaliveConfig>,
 }
 
@@ -339,7 +357,7 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
             connect_options = connect_options.password(password.expose_secret());
         }
 
-        // Apply options if provided
+        // Apply options if provided.
         if let Some(opts) = options {
             connect_options = connect_options.options(opts.to_key_value_pairs());
         }
@@ -390,7 +408,7 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
                 .keepalives_retries(keepalive.retries);
         }
 
-        // Apply options if provided
+        // Apply options if provided.
         if let Some(opts) = options {
             config.options(opts.to_options_string());
         }
@@ -445,5 +463,13 @@ mod tests {
     #[test]
     fn test_api_options_application_name() {
         assert_eq!(ETL_API_OPTIONS.application_name, "supabase_etl_api");
+    }
+
+    #[test]
+    fn test_heartbeat_options() {
+        assert_eq!(ETL_HEARTBEAT_OPTIONS.statement_timeout, 5_000);
+        assert_eq!(ETL_HEARTBEAT_OPTIONS.lock_timeout, 5_000);
+        assert_eq!(ETL_HEARTBEAT_OPTIONS.idle_in_transaction_session_timeout, 30_000);
+        assert_eq!(ETL_HEARTBEAT_OPTIONS.application_name, "supabase_etl_heartbeat");
     }
 }

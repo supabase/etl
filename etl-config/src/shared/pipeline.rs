@@ -3,10 +3,11 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::shared::{
-    PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError, batch::BatchConfig,
+    HeartbeatConfig, PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError,
+    batch::BatchConfig,
 };
 
-/// c copy should be performed.Selection rules for tables participating in replication.
+/// Selection rules for tables participating in replication.
 ///
 /// Controls which tables are eligible for initial table copy and streaming.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -67,35 +68,91 @@ pub struct PipelineConfig {
     /// The connection configuration for the Postgres instance to which the pipeline connects for
     /// replication.
     pub pg_connection: PgConnectionConfig,
+    /// Optional connection to the primary database for read replica mode.
+    ///
+    /// When replicating from a read replica, this connection is used to emit heartbeat
+    /// messages to the primary to keep the replication slot active.
+    #[serde(default)]
+    pub primary_connection: Option<PgConnectionConfig>,
+    /// Heartbeat configuration for read replica mode.
+    ///
+    /// Controls the interval and backoff settings for heartbeat emissions to the primary.
+    #[serde(default)]
+    pub heartbeat: Option<HeartbeatConfig>,
     /// Batch processing configuration.
+    #[serde(default)]
     pub batch: BatchConfig,
     /// Number of milliseconds between one retry and another when a table error occurs.
+    #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
     /// Maximum number of automatic retry attempts before requiring manual intervention.
+    #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
-    /// Maximum number of table sync workers that can run at a time
+    /// Maximum number of table sync workers that can run at a time.
+    #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
     /// Selection rules for tables participating in replication.
+    #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
 }
 
 impl PipelineConfig {
+    /// Default retry delay in milliseconds between table error retries.
+    pub const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
+
+    /// Default maximum number of retry attempts for table errors.
+    pub const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: u32 = 5;
+
+    /// Default maximum number of concurrent table sync workers.
+    pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
+
+    /// Returns `true` if the pipeline is configured for read replica mode.
+    ///
+    /// Read replica mode is active when a primary connection is configured,
+    /// enabling heartbeat emissions to keep the replication slot active.
+    pub fn is_replica_mode(&self) -> bool {
+        self.primary_connection.is_some()
+    }
+
+    /// Returns the heartbeat configuration, using defaults if not explicitly set.
+    pub fn heartbeat_config(&self) -> HeartbeatConfig {
+        self.heartbeat.clone().unwrap_or_default()
+    }
+
     /// Validates pipeline configuration settings.
     ///
-    /// Checks connection settings and ensures worker count is non-zero.
+    /// Checks batch configuration and ensures worker counts and retry attempts are non-zero.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        self.pg_connection.tls.validate()?;
+        self.batch.validate()?;
 
         if self.max_table_sync_workers == 0 {
-            return Err(ValidationError::MaxTableSyncWorkersZero);
+            return Err(ValidationError::InvalidFieldValue {
+                field: "max_table_sync_workers".to_string(),
+                constraint: "must be greater than 0".to_string(),
+            });
         }
 
         if self.table_error_retry_max_attempts == 0 {
-            return Err(ValidationError::TableErrorRetryMaxAttemptsZero);
+            return Err(ValidationError::InvalidFieldValue {
+                field: "table_error_retry_max_attempts".to_string(),
+                constraint: "must be greater than 0".to_string(),
+            });
         }
 
         Ok(())
     }
+}
+
+fn default_table_error_retry_delay_ms() -> u64 {
+    PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
+}
+
+fn default_table_error_retry_max_attempts() -> u32 {
+    PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
+}
+
+fn default_max_table_sync_workers() -> u16 {
+    PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
 }
 
 /// Same as [`PipelineConfig`] but without secrets. This type
@@ -113,15 +170,26 @@ pub struct PipelineConfigWithoutSecrets {
     /// The connection configuration for the Postgres instance to which the pipeline connects for
     /// replication.
     pub pg_connection: PgConnectionConfigWithoutSecrets,
+    /// Optional connection to the primary database for read replica mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_connection: Option<PgConnectionConfigWithoutSecrets>,
+    /// Heartbeat configuration for read replica mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat: Option<HeartbeatConfig>,
     /// Batch processing configuration.
+    #[serde(default)]
     pub batch: BatchConfig,
     /// Number of milliseconds between one retry and another when a table error occurs.
+    #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
     /// Maximum number of automatic retry attempts before requiring manual intervention.
+    #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
-    /// Maximum number of table sync workers that can run at a time
+    /// Maximum number of table sync workers that can run at a time.
+    #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
     /// Selection rules for tables participating in replication.
+    #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
 }
 
@@ -131,6 +199,8 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             id: value.id,
             publication_name: value.publication_name,
             pg_connection: value.pg_connection.into(),
+            primary_connection: value.primary_connection.map(Into::into),
+            heartbeat: value.heartbeat,
             batch: value.batch,
             table_error_retry_delay_ms: value.table_error_retry_delay_ms,
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
