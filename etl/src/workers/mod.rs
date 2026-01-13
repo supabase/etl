@@ -1,10 +1,12 @@
-//! Worker implementations for concurrent replication tasks.
+//! Workers for handling different pipeline phases.
 //!
-//! Contains worker types for handling different aspects of replication: apply workers process
-//! replication streams, table sync workers handle initial data copying, and worker pools manage
-//! concurrent execution and lifecycle coordination.
+//! Each worker handles a specific part of the replication process:
+//! - **apply**: Processes events from the replication stream.
+//! - **table_sync**: Handles initial table synchronization.
+//! - **heartbeat**: Maintains replication slot activity for read replicas.
 
 pub mod apply;
 pub mod base;
+pub mod heartbeat;
 pub mod pool;
 pub mod table_sync;
