@@ -184,6 +184,7 @@ jobs:
           cargo llvm-cov test \
             --workspace --no-fail-fast \
             --all-features \
+            --remap-path-prefix \
             --lcov --output-path lcov.info
 
       - name: Upload Coverage to Coveralls
