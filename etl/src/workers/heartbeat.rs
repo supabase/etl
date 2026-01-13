@@ -22,22 +22,31 @@ use etl_config::shared::{HeartbeatConfig, PgConnectionConfig};
 
 const MIN_PG_VERSION: i32 = 15_00_00;
 
+/// Errors that can occur during heartbeat operations.
 #[derive(Debug, Error)]
 pub enum HeartbeatError {
+    /// Failed to establish connection to the primary database.
     #[error("failed to connect to primary: {0}")]
     ConnectionFailed(String),
+    /// The primary database version is below the minimum required (PG 15+).
     #[error("PostgreSQL version {0} is below minimum required version 15")]
     UnsupportedVersion(String),
+    /// Failed to emit a heartbeat message.
     #[error("failed to emit heartbeat: {0}")]
     EmitFailed(String),
+    /// Failed to query the PostgreSQL server version.
     #[error("failed to query PostgreSQL version: {0}")]
     VersionQueryFailed(String),
 }
 
+/// Tracks the heartbeat worker's connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectionState {
+    /// Not connected to the primary database.
     Disconnected,
+    /// Connection attempt in progress.
     Connecting,
+    /// Successfully connected and heartbeating.
     Connected,
 }
 
@@ -51,12 +60,16 @@ impl ConnectionState {
     }
 }
 
+/// Handle returned by [`HeartbeatWorker::start`] for awaiting worker completion.
 #[derive(Debug)]
 pub struct HeartbeatWorkerHandle {
     join_handle: JoinHandle<Result<(), HeartbeatError>>,
 }
 
 impl HeartbeatWorkerHandle {
+    /// Waits for the heartbeat worker to complete.
+    ///
+    /// Returns `Ok(())` on graceful shutdown or an error if the worker failed.
     pub async fn wait(self) -> Result<(), HeartbeatError> {
         match self.join_handle.await {
             Ok(result) => result,
@@ -68,6 +81,11 @@ impl HeartbeatWorkerHandle {
     }
 }
 
+/// Worker that emits periodic heartbeats to the primary database.
+///
+/// When replicating from a read replica, this worker maintains the replication
+/// slot's activity by emitting `pg_logical_emit_message` calls to the primary.
+/// This ensures WAL flows through the replication chain even during idle periods.
 pub struct HeartbeatWorker {
     pipeline_id: PipelineId,
     primary_config: PgConnectionConfig,
@@ -78,6 +96,14 @@ pub struct HeartbeatWorker {
 }
 
 impl HeartbeatWorker {
+    /// Creates a new heartbeat worker.
+    ///
+    /// # Arguments
+    ///
+    /// * `pipeline_id` - The pipeline identifier for metrics labeling
+    /// * `primary_config` - Connection configuration for the primary database
+    /// * `heartbeat_config` - Heartbeat interval and backoff settings
+    /// * `shutdown_rx` - Receiver for shutdown signals
     pub fn new(
         pipeline_id: PipelineId,
         primary_config: PgConnectionConfig,
@@ -95,6 +121,9 @@ impl HeartbeatWorker {
         }
     }
 
+    /// Starts the heartbeat worker in a background task.
+    ///
+    /// Returns a handle that can be used to await the worker's completion.
     pub fn start(self) -> HeartbeatWorkerHandle {
         let join_handle = tokio::spawn(self.run());
         HeartbeatWorkerHandle { join_handle }
@@ -251,16 +280,17 @@ impl HeartbeatWorker {
     }
 
     fn calculate_backoff(&self, base_backoff: Duration) -> Duration {
-        // Simple jitter using timestamp nanoseconds as pseudo-random source
+        // Simple jitter using timestamp nanoseconds as pseudo-random source.
         let jitter_fraction = self.heartbeat_config.jitter_percent as f64 / 100.0;
         let jitter_range = base_backoff.as_secs_f64() * jitter_fraction;
 
-        // Use nanoseconds from current time as a simple source of variation
+        // Use nanoseconds from current time as a simple source of variation.
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos();
-        let normalized = (nanos as f64 / u32::MAX as f64) * 2.0 - 1.0; // -1.0 to 1.0
+        // subsec_nanos() returns 0..1_000_000_000, normalize to -1.0..1.0
+        let normalized = (nanos as f64 / 1_000_000_000.0) * 2.0 - 1.0;
         let jitter = normalized * jitter_range;
 
         let jittered_secs = (base_backoff.as_secs_f64() + jitter).max(0.1);
