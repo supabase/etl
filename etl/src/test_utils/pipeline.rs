@@ -1,84 +1,57 @@
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig};
-use uuid::Uuid;
-
 use crate::destination::Destination;
 use crate::pipeline::Pipeline;
-use crate::store::cleanup::CleanupStore;
-use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
-use crate::types::PipelineId;
+use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig};
 
-/// Generates a test-specific replication slot name with a random component.
+/// Creates a test-specific replication slot name.
 ///
-/// This function prefixes the provided slot name with "test_" to avoid conflicts
-/// with other replication slots and other tests running in parallel.
+/// Prefixes the slot name with "test_" to distinguish test slots from production slots.
 pub fn test_slot_name(slot_name: &str) -> String {
-    let uuid = Uuid::new_v4().simple().to_string();
-    format!("test_{slot_name}_{uuid}")
+    format!("test_{}", slot_name)
 }
 
-/// Builder for creating test pipelines with configurable options.
+/// Builder pattern for constructing test pipelines.
 ///
-/// This builder provides a fluent interface for constructing `Pipeline` instances
-/// with custom configurations. All configuration options have sensible defaults,
-/// allowing you to only specify the options you need to customize.
+/// Provides sensible defaults for testing while allowing customization of specific fields.
 ///
 /// # Examples
 ///
-/// ```
-/// // Create a pipeline with default settings
+/// ```ignore
+/// // Create a pipeline with default settings.
 /// let pipeline = PipelineBuilder::new(pg_config, id, pub_name, store, dest)
 ///     .build();
 ///
-/// // Create a pipeline with custom batch and retry configurations
+/// // Create a pipeline with custom batch settings.
 /// let pipeline = PipelineBuilder::new(pg_config, id, pub_name, store, dest)
-///     .with_batch_config(BatchConfig { max_size: 100, max_fill_ms: 5000 })
-///     .with_retry_config(2000, 10)
+///     .with_batch(BatchConfig { max_size: 100, max_fill_ms: 500 })
 ///     .build();
 /// ```
-pub struct PipelineBuilder<S, D> {
+pub struct PipelineBuilder<S, D>
+where
+    S: StateStore,
+    D: Destination,
+{
     pg_connection_config: PgConnectionConfig,
-    pipeline_id: PipelineId,
+    pipeline_id: u64,
     publication_name: String,
     store: S,
     destination: D,
-    /// Batch configuration. Defaults to max_size=1, max_fill_ms=1000 if not specified.
     batch: Option<BatchConfig>,
-    /// Delay in milliseconds before retrying a failed table operation. Default: 1000ms.
-    table_error_retry_delay_ms: u64,
-    /// Maximum number of retry attempts for table operations. Default: 2.
-    table_error_retry_max_attempts: u32,
-    /// Maximum number of concurrent table sync workers. Default: 1.
-    max_table_sync_workers: u16,
-    /// Table sync copy configuration. Uses default if not specified.
+    max_table_sync_workers: Option<u16>,
+    table_error_retry_delay_ms: Option<u64>,
+    table_error_retry_max_attempts: Option<u32>,
     table_sync_copy: Option<TableSyncCopyConfig>,
 }
 
 impl<S, D> PipelineBuilder<S, D>
 where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
+    S: StateStore,
+    D: Destination,
 {
-    /// Creates a new pipeline builder with required parameters and default settings.
-    ///
-    /// # Arguments
-    ///
-    /// * `pg_connection_config` - PostgreSQL connection configuration
-    /// * `pipeline_id` - Unique identifier for the pipeline
-    /// * `publication_name` - Name of the PostgreSQL publication to replicate from
-    /// * `store` - Store implementation for state, schema, and cleanup operations
-    /// * `destination` - Destination for replicated data
-    ///
-    /// # Default Settings
-    ///
-    /// * Batch: max_size=1, max_fill_ms=1000
-    /// * Retry delay: 1000ms
-    /// * Max retry attempts: 2
-    /// * Max table sync workers: 1
-    /// * Table sync copy: default configuration
+    /// Creates a new pipeline builder with required parameters.
     pub fn new(
         pg_connection_config: PgConnectionConfig,
-        pipeline_id: PipelineId,
+        pipeline_id: u64,
         publication_name: String,
         store: S,
         destination: D,
@@ -90,157 +63,63 @@ where
             store,
             destination,
             batch: None,
-            table_error_retry_delay_ms: 1000,
-            table_error_retry_max_attempts: 2,
-            max_table_sync_workers: 1,
+            max_table_sync_workers: None,
+            table_error_retry_delay_ms: None,
+            table_error_retry_max_attempts: None,
             table_sync_copy: None,
         }
     }
 
     /// Sets custom batch configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `batch` - Configuration controlling batch size and timing for processing events
-    pub fn with_batch_config(mut self, batch: BatchConfig) -> Self {
+    pub fn with_batch(mut self, batch: BatchConfig) -> Self {
         self.batch = Some(batch);
         self
     }
 
-    /// Sets custom table sync copy configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `table_sync_copy` - Configuration for how table syncs are performed
-    pub fn with_table_sync_copy_config(mut self, table_sync_copy: TableSyncCopyConfig) -> Self {
+    /// Sets the maximum number of concurrent table sync workers.
+    pub fn with_max_table_sync_workers(mut self, max_workers: u16) -> Self {
+        self.max_table_sync_workers = Some(max_workers);
+        self
+    }
+
+    /// Sets the delay between table error retries.
+    pub fn with_table_error_retry_delay_ms(mut self, delay_ms: u64) -> Self {
+        self.table_error_retry_delay_ms = Some(delay_ms);
+        self
+    }
+
+    /// Sets the maximum number of table error retry attempts.
+    pub fn with_table_error_retry_max_attempts(mut self, max_attempts: u32) -> Self {
+        self.table_error_retry_max_attempts = Some(max_attempts);
+        self
+    }
+
+    /// Sets the table sync copy configuration.
+    pub fn with_table_sync_copy(mut self, table_sync_copy: TableSyncCopyConfig) -> Self {
         self.table_sync_copy = Some(table_sync_copy);
         self
     }
 
-    /// Sets custom retry configuration for table operations.
+    /// Builds the pipeline with the configured settings.
     ///
-    /// # Arguments
-    ///
-    /// * `delay_ms` - Delay in milliseconds before retrying a failed operation
-    /// * `max_attempts` - Maximum number of retry attempts before giving up
-    pub fn with_retry_config(mut self, delay_ms: u64, max_attempts: u32) -> Self {
-        self.table_error_retry_delay_ms = delay_ms;
-        self.table_error_retry_max_attempts = max_attempts;
-        self
-    }
-
-    /// Sets the maximum number of concurrent table sync workers.
-    ///
-    /// # Arguments
-    ///
-    /// * `workers` - Number of workers to use for parallel table synchronization
-    pub fn with_max_table_sync_workers(mut self, workers: u16) -> Self {
-        self.max_table_sync_workers = workers;
-        self
-    }
-
-    /// Builds and returns the configured pipeline.
-    ///
-    /// This method consumes the builder and creates a `Pipeline` instance with
-    /// all the configured settings. Any options not explicitly set will use their
-    /// default values.
+    /// Uses default values for any unset optional parameters.
     pub fn build(self) -> Pipeline<S, D> {
         let config = PipelineConfig {
             id: self.pipeline_id,
             publication_name: self.publication_name,
             pg_connection: self.pg_connection_config,
+            primary_connection: None,
+            heartbeat: None,
             batch: self.batch.unwrap_or(BatchConfig {
                 max_size: 1,
                 max_fill_ms: 1000,
             }),
-            table_error_retry_delay_ms: self.table_error_retry_delay_ms,
-            table_error_retry_max_attempts: self.table_error_retry_max_attempts,
-            max_table_sync_workers: self.max_table_sync_workers,
+            max_table_sync_workers: self.max_table_sync_workers.unwrap_or(4),
+            table_error_retry_delay_ms: self.table_error_retry_delay_ms.unwrap_or(1000),
+            table_error_retry_max_attempts: self.table_error_retry_max_attempts.unwrap_or(3),
             table_sync_copy: self.table_sync_copy.unwrap_or_default(),
         };
 
         Pipeline::new(config, self.store, self.destination)
     }
-}
-
-/// Creates a pipeline with default test configuration.
-///
-/// This is a convenience wrapper around `PipelineBuilder` that creates a pipeline
-/// with standard test defaults: small batch size (1), short timeouts (1000ms),
-/// and minimal retry attempts (2).
-pub fn create_pipeline<S, D>(
-    pg_connection_config: &PgConnectionConfig,
-    pipeline_id: PipelineId,
-    publication_name: String,
-    store: S,
-    destination: D,
-) -> Pipeline<S, D>
-where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
-{
-    PipelineBuilder::new(
-        pg_connection_config.clone(),
-        pipeline_id,
-        publication_name,
-        store,
-        destination,
-    )
-    .build()
-}
-
-/// Creates a pipeline with custom batch configuration.
-///
-/// This variant allows customizing the batch processing behavior while using
-/// default values for other settings. Note that this also increases the maximum
-/// retry attempts to 5 (vs the default 2).
-pub fn create_pipeline_with_batch_config<S, D>(
-    pg_connection_config: &PgConnectionConfig,
-    pipeline_id: PipelineId,
-    publication_name: String,
-    store: S,
-    destination: D,
-    batch: BatchConfig,
-) -> Pipeline<S, D>
-where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
-{
-    PipelineBuilder::new(
-        pg_connection_config.clone(),
-        pipeline_id,
-        publication_name,
-        store,
-        destination,
-    )
-    .with_batch_config(batch)
-    .with_retry_config(1000, 5)
-    .build()
-}
-
-/// Creates a pipeline with custom table sync copy configuration.
-///
-/// This variant allows customizing how table synchronization is performed while
-/// using default values for other settings.
-pub fn create_pipeline_with_table_sync_copy_config<S, D>(
-    pg_connection_config: &PgConnectionConfig,
-    pipeline_id: PipelineId,
-    publication_name: String,
-    store: S,
-    destination: D,
-    table_sync_copy: TableSyncCopyConfig,
-) -> Pipeline<S, D>
-where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
-{
-    PipelineBuilder::new(
-        pg_connection_config.clone(),
-        pipeline_id,
-        publication_name,
-        store,
-        destination,
-    )
-    .with_table_sync_copy_config(table_sync_copy)
-    .build()
 }

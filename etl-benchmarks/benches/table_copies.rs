@@ -3,7 +3,7 @@ use etl::destination::Destination;
 use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
 use etl::state::table::TableReplicationPhaseType;
-use etl::test_utils::notify::NotifyingStore;
+use etl::test_utils::notifying_store::NotifyingStore;
 use etl::types::{Event, TableRow};
 use etl_config::Environment;
 use etl_config::shared::{
@@ -32,7 +32,7 @@ fn install_crypto_provider() {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Where to send log output
+    /// Where to send log output.
     #[arg(
         long = "log-target",
         value_enum,
@@ -46,9 +46,9 @@ struct Args {
 
 #[derive(ValueEnum, Debug, Clone)]
 enum LogTarget {
-    /// Send logs to terminal with colors and pretty formatting
+    /// Send logs to terminal with colors and pretty formatting.
     Terminal,
-    /// Send logs to files in 'logs/' directory
+    /// Send logs to files in 'logs/' directory.
     File,
 }
 
@@ -63,89 +63,89 @@ impl From<LogTarget> for Environment {
 
 #[derive(ValueEnum, Debug, Clone)]
 enum DestinationType {
-    /// Use a null destination that discards all data (fastest)
+    /// Use a null destination that discards all data (fastest).
     Null,
-    /// Use BigQuery as the destination
+    /// Use BigQuery as the destination.
     BigQuery,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Run the table copies benchmark
+    /// Run the table copies benchmark.
     Run {
-        /// Postgres host
+        /// Postgres host.
         #[arg(long, default_value = "localhost")]
         host: String,
-        /// Postgres port
+        /// Postgres port.
         #[arg(long, default_value = "5432")]
         port: u16,
-        /// Database name
+        /// Database name.
         #[arg(long, default_value = "bench")]
         database: String,
-        /// Postgres username
+        /// Postgres username.
         #[arg(long, default_value = "postgres")]
         username: String,
-        /// Postgres password (optional)
+        /// Postgres password (optional).
         #[arg(long)]
         password: Option<String>,
-        /// Enable TLS
+        /// Enable TLS.
         #[arg(long, default_value = "false")]
         tls_enabled: bool,
-        /// TLS trusted root certificates
+        /// TLS trusted root certificates.
         #[arg(long, default_value = "")]
         tls_certs: String,
-        /// Publication name
+        /// Publication name.
         #[arg(long, default_value = "bench_pub")]
         publication_name: String,
-        /// Maximum batch size
+        /// Maximum batch size.
         #[arg(long, default_value = "100000")]
         batch_max_size: usize,
-        /// Maximum batch fill time in milliseconds
+        /// Maximum batch fill time in milliseconds.
         #[arg(long, default_value = "10000")]
         batch_max_fill_ms: u64,
-        /// Maximum number of table sync workers
+        /// Maximum number of table sync workers.
         #[arg(long, default_value = "8")]
         max_table_sync_workers: u16,
-        /// Table IDs to replicate (comma-separated)
+        /// Table IDs to replicate (comma-separated).
         #[arg(long, value_delimiter = ',')]
         table_ids: Vec<u32>,
-        /// Destination type to use
+        /// Destination type to use.
         #[arg(long, value_enum, default_value = "null")]
         destination: DestinationType,
-        /// BigQuery project ID (required when using BigQuery destination)
+        /// BigQuery project ID (required when using BigQuery destination).
         #[arg(long)]
         bq_project_id: Option<String>,
-        /// BigQuery dataset ID (required when using BigQuery destination)
+        /// BigQuery dataset ID (required when using BigQuery destination).
         #[arg(long)]
         bq_dataset_id: Option<String>,
-        /// BigQuery service account key file path (required when using BigQuery destination)
+        /// BigQuery service account key file path (required when using BigQuery destination).
         #[arg(long)]
         bq_sa_key_file: Option<String>,
-        /// BigQuery maximum staleness in minutes (optional)
+        /// BigQuery maximum staleness in minutes (optional).
         #[arg(long)]
         bq_max_staleness_mins: Option<u16>,
-        /// BigQuery maximum concurrent streams (optional)
+        /// BigQuery maximum concurrent streams (optional).
         #[arg(long, default_value = "32")]
         bq_max_concurrent_streams: usize,
     },
-    /// Prepare the benchmark environment by cleaning up replication slots
+    /// Prepare the benchmark environment by cleaning up replication slots.
     Prepare {
-        /// Postgres host
+        /// Postgres host.
         #[arg(long, default_value = "localhost")]
         host: String,
-        /// Postgres port
+        /// Postgres port.
         #[arg(long, default_value = "5432")]
         port: u16,
-        /// Database name
+        /// Database name.
         #[arg(long, default_value = "bench")]
         database: String,
-        /// Postgres username
+        /// Postgres username.
         #[arg(long, default_value = "postgres")]
         username: String,
-        /// Postgres password (optional)
+        /// Postgres password (optional).
         #[arg(long)]
         password: Option<String>,
-        /// Enable TLS
+        /// Enable TLS.
         #[arg(long, default_value = "false")]
         tls_enabled: bool,
     },
@@ -153,16 +153,16 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Filter out the --bench argument that cargo might add
+    // Filter out the --bench argument that cargo might add.
     let args: Vec<String> = std::env::args().filter(|arg| arg != "--bench").collect();
 
     let args = Args::parse_from(args);
 
-    // Set the environment based on the log target argument
+    // Set the environment based on the log target argument.
     let environment: Environment = args.log_target.into();
     environment.set();
 
-    // Initialize tracing with the selected environment
+    // Initialize tracing with the selected environment.
     let _log_flusher = init_tracing("table_copies")?;
 
     match args.command {
@@ -264,7 +264,7 @@ struct PrepareArgs {
 async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
     info!("preparing benchmark environment");
 
-    // Build connection string
+    // Build connection string.
     let mut connection_string = format!(
         "postgres://{}@{}:{}/{}",
         args.username, args.host, args.port, args.database
@@ -277,7 +277,7 @@ async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
         );
     }
 
-    // Add SSL mode based on TLS settings
+    // Add SSL mode based on TLS settings.
     if args.tls_enabled {
         connection_string.push_str("?sslmode=require");
     } else {
@@ -286,12 +286,12 @@ async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
 
     info!(host = %args.host, port = %args.port, "connecting to database");
 
-    // Connect to the database
+    // Connect to the database.
     let pool = PgPool::connect(&connection_string).await?;
 
     info!("cleaning up existing replication slots");
 
-    // Execute the cleanup SQL
+    // Execute the cleanup SQL.
     let cleanup_sql = r#"
         do $$
         declare
@@ -308,7 +308,7 @@ async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
 
     info!("replication slots cleanup completed");
 
-    // Close the connection
+    // Close the connection.
     pool.close().await;
 
     Ok(())
@@ -345,6 +345,8 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         id: 1,
         publication_name: args.publication_name,
         pg_connection: pg_connection_config,
+        primary_connection: None,
+        heartbeat: None,
         batch: BatchConfig {
             max_size: args.batch_max_size,
             max_fill_ms: args.batch_max_fill_ms,
@@ -355,7 +357,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         table_sync_copy: TableSyncCopyConfig::default(),
     };
 
-    // Create the appropriate destination based on the argument
+    // Create the appropriate destination based on the argument.
     let destination = match args.destination {
         DestinationType::Null => BenchDestination::Null(NullDestination),
 

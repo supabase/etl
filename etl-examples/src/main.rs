@@ -1,53 +1,30 @@
-/*
+//! ETL Example: BigQuery Destination
+//!
+//! This example demonstrates how to set up an ETL pipeline that replicates
+//! data from PostgreSQL to Google BigQuery.
 
-BigQuery Example
-
-This example demonstrates how to use the pipeline to stream
-data from Postgres to BigQuery using change data capture (CDC).
-
-Prerequisites:
-1. Postgres server with logical replication enabled (wal_level = logical)
-2. A publication created in Postgres (CREATE PUBLICATION my_publication FOR ALL TABLES;)
-3. GCP service account with BigQuery Data Editor and Job User permissions
-4. Service account key file downloaded from GCP console
-
-Usage:
-    cargo run --example bigquery --features bigquery -- \
-        --db-host localhost \
-        --db-port 5432 \
-        --db-name mydb \
-        --db-username postgres \
-        --db-password mypassword \
-        --bq-sa-key-file /path/to/service-account-key.json \
-        --bq-project-id my-gcp-project \
-        --bq-dataset-id my_dataset \
-        --publication my_publication
-
-The pipeline will automatically:
-- Create tables in BigQuery matching your Postgres schema
-- Perform initial data sync for existing tables
-- Stream real-time changes using logical replication
-- Handle schema changes and DDL operations
-
-*/
-
-use clap::{Args, Parser};
-use etl::config::{
+use clap::Parser;
+use etl::destination::Destination;
+use etl::error::EtlResult;
+use etl::pipeline::Pipeline;
+use etl::types::{Event, TableRow};
+use etl_config::Environment;
+use etl_config::shared::{
     BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig, TlsConfig,
 };
-use etl::pipeline::Pipeline;
-use etl::store::both::memory::MemoryStore;
-use etl_destinations::bigquery::BigQueryDestination;
+use etl_destinations::bigquery::{BigQueryArgs, BigQueryDestination};
+use etl_postgres::types::TableId;
+use etl_telemetry::tracing::init_tracing;
 use std::error::Error;
 use std::sync::Once;
-use tokio::signal;
-use tracing::{error, info};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::info;
 
-/// Ensures crypto provider is only initialized once.
+mod store;
+
+use store::ExampleStore;
+
 static INIT_CRYPTO: Once = Once::new();
 
-/// Installs the default cryptographic provider for rustls.
 fn install_crypto_provider() {
     INIT_CRYPTO.call_once(|| {
         rustls::crypto::aws_lc_rs::default_provider()
@@ -56,190 +33,113 @@ fn install_crypto_provider() {
     });
 }
 
-// Main application arguments combining database and BigQuery configurations
-#[derive(Debug, Parser)]
-#[command(name = "bigquery", version, about, arg_required_else_help = true)]
-struct AppArgs {
-    // Postgres connection parameters
-    #[clap(flatten)]
-    db_args: DbArgs,
-    // BigQuery destination parameters
-    #[clap(flatten)]
-    bq_args: BqArgs,
-    /// Postgres publication name (must be created beforehand with CREATE PUBLICATION)
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Postgres host.
+    #[arg(long, default_value = "localhost")]
+    host: String,
+
+    /// Postgres port.
+    #[arg(long, default_value = "5432")]
+    port: u16,
+
+    /// Database name.
+    #[arg(long, default_value = "postgres")]
+    database: String,
+
+    /// Postgres username.
+    #[arg(long, default_value = "postgres")]
+    username: String,
+
+    /// Postgres password.
     #[arg(long)]
+    password: Option<String>,
+
+    /// Publication name.
+    #[arg(long, default_value = "example_pub")]
     publication: String,
+
+    /// BigQuery arguments.
+    #[command(flatten)]
+    bq_args: BigQueryArgs,
 }
 
-// Postgres database connection configuration
-#[derive(Debug, Args)]
-struct DbArgs {
-    /// Host on which Postgres is running (e.g., localhost or IP address)
-    #[arg(long)]
-    db_host: String,
-    /// Port on which Postgres is running (default: 5432)
-    #[arg(long)]
-    db_port: u16,
-    /// Postgres database name to connect to
-    #[arg(long)]
-    db_name: String,
-    /// Postgres database user name (must have REPLICATION privileges)
-    #[arg(long)]
-    db_username: String,
-    /// Postgres database user password (optional if using trust authentication)
-    #[arg(long)]
-    db_password: Option<String>,
-}
-
-// BigQuery destination configuration
-#[derive(Debug, Args)]
-struct BqArgs {
-    /// Path to GCP service account key JSON file (download from GCP Console > IAM & Admin > Service Accounts)
-    #[arg(long)]
-    bq_sa_key_file: String,
-    /// BigQuery project ID (found in GCP Console project selector)
-    #[arg(long)]
-    bq_project_id: String,
-    /// BigQuery dataset ID (must exist in the specified project)
-    #[arg(long)]
-    bq_dataset_id: String,
-    /// Maximum batch size for processing events (higher values = better throughput, more memory usage)
-    #[arg(long, default_value = "1000")]
-    max_batch_size: usize,
-    /// Maximum time to wait for a batch to fill in milliseconds (lower values = lower latency, less throughput)
-    #[arg(long, default_value = "5000")]
-    max_batch_fill_duration_ms: u64,
-    /// Maximum number of concurrent table sync workers (higher values = faster initial sync, more resource usage)
-    #[arg(long, default_value = "4")]
-    max_table_sync_workers: u16,
-}
-
-// Entry point - handles error reporting and process exit
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    if let Err(e) = main_impl().await {
-        error!("{e}");
-        std::process::exit(1);
-    }
+    // Set development environment for pretty logging.
+    Environment::Dev.set();
 
-    Ok(())
+    // Initialize tracing.
+    let _log_flusher = init_tracing("etl-example")?;
+
+    main_impl().await
 }
 
-// Initialize structured logging with configurable log levels via RUST_LOG environment variable
-fn init_tracing() {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "bigquery=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-}
-
-// Set default log level if RUST_LOG environment variable is not set
-fn set_log_level() {
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe {
-            std::env::set_var("RUST_LOG", "info");
-        }
-    }
-}
-
-// Main implementation function containing all the pipeline setup and execution logic
 async fn main_impl() -> Result<(), Box<dyn Error>> {
-    // Set up logging and tracing
-    set_log_level();
-    init_tracing();
-
-    // Install required crypto provider for authentication
     install_crypto_provider();
 
-    // Parse command line arguments
-    let args = AppArgs::parse();
+    let args = Args::parse();
 
-    // Configure Postgres connection settings
-    // Note: TLS is disabled in this example - enable for production use
+    info!("starting ETL example with BigQuery destination");
+    info!(
+        host = %args.host,
+        port = %args.port,
+        database = %args.database,
+        username = %args.username,
+        publication = %args.publication,
+        "postgres connection config"
+    );
+
     let pg_connection_config = PgConnectionConfig {
-        host: args.db_args.db_host,
-        port: args.db_args.db_port,
-        name: args.db_args.db_name,
-        username: args.db_args.db_username,
-        password: args.db_args.db_password.map(Into::into),
-        tls: TlsConfig {
-            trusted_root_certs: String::new(),
-            enabled: false, // Set to true and provide certs for production
-        },
+        host: args.host,
+        port: args.port,
+        name: args.database,
+        username: args.username,
+        password: args.password.map(|p| p.into()),
+        tls: TlsConfig::disabled(),
         keepalive: None,
     };
 
-    // Create in-memory store for tracking table replication states and table schemas
-    // In production, you might want to use a persistent store like PostgresStore
-    let store = MemoryStore::new();
+    let store = ExampleStore::new();
 
-    // Create pipeline configuration with batching and retry settings
     let pipeline_config = PipelineConfig {
-        id: 1, // Using a simple ID for the example
+        id: 1,
         publication_name: args.publication,
         pg_connection: pg_connection_config,
+        primary_connection: None,
+        heartbeat: None,
         batch: BatchConfig {
             max_size: args.bq_args.max_batch_size,
             max_fill_ms: args.bq_args.max_batch_fill_duration_ms,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
-        max_table_sync_workers: args.bq_args.max_table_sync_workers,
+        max_table_sync_workers: 4,
         table_sync_copy: TableSyncCopyConfig::default(),
     };
 
-    // Initialize BigQuery destination with service account authentication
-    // Tables will be automatically created to match Postgres schema
-    let bigquery_destination = BigQueryDestination::new_with_key_path(
-        args.bq_args.bq_project_id,
-        args.bq_args.bq_dataset_id,
-        &args.bq_args.bq_sa_key_file,
-        None,
-        1,
+    let destination = BigQueryDestination::new_with_key_path(
+        args.bq_args.project_id,
+        args.bq_args.dataset_id,
+        &args.bq_args.sa_key_file,
+        args.bq_args.max_staleness_mins,
+        args.bq_args.max_concurrent_streams,
         store.clone(),
     )
     .await?;
 
-    // Create the pipeline instance with all components
-    let mut pipeline = Pipeline::new(pipeline_config, store, bigquery_destination);
+    let mut pipeline = Pipeline::new(pipeline_config, store, destination);
 
-    info!(
-        "Starting BigQuery CDC pipeline - connecting to Postgres and initializing replication..."
-    );
-
-    // Start the pipeline - this will:
-    // 1. Connect to Postgres
-    // 2. Initialize table states based on the publication
-    // 3. Start apply and table sync workers
-    // 4. Begin streaming replication data
+    info!("starting pipeline");
     pipeline.start().await?;
 
-    info!("pipeline started, data replication is now active, press ctrl+c to stop");
+    info!("pipeline started, press Ctrl+C to stop");
+    tokio::signal::ctrl_c().await?;
 
-    // Set up signal handler for graceful shutdown on Ctrl+C
-    let shutdown_signal = async {
-        signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
-        info!("received ctrl+c signal, initiating graceful shutdown");
-    };
+    info!("shutting down pipeline");
+    pipeline.shutdown_and_wait().await?;
 
-    // Wait for either the pipeline to complete naturally or receive a shutdown signal
-    // The pipeline will run indefinitely unless an error occurs or it's manually stopped
-    tokio::select! {
-        result = pipeline.wait() => {
-            info!("pipeline completed normally (this usually indicates an error condition)");
-            result?;
-        }
-        _ = shutdown_signal => {
-            info!("gracefully shutting down pipeline and cleaning up resources");
-        }
-    }
-
-    info!("pipeline stopped, all resources cleaned up");
-
+    info!("pipeline shutdown complete");
     Ok(())
 }
