@@ -6,7 +6,7 @@ use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::test_utils::database::{spawn_source_database, test_table_name};
-use crate::test_utils::notify::NotifyingStore;
+use crate::test_utils::notifying_store::NotifyingStore;
 use crate::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use crate::types::PipelineId;
 use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig};
@@ -33,7 +33,7 @@ pub fn test_slot_name(slot_name: &str) -> String {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// // Create a pipeline with default settings
 /// let pipeline = PipelineBuilder::new(pg_config, id, pub_name, store, dest)
 ///     .build();

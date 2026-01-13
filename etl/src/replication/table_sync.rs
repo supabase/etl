@@ -84,9 +84,11 @@ where
         // successfully return.
         if matches!(
             phase_type,
-            TableReplicationPhaseType::SyncDone | TableReplicationPhaseType::Ready
+            TableReplicationPhaseType::SyncDone
+                | TableReplicationPhaseType::Ready
+                | TableReplicationPhaseType::Errored
         ) {
-            info!(%table_id, %phase_type, "initial table sync not required");
+            warn!(%table_id, %phase_type, "initial table sync not required");
 
             return Ok(TableSyncResult::SyncNotRequired);
         }
@@ -141,6 +143,34 @@ where
                 // If the slot is not found, we are safe to continue, for any other error, we bail.
                 if err.kind() != ErrorKind::ReplicationSlotNotFound {
                     return Err(err);
+                }
+            }
+
+            // We must truncate the destination table before starting a copy to avoid data inconsistencies.
+            //
+            // Example scenario:
+            // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
+            // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
+            // 3. While down, the source deletes row id = 1 and inserts row id = 2.
+            // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
+            // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
+            // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
+            // Fix: Always truncate the destination table before starting a copy.
+            //
+            // Try to load the previously stored destination table metadata, which contains
+            // both the snapshot_id and replication_mask. If available, we can load the
+            // corresponding table schema and truncate the destination table before starting a copy.
+            // If the metadata is not present, we can safely assume that no data is there in the
+            // table, thus a truncate won't be issued.
+            if let Some(metadata) = store.get_destination_table_metadata(&table_id).await? {
+                if let Some(table_schema) = store
+                    .get_table_schema(&table_id, metadata.snapshot_id)
+                    .await?
+                {
+                    let replicated_table_schema =
+                        ReplicatedTableSchema::from_mask(table_schema, metadata.replication_mask);
+                    destination.truncate_table(&replicated_table_schema).await?;
+                    info!(%table_id, "truncated destination table before starting copy");
                 }
             }
 
@@ -214,21 +244,6 @@ where
             // Create the replicated table schema with the replication mask.
             let replicated_table_schema =
                 ReplicatedTableSchema::from_mask(table_schema, replication_mask);
-
-            // We must truncate the destination table before starting a copy to avoid data inconsistencies.
-            //
-            // Example scenario:
-            // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
-            // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
-            // 3. While down, the source deletes row id = 1 and inserts row id = 2.
-            // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
-            // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
-            // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
-            // Fix: Always truncate the destination table before starting a copy.
-            //
-            // We try to truncate the table also during `Init` because we support state rollback and
-            // a table might be there from a previous run.
-            destination.truncate_table(&replicated_table_schema).await?;
 
             let table_copy_start = Instant::now();
             let mut total_rows_copied = 0;

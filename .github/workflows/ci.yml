@@ -64,6 +64,16 @@ jobs:
     strategy:
       matrix:
         postgres_version: [18, 17, 16, 15, 14]
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PORT: 5430
+      POSTGRES_HOST: localhost
+      TESTS_DATABASE_HOST: localhost
+      TESTS_DATABASE_PORT: 5430
+      TESTS_DATABASE_USERNAME: postgres
+      TESTS_DATABASE_PASSWORD: postgres
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -88,20 +98,11 @@ jobs:
             --locked
 
       - name: Migrate Database
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-          POSTGRES_PORT: 5430
-          POSTGRES_HOST: localhost
-        run: ./scripts/run_migrations.sh etl-api
+        run: |
+          sudo apt-get install libpq-dev -y
+          ./scripts/run_migrations.sh etl-api
 
       - name: Run Tests
-        env:
-          TESTS_DATABASE_HOST: localhost
-          TESTS_DATABASE_PORT: 5430
-          TESTS_DATABASE_USERNAME: postgres
-          TESTS_DATABASE_PASSWORD: postgres
         run: |
           cargo test \
             --workspace \
@@ -126,6 +127,16 @@ jobs:
     strategy:
       matrix:
         postgres_version: [18, 17, 16, 15, 14]
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PORT: 5430
+      POSTGRES_HOST: localhost
+      TESTS_DATABASE_HOST: localhost
+      TESTS_DATABASE_PORT: 5430
+      TESTS_DATABASE_USERNAME: postgres
+      TESTS_DATABASE_PASSWORD: postgres
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -150,13 +161,9 @@ jobs:
             --locked
 
       - name: Migrate Database
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-          POSTGRES_PORT: 5430
-          POSTGRES_HOST: localhost
-        run: ./scripts/run_migrations.sh etl-api
+        run: |
+          sudo apt-get install libpq-dev -y
+          ./scripts/run_migrations.sh etl-api
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -169,16 +176,15 @@ jobs:
 
       - name: Generate Code Coverage
         id: coverage
-        env:
-          TESTS_DATABASE_HOST: localhost
-          TESTS_DATABASE_PORT: 5430
-          TESTS_DATABASE_USERNAME: postgres
-          TESTS_DATABASE_PASSWORD: postgres
         run: |
           cargo llvm-cov test \
             --workspace --no-fail-fast \
             --all-features \
             --lcov --output-path lcov.info
+
+      - name: Run Doctests
+        run: |
+          cargo test --doc --workspace --all-features --no-fail-fast
 
       - name: Upload Coverage to Coveralls
         uses: coverallsapp/github-action@v2

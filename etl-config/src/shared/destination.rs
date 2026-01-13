@@ -1,6 +1,10 @@
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
+fn default_max_concurrent_streams() -> usize {
+    DestinationConfig::DEFAULT_MAX_CONCURRENT_STREAMS
+}
+
 /// Configuration for supported ETL data destinations.
 ///
 /// Specifies the destination type and its associated configuration parameters.
@@ -29,7 +33,6 @@ pub enum DestinationConfig {
         ///
         /// If not set, the default staleness behavior is used. See
         /// <https://cloud.google.com/bigquery/docs/change-data-capture#create-max-staleness>.
-        #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
         /// Maximum number of concurrent streams for BigQuery append operations.
         ///
@@ -41,12 +44,18 @@ pub enum DestinationConfig {
         /// - the number of tables being replicated,
         /// - the volume of events processed by the ETL,
         /// - and the configured batch size.
+        #[serde(default = "default_max_concurrent_streams")]
         max_concurrent_streams: usize,
     },
     Iceberg {
         #[serde(flatten)]
         config: IcebergConfig,
     },
+}
+
+impl DestinationConfig {
+    /// Default maximum number of concurrent streams for BigQuery destinations.
+    pub const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 8;
 }
 
 /// Configuration for the iceberg destination with two variants
@@ -193,6 +202,7 @@ pub enum DestinationConfigWithoutSecrets {
         /// - the number of tables being replicated,
         /// - the volume of events processed by the ETL,
         /// - and the configured batch size.
+        #[serde(default = "default_max_concurrent_streams")]
         max_concurrent_streams: usize,
     },
     Iceberg {

@@ -460,12 +460,12 @@ where
             match result {
                 Ok(_) => {
                     // Worker completed successfully, mark as finished.
-                    let mut pool = pool.lock().await;
+                    let mut pool_guard = pool.lock().await;
                     {
                         let mut state_guard = state.lock().await;
                         state_guard.reset_retry_attempts();
                     }
-                    pool.mark_worker_finished(table_id);
+                    pool_guard.mark_worker_finished(table_id);
 
                     return Ok(());
                 }

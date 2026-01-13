@@ -6,7 +6,7 @@ use etl::error::ErrorKind;
 use etl::state::table::TableReplicationPhaseType;
 use etl::store::state::StateStore;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
-use etl::test_utils::notify::NotifyingStore;
+use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with_batch_config};
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
