@@ -1,7 +1,9 @@
 use crate::error::{ErrorKind, EtlResult};
 use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
-use etl_config::shared::{ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig};
+use etl_config::shared::{
+    ETL_HEARTBEAT_OPTIONS, ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig,
+};
 use etl_postgres::replication::extract_server_version;
 use etl_postgres::types::convert_type_oid_to_type;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
@@ -174,6 +176,68 @@ impl PgReplicationClient {
             true => PgReplicationClient::connect_tls(pg_connection_config).await,
             false => PgReplicationClient::connect_no_tls(pg_connection_config).await,
         }
+    }
+
+    /// Establishes a regular (non-replication) connection to Postgres.
+    ///
+    /// This connection type is used for operations that don't require replication mode,
+    /// such as heartbeat emissions to the primary database. Uses short timeouts suitable
+    /// for quick operations.
+    ///
+    /// The connection uses TLS if configured in the supplied [`PgConnectionConfig`].
+    pub async fn connect_regular(pg_connection_config: PgConnectionConfig) -> EtlResult<Client> {
+        match pg_connection_config.tls.enabled {
+            true => PgReplicationClient::connect_regular_tls(pg_connection_config).await,
+            false => PgReplicationClient::connect_regular_no_tls(pg_connection_config).await,
+        }
+    }
+
+    /// Establishes a regular connection to Postgres without TLS encryption.
+    ///
+    /// Uses heartbeat-specific connection options with short timeouts.
+    async fn connect_regular_no_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Client> {
+        let config: Config = pg_connection_config
+            .clone()
+            .with_db(Some(&ETL_HEARTBEAT_OPTIONS));
+
+        let (client, connection) = config.connect(NoTls).await?;
+
+        spawn_postgres_connection::<NoTls>(connection);
+
+        info!("connected to postgres (regular mode) without tls");
+
+        Ok(client)
+    }
+
+    /// Establishes a regular TLS-encrypted connection to Postgres.
+    ///
+    /// Uses heartbeat-specific connection options with short timeouts.
+    async fn connect_regular_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Client> {
+        let config: Config = pg_connection_config
+            .clone()
+            .with_db(Some(&ETL_HEARTBEAT_OPTIONS));
+
+        let mut root_store = rustls::RootCertStore::empty();
+        if pg_connection_config.tls.enabled {
+            for cert in CertificateDer::pem_slice_iter(
+                pg_connection_config.tls.trusted_root_certs.as_bytes(),
+            ) {
+                let cert = cert?;
+                root_store.add(cert)?;
+            }
+        };
+
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
+
+        spawn_postgres_connection::<MakeRustlsConnect>(connection);
+
+        info!("connected to postgres (regular mode) with tls");
+
+        Ok(client)
     }
 
     /// Establishes a connection to Postgres without TLS encryption.

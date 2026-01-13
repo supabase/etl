@@ -16,6 +16,7 @@
 //! - **Robust error handling**: Comprehensive error classification with retry strategies
 //! - **Concurrent processing**: Parallel table synchronization and event application for increased throughput
 //! - **Suspendable**: Persistent tracking of replication progress which allows the pipeline to be safely paused and restarted
+//! - **Read replica support**: Replicate from PostgreSQL 15+ read replicas with automatic heartbeat to primary
 //!
 //! # Core Concepts
 //!
@@ -44,6 +45,13 @@
 //! ## Error Handling
 //! All operations return [`error::EtlResult<T>`] which provides detailed error classification
 //! for implementing appropriate retry and recovery strategies.
+//!
+//! # Read Replica Mode
+//!
+//! When replicating from a PostgreSQL 15+ read replica, configure `primary_connection` in
+//! [`config::PipelineConfig`] to enable automatic heartbeat emission. This keeps the
+//! replication slot active on the primary during idle periods by emitting WAL messages
+//! using `pg_logical_emit_message()`.
 //!
 //! # Basic Usage Example
 //!
@@ -77,6 +85,8 @@
 //!         id: 1,
 //!         publication_name: "my_publication".to_string(),
 //!         pg_connection: pg_config,
+//!         primary_connection: None,  // Set for read replica mode
+//!         heartbeat: None,           // Uses defaults if primary_connection is set
 //!         batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
 //!         table_error_retry_delay_ms: 10000,
 //!         table_error_retry_max_attempts: 5,
