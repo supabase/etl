@@ -954,7 +954,7 @@ where
         .replication_progress
         .update_last_flush_lsn(last_commit_end_lsn);
 
-    let current_lsn = state.replication_progress.last_received_lsn;
+    let current_lsn = state.replication_progress.last_flush_lsn;
     info!(worker_type = %hook.worker_type(), %current_lsn, "processing syncing tables after batch flush");
 
     // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
