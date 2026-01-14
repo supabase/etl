@@ -703,7 +703,6 @@ where
                         )
                 ))?;
 
-            // We need to determine the current sequenced table ID for this table.
             let sequenced_bigquery_table_id =
                 self.get_sequenced_bigquery_table_id(&table_id)
                     .await?

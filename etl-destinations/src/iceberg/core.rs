@@ -192,7 +192,6 @@ where
         let mut inner = self.inner.lock().await;
 
         let Some(table_schema) = self.store.get_table_schema(&table_id).await? else {
-            // If this is a cdc truncate event, the table schema must be there, so we raise an error.
             bail!(
                 ErrorKind::MissingTableSchema,
                 "Table not found in the schema store",
@@ -203,7 +202,6 @@ where
         };
 
         let Some(iceberg_table_name) = self.store.get_table_mapping(&table_id).await? else {
-            // If this is a cdc truncate event, the table mapping must be there, so we raise an error.
             bail!(
                 ErrorKind::MissingTableMapping,
                 "Table mapping not found",
