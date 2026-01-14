@@ -213,26 +213,26 @@ impl HttpK8sClient {
         }
 
         // Waiting state, we want to distinguish normal waiting reasons from abnormal ones.
-        if let Some(waiting) = &state.waiting {
-            if let Some(reason) = &waiting.reason {
-                match reason.as_str() {
-                    // Crash/restart errors
-                    "CrashLoopBackOff" => return true,
+        if let Some(waiting) = &state.waiting
+            && let Some(reason) = &waiting.reason
+        {
+            match reason.as_str() {
+                // Crash/restart errors
+                "CrashLoopBackOff" => return true,
 
-                    // Image-related errors (6 predefined in kubelet)
-                    "ImagePullBackOff"
-                    | "ErrImagePull"
-                    | "ErrImageNeverPull"
-                    | "InvalidImageName"
-                    | "ImageInspectError"
-                    | "RegistryUnavailable" => return true,
+                // Image-related errors (6 predefined in kubelet)
+                "ImagePullBackOff"
+                | "ErrImagePull"
+                | "ErrImageNeverPull"
+                | "InvalidImageName"
+                | "ImageInspectError"
+                | "RegistryUnavailable" => return true,
 
-                    // Container creation errors
-                    "CreateContainerConfigError" | "CreateContainerError" | "RunContainerError" => {
-                        return true;
-                    }
-                    _ => {}
+                // Container creation errors
+                "CreateContainerConfigError" | "CreateContainerError" | "RunContainerError" => {
+                    return true;
                 }
+                _ => {}
             }
         }
 
