@@ -85,11 +85,11 @@ impl TrustedRootCertsCache {
         // Fast path: check if we have a valid cached value
         {
             let cache = self.cache.read().await;
-            if let Some(cached) = cache.as_ref() {
-                if cached.fetched_at.elapsed() < Self::TTL {
-                    debug!("returning cached trusted root certificates");
-                    return Ok(cached.certs.clone());
-                }
+            if let Some(cached) = cache.as_ref()
+                && cached.fetched_at.elapsed() < Self::TTL
+            {
+                debug!("returning cached trusted root certificates");
+                return Ok(cached.certs.clone());
             }
         }
 
