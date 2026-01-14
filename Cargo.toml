@@ -7,6 +7,7 @@ members = [
     "etl-config",
     "etl-destinations",
     "etl-examples",
+    "etl-iceberg-merger",
     "etl-postgres",
     "etl-replicator",
     "etl-telemetry",
@@ -24,6 +25,7 @@ etl = { path = "etl", default-features = false }
 etl-api = { path = "etl-api", default-features = false }
 etl-config = { path = "etl-config", default-features = false }
 etl-destinations = { path = "etl-destinations", default-features = false }
+etl-iceberg-merger = { path = "etl-iceberg-merger", default-features = false }
 etl-postgres = { path = "etl-postgres", default-features = false }
 etl-replicator = { path = "etl-replicator", default-features = false }
 etl-telemetry = { path = "etl-telemetry", default-features = false }
@@ -47,6 +49,7 @@ constant_time_eq = { version = "0.4.2" }
 fail = { version = "0.5.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 gcp-bigquery-client = { version = "0.27.0", default-features = false }
+humantime-serde = { version = "1.1.1", default-features = false }
 iceberg = { version = "0.7.0", default-features = false }
 iceberg-catalog-rest = { version = "0.7.0", default-features = false }
 insta = { version = "1.43.1", default-features = false }
@@ -70,9 +73,14 @@ serde_json = { version = "1.0.141", default-features = false }
 serde_yaml = { version = "0.9.34", default-features = false }
 sqlx = { version = "0.8.6", default-features = false }
 tempfile = { version = "3.23.0", default-features = false }
-thiserror = "2.0.12"    
-tikv-jemalloc-ctl = { version = "0.6.0", default-features = false, features = ["stats"] }
-tikv-jemallocator = { version = "0.6.1", default-features = false, features = ["background_threads_runtime_support", "unprefixed_malloc_on_supported_platforms"] }
+thiserror = "2.0.12"
+tikv-jemalloc-ctl = { version = "0.6.0", default-features = false, features = [
+    "stats",
+] }
+tikv-jemallocator = { version = "0.6.1", default-features = false, features = [
+    "background_threads_runtime_support",
+    "unprefixed_malloc_on_supported_platforms",
+] }
 tokio = { version = "1.47.0", default-features = false }
 tokio-postgres = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, rev = "c4b473b478b3adfbf8667d2fbe895d8423f1290b" }
 tokio-rustls = { version = "0.26.2", default-features = false }

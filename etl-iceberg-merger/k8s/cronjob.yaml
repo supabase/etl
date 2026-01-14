@@ -1,0 +1,113 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: iceberg-merger
+  namespace: default
+  labels:
+    app: iceberg-merger
+    component: etl
+spec:
+  # Run every hour at minute 0
+  schedule: "0 * * * *"
+
+  # Keep last 3 successful and 1 failed job for debugging
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+  # Don't allow concurrent runs
+  concurrencyPolicy: Forbid
+
+  jobTemplate:
+    metadata:
+      labels:
+        app: iceberg-merger
+        component: etl
+    spec:
+      # Clean up jobs after 1 day
+      ttlSecondsAfterFinished: 86400
+
+      template:
+        metadata:
+          labels:
+            app: iceberg-merger
+            component: etl
+        spec:
+          restartPolicy: OnFailure
+
+          containers:
+            - name: merger
+              image: ghcr.io/supabase/etl-iceberg-merger:latest
+              imagePullPolicy: Always
+
+              resources:
+                requests:
+                  memory: "512Mi"
+                  cpu: "500m"
+                limits:
+                  memory: "2Gi"
+                  cpu: "2000m"
+
+              env:
+                - name: RUST_LOG
+                  value: "info,etl_iceberg_merger=debug"
+
+                # Configuration loaded from file
+                - name: CONFIG_FILE
+                  value: "/etc/merger/config.yaml"
+
+                # Secrets injected as environment variables
+                - name: ICEBERG_CATALOG_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: iceberg-merger-secrets
+                      key: catalog_token
+
+                - name: ICEBERG_S3_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: iceberg-merger-secrets
+                      key: s3_access_key_id
+
+                - name: ICEBERG_S3_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: iceberg-merger-secrets
+                      key: s3_secret_access_key
+
+                - name: SENTRY_DSN
+                  valueFrom:
+                    secretKeyRef:
+                      name: iceberg-merger-secrets
+                      key: sentry_dsn
+                      optional: true
+
+                - name: APP_VERSION
+                  value: "1.0.0"
+
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/merger
+                  readOnly: true
+
+              # Health probes (for long-running jobs)
+              livenessProbe:
+                exec:
+                  command:
+                    - /bin/sh
+                    - -c
+                    - "pgrep etl-iceberg-merger"
+                initialDelaySeconds: 30
+                periodSeconds: 60
+                timeoutSeconds: 5
+                failureThreshold: 3
+
+          volumes:
+            - name: config
+              configMap:
+                name: iceberg-merger-config
+
+          # Security context
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            fsGroup: 65532

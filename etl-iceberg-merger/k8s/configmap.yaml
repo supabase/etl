@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iceberg-merger-config
+  namespace: default
+data:
+  config.yaml: |
+    project_ref: "example-project"
+    environment: "production"
+
+    iceberg:
+      catalog_url: "https://catalog.example.com/api/v1"
+      warehouse: "main"
+      s3_endpoint: "https://s3.us-east-1.amazonaws.com"
+      s3_region: "us-east-1"
+
+    tables:
+      - namespace: "public"
+        changelog_table: "users_changelog"
+        mirror_table: "users"
+        primary_keys:
+          - "id"
+        sequence_column: "cdc_sequence_number"
+        operation_column: "cdc_operation"
+
+    merge_interval: "1h"
+    batch_size: 10000
