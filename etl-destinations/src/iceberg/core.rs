@@ -19,7 +19,7 @@ use etl::types::{
 use etl::{bail, etl_error};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// CDC operation types for Iceberg changelog tables.
 ///
