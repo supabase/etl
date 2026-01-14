@@ -227,8 +227,7 @@ pub enum TableReplicationPhase {
         ///
         /// This LSN represents the consistent point from which the table sync worker
         /// will start streaming changes. The apply worker will use `max(this lsn, current_lsn)`
-        /// when setting the Catchup LSN to ensure no data loss, following PostgreSQL's pattern:
-        /// `syncworker->relstate_lsn = Max(syncworker->relstate_lsn, current_lsn)`.
+        /// when setting the Catchup LSN to ensure no data loss, following PostgreSQL's pattern.
         lsn: PgLsn,
     },
     /// Set by the apply worker when it is paused. The table-sync worker waits
@@ -236,7 +235,8 @@ pub enum TableReplicationPhase {
     ///
     /// This phase is stored in memory only and not persisted to the state store
     Catchup {
-        /// The lsn to catch up to. This is the location where the apply worker is paused.
+        /// The lsn to catch up before shutting down the table sync worker and handing over streaming
+        /// to the apply worker.
         lsn: PgLsn,
     },
 
