@@ -221,14 +221,22 @@ pub enum TableReplicationPhase {
     /// worker is in the `SyncWait` state and pauses itself if it finds any. It resumes
     /// only when the table sync worker has caught up with the `Catchup`'s LSN.
     ///
-    /// This phase is stored in memory only and not persisted to the state store
-    SyncWait,
+    /// This phase is stored in memory only and not persisted to the state store.
+    SyncWait {
+        /// The LSN of the snapshot used for the initial table copy.
+        ///
+        /// This LSN represents the consistent point from which the table sync worker
+        /// will start streaming changes. The apply worker will use `max(this lsn, current_lsn)`
+        /// when setting the Catchup LSN to ensure no data loss, following PostgreSQL's pattern.
+        lsn: PgLsn,
+    },
     /// Set by the apply worker when it is paused. The table-sync worker waits
     /// for the apply worker to set this state after setting the state to `SyncWait`.
     ///
     /// This phase is stored in memory only and not persisted to the state store
     Catchup {
-        /// The lsn to catch up to. This is the location where the apply worker is paused.
+        /// The lsn to catch up before shutting down the table sync worker and handing over streaming
+        /// to the apply worker.
         lsn: PgLsn,
     },
 
@@ -272,7 +280,7 @@ impl fmt::Display for TableReplicationPhase {
             Self::Init => write!(f, "init"),
             Self::DataSync => write!(f, "data_sync"),
             Self::FinishedCopy => write!(f, "finished_copy"),
-            Self::SyncWait => write!(f, "sync_wait"),
+            Self::SyncWait { lsn } => write!(f, "sync_wait({lsn})"),
             Self::Catchup { lsn } => write!(f, "catchup({lsn})"),
             Self::SyncDone { lsn } => write!(f, "sync_done({lsn})"),
             Self::Ready => write!(f, "ready"),
@@ -423,7 +431,7 @@ impl<'a> From<&'a TableReplicationPhase> for TableReplicationPhaseType {
             TableReplicationPhase::Init => Self::Init,
             TableReplicationPhase::DataSync => Self::DataSync,
             TableReplicationPhase::FinishedCopy => Self::FinishedCopy,
-            TableReplicationPhase::SyncWait => Self::SyncWait,
+            TableReplicationPhase::SyncWait { .. } => Self::SyncWait,
             TableReplicationPhase::Catchup { .. } => Self::Catchup,
             TableReplicationPhase::SyncDone { .. } => Self::SyncDone,
             TableReplicationPhase::Ready => Self::Ready,

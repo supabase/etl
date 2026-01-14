@@ -363,17 +363,23 @@ where
                             .await?;
                     }
                 }
-                TableReplicationPhase::SyncWait => {
-                    // Transition worker from `SyncWait` to `Catchup`.
+                TableReplicationPhase::SyncWait { lsn: snapshot_lsn } => {
+                    // Following PostgreSQL's pattern, we use max(snapshot_lsn, current_lsn) to ensure
+                    // no data loss. If the apply worker is behind the snapshot LSN, we must catch up
+                    // to the snapshot LSN to avoid missing transactions between current_lsn and snapshot_lsn.
+                    let catchup_lsn = snapshot_lsn.max(current_lsn);
+
                     info!(
                         %table_id,
                         %current_lsn,
+                        %snapshot_lsn,
+                        %catchup_lsn,
                         "table sync worker is waiting to catchup, starting catchup",
                     );
 
                     worker_state_guard
                         .set_and_store(
-                            TableReplicationPhase::Catchup { lsn: current_lsn },
+                            TableReplicationPhase::Catchup { lsn: catchup_lsn },
                             &self.store,
                         )
                         .await?;
