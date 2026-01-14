@@ -188,21 +188,10 @@ where
     /// Removes all data from the target table by dropping the existing Iceberg table
     /// and creating a fresh empty table with the same schema. Updates the internal
     /// table creation cache to reflect the new table state.
-    async fn truncate_table(&self, table_id: TableId, is_cdc_truncate: bool) -> EtlResult<()> {
+    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
         let Some(table_schema) = self.store.get_table_schema(&table_id).await? else {
-            // If this is not a cdc truncate event, we just raise a warning since it could be that the
-            // table schema is not there.
-            if !is_cdc_truncate {
-                warn!(
-                    %table_id,
-                    "table schema not found in schema store while processing truncate events for iceberg"
-                );
-
-                return Ok(());
-            }
-
             // If this is a cdc truncate event, the table schema must be there, so we raise an error.
             bail!(
                 ErrorKind::MissingTableSchema,
@@ -214,17 +203,6 @@ where
         };
 
         let Some(iceberg_table_name) = self.store.get_table_mapping(&table_id).await? else {
-            // If this is not a cdc truncate event, we just raise a warning since it could be that the
-            // table mapping is not there.
-            if !is_cdc_truncate {
-                warn!(
-                    %table_id,
-                    "table mapping not found in state store while processing truncate events for iceberg"
-                );
-
-                return Ok(());
-            }
-
             // If this is a cdc truncate event, the table mapping must be there, so we raise an error.
             bail!(
                 ErrorKind::MissingTableMapping,
@@ -409,7 +387,7 @@ where
             }
 
             for table_id in truncate_table_ids {
-                self.truncate_table(table_id, true).await?;
+                self.truncate_table(table_id).await?;
             }
         }
 
@@ -582,7 +560,7 @@ where
     /// Removes all data from the target Iceberg table while preserving
     /// the table schema structure for continued CDC operations.
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table(table_id, false).await?;
+        self.truncate_table(table_id).await?;
 
         Ok(())
     }
