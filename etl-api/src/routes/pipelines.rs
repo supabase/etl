@@ -1194,10 +1194,10 @@ pub async fn rollback_tables(
             // All errored tables mode, find all tables in errored state
             let mut errored_table_ids = Vec::new();
             for row in &state_rows {
-                if let Ok(Some(state)) = row.deserialize_metadata() {
-                    if state.is_errored() {
-                        errored_table_ids.push(row.table_id.0);
-                    }
+                if let Ok(Some(state)) = row.deserialize_metadata()
+                    && state.is_errored()
+                {
+                    errored_table_ids.push(row.table_id.0);
                 }
             }
 

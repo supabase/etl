@@ -13,8 +13,10 @@ use crate::shared::{
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
+#[derive(Default)]
 pub enum TableSyncCopyConfig {
     /// Performs the initial copy for all tables.
+    #[default]
     IncludeAllTables,
     /// Skips the initial copy for all tables.
     SkipAllTables,
@@ -39,12 +41,6 @@ impl TableSyncCopyConfig {
             TableSyncCopyConfig::IncludeTables { table_ids } => table_ids.contains(&table_id),
             TableSyncCopyConfig::SkipTables { table_ids } => !table_ids.contains(&table_id),
         }
-    }
-}
-
-impl Default for TableSyncCopyConfig {
-    fn default() -> Self {
-        Self::IncludeAllTables
     }
 }
 
