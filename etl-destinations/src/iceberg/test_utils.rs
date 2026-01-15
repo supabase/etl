@@ -150,21 +150,49 @@ impl LakekeeperClient {
     }
 
     /// Creates a new warehouse with a random UUID as name.
+    ///
+    /// Includes retry logic for transient failures like timeouts.
     pub async fn create_warehouse(&self) -> Result<(String, Uuid), reqwest::Error> {
         let url = format!("{}/warehouse", self.base_url);
-
         let warehouse = CreateWarehouseRequest::default();
-        let response = self
-            .client
-            .post(url)
-            .header(PROJECT_ID_HEADER, PROJECT_ID)
-            .json(&warehouse)
-            .send()
-            .await?;
 
-        let response: CreateWarehouseResponse = response.json().await?;
+        const MAX_RETRIES: u8 = 5;
+        let mut last_error = None;
 
-        Ok((warehouse.warehouse_name, response.warehouse_id))
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                // Exponential backoff with jitter.
+                let delay_ms = (1 << attempt) * 100 + (attempt as u64 * 50);
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+
+            match self
+                .client
+                .post(&url)
+                .header(PROJECT_ID_HEADER, PROJECT_ID)
+                .json(&warehouse)
+                .send()
+                .await
+            {
+                Ok(response) => match response.error_for_status() {
+                    Ok(response) => {
+                        let response: CreateWarehouseResponse = response.json().await?;
+                        return Ok((warehouse.warehouse_name, response.warehouse_id));
+                    }
+                    Err(e) if e.status() == Some(reqwest::StatusCode::REQUEST_TIMEOUT) => {
+                        last_error = Some(e);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                },
+                Err(e) => {
+                    last_error = Some(e);
+                    continue;
+                }
+            }
+        }
+
+        Err(last_error.expect("should have at least one error after retries"))
     }
 
     /// Drops a warehouse with retries.

@@ -46,3 +46,13 @@ uuid = { workspace = true, features = ["v4"] }
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemalloc-ctl = { workspace = true }
 tikv-jemallocator = { workspace = true }
+
+[dev-dependencies]
+etl = { workspace = true, features = ["test-utils"] }
+etl-destinations = { workspace = true, features = ["iceberg", "test-utils"] }
+etl-telemetry = { workspace = true }
+
+chrono = { workspace = true }
+rand = { workspace = true, features = ["thread_rng"] }
+reqwest = { workspace = true, features = ["json"] }
+tokio = { workspace = true, features = ["full"] }

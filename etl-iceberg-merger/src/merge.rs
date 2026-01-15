@@ -98,30 +98,19 @@ impl MergeExecutor {
             TableIdent::new(namespace.clone(), table_config.changelog_table.clone());
         let mirror_ident = TableIdent::new(namespace.clone(), table_config.mirror_table.clone());
 
-        // Load changelog table
+        // Load changelog table.
         let changelog_table = self
             .catalog
             .load_table(&changelog_ident)
             .await
             .context("loading changelog table")?;
 
-        // Ensure mirror table exists
-        self.ensure_mirror_table_exists(&mirror_ident, &changelog_table, table_config)
-            .await?;
-
-        // Load mirror table
-        let mirror_table = self
-            .catalog
-            .load_table(&mirror_ident)
-            .await
-            .context("loading mirror table")?;
-
-        // Load or create index
+        // Load or create index from changelog.
         let index = self
             .load_or_create_index(&changelog_table, table_config)
             .await?;
 
-        // Scan changelog and build deduplicated records
+        // Scan changelog and build deduplicated records.
         let deduplicated = self
             .scan_and_deduplicate(&changelog_table, &index, table_config)
             .await?;
@@ -137,7 +126,19 @@ impl MergeExecutor {
         counter!("merger.rows.deduplicated", "table" => table_config.mirror_table.clone())
             .increment(deduplicated.len() as u64);
 
-        // Write compacted data to mirror table (placeholder)
+        // Recreate the mirror table to replace all data (full snapshot mode).
+        // This ensures each merge produces a complete deduplicated view.
+        self.recreate_mirror_table(&mirror_ident, &changelog_table, table_config)
+            .await?;
+
+        // Reload the mirror table after recreation.
+        let mirror_table = self
+            .catalog
+            .load_table(&mirror_ident)
+            .await
+            .context("loading recreated mirror table")?;
+
+        // Write compacted data to mirror table.
         self.write_mirror_data(&mirror_table, deduplicated, table_config)
             .await?;
 
@@ -155,28 +156,29 @@ impl MergeExecutor {
         Ok(())
     }
 
-    /// Ensures the mirror table exists, creating it if necessary.
-    async fn ensure_mirror_table_exists(
+    /// Recreates the mirror table by dropping and creating it fresh.
+    ///
+    /// This implements a full snapshot mode where each merge produces a complete
+    /// deduplicated view of the changelog data. All previous mirror data is replaced.
+    async fn recreate_mirror_table(
         &self,
         mirror_ident: &TableIdent,
         changelog_table: &Table,
         table_config: &TableConfig,
     ) -> anyhow::Result<()> {
-        // Check if mirror table already exists
-        match self.catalog.load_table(mirror_ident).await {
-            Ok(_) => {
-                debug!("mirror table already exists");
-                return Ok(());
-            }
-            Err(_) => {
-                info!("mirror table does not exist, creating it");
-            }
+        // Drop the existing mirror table if it exists.
+        if self.catalog.load_table(mirror_ident).await.is_ok() {
+            debug!("dropping existing mirror table for full refresh");
+            self.catalog
+                .drop_table(mirror_ident)
+                .await
+                .context("dropping mirror table")?;
         }
 
-        // Derive schema from changelog table, excluding CDC columns
+        // Derive schema from changelog table, excluding CDC columns.
         let mirror_schema = self.derive_mirror_schema(changelog_table, table_config)?;
 
-        // Create the mirror table
+        // Create the mirror table.
         self.catalog
             .create_table(
                 &mirror_ident.namespace,
@@ -188,7 +190,7 @@ impl MergeExecutor {
             .await
             .context("creating mirror table")?;
 
-        info!("mirror table created successfully");
+        info!("mirror table recreated for full snapshot merge");
         Ok(())
     }
 
