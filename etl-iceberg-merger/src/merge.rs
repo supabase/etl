@@ -8,7 +8,7 @@
 //! 5. Commits Iceberg transaction to swap manifest
 
 use crate::config::{IcebergCatalogConfig, TableConfig};
-use crate::index::{IndexBuilder, PuffinIndex, PuffinIndexMetadata};
+use crate::index::{IndexBuilder, PuffinIndex, PuffinIndexMetadata, compute_pk_hash};
 use anyhow::Context;
 use arrow::array::{Array, RecordBatch};
 use arrow::datatypes::Schema as ArrowSchema;
@@ -31,7 +31,6 @@ use metrics::{counter, histogram};
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use std::collections::{HashMap, HashSet};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info};
@@ -617,48 +616,6 @@ struct DeduplicatedRecord {
 
     /// Row index within the batch.
     row_idx: usize,
-}
-
-/// Computes a hash of the primary key columns for a given row.
-fn compute_pk_hash(batch: &RecordBatch, pk_col_indices: &[usize], row_idx: usize) -> u64 {
-    let mut hasher = DefaultHasher::new();
-
-    for &col_idx in pk_col_indices {
-        let col = batch.column(col_idx);
-
-        // Hash the column value based on its type.
-        if col.is_null(row_idx) {
-            0u8.hash(&mut hasher);
-        } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::Int64Array>() {
-            arr.value(row_idx).hash(&mut hasher);
-        } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::Int32Array>() {
-            arr.value(row_idx).hash(&mut hasher);
-        } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::StringArray>() {
-            arr.value(row_idx).hash(&mut hasher);
-        } else if let Some(arr) = col
-            .as_any()
-            .downcast_ref::<arrow::array::LargeStringArray>()
-        {
-            arr.value(row_idx).hash(&mut hasher);
-        } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::BinaryArray>() {
-            arr.value(row_idx).hash(&mut hasher);
-        } else if let Some(arr) = col
-            .as_any()
-            .downcast_ref::<arrow::array::LargeBinaryArray>()
-        {
-            arr.value(row_idx).hash(&mut hasher);
-        } else if let Some(arr) = col
-            .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-        {
-            arr.value(row_idx).hash(&mut hasher);
-        } else {
-            // For other types, hash the debug representation.
-            format!("{:?}", col.slice(row_idx, 1)).hash(&mut hasher);
-        }
-    }
-
-    hasher.finish()
 }
 
 /// Extracts an i64 value from a record batch column.

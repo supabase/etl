@@ -7,6 +7,14 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[lib]
+name = "etl_iceberg_merger"
+path = "src/lib.rs"
+
+[[bin]]
+name = "etl-iceberg-merger"
+path = "src/main.rs"
+
 [dependencies]
 etl-config = { workspace = true }
 etl-telemetry = { workspace = true }

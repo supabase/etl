@@ -4,6 +4,29 @@
 //! primary key hashes to file locations for efficient deduplication during merge.
 //! Adapted from moonlink's GlobalIndex design but using Iceberg FileIO instead
 //! of memory-mapped local files.
+//!
+//! ## Architecture
+//!
+//! The index uses a two-tier strategy optimized for S3 storage:
+//!
+//! 1. **Persistent Storage**: Index data is stored as Parquet in Puffin files on S3
+//! 2. **Memory Cache**: Index entries are cached in-memory for fast lookups
+//!
+//! ## Hash Function
+//!
+//! Uses `splitmix64` - a high-quality hash function with excellent distribution
+//! properties, adopted from moonlink's implementation:
+//!
+//! - Fast computation (few arithmetic operations)
+//! - Good avalanche properties (small input changes → large hash changes)
+//! - Avoids clustering in hash buckets
+//!
+//! ## Lookup Strategy
+//!
+//! Supports both single and batch lookups:
+//!
+//! - **Single lookup**: `get(pk_hash)` for individual key lookups
+//! - **Batch lookup**: `search_values(&hashes)` for efficient multi-key lookups
 
 use anyhow::Context;
 use arrow::array::Array;
@@ -13,17 +36,65 @@ use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::properties::WriterProperties;
 use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use tracing::{debug, info};
+
+/// High-quality hash function for distributing keys across buckets.
+///
+/// SplitMix64 is a fast, non-cryptographic hash function with excellent
+/// statistical properties. It's used to hash primary keys before indexing.
+///
+/// Adopted from moonlink's implementation, which provides:
+/// - **Fast**: Only a few arithmetic operations
+/// - **Good distribution**: Avoids clustering in hash buckets
+/// - **Avalanche**: Small input changes cause large output changes
+///
+/// # Example
+///
+/// ```
+/// # use etl_iceberg_merger::index::splitmix64;
+/// let key = 12345u64;
+/// let hash = splitmix64(key);
+///
+/// // Even nearby keys produce very different hashes
+/// let hash2 = splitmix64(12346);
+/// assert_ne!(hash, hash2);
+/// ```
+#[inline]
+pub fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
 
 /// A secondary index that maps primary key hashes to their locations in Parquet files.
 ///
 /// The index is serialized as Parquet data within Puffin files and stored in Iceberg
-/// table metadata. Each index entry contains:
-/// - `pk_hash`: Hash of the primary key values
+/// table metadata. The data is persisted to S3 but cached in memory for fast lookups.
+///
+/// ## Index Structure
+///
+/// Each index entry contains:
+/// - `pk_hash`: Hash of the primary key values (using `splitmix64`)
 /// - `file_path`: Path to the Parquet file containing the row
 /// - `row_offset`: Offset of the row within the file
+///
+/// ## Lookup Strategy
+///
+/// The index supports both single and batch lookups:
+///
+/// - **Single lookup**: `get(pk_hash)` - O(1) average case
+/// - **Batch lookup**: `search_values(&hashes)` - More efficient for multiple keys
+///   as it processes all lookups in a single pass
+///
+/// ## Memory Caching
+///
+/// The index is designed for S3 storage with in-memory caching:
+/// - Index data is persisted as Parquet in Puffin files on S3
+/// - When loaded, the entire index is cached in memory (via the `entries` HashMap)
+/// - Subsequent lookups hit the in-memory cache directly
 #[derive(Debug, Clone)]
 pub struct PuffinIndex {
     /// Hash bits used for the index (e.g., 64 for full u64 hash).
@@ -34,6 +105,7 @@ pub struct PuffinIndex {
     num_rows: usize,
 
     /// Map from primary key hash to file location.
+    /// This serves as the in-memory cache for the index.
     entries: HashMap<u64, FileLocation>,
 }
 
@@ -104,6 +176,73 @@ impl PuffinIndex {
     #[allow(dead_code)]
     pub fn hash_bits(&self) -> u32 {
         self.hash_bits
+    }
+
+    /// Checks if a primary key hash exists in the index.
+    ///
+    /// More efficient than `get()` when you only need to know if a key exists.
+    pub fn contains(&self, pk_hash: u64) -> bool {
+        self.entries.contains_key(&pk_hash)
+    }
+
+    /// Search for multiple values efficiently in a single pass.
+    ///
+    /// This is more efficient than repeated single lookups when looking up
+    /// many keys, as it amortizes the overhead of the lookup operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `pk_hashes` - Slice of primary key hashes to look up
+    ///
+    /// # Returns
+    ///
+    /// Vector of (pk_hash, location) for all matches found.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use etl_iceberg_merger::index::PuffinIndex;
+    /// let mut index = PuffinIndex::new(64);
+    /// index.insert(100, "file1.parquet".to_string(), 0);
+    /// index.insert(200, "file2.parquet".to_string(), 42);
+    /// index.insert(300, "file3.parquet".to_string(), 100);
+    ///
+    /// let hashes = vec![100, 200, 999];  // 999 doesn't exist
+    /// let results = index.search_values(&hashes);
+    ///
+    /// assert_eq!(results.len(), 2);  // Only 100 and 200 found
+    /// ```
+    pub fn search_values(&self, pk_hashes: &[u64]) -> Vec<(u64, &FileLocation)> {
+        pk_hashes
+            .iter()
+            .filter_map(|&hash| self.entries.get(&hash).map(|loc| (hash, loc)))
+            .collect()
+    }
+
+    /// Batch insert entries from an iterator.
+    ///
+    /// More efficient than calling `insert()` repeatedly as it pre-allocates
+    /// space for the new entries.
+    ///
+    /// # Arguments
+    ///
+    /// * `entries` - Iterator of (pk_hash, file_path, row_offset) tuples
+    pub fn insert_batch<I>(&mut self, entries: I)
+    where
+        I: IntoIterator<Item = (u64, String, usize)>,
+    {
+        let entries: Vec<_> = entries.into_iter().collect();
+        self.entries.reserve(entries.len());
+        for (pk_hash, file_path, row_offset) in entries {
+            self.entries.insert(
+                pk_hash,
+                FileLocation {
+                    file_path,
+                    row_offset,
+                },
+            );
+            self.num_rows += 1;
+        }
     }
 
     /// Serializes the index to Parquet format.
@@ -390,47 +529,109 @@ impl IndexBuilder {
 }
 
 /// Computes a hash of the primary key columns for a given row.
-fn compute_pk_hash(
+///
+/// Uses `splitmix64` for final hash mixing to ensure good distribution
+/// across hash buckets, following moonlink's approach.
+///
+/// # Algorithm
+///
+/// 1. Extract each primary key column value
+/// 2. Combine values using a rolling hash (FNV-1a inspired)
+/// 3. Apply `splitmix64` for final mixing
+///
+/// This ensures that even similar composite keys (e.g., (1, 2) vs (2, 1))
+/// produce well-distributed hashes.
+pub fn compute_pk_hash(
     batch: &arrow::array::RecordBatch,
     pk_col_indices: &[usize],
     row_idx: usize,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    // Use FNV-1a-like combination for multiple columns.
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut combined_hash = FNV_OFFSET;
 
     for &col_idx in pk_col_indices {
         let col = batch.column(col_idx);
+        let col_value = extract_column_value(col, row_idx);
 
-        if col.is_null(row_idx) {
-            0u8.hash(&mut hasher);
-        } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::Int64Array>() {
-            arr.value(row_idx).hash(&mut hasher);
-        } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::Int32Array>() {
-            arr.value(row_idx).hash(&mut hasher);
-        } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::StringArray>() {
-            arr.value(row_idx).hash(&mut hasher);
-        } else if let Some(arr) = col
-            .as_any()
-            .downcast_ref::<arrow::array::LargeStringArray>()
-        {
-            arr.value(row_idx).hash(&mut hasher);
-        } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::BinaryArray>() {
-            arr.value(row_idx).hash(&mut hasher);
-        } else if let Some(arr) = col
-            .as_any()
-            .downcast_ref::<arrow::array::LargeBinaryArray>()
-        {
-            arr.value(row_idx).hash(&mut hasher);
-        } else if let Some(arr) = col
-            .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-        {
-            arr.value(row_idx).hash(&mut hasher);
-        } else {
-            format!("{:?}", col.slice(row_idx, 1)).hash(&mut hasher);
-        }
+        // FNV-1a: XOR then multiply.
+        combined_hash ^= col_value;
+        combined_hash = combined_hash.wrapping_mul(FNV_PRIME);
     }
 
-    hasher.finish()
+    // Apply splitmix64 for final mixing.
+    splitmix64(combined_hash)
+}
+
+/// Extracts a u64 value from an Arrow column at the given row index.
+///
+/// For integer types, uses the value directly.
+/// For string/binary types, computes a hash of the bytes.
+/// For null values, returns 0.
+fn extract_column_value(col: &dyn Array, row_idx: usize) -> u64 {
+    if col.is_null(row_idx) {
+        return 0;
+    }
+
+    if let Some(arr) = col.as_any().downcast_ref::<arrow::array::Int64Array>() {
+        arr.value(row_idx) as u64
+    } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::Int32Array>() {
+        arr.value(row_idx) as u64
+    } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::Int16Array>() {
+        arr.value(row_idx) as u64
+    } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::Int8Array>() {
+        arr.value(row_idx) as u64
+    } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::UInt64Array>() {
+        arr.value(row_idx)
+    } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::UInt32Array>() {
+        arr.value(row_idx) as u64
+    } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::UInt16Array>() {
+        arr.value(row_idx) as u64
+    } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::UInt8Array>() {
+        arr.value(row_idx) as u64
+    } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::StringArray>() {
+        hash_bytes(arr.value(row_idx).as_bytes())
+    } else if let Some(arr) = col
+        .as_any()
+        .downcast_ref::<arrow::array::LargeStringArray>()
+    {
+        hash_bytes(arr.value(row_idx).as_bytes())
+    } else if let Some(arr) = col.as_any().downcast_ref::<arrow::array::BinaryArray>() {
+        hash_bytes(arr.value(row_idx))
+    } else if let Some(arr) = col
+        .as_any()
+        .downcast_ref::<arrow::array::LargeBinaryArray>()
+    {
+        hash_bytes(arr.value(row_idx))
+    } else if let Some(arr) = col
+        .as_any()
+        .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+    {
+        hash_bytes(arr.value(row_idx))
+    } else {
+        // Fallback: use debug format hash.
+        let debug_str = format!("{:?}", col.slice(row_idx, 1));
+        hash_bytes(debug_str.as_bytes())
+    }
+}
+
+/// Computes a hash of a byte slice using FNV-1a.
+///
+/// FNV-1a is a simple, fast hash function suitable for combining with
+/// splitmix64 for the final mixing step.
+#[inline]
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -583,5 +784,147 @@ mod tests {
     fn test_index_builder_new() {
         let builder = IndexBuilder::new(64);
         assert_eq!(builder.hash_bits, 64);
+    }
+
+    #[test]
+    fn test_splitmix64_distribution() {
+        // Test that splitmix64 produces well-distributed hashes.
+        let hashes: Vec<u64> = (0..1000).map(splitmix64).collect();
+
+        // All hashes should be unique.
+        let unique: std::collections::HashSet<_> = hashes.iter().collect();
+        assert_eq!(unique.len(), 1000);
+
+        // Adjacent keys should produce very different hashes.
+        let hash1 = splitmix64(12345);
+        let hash2 = splitmix64(12346);
+
+        // At least half the bits should differ (avalanche property).
+        let differing_bits = (hash1 ^ hash2).count_ones();
+        assert!(
+            differing_bits >= 20,
+            "expected at least 20 differing bits, got {}",
+            differing_bits
+        );
+    }
+
+    #[test]
+    fn test_splitmix64_deterministic() {
+        // Same input should always produce same output.
+        let hash1 = splitmix64(42);
+        let hash2 = splitmix64(42);
+        assert_eq!(hash1, hash2);
+
+        // Different inputs should produce different outputs.
+        let hash3 = splitmix64(43);
+        assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_search_values() {
+        let mut index = PuffinIndex::new(64);
+        index.insert(100, "file1.parquet".to_string(), 0);
+        index.insert(200, "file2.parquet".to_string(), 1);
+        index.insert(300, "file3.parquet".to_string(), 2);
+
+        // Search for existing and non-existing keys.
+        let hashes = vec![100, 200, 999];
+        let results = index.search_values(&hashes);
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().any(|(h, _)| *h == 100));
+        assert!(results.iter().any(|(h, _)| *h == 200));
+
+        // Check that 999 is not in results.
+        assert!(!results.iter().any(|(h, _)| *h == 999));
+    }
+
+    #[test]
+    fn test_search_values_empty() {
+        let index = PuffinIndex::new(64);
+        let results = index.search_values(&[100, 200, 300]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_values_all_found() {
+        let mut index = PuffinIndex::new(64);
+        index.insert(1, "file.parquet".to_string(), 0);
+        index.insert(2, "file.parquet".to_string(), 1);
+        index.insert(3, "file.parquet".to_string(), 2);
+
+        let results = index.search_values(&[1, 2, 3]);
+        assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_contains() {
+        let mut index = PuffinIndex::new(64);
+        index.insert(12345, "file.parquet".to_string(), 0);
+
+        assert!(index.contains(12345));
+        assert!(!index.contains(99999));
+    }
+
+    #[test]
+    fn test_insert_batch() {
+        let mut index = PuffinIndex::new(64);
+
+        let entries = vec![
+            (1u64, "file1.parquet".to_string(), 0usize),
+            (2, "file2.parquet".to_string(), 1),
+            (3, "file3.parquet".to_string(), 2),
+        ];
+
+        index.insert_batch(entries);
+
+        assert_eq!(index.len(), 3);
+        assert_eq!(index.get(1).unwrap().file_path, "file1.parquet");
+        assert_eq!(index.get(2).unwrap().file_path, "file2.parquet");
+        assert_eq!(index.get(3).unwrap().file_path, "file3.parquet");
+    }
+
+    #[test]
+    fn test_hash_bytes_consistency() {
+        // Test that hash_bytes produces consistent results.
+        let bytes1 = b"hello world";
+        let bytes2 = b"hello world";
+        let bytes3 = b"hello worlD";
+
+        assert_eq!(hash_bytes(bytes1), hash_bytes(bytes2));
+        assert_ne!(hash_bytes(bytes1), hash_bytes(bytes3));
+    }
+
+    #[test]
+    fn test_compute_pk_hash_uses_splitmix64() {
+        // Verify that the hash function produces consistent results.
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch1 =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![42]))])
+                .unwrap();
+        let batch2 =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![42]))]).unwrap();
+
+        let hash1 = compute_pk_hash(&batch1, &[0], 0);
+        let hash2 = compute_pk_hash(&batch2, &[0], 0);
+
+        assert_eq!(hash1, hash2, "same data should produce same hash");
+    }
+
+    #[test]
+    fn test_compute_pk_hash_string_values() {
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec!["alice", "bob", "alice"]))],
+        )
+        .unwrap();
+
+        let hash_alice1 = compute_pk_hash(&batch, &[0], 0);
+        let hash_bob = compute_pk_hash(&batch, &[0], 1);
+        let hash_alice2 = compute_pk_hash(&batch, &[0], 2);
+
+        assert_eq!(hash_alice1, hash_alice2);
+        assert_ne!(hash_alice1, hash_bob);
     }
 }

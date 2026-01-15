@@ -34,18 +34,14 @@ pub static malloc_conf: &[u8] =
 pub static malloc_conf: &[u8] =
     b"narenas:8,background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
 
-use crate::config::load_merger_config;
-use crate::scheduler::run_scheduler;
+use etl_iceberg_merger::config::load_merger_config;
+use etl_iceberg_merger::scheduler::run_scheduler;
 use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
 use tracing::{error, info};
 
-mod config;
-mod index;
 #[cfg(not(target_env = "msvc"))]
 mod jemalloc_metrics;
-mod merge;
-mod scheduler;
 
 /// The name of the environment variable which contains version information for this merger.
 const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
@@ -85,7 +81,7 @@ fn main() -> anyhow::Result<()> {
 ///
 /// Launches the scheduler with the provided configuration and captures any errors
 /// to Sentry.
-async fn async_main(merger_config: config::MergerConfig) -> anyhow::Result<()> {
+async fn async_main(merger_config: etl_iceberg_merger::config::MergerConfig) -> anyhow::Result<()> {
     // Start the jemalloc metrics collection background task
     #[cfg(not(target_env = "msvc"))]
     jemalloc_metrics::spawn_jemalloc_metrics_task();
