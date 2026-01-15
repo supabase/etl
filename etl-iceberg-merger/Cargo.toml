@@ -33,6 +33,7 @@ tokio = { workspace = true, features = [
     "time",
 ] }
 tracing = { workspace = true, default-features = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemalloc-ctl = { workspace = true }
