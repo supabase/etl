@@ -49,7 +49,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     .await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -113,7 +113,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     .await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -181,7 +181,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     .await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -248,7 +248,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     .await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -614,7 +614,7 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
         .expect("Failed to create publication with column filter");
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(

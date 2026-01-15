@@ -261,8 +261,8 @@ pub async fn create_database_and_pipeline_with_table(
     TableName,
     TableId,
     NotifyingStore,
-    TestDestinationWrapper<MemoryDestination>,
-    Pipeline<NotifyingStore, TestDestinationWrapper<MemoryDestination>>,
+    TestDestinationWrapper<MemoryDestination<NotifyingStore>>,
+    Pipeline<NotifyingStore, TestDestinationWrapper<MemoryDestination<NotifyingStore>>>,
     PipelineId,
     String,
 ) {
@@ -281,7 +281,7 @@ pub async fn create_database_and_pipeline_with_table(
         .unwrap();
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(

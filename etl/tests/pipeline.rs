@@ -16,7 +16,7 @@ use etl::test_utils::test_schema::{
     build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
     insert_mock_data, insert_orders_data, insert_users_data, setup_test_database_schema,
 };
-use etl::types::{Event, EventType, InsertEvent, PipelineId, Type};
+use etl::types::{Cell, Event, EventType, InsertEvent, PipelineId, Type};
 use etl_config::shared::{BatchConfig, TableSyncCopyConfig};
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
@@ -54,7 +54,7 @@ async fn pipeline_shutdown_calls_destination_shutdown() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -94,7 +94,7 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -192,7 +192,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -317,7 +317,7 @@ async fn publication_changes_are_correctly_handled() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -474,7 +474,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         .unwrap();
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -613,7 +613,7 @@ async fn run_table_sync_copy_case<F>(
     insert_orders_data(&mut database, &orders_table_name, 0..=0).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
     let table_sync_copy = table_sync_copy_fn(users_table_id, orders_table_id);
@@ -739,7 +739,7 @@ async fn table_copy_replicates_existing_data() {
     .await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -826,7 +826,7 @@ async fn table_copy_and_sync_streams_new_data() {
     .await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -983,7 +983,7 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -1059,7 +1059,7 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Insert some data to test that the table copy is performed.
     let rows_inserted = 5;
@@ -1137,7 +1137,7 @@ async fn table_without_primary_key_is_errored() {
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -1213,7 +1213,7 @@ async fn pipeline_respects_column_level_publication() {
         .expect("Failed to create publication with column filter");
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -1508,7 +1508,7 @@ async fn empty_tables_are_created_at_destination() {
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Start the pipeline.
     let pipeline_id: PipelineId = random();
@@ -1553,4 +1553,194 @@ async fn empty_tables_are_created_at_destination() {
 
     // Verify that the write table rows method was called nonetheless.
     assert_eq!(destination.write_table_rows_called().await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_truncates_destination_after_state_reset() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+
+    // Insert initial test data.
+    let initial_rows = 5;
+    insert_mock_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        &database_schema.orders_schema().name,
+        1..=initial_rows,
+        false,
+    )
+    .await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    // Start pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Wait for both tables to be ready.
+    let users_ready_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+    let orders_ready_notify = store
+        .notify_on_table_state_type(
+            database_schema.orders_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
+
+    // Register wait for the CDC inserts before inserting data.
+    let cdc_events_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 4)])
+        .await;
+
+    // Insert additional data via CDC to ensure streaming is working.
+    let cdc_rows = 2;
+    insert_mock_data(
+        &mut database,
+        &database_schema.users_schema().name,
+        &database_schema.orders_schema().name,
+        (initial_rows + 1)..=(initial_rows + cdc_rows),
+        true,
+    )
+    .await;
+
+    // Wait for the CDC inserts to be processed.
+    cdc_events_notify.notified().await;
+
+    // Verify the data before reset.
+    let table_rows_before = destination.get_table_rows().await;
+    assert_eq!(
+        table_rows_before
+            .get(&database_schema.users_schema().id)
+            .unwrap()
+            .len(),
+        initial_rows
+    );
+    assert_eq!(
+        table_rows_before
+            .get(&database_schema.orders_schema().id)
+            .unwrap()
+            .len(),
+        initial_rows
+    );
+
+    // Reset the users table state to Init (simulating a state reset).
+    // The pipeline is still running and should automatically handle the table sync.
+    store
+        .reset_table_state(database_schema.users_schema().id)
+        .await
+        .unwrap();
+
+    // Now modify the source data to simulate the scenario where data changed:
+    // Delete the first 3 users (ids 1, 2, 3).
+    for id in 1..=3 {
+        database
+            .run_sql(&format!(
+                "delete from {} where id = {}",
+                database_schema.users_schema().name.as_quoted_identifier(),
+                id
+            ))
+            .await
+            .unwrap();
+    }
+
+    // At this point, the TestDestinationWrapper still has the old data (5 users) tracked.
+    // Without truncate being called, we would have old + new data. With truncate, we should
+    // only have current source data after the automatic re-sync.
+
+    // Register wait for users table to be ready again (it will go through table sync again).
+    let users_ready_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    // Insert completely new users (ids 100, 101, 102).
+    // This insertion should trigger the automatic table sync since the state is now Init.
+    // We explicitly set the IDs to 100-102 to verify we get the correct data.
+    for id in 100i64..=102i64 {
+        database
+            .insert_values(
+                database_schema.users_schema().name.clone(),
+                &["id", "name", "age"],
+                &[&id, &format!("user_{}", id), &(id as i32)],
+            )
+            .await
+            .unwrap();
+    }
+
+    // Wait for the automatic table sync to complete.
+    users_ready_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify the final state in table_rows (not events):
+    // After the reset and automatic re-sync, the destination should have ALL current source data.
+    // Source currently has:
+    //   - Initial 5 rows (1-5)
+    //   - CDC 2 rows (6-7)
+    //   - Deleted 3 rows (1-3)
+    //   - New 3 rows (100-102)
+    //   = Total: 4, 5, 6, 7, 100, 101, 102 (7 rows)
+    //
+    // Without truncate: destination would have old (1-5) + new (4, 5, 6, 7, 100, 101, 102) = duplicates
+    // With truncate: destination should have exactly the current source data (7 rows, no duplicates)
+    let table_rows_after = destination.get_table_rows().await;
+
+    let users_rows_after = table_rows_after
+        .get(&database_schema.users_schema().id)
+        .unwrap();
+    assert_eq!(
+        users_rows_after.len(),
+        7,
+        "Users table should have exactly 7 rows (all current source data) after truncate and re-sync"
+    );
+
+    // Extract user IDs to verify we have the correct data.
+    let mut user_ids: Vec<i64> = users_rows_after
+        .iter()
+        .map(|row| {
+            if let Cell::I64(id) = &row.values[0] {
+                *id
+            } else {
+                panic!("Expected I64 for user ID");
+            }
+        })
+        .collect();
+    user_ids.sort();
+
+    // We should have ALL current source data: 4, 5, 6, 7 (survivors) and 100, 101, 102 (new data).
+    // Ids 1, 2, 3 should NOT be present (they were deleted from source).
+    assert_eq!(
+        user_ids,
+        vec![4, 5, 6, 7, 100, 101, 102],
+        "Users table should contain ALL current source data without duplicates or stale data"
+    );
+
+    // Orders table should be unaffected (still has only initial data).
+    let orders_rows_after = table_rows_after
+        .get(&database_schema.orders_schema().id)
+        .unwrap();
+    assert_eq!(
+        orders_rows_after.len(),
+        initial_rows,
+        "Orders table should remain unchanged"
+    );
 }
