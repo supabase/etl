@@ -358,7 +358,6 @@ impl MergeExecutor {
                     deduplicated.insert(
                         pk_hash,
                         DeduplicatedRecord {
-                            pk_hash,
                             sequence,
                             operation,
                             batch: batch_result.clone(),
@@ -601,10 +600,6 @@ impl MergeExecutor {
 /// A deduplicated record with its metadata.
 #[derive(Debug, Clone)]
 struct DeduplicatedRecord {
-    /// Primary key hash.
-    #[allow(dead_code)]
-    pk_hash: u64,
-
     /// CDC sequence number.
     sequence: i64,
 

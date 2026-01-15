@@ -98,7 +98,6 @@ pub fn splitmix64(mut x: u64) -> u64 {
 #[derive(Debug, Clone)]
 pub struct PuffinIndex {
     /// Hash bits used for the index (e.g., 64 for full u64 hash).
-    #[allow(dead_code)]
     hash_bits: u32,
 
     /// Total number of rows indexed.
@@ -111,7 +110,6 @@ pub struct PuffinIndex {
 
 /// Location of a row within a Parquet file.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct FileLocation {
     /// Path to the Parquet file.
     pub file_path: String,
@@ -156,7 +154,6 @@ impl PuffinIndex {
     }
 
     /// Looks up a primary key hash in the index.
-    #[allow(dead_code)]
     pub fn get(&self, pk_hash: u64) -> Option<&FileLocation> {
         self.entries.get(&pk_hash)
     }
@@ -167,13 +164,11 @@ impl PuffinIndex {
     }
 
     /// Returns whether the index is empty.
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Returns the hash bits used by this index.
-    #[allow(dead_code)]
     pub fn hash_bits(&self) -> u32 {
         self.hash_bits
     }
@@ -248,7 +243,6 @@ impl PuffinIndex {
     /// Serializes the index to Parquet format.
     ///
     /// Returns bytes that can be stored in a Puffin file.
-    #[allow(dead_code)]
     pub fn to_parquet(&self) -> anyhow::Result<Vec<u8>> {
         use arrow::array::{StringArray, UInt64Array};
         use arrow::datatypes::{DataType, Field, Schema};
@@ -457,7 +451,6 @@ impl IndexBuilder {
     ///
     /// This method scans the provided Parquet file paths and creates PK hash mappings.
     /// Used for cases where direct file access is preferred over table scanning.
-    #[allow(dead_code)]
     pub async fn build_from_changelog(
         &self,
         changelog_files: Vec<String>,

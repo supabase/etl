@@ -19,20 +19,59 @@ The merger service runs periodically (configurable interval) and processes confi
 Adapted from moonlink's GlobalIndex design, the index structure:
 
 - Maps primary key hashes to file locations (file_path, row_offset)
+- Uses `splitmix64` hash function for excellent distribution
 - Serialized as Parquet within Puffin files
-- Stored in Iceberg table metadata
-- Enables efficient deduplication during merge
+- Stored on S3 with in-memory caching for fast lookups
+- Supports batch lookups via `search_values()` for efficiency
+
+### Hash Function
+
+The merger uses `splitmix64`, a high-quality non-cryptographic hash function with:
+
+- **Fast computation**: Only a few arithmetic operations
+- **Good distribution**: Avoids clustering in hash buckets
+- **Avalanche property**: Small input changes cause large output changes
+
+```rust
+use etl_iceberg_merger::index::splitmix64;
+
+let hash = splitmix64(12345);
+```
 
 ### Components
 
 - **Scheduler**: Periodic execution loop with graceful shutdown
-- **Index**: Puffin-based secondary index for PK→location mapping
+- **Index**: Puffin-based secondary index for PK to location mapping
 - **Merge**: Core deduplication and compaction logic
 - **Config**: Configuration loading and validation
 
+## Library Usage
+
+The crate can be used as a library for building custom merge pipelines:
+
+```rust
+use etl_iceberg_merger::index::{PuffinIndex, compute_pk_hash, splitmix64};
+
+// Create a new index
+let mut index = PuffinIndex::new(64);
+
+// Insert entries (typically from scanning Parquet files)
+let pk_hash = splitmix64(12345);
+index.insert(pk_hash, "s3://bucket/file.parquet".to_string(), 0);
+
+// Single lookup
+if let Some(location) = index.get(pk_hash) {
+    println!("Found at {}:{}", location.file_path, location.row_offset);
+}
+
+// Batch lookup for efficiency
+let hashes = vec![splitmix64(100), splitmix64(200), splitmix64(300)];
+let results = index.search_values(&hashes);
+```
+
 ## Configuration
 
-Configuration is loaded from a YAML file (see `k8s/configmap.yaml` for example):
+Configuration is loaded from a YAML file:
 
 ```yaml
 project_ref: "example-project"
@@ -73,25 +112,74 @@ Sensitive values should be provided via environment variables:
 - `SENTRY_DSN`: Sentry DSN for error reporting (optional)
 - `APP_VERSION`: Application version for tagging (optional)
 
-## Deployment
+## Deduplication Logic
 
-### Kubernetes CronJob
+The merger handles duplicate CDC events as follows:
 
-The merger runs as a Kubernetes CronJob for periodic execution:
+### Sequence-Based Deduplication
 
-```bash
-# Apply configuration and secrets
-kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/secret.yaml
+When multiple events share the same primary key, the merger keeps only the event with the **highest sequence number**:
 
-# Deploy the CronJob
-kubectl apply -f k8s/cronjob.yaml
+```text
+Events:
+  PK=1, seq=100, op=INSERT, value="old"
+  PK=1, seq=200, op=UPDATE, value="new"
 
-# Check status
-kubectl get cronjobs
-kubectl get jobs
-kubectl logs -l app=iceberg-merger
+Result:
+  PK=1, seq=200, op=UPDATE, value="new"  # Kept (highest seq)
 ```
+
+### Out-of-Order Events
+
+Events arriving out of order are handled correctly:
+
+```text
+Events (arrival order):
+  PK=1, seq=200, op=UPDATE
+  PK=1, seq=100, op=INSERT  # Arrives late
+  PK=1, seq=300, op=UPDATE
+
+Result:
+  PK=1, seq=300  # Highest sequence wins
+```
+
+### DELETE Handling
+
+DELETE operations are filtered out after deduplication:
+
+```text
+Events:
+  PK=1, seq=100, op=INSERT
+  PK=1, seq=200, op=DELETE
+
+Result:
+  (empty)  # Record was deleted
+```
+
+If an INSERT follows a DELETE (with higher sequence), the record is kept:
+
+```text
+Events:
+  PK=1, seq=100, op=DELETE
+  PK=1, seq=200, op=INSERT  # Re-creation
+
+Result:
+  PK=1, seq=200, op=INSERT  # Kept
+```
+
+### Composite Primary Keys
+
+The merger supports composite primary keys:
+
+```yaml
+primary_keys:
+  - "order_id"
+  - "item_id"
+```
+
+Each unique combination is treated as a separate entity.
+
+## Deployment
 
 ### Docker Build
 
@@ -168,8 +256,48 @@ RUST_LOG=debug cargo run -p etl-iceberg-merger
 ### Test
 
 ```bash
+# Run all tests (unit + integration)
 cargo test -p etl-iceberg-merger
+
+# Run only unit tests
+cargo test -p etl-iceberg-merger --lib
+
+# Run only integration tests
+cargo test -p etl-iceberg-merger --test merge_integration
+
+# Run with verbose output
+cargo test -p etl-iceberg-merger -- --nocapture
 ```
+
+### Clippy
+
+```bash
+cargo clippy -p etl-iceberg-merger --all-targets --all-features -- -D warnings
+```
+
+## Testing
+
+The project includes comprehensive tests:
+
+### Unit Tests
+
+Located in `src/index.rs` and `src/merge.rs`:
+
+- Hash function tests (`splitmix64` distribution, determinism)
+- Index operations (insert, get, search_values, serialization)
+- Schema derivation and extraction helpers
+
+### Integration Tests
+
+Located in `tests/merge_integration.rs`:
+
+- Basic deduplication (keeps latest by sequence)
+- Out-of-order event handling
+- Exact duplicate events (same sequence)
+- DELETE operation filtering
+- Composite primary keys
+- Large-scale deduplication (10k+ records)
+- Index roundtrip serialization
 
 ## Further Considerations
 
@@ -185,8 +313,8 @@ As mirror tables grow, Puffin index files will accumulate. Future enhancements:
 
 Current behavior on failure:
 
-- Merge succeeds → entire operation committed atomically
-- Merge fails → error logged, metrics updated, Sentry notified
+- Merge succeeds: entire operation committed atomically
+- Merge fails: error logged, metrics updated, Sentry notified
 - Retry on next scheduled run
 
 Future enhancements:
