@@ -7,7 +7,7 @@ use tokio::sync::{Notify, RwLock};
 
 use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::test_utils::event::{check_events_count, deduplicate_events};
+use crate::test_utils::event::{check_all_events_count, check_events_count, deduplicate_events};
 use crate::test_utils::notify::TimedNotify;
 use crate::types::{Event, EventType, TableRow};
 
@@ -176,14 +176,11 @@ impl<D> TestDestinationWrapper<D> {
     /// This is useful for tests that need to verify all data was captured regardless of
     /// whether it arrived during table copy or streaming replication.
     ///
+    /// Counts are aggregated across all tables for the specified event types.
+    ///
     /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
     /// expected count is not reached. This prevents tests from hanging indefinitely.
-    pub async fn wait_for_all_events(
-        &self,
-        conditions: Vec<(EventType, TableId, u64)>,
-    ) -> TimedNotify {
-        use crate::test_utils::event::check_all_events_count;
-
+    pub async fn wait_for_all_events(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
 
@@ -197,6 +194,11 @@ impl<D> TestDestinationWrapper<D> {
         inner.check_conditions().await;
 
         TimedNotify::new(notify)
+    }
+
+    pub async fn clear_table_rows(&self) {
+        let mut inner = self.inner.write().await;
+        inner.table_rows.clear();
     }
 
     pub async fn clear_events(&self) {

@@ -1,4 +1,4 @@
-use crate::types::{Event, EventType};
+use crate::types::{Event, EventType, TableRow};
 use etl_postgres::types::TableId;
 use std::collections::HashMap;
 
@@ -55,7 +55,7 @@ pub fn check_events_count(events: &[Event], conditions: Vec<(EventType, u64)>) -
     })
 }
 
-/// Checks if the combined count of events and table rows meets the expected counts.
+/// Checks if the combined count of events and table rows meets the expected counts across all tables.
 ///
 /// This function groups events once for efficient lookup, then checks each condition
 /// to see if the sum of streaming events and copied table rows meets or exceeds the
@@ -65,33 +65,28 @@ pub fn check_events_count(events: &[Event], conditions: Vec<(EventType, u64)>) -
 /// For other event types, only streaming events are counted.
 pub fn check_all_events_count(
     events: &[Event],
-    table_rows: &HashMap<TableId, Vec<crate::types::TableRow>>,
-    conditions: Vec<(EventType, TableId, u64)>,
+    table_rows: &HashMap<TableId, Vec<TableRow>>,
+    conditions: Vec<(EventType, u64)>,
 ) -> bool {
-    let grouped_events = group_events_by_type_and_table_id(events);
+    let grouped_events = group_events_by_type(events);
 
-    conditions
-        .iter()
-        .all(|(event_type, table_id, expected_count)| {
-            // Count events of the specified type for this table using the grouped map.
-            let event_count = grouped_events
-                .get(&(event_type.clone(), *table_id))
-                .map(|events| events.len() as u64)
-                .unwrap_or(0);
+    conditions.iter().all(|(event_type, expected_count)| {
+        // Count events of the specified type across all tables.
+        let event_count = grouped_events
+            .get(event_type)
+            .map(|events| events.len() as u64)
+            .unwrap_or(0);
 
-            // Count table rows for this table (treated as inserts).
-            let table_row_count = if *event_type == EventType::Insert {
-                table_rows
-                    .get(table_id)
-                    .map(|rows| rows.len() as u64)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
+        // Count all table rows (treated as inserts) across all tables.
+        let table_row_count = if *event_type == EventType::Insert {
+            table_rows.values().map(|rows| rows.len() as u64).sum()
+        } else {
+            0
+        };
 
-            let total = event_count + table_row_count;
-            total >= *expected_count
-        })
+        let total = event_count + table_row_count;
+        total >= *expected_count
+    })
 }
 
 /// Returns a new Vec of events with duplicates removed.
