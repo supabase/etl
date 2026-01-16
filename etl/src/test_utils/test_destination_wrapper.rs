@@ -13,6 +13,8 @@ use crate::types::{Event, EventType, TableRow};
 
 type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
 type TableRowCondition = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
+type CombinedCondition =
+    Box<dyn Fn(&[Event], &HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
 
 struct Inner<D> {
     wrapped_destination: D,
@@ -20,6 +22,7 @@ struct Inner<D> {
     table_rows: HashMap<TableId, Vec<TableRow>>,
     event_conditions: Vec<(EventCondition, Arc<Notify>)>,
     table_row_conditions: Vec<(TableRowCondition, Arc<Notify>)>,
+    combined_conditions: Vec<(CombinedCondition, Arc<Notify>)>,
     write_table_rows_called: u64,
     shutdown_called: bool,
 }
@@ -40,6 +43,17 @@ impl<D> Inner<D> {
         let table_rows = self.table_rows.clone();
         self.table_row_conditions.retain(|(condition, notify)| {
             let should_retain = !condition(&table_rows);
+            if !should_retain {
+                notify.notify_one();
+            }
+            should_retain
+        });
+
+        // Check combined conditions
+        let events = self.events.clone();
+        let table_rows = self.table_rows.clone();
+        self.combined_conditions.retain(|(condition, notify)| {
+            let should_retain = !condition(&events, &table_rows);
             if !should_retain {
                 notify.notify_one();
             }
@@ -86,6 +100,7 @@ impl<D> TestDestinationWrapper<D> {
             table_rows: HashMap::new(),
             event_conditions: Vec::new(),
             table_row_conditions: Vec::new(),
+            combined_conditions: Vec::new(),
             write_table_rows_called: 0,
             shutdown_called: false,
         };
@@ -153,6 +168,35 @@ impl<D> TestDestinationWrapper<D> {
             check_events_count(&deduped, conditions.clone())
         })
         .await
+    }
+
+    /// Registers a notification that fires when a specific number of events are received,
+    /// counting both insert events from streaming and table rows from the initial copy phase.
+    ///
+    /// This is useful for tests that need to verify all data was captured regardless of
+    /// whether it arrived during table copy or streaming replication.
+    ///
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// expected count is not reached. This prevents tests from hanging indefinitely.
+    pub async fn wait_for_all_events(
+        &self,
+        conditions: Vec<(EventType, TableId, u64)>,
+    ) -> TimedNotify {
+        use crate::test_utils::event::check_all_events_count;
+
+        let notify = Arc::new(Notify::new());
+        let mut inner = self.inner.write().await;
+
+        let condition: CombinedCondition = Box::new(move |events, table_rows| {
+            check_all_events_count(events, table_rows, conditions.clone())
+        });
+
+        inner.combined_conditions.push((condition, notify.clone()));
+
+        // Check conditions immediately in case they're already satisfied.
+        inner.check_conditions().await;
+
+        TimedNotify::new(notify)
     }
 
     pub async fn clear_events(&self) {

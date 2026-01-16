@@ -1437,3 +1437,117 @@ async fn empty_tables_are_created_at_destination() {
     // Verify that the write table rows method was called nonetheless.
     assert_eq!(destination.write_table_rows_called().await, 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_processes_concurrent_inserts_during_startup() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Spawn a task that inserts data concurrently using a separate connection.
+    // This creates a race condition where some rows may be captured during table copy
+    // and others during streaming replication.
+    let rows_to_insert = 10;
+    let users_table_name = database_schema.users_schema().name.clone();
+    let orders_table_name = database_schema.orders_schema().name.clone();
+    let mut duplicate_database = database.duplicate().await;
+
+    // Use a JoinHandle to ensure the task completes and the database isn't dropped prematurely.
+    let insert_handle = tokio::spawn(async move {
+        insert_mock_data(
+            &mut duplicate_database,
+            &users_table_name,
+            &orders_table_name,
+            1..=rows_to_insert,
+            true,
+        )
+        .await;
+        // Return the database to prevent it from being dropped and destroying the test database.
+        duplicate_database
+    });
+
+    // Start the pipeline after spawning the insert task.
+    pipeline.start().await.unwrap();
+
+    // Wait for all rows to be processed (either as table copy or streaming inserts).
+    let all_events_notify = destination
+        .wait_for_all_events(vec![
+            (
+                EventType::Insert,
+                database_schema.users_schema().id,
+                rows_to_insert as u64,
+            ),
+            (
+                EventType::Insert,
+                database_schema.orders_schema().id,
+                rows_to_insert as u64,
+            ),
+        ])
+        .await;
+
+    all_events_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Wait for the insert task to complete and retrieve the database connection.
+    let _duplicate_database = insert_handle.await.unwrap();
+
+    // Validate that both tables are in Ready state.
+    let states = store.get_table_replication_states().await;
+    assert!(
+        states.contains_key(&database_schema.users_schema().id),
+        "Users table state should exist"
+    );
+    assert!(
+        states.contains_key(&database_schema.orders_schema().id),
+        "Orders table state should exist"
+    );
+
+    // Validate that the sum of table rows (from copy) + insert events (from streaming) equals expected count.
+    let table_rows = destination.get_table_rows().await;
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+
+    let users_copied_rows = table_rows
+        .get(&database_schema.users_schema().id)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    let users_insert_events = grouped_events
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .map(|e| e.len())
+        .unwrap_or(0);
+    let total_users = users_copied_rows + users_insert_events;
+
+    let orders_copied_rows = table_rows
+        .get(&database_schema.orders_schema().id)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    let orders_insert_events = grouped_events
+        .get(&(EventType::Insert, database_schema.orders_schema().id))
+        .map(|e| e.len())
+        .unwrap_or(0);
+    let total_orders = orders_copied_rows + orders_insert_events;
+
+    assert_eq!(
+        total_users, rows_to_insert,
+        "Expected {} total users (copied: {}, streamed: {})",
+        rows_to_insert, users_copied_rows, users_insert_events
+    );
+    assert_eq!(
+        total_orders, rows_to_insert,
+        "Expected {} total orders (copied: {}, streamed: {})",
+        rows_to_insert, orders_copied_rows, orders_insert_events
+    );
+}
