@@ -1570,31 +1570,23 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
         // Update rows 1-5 for both tables.
         for i in 1..=rows_to_update {
             duplicate_database
-                .client
-                .as_ref()
-                .unwrap()
-                .execute(
-                    &format!(
-                        "update {} set age = age + 100 where id = {}",
-                        users_table_name.as_quoted_identifier(),
-                        i
-                    ),
-                    &[],
+                .update_with_expressions(
+                    users_table_name.clone(),
+                    &["age = age + 100"],
+                    &["id"],
+                    &[&i.to_string()],
+                    " and ",
                 )
                 .await
                 .unwrap();
 
             duplicate_database
-                .client
-                .as_ref()
-                .unwrap()
-                .execute(
-                    &format!(
-                        "update {} set description = description || '_updated' where id = {}",
-                        orders_table_name.as_quoted_identifier(),
-                        i
-                    ),
-                    &[],
+                .update_with_expressions(
+                    orders_table_name.clone(),
+                    &["description = description || '_updated'"],
+                    &["id"],
+                    &[&i.to_string()],
+                    " and ",
                 )
                 .await
                 .unwrap();
