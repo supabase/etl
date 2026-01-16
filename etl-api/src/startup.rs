@@ -104,30 +104,41 @@ impl Application {
             key,
         };
 
-        let kube_client = match Environment::load()? {
-            Environment::Staging | Environment::Prod => kube::Client::try_default().await?,
-            Environment::Dev => {
-                let options = KubeConfigOptions {
-                    context: Some("orbstack".to_string()),
-                    cluster: Some("orbstack".to_string()),
-                    user: Some("orbstack".to_string()),
-                };
-                let kube_config = kube::config::Config::from_kubeconfig(&options).await?;
-                let kube_client: kube::Client = kube_config.try_into()?;
-
-                test_orbstack_connection(&kube_client).await?;
-
-                kube_client
+        // Try to create Kubernetes client, but continue without it if unavailable
+        let kube_client_result = match Environment::load() {
+            Ok(Environment::Staging) | Ok(Environment::Prod) => {
+                kube::Client::try_default().await.ok()
             }
+            Ok(Environment::Dev) => {
+                async {
+                    let options = KubeConfigOptions {
+                        context: Some("orbstack".to_string()),
+                        cluster: Some("orbstack".to_string()),
+                        user: Some("orbstack".to_string()),
+                    };
+                    let kube_config = kube::config::Config::from_kubeconfig(&options).await.ok()?;
+                    let kube_client: kube::Client = kube_config.try_into().ok()?;
+                    test_orbstack_connection(&kube_client).await.ok()?;
+                    Some(kube_client)
+                }
+                .await
+            }
+            Err(_) => None,
         };
 
-        let k8s_client = match HttpK8sClient::new(kube_client).await {
-            Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "failed to create kubernetes client, running without kubernetes support"
-                );
+        let k8s_client = match kube_client_result {
+            Some(client) => match HttpK8sClient::new(client).await {
+                Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "failed to create kubernetes client, running without kubernetes support"
+                    );
+                    None
+                }
+            },
+            None => {
+                warn!("kubernetes client unavailable, running without kubernetes support");
                 None
             }
         };
