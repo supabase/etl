@@ -78,10 +78,15 @@ const REPLICATOR_MEMORY_REQUEST_STAGING: i32 = 250;
 /// Replicator CPU request tuned for `c8gn.medium` instances in staging.
 const REPLICATOR_CPU_REQUEST_STAGING: i32 = 125;
 
-/// Vector memory request for init container.
-const VECTOR_MEMORY_REQUEST: i32 = 100;
-/// Vector CPU request for init container.
-const VECTOR_CPU_REQUEST: i32 = 50;
+/// Vector memory request tuned for staging environments.
+const VECTOR_MEMORY_REQUEST_STAGING: i32 = 192;
+/// Vector CPU request tuned for staging environments.
+const VECTOR_CPU_REQUEST_STAGING: i32 = 75;
+
+/// Vector memory request tuned for production environments.
+const VECTOR_MEMORY_REQUEST_PROD: i32 = 256;
+/// Vector CPU request tuned for production environments.
+const VECTOR_CPU_REQUEST_PROD: i32 = 100;
 
 /// Memory limit multiplier (request × 1.2 = limit).
 ///
@@ -119,13 +124,18 @@ impl ReplicatorResourceConfig {
             ),
         };
 
+        let (vector_memory_request, vector_cpu_request) = match environment {
+            Environment::Prod => (VECTOR_MEMORY_REQUEST_PROD, VECTOR_CPU_REQUEST_PROD),
+            _ => (VECTOR_MEMORY_REQUEST_STAGING, VECTOR_CPU_REQUEST_STAGING),
+        };
+
         let replicator_memory_limit =
             ((replicator_memory_request as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
         let replicator_cpu_limit =
             ((replicator_cpu_request as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
         let vector_memory_limit =
-            ((VECTOR_MEMORY_REQUEST as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
-        let vector_cpu_limit = ((VECTOR_CPU_REQUEST as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
+            ((vector_memory_request as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
+        let vector_cpu_limit = ((vector_cpu_request as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
 
         Ok(Self {
             replicator_memory_limit: format!("{replicator_memory_limit}Mi"),
@@ -133,9 +143,9 @@ impl ReplicatorResourceConfig {
             replicator_cpu_limit: format!("{replicator_cpu_limit}m"),
             replicator_cpu_request: format!("{replicator_cpu_request}m"),
             vector_memory_limit: format!("{vector_memory_limit}Mi"),
-            vector_memory_request: format!("{VECTOR_MEMORY_REQUEST}Mi"),
+            vector_memory_request: format!("{vector_memory_request}Mi"),
             vector_cpu_limit: format!("{vector_cpu_limit}m"),
-            vector_cpu_request: format!("{VECTOR_CPU_REQUEST}m"),
+            vector_cpu_request: format!("{vector_cpu_request}m"),
         })
     }
 }
