@@ -345,6 +345,8 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         id: 1,
         publication_name: args.publication_name,
         pg_connection: pg_connection_config,
+        primary_connection: None,
+        heartbeat: None,
         batch: BatchConfig {
             max_size: args.batch_max_size,
             max_fill_ms: args.batch_max_fill_ms,

@@ -15,6 +15,13 @@ pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
 
+// Heartbeat metrics.
+pub const ETL_HEARTBEAT_EMISSIONS_TOTAL: &str = "etl_heartbeat_emissions_total";
+pub const ETL_HEARTBEAT_FAILURES_TOTAL: &str = "etl_heartbeat_failures_total";
+pub const ETL_HEARTBEAT_CONSECUTIVE_FAILURES: &str = "etl_heartbeat_consecutive_failures";
+pub const ETL_HEARTBEAT_CONNECTION_ATTEMPTS_TOTAL: &str = "etl_heartbeat_connection_attempts_total";
+pub const ETL_HEARTBEAT_LAST_EMISSION_TIMESTAMP: &str = "etl_heartbeat_last_emission_timestamp";
+
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
 /// Label key for the ETL worker type ("table_sync" or "apply").
@@ -95,6 +102,37 @@ pub(crate) fn register_metrics() {
             ETL_STATUS_UPDATES_SKIPPED_TOTAL,
             Unit::Count,
             "Total number of status updates skipped due to throttling, labeled by pipeline_id"
+        );
+
+        // Heartbeat metrics.
+        describe_counter!(
+            ETL_HEARTBEAT_EMISSIONS_TOTAL,
+            Unit::Count,
+            "Total number of heartbeat messages emitted to the primary"
+        );
+
+        describe_counter!(
+            ETL_HEARTBEAT_FAILURES_TOTAL,
+            Unit::Count,
+            "Total number of heartbeat emission failures"
+        );
+
+        describe_gauge!(
+            ETL_HEARTBEAT_CONSECUTIVE_FAILURES,
+            Unit::Count,
+            "Current number of consecutive heartbeat failures"
+        );
+
+        describe_counter!(
+            ETL_HEARTBEAT_CONNECTION_ATTEMPTS_TOTAL,
+            Unit::Count,
+            "Total number of heartbeat connection attempts to the primary"
+        );
+
+        describe_gauge!(
+            ETL_HEARTBEAT_LAST_EMISSION_TIMESTAMP,
+            Unit::Seconds,
+            "Unix timestamp of the last successful heartbeat emission"
         );
     });
 }
