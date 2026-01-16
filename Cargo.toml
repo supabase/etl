@@ -82,7 +82,7 @@ tracing-appender = { version = "0.2.3", default-features = false }
 tracing-log = { version = "0.2.0", default-features = false }
 tracing-subscriber = { version = "0.3.19", default-features = false }
 utoipa = { version = "5.4.0", default-features = false }
-utoipa-swagger-ui = { version = "9.0.2", default-features = false }
+utoipa-swagger-ui = { version = "9.0.2", default-features = false, features = ["vendored"] }
 uuid = { version = "1.17.0", default-features = false }
 x509-cert = { version = "0.2.2", default-features = false }
 
