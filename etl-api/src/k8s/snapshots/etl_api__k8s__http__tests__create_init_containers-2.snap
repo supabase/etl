@@ -19,12 +19,12 @@ expression: node_selector
     "name": "abcdefghijklmnopqrst-42-vector",
     "resources": {
       "limits": {
-        "cpu": "100m",
-        "memory": "120Mi"
+        "cpu": "150m",
+        "memory": "230Mi"
       },
       "requests": {
-        "cpu": "50m",
-        "memory": "100Mi"
+        "cpu": "75m",
+        "memory": "192Mi"
       }
     },
     "restartPolicy": "Always",
