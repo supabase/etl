@@ -1,17 +1,15 @@
 use etl_postgres::types::TableId;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
-use tracing::{debug, warn};
+use tracing::debug;
 
-use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
-use crate::workers::base::{Worker, WorkerHandle};
-use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerHandle, TableSyncWorkerState};
+use crate::workers::base::WorkerHandle;
+use crate::workers::table_sync::{TableSyncWorkerHandle, TableSyncWorkerState};
 
 /// Internal state for [`TableSyncWorkerPool`].
 #[derive(Debug)]
@@ -35,35 +33,6 @@ impl TableSyncWorkerPoolInner {
             finished: HashMap::new(),
             pool_update: Arc::new(Notify::new()),
         }
-    }
-
-    /// Starts a new table sync worker and adds it to the active worker pool.
-    ///
-    /// This method initiates the worker's synchronization process and tracks it
-    /// in the pool. If a worker for the same table already exists, the operation
-    /// is skipped to prevent conflicts.
-    ///
-    /// Returns `Ok(true)` if the worker was successfully started, `Ok(false)` if
-    /// a worker for the table already exists.
-    pub async fn start_worker<S, D>(&mut self, worker: TableSyncWorker<S, D>) -> EtlResult<bool>
-    where
-        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-        D: Destination + Clone + Send + Sync + 'static,
-    {
-        let table_id = worker.table_id();
-        if self.active.contains_key(&table_id) {
-            warn!(%table_id, "worker already exists in pool");
-            return Ok(false);
-        }
-
-        let handle = worker.start().await?;
-        self.active.insert(table_id, handle);
-
-        // Metric removed: active workers gauge is omitted.
-
-        debug!(%table_id, "added worker to pool");
-
-        Ok(true)
     }
 
     /// Marks a worker as finished and moves it from active to finished state.
@@ -106,10 +75,8 @@ impl TableSyncWorkerPoolInner {
     ///
     /// Returns `true` if the handle was inserted, `false` if a worker for the table already exists.
     pub fn try_insert_handle(&mut self, table_id: TableId, handle: TableSyncWorkerHandle) -> bool {
-        use std::collections::hash_map::Entry;
-
-        if let Entry::Vacant(e) = self.active.entry(table_id) {
-            e.insert(handle);
+        if let Entry::Vacant(entry) = self.active.entry(table_id) {
+            entry.insert(handle);
             debug!(%table_id, "added worker to pool");
             true
         } else {

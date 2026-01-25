@@ -1203,7 +1203,9 @@ where
 
         match worker_state_guard.replication_phase() {
             TableReplicationPhase::SyncWait { lsn: snapshot_lsn } => {
-                // Trigger catchup: SyncWait → Catchup.
+                // The catchup lsn is determined via max since it could be that the table sync worker
+                // is started from a lsn which is far in the future compared to where the apply worker
+                // is.
                 let catchup_lsn = snapshot_lsn.max(current_lsn);
 
                 info!(
@@ -1319,7 +1321,7 @@ async fn process_syncing_tables_after_commit_table_sync<S>(
 
 /// Processes syncing tables after batch flush (apply worker).
 ///
-/// Handles SyncWait → Catchup, SyncDone → Ready transitions, and spawns new workers.
+/// Handles `SyncDone → Ready` transitions and spawns new workers.
 async fn process_syncing_tables_after_batch_apply<S, D>(
     ctx: &mut ApplyWorkerContext<S, D>,
     current_lsn: PgLsn,
@@ -1354,7 +1356,7 @@ where
 
 /// Processes a single syncing table after batch flush (apply worker).
 ///
-/// Handles SyncWait → Catchup, SyncDone → Ready transitions, and spawns new workers.
+/// Handles `SyncDone → Ready` transitions and spawns new workers.
 async fn process_single_syncing_table_after_batch_apply<S, D>(
     ctx: &mut ApplyWorkerContext<S, D>,
     table_id: TableId,
@@ -1498,7 +1500,9 @@ where
 
         match worker_state_guard.replication_phase() {
             TableReplicationPhase::SyncWait { lsn: snapshot_lsn } => {
-                // Trigger catchup: SyncWait → Catchup (only when batch is empty).
+                // The catchup lsn is determined via max since it could be that the table sync worker
+                // is started from a lsn which is far in the future compared to where the apply worker
+                // is.
                 let catchup_lsn = snapshot_lsn.max(current_lsn);
 
                 info!(
