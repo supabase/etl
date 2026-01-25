@@ -512,8 +512,6 @@ where
         }
     }
 
-    // Message Handling
-
     /// Handles a replication message and flushes the batch if necessary.
     async fn handle_replication_message_and_flush(
         &mut self,
@@ -638,8 +636,9 @@ where
                     .update_last_received_lsn(end_lsn);
 
                 debug!(
-                    message = ?message,
-                    "handling logical replication keep alive message",
+                    wal_end = %end_lsn,
+                    reply_requested = message.reply() == 1,
+                    "received keep alive",
                 );
 
                 events_stream
@@ -975,8 +974,6 @@ where
         Ok(HandleMessageResult::return_event(Event::Truncate(event)))
     }
 
-    // Worker-Specific Methods: should_apply_changes
-
     /// Determines whether changes should be applied for a given table.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
@@ -995,8 +992,6 @@ where
         }
     }
 
-    // Worker-Specific Methods: process_syncing_tables_after_commit
-
     /// Processes syncing tables after a commit message.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
@@ -1011,8 +1006,6 @@ where
             }
         }
     }
-
-    // Worker-Specific Methods: process_syncing_tables_after_batch
 
     /// Processes syncing tables after a batch has been flushed.
     ///
@@ -1042,8 +1035,6 @@ where
             }
         }
     }
-
-    // Worker-Specific Methods: process_syncing_tables_outside_transaction
 
     /// Processes syncing tables outside a transaction.
     ///
@@ -1077,8 +1068,6 @@ where
             }
         }
     }
-
-    // Worker-Specific Methods: mark_table_errored
 
     /// Marks a table as errored.
     ///
@@ -1384,11 +1373,15 @@ where
     if let Some(worker_state) = worker_state {
         let worker_state_guard = worker_state.lock().await;
 
-        if let TableReplicationPhase::SyncDone { lsn } = worker_state_guard.replication_phase() {
-            if current_lsn >= lsn {
+        if let TableReplicationPhase::SyncDone { lsn: sync_done_lsn } =
+            worker_state_guard.replication_phase()
+        {
+            if current_lsn >= sync_done_lsn {
                 info!(
                     %table_id,
-                    "table ready, events will be processed by apply worker",
+                    %sync_done_lsn,
+                    %current_lsn,
+                    "table transitioned to ready",
                 );
 
                 ctx.store
@@ -1399,11 +1392,13 @@ where
     } else {
         // No active worker exists.
         match table_replication_phase {
-            TableReplicationPhase::SyncDone { lsn } => {
-                if current_lsn >= lsn {
+            TableReplicationPhase::SyncDone { lsn: sync_done_lsn } => {
+                if current_lsn >= sync_done_lsn {
                     info!(
                         %table_id,
-                        "table ready, events will be processed by apply worker",
+                        %sync_done_lsn,
+                        %current_lsn,
+                        "table transitioned to ready",
                     );
 
                     ctx.store
@@ -1559,11 +1554,13 @@ where
 
                 info!(%table_id, "table sync worker finished syncing");
             }
-            TableReplicationPhase::SyncDone { lsn } => {
-                if current_lsn >= lsn {
+            TableReplicationPhase::SyncDone { lsn: sync_done_lsn } => {
+                if current_lsn >= sync_done_lsn {
                     info!(
                         %table_id,
-                        "table ready, events will be processed by apply worker",
+                        %sync_done_lsn,
+                        %current_lsn,
+                        "table transitioned to ready",
                     );
 
                     ctx.store
@@ -1576,11 +1573,13 @@ where
     } else {
         // No active worker exists.
         match table_replication_phase {
-            TableReplicationPhase::SyncDone { lsn } => {
-                if current_lsn >= lsn {
+            TableReplicationPhase::SyncDone { lsn: sync_done_lsn } => {
+                if current_lsn >= sync_done_lsn {
                     info!(
                         %table_id,
-                        "table ready, events will be processed by apply worker",
+                        %sync_done_lsn,
+                        %current_lsn,
+                        "table transitioned to ready",
                     );
 
                     ctx.store
