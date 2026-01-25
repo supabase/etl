@@ -3,10 +3,11 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::shared::{
-    PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError, batch::BatchConfig,
+    HeartbeatConfig, PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError,
+    batch::BatchConfig,
 };
 
-/// c copy should be performed.Selection rules for tables participating in replication.
+/// Selection rules for tables participating in replication.
 ///
 /// Controls which tables are eligible for initial table copy and streaming.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -63,6 +64,15 @@ pub struct PipelineConfig {
     /// The connection configuration for the Postgres instance to which the pipeline connects for
     /// replication.
     pub pg_connection: PgConnectionConfig,
+    /// Optional connection configuration for the primary database when replicating from a read replica.
+    ///
+    /// When set, enables replica mode where heartbeat messages are sent to the primary
+    /// to keep the replication slot active.
+    pub primary_connection: Option<PgConnectionConfig>,
+    /// Optional heartbeat configuration for replica mode.
+    ///
+    /// Only used when `primary_connection` is set. If not provided, default values are used.
+    pub heartbeat: Option<HeartbeatConfig>,
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
@@ -90,6 +100,26 @@ impl PipelineConfig {
     /// Default maximum number of concurrent table sync workers.
     pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
 
+    /// Returns `true` if the pipeline is configured for replica mode.
+    ///
+    /// Replica mode is enabled when `primary_connection` is set, indicating
+    /// that replication is from a read replica and heartbeat messages should
+    /// be sent to the primary.
+    pub fn is_replica_mode(&self) -> bool {
+        self.primary_connection.is_some()
+    }
+
+    /// Returns the heartbeat configuration, using defaults if not explicitly set.
+    ///
+    /// Returns `None` if not in replica mode (no `primary_connection`).
+    pub fn heartbeat_config(&self) -> Option<HeartbeatConfig> {
+        if self.is_replica_mode() {
+            Some(self.heartbeat.clone().unwrap_or_default())
+        } else {
+            None
+        }
+    }
+
     /// Validates pipeline configuration settings.
     ///
     /// Checks batch configuration and ensures worker counts and retry attempts are non-zero.
@@ -108,6 +138,13 @@ impl PipelineConfig {
                 field: "table_error_retry_max_attempts".to_string(),
                 constraint: "must be greater than 0".to_string(),
             });
+        }
+
+        // Only validate heartbeat config when replica mode is enabled (primary_connection is set)
+        if self.primary_connection.is_some() {
+            if let Some(ref heartbeat) = self.heartbeat {
+                heartbeat.validate()?;
+            }
         }
 
         Ok(())
@@ -141,6 +178,10 @@ pub struct PipelineConfigWithoutSecrets {
     /// The connection configuration for the Postgres instance to which the pipeline connects for
     /// replication.
     pub pg_connection: PgConnectionConfigWithoutSecrets,
+    /// Optional connection configuration for the primary database when replicating from a read replica.
+    pub primary_connection: Option<PgConnectionConfigWithoutSecrets>,
+    /// Optional heartbeat configuration for replica mode.
+    pub heartbeat: Option<HeartbeatConfig>,
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
@@ -164,6 +205,8 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             id: value.id,
             publication_name: value.publication_name,
             pg_connection: value.pg_connection.into(),
+            primary_connection: value.primary_connection.map(Into::into),
+            heartbeat: value.heartbeat,
             batch: value.batch,
             table_error_retry_delay_ms: value.table_error_retry_delay_ms,
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
