@@ -7,14 +7,16 @@ use utoipa::ToSchema;
 
 use crate::configs::{log::LogLevel, store::Store};
 
-const DEFAULT_BATCH_MAX_SIZE: usize = 100000;
-const DEFAULT_BATCH_MAX_FILL_MS: u64 = 10000;
-const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
-const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: u32 = 5;
-const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
-
 const fn default_table_error_retry_max_attempts() -> u32 {
-    DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
+    PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
+}
+
+const fn default_table_error_retry_delay_ms() -> u64 {
+    PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
+}
+
+const fn default_max_table_sync_workers() -> u16 {
+    PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
 }
 
 /// Batch processing configuration for pipelines.
@@ -151,9 +153,11 @@ pub struct StoredPipelineConfig {
     #[serde(default)]
     pub replication_slot: ReplicationSlotConfig,
     pub batch: BatchConfig,
+    #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
     #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
+    #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
@@ -220,12 +224,12 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
         let batch = value
             .batch
             .map(|b| BatchConfig {
-                max_size: b.max_size.unwrap_or(DEFAULT_BATCH_MAX_SIZE),
-                max_fill_ms: b.max_fill_ms.unwrap_or(DEFAULT_BATCH_MAX_FILL_MS),
+                max_size: b.max_size.unwrap_or(BatchConfig::DEFAULT_MAX_SIZE),
+                max_fill_ms: b.max_fill_ms.unwrap_or(BatchConfig::DEFAULT_MAX_FILL_MS),
             })
             .unwrap_or(BatchConfig {
-                max_size: DEFAULT_BATCH_MAX_SIZE,
-                max_fill_ms: DEFAULT_BATCH_MAX_FILL_MS,
+                max_size: BatchConfig::DEFAULT_MAX_SIZE,
+                max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
             });
 
         Self {
@@ -234,13 +238,13 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
             batch,
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
-                .unwrap_or(DEFAULT_TABLE_ERROR_RETRY_DELAY_MS),
+                .unwrap_or(PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS),
             table_error_retry_max_attempts: value
                 .table_error_retry_max_attempts
-                .unwrap_or(DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS),
+                .unwrap_or(PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS),
             max_table_sync_workers: value
                 .max_table_sync_workers
-                .unwrap_or(DEFAULT_MAX_TABLE_SYNC_WORKERS),
+                .unwrap_or(PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS),
             table_sync_copy: value.table_sync_copy.unwrap_or_default(),
             log_level: value.log_level,
         }
@@ -321,19 +325,19 @@ mod tests {
 
         let stored: StoredPipelineConfig = full_config.into();
 
-        assert_eq!(stored.batch.max_size, DEFAULT_BATCH_MAX_SIZE);
-        assert_eq!(stored.batch.max_fill_ms, DEFAULT_BATCH_MAX_FILL_MS);
+        assert_eq!(stored.batch.max_size, BatchConfig::DEFAULT_MAX_SIZE);
+        assert_eq!(stored.batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
         assert_eq!(
             stored.table_error_retry_delay_ms,
-            DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
+            PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
         );
         assert_eq!(
             stored.table_error_retry_max_attempts,
-            DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
+            PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
         );
         assert_eq!(
             stored.max_table_sync_workers,
-            DEFAULT_MAX_TABLE_SYNC_WORKERS
+            PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
         );
     }
 

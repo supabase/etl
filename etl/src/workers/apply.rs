@@ -201,14 +201,14 @@ async fn get_start_lsn<S: StateStore>(
     // When creating a new apply worker slot, all tables must be in the `Init` state. If any table
     // is not in Init state, it means the table was synchronized based on another apply worker
     // lineage (different slot) which will break correctness.
-    if let GetOrCreateSlotResult::CreateSlot(_) = &slot {
-        if let Err(err) = validate_tables_in_init_state(store).await {
-            // Delete the slot before failing, otherwise the system will restart and skip validation
-            // since the slot will already exist.
-            replication_client.delete_slot(&slot_name).await?;
+    if let GetOrCreateSlotResult::CreateSlot(_) = &slot
+        && let Err(err) = validate_tables_in_init_state(store).await
+    {
+        // Delete the slot before failing, otherwise the system will restart and skip validation
+        // since the slot will already exist.
+        replication_client.delete_slot(&slot_name).await?;
 
-            return Err(err);
-        }
+        return Err(err);
     }
 
     // We return the LSN from which we will start streaming events.
@@ -371,17 +371,23 @@ where
                             .await?;
                     }
                 }
-                TableReplicationPhase::SyncWait => {
-                    // Transition worker from `SyncWait` to `Catchup`.
+                TableReplicationPhase::SyncWait { lsn: snapshot_lsn } => {
+                    // Following PostgreSQL's pattern, we use max(snapshot_lsn, current_lsn) to ensure
+                    // no data loss. If the apply worker is behind the snapshot LSN, we must catch up
+                    // to the snapshot LSN to avoid missing transactions between current_lsn and snapshot_lsn.
+                    let catchup_lsn = snapshot_lsn.max(current_lsn);
+
                     info!(
                         %table_id,
                         %current_lsn,
+                        %snapshot_lsn,
+                        %catchup_lsn,
                         "table sync worker is waiting to catchup, starting catchup",
                     );
 
                     worker_state_guard
                         .set_and_store(
-                            TableReplicationPhase::Catchup { lsn: current_lsn },
+                            TableReplicationPhase::Catchup { lsn: catchup_lsn },
                             &self.store,
                         )
                         .await?;

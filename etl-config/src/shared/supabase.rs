@@ -13,19 +13,16 @@ pub struct SupabaseConfig {
     ///
     /// This URL is used to send error notifications to the Supabase API.
     /// If not provided, error notifications will not be sent.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_url: Option<String>,
     /// Supabase API key for authentication.
     ///
     /// This API key is used to authenticate requests to the Supabase API.
     /// Required when `api_url` is provided.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<SecretString>,
     /// Optional ConfigCat SDK key for feature flag integration used at Supabase.
     ///
     /// If provided, enables ConfigCat feature flag evaluation.
     /// If `None`, the replicator operates without feature flag support.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub configcat_sdk_key: Option<String>,
 }
 

@@ -1187,7 +1187,7 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .unwrap();
     assert_eq!(count, 1);
 
-    // Verify table schema was deleted
+    // Verify table schema was preserved (schemas are no longer deleted during reset)
     let schema_count_after: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
     )
@@ -1196,9 +1196,9 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(schema_count_after, 0);
+    assert_eq!(schema_count_after, 1);
 
-    // Verify table mapping was NOT deleted (kept for truncation on restart)
+    // Verify table mapping was also preserved
     let mapping_count_after: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
     )
@@ -1213,7 +1213,7 @@ async fn rollback_tables_with_full_reset_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_to_init_cleans_up_schemas_but_keeps_mappings() {
+async fn rollback_to_init_keeps_schemas_and_mappings() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1274,7 +1274,7 @@ async fn rollback_to_init_cleans_up_schemas_but_keeps_mappings() {
         SimpleTableReplicationState::Queued
     ));
 
-    // Verify table schema was deleted (because we rolled back to init)
+    // Verify table schema was preserved (schemas are no longer deleted during rollback)
     let schema_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
     )
@@ -1283,9 +1283,9 @@ async fn rollback_to_init_cleans_up_schemas_but_keeps_mappings() {
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(schema_count, 0);
+    assert_eq!(schema_count, 1);
 
-    // Verify table mapping was NOT deleted (kept for truncation on restart)
+    // Verify table mapping was also preserved
     let mapping_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
     )

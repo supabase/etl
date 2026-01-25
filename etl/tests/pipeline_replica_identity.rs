@@ -4,7 +4,7 @@ use etl::destination::memory::MemoryDestination;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::materialize::{FromTableRow, materialize_events};
-use etl::test_utils::notify::NotifyingStore;
+use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::types::{Cell, EventType, PipelineId};

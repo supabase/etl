@@ -10,7 +10,10 @@ use crate::configs::encryption::{
 };
 use crate::configs::store::Store;
 
-const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 8;
+/// Returns the default maximum concurrent streams for BigQuery destinations.
+pub const fn default_max_concurrent_streams() -> usize {
+    DestinationConfig::DEFAULT_MAX_CONCURRENT_STREAMS
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -106,6 +109,7 @@ pub enum StoredDestinationConfig {
         dataset_id: String,
         service_account_key: SerializableSecretString,
         max_staleness_mins: Option<u16>,
+        #[serde(default = "default_max_concurrent_streams")]
         max_concurrent_streams: usize,
     },
     Iceberg {
@@ -189,7 +193,7 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 max_concurrent_streams: max_concurrent_streams
-                    .unwrap_or(DEFAULT_MAX_CONCURRENT_STREAMS),
+                    .unwrap_or(DestinationConfig::DEFAULT_MAX_CONCURRENT_STREAMS),
             },
             FullApiDestinationConfig::Iceberg { config } => match config {
                 FullApiIcebergConfig::Supabase {
@@ -925,7 +929,7 @@ mod tests {
                 assert_eq!(p1_max_concurrent_streams, None);
                 assert_eq!(
                     p2_max_concurrent_streams,
-                    Some(DEFAULT_MAX_CONCURRENT_STREAMS)
+                    Some(DestinationConfig::DEFAULT_MAX_CONCURRENT_STREAMS)
                 );
             }
             _ => panic!("Config types don't match"),

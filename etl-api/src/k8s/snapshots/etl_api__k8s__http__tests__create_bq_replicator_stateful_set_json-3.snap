@@ -144,12 +144,12 @@ expression: stateful_set_json
             "name": "abcdefghijklmnopqrst-42-vector",
             "resources": {
               "limits": {
-                "cpu": "100m",
-                "memory": "120Mi"
+                "cpu": "200m",
+                "memory": "307Mi"
               },
               "requests": {
-                "cpu": "50m",
-                "memory": "100Mi"
+                "cpu": "100m",
+                "memory": "256Mi"
               }
             },
             "restartPolicy": "Always",

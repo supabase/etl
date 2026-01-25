@@ -410,22 +410,6 @@ pub enum RollbackType {
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct RollbackTableStateRequest {
-    #[schema(example = 1)]
-    pub table_id: u32,
-    pub rollback_type: RollbackType,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct RollbackTableStateResponse {
-    #[schema(example = 1)]
-    pub pipeline_id: i64,
-    #[schema(example = 1)]
-    pub table_id: u32,
-    pub new_state: SimpleTableReplicationState,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
 pub enum RollbackTablesTarget {
@@ -1128,134 +1112,6 @@ pub async fn get_pipeline_replication_status(
 }
 
 #[utoipa::path(
-    summary = "Roll back table state (deprecated)",
-    description = "Deprecated: Use POST /pipelines/{pipeline_id}/rollback-tables instead. Rolls back the replication state of a specific table in the pipeline.",
-    request_body = RollbackTableStateRequest,
-    params(
-        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
-        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
-    ),
-    responses(
-        (status = 200, description = "Table state rolled back successfully", body = RollbackTableStateResponse),
-        (status = 400, description = "Bad request – state not rollbackable", body = ErrorMessage),
-        (status = 404, description = "Pipeline or table not found", body = ErrorMessage),
-        (status = 500, description = "Internal server error", body = ErrorMessage)
-    ),
-    tag = "Pipelines"
-)]
-#[post("/pipelines/{pipeline_id}/rollback-table-state")]
-pub async fn rollback_table_state(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    encryption_key: Data<EncryptionKey>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
-    pipeline_id: Path<i64>,
-    rollback_request: Json<RollbackTableStateRequest>,
-) -> Result<impl Responder, PipelineError> {
-    let tenant_id = extract_tenant_id(&req)?;
-    let pipeline_id = pipeline_id.into_inner();
-    let table_id = rollback_request.table_id;
-    let rollback_type = rollback_request.rollback_type;
-
-    let mut txn = pool.begin().await?;
-
-    // Read the pipeline to ensure it exists and get the source configuration
-    let pipeline = db::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
-        .await?
-        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
-
-    // Get the source configuration
-    let source = db::sources::read_source(
-        txn.deref_mut(),
-        tenant_id,
-        pipeline.source_id,
-        &encryption_key,
-    )
-    .await?
-    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
-
-    txn.commit().await?;
-
-    // Connect to the source database to perform rollback
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
-        .await?;
-    let source_pool =
-        connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
-            .await?;
-
-    // Start transaction for all source database operations
-    let mut source_txn = source_pool.begin().await?;
-
-    // Ensure ETL tables exist in the source DB
-    if !health::etl_tables_present(source_txn.deref_mut()).await? {
-        return Err(PipelineError::EtlStateNotInitialized);
-    }
-
-    // First, check current state to ensure it's rollbackable (manual retry policy)
-    let state_rows =
-        state::get_table_replication_state_rows(source_txn.deref_mut(), pipeline_id).await?;
-    let current_row = state_rows
-        .into_iter()
-        .find(|row| row.table_id.0 == table_id)
-        .ok_or(PipelineError::MissingTableReplicationState)?;
-
-    // Check if the current state is rollbackable (has ManualRetry policy)
-    let current_state = current_row
-        .deserialize_metadata()
-        .map_err(PipelineError::InvalidTableReplicationState)?
-        .ok_or(PipelineError::MissingTableReplicationState)?;
-    if !current_state.supports_manual_retry() {
-        return Err(PipelineError::NotRollbackable(
-            "Only manual retry errors can be rolled back".to_string(),
-        ));
-    }
-
-    let new_state_row = match rollback_type {
-        RollbackType::Individual => {
-            let Some(new_state_row) = state::rollback_replication_state(
-                source_txn.deref_mut(),
-                pipeline_id,
-                TableId::new(table_id),
-            )
-            .await?
-            else {
-                return Err(PipelineError::NotRollbackable(
-                    "No previous state to rollback to".to_string(),
-                ));
-            };
-
-            new_state_row
-        }
-        RollbackType::Full => {
-            state::reset_replication_state(
-                source_txn.deref_mut(),
-                pipeline_id,
-                TableId::new(table_id),
-            )
-            .await?
-        }
-    };
-
-    source_txn.commit().await?;
-
-    // We extract the state from the metadata of the row
-    let new_state = new_state_row
-        .deserialize_metadata()
-        .map_err(PipelineError::InvalidTableReplicationState)?
-        .ok_or(PipelineError::MissingTableReplicationState)?;
-
-    let response = RollbackTableStateResponse {
-        pipeline_id,
-        table_id,
-        new_state: new_state.into(),
-    };
-
-    Ok(Json(response))
-}
-
-#[utoipa::path(
     summary = "Roll back tables",
     description = "Rolls back the replication state of tables in the pipeline. Supports rolling back a single table, all errored tables or all tables.",
     request_body = RollbackTablesRequest,
@@ -1338,10 +1194,10 @@ pub async fn rollback_tables(
             // All errored tables mode, find all tables in errored state
             let mut errored_table_ids = Vec::new();
             for row in &state_rows {
-                if let Ok(Some(state)) = row.deserialize_metadata() {
-                    if state.is_errored() {
-                        errored_table_ids.push(row.table_id.0);
-                    }
+                if let Ok(Some(state)) = row.deserialize_metadata()
+                    && state.is_errored()
+                {
+                    errored_table_ids.push(row.table_id.0);
                 }
             }
 

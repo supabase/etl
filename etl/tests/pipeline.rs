@@ -2,10 +2,10 @@
 
 use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
-use etl::state::table::TableReplicationPhaseType;
+use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
-use etl::test_utils::notify::NotifyingStore;
+use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{
     create_pipeline, create_pipeline_with_batch_config, create_pipeline_with_table_sync_copy_config,
 };
@@ -21,7 +21,7 @@ use etl_config::shared::{BatchConfig, TableSyncCopyConfig};
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
-use etl_postgres::types::ColumnSchema;
+use etl_postgres::types::{ColumnSchema, TableId};
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
@@ -521,120 +521,134 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
     assert!(table_schemas.contains_key(&table_2_id));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn table_sync_copy_config_variants_change_initial_copy_behavior() {
+async fn run_table_sync_copy_case<F>(
+    table_sync_copy_fn: F,
+    expected_users_copied_rows: usize,
+    expected_orders_copied_rows: usize,
+) where
+    F: FnOnce(TableId, TableId) -> TableSyncCopyConfig,
+{
     init_test_tracing();
 
-    #[derive(Debug)]
-    enum TableCopyCase {
-        IncludeAll,
-        SkipAll,
-        IncludeOnly,
-        SkipOnly,
-    }
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
-    for table_copy_case in [
-        TableCopyCase::IncludeAll,
-        TableCopyCase::SkipAll,
-        TableCopyCase::IncludeOnly,
-        TableCopyCase::SkipOnly,
-    ] {
-        let mut database = spawn_source_database().await;
-        let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+    let users_table_id = database_schema.users_schema().id;
+    let orders_table_id = database_schema.orders_schema().id;
+    let users_table_name = database_schema.users_schema().name.clone();
+    let orders_table_name = database_schema.orders_schema().name.clone();
 
-        let users_table_id = database_schema.users_schema().id;
-        let orders_table_id = database_schema.orders_schema().id;
-        let users_table_name = database_schema.users_schema().name.clone();
-        let orders_table_name = database_schema.orders_schema().name.clone();
+    // We insert a single user and order.
+    insert_users_data(&mut database, &users_table_name, 0..=0).await;
+    insert_orders_data(&mut database, &orders_table_name, 0..=0).await;
 
-        // We insert a single user and order.
-        insert_users_data(&mut database, &users_table_name, 0..=0).await;
-        insert_orders_data(&mut database, &orders_table_name, 0..=0).await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
-        let store = NotifyingStore::new();
-        let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let pipeline_id: PipelineId = random();
+    let table_sync_copy = table_sync_copy_fn(users_table_id, orders_table_id);
+    let mut pipeline = create_pipeline_with_table_sync_copy_config(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+        table_sync_copy,
+    );
 
-        let pipeline_id: PipelineId = random();
-        let table_sync_copy = match table_copy_case {
-            TableCopyCase::IncludeAll => TableSyncCopyConfig::IncludeAllTables,
-            TableCopyCase::SkipAll => TableSyncCopyConfig::SkipAllTables,
-            TableCopyCase::IncludeOnly => TableSyncCopyConfig::IncludeTables {
-                // We include only the users table.
-                table_ids: vec![users_table_id.into_inner()],
-            },
-            TableCopyCase::SkipOnly => TableSyncCopyConfig::SkipTables {
-                // We exclude only the users table.
-                table_ids: vec![users_table_id.into_inner()],
-            },
-        };
+    // We wait for both tables to be ready for streaming.
+    let users_table_ready_notify = store
+        .notify_on_table_state_type(users_table_id, TableReplicationPhaseType::Ready)
+        .await;
+    let orders_table_ready_notify = store
+        .notify_on_table_state_type(orders_table_id, TableReplicationPhaseType::Ready)
+        .await;
 
-        let mut pipeline = create_pipeline_with_table_sync_copy_config(
-            &database.config,
-            pipeline_id,
-            database_schema.publication_name(),
-            store.clone(),
-            destination.clone(),
-            table_sync_copy,
-        );
+    pipeline.start().await.unwrap();
 
-        // We wait for the table to be ready for streaming.
-        let table_ready_notify = store
-            .notify_on_table_state_type(users_table_id, TableReplicationPhaseType::Ready)
-            .await;
+    users_table_ready_notify.notified().await;
+    orders_table_ready_notify.notified().await;
 
-        pipeline.start().await.unwrap();
+    // We wait for the two inserts.
+    let events_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 2)])
+        .await;
 
-        table_ready_notify.notified().await;
+    // We insert additional data.
+    insert_users_data(&mut database, &users_table_name, 1..=1).await;
+    insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
 
-        // We wait for the two inserts.
-        let events_notify = destination
-            .wait_for_events_count(vec![(EventType::Insert, 2)])
-            .await;
+    events_notify.notified().await;
 
-        // We insert additional data.
-        insert_users_data(&mut database, &users_table_name, 1..=1).await;
-        insert_orders_data(&mut database, &orders_table_name, 1..=1).await;
+    pipeline.shutdown_and_wait().await.unwrap();
 
-        events_notify.notified().await;
+    // We validate that the table rows are correct.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_copied_rows = table_rows
+        .get(&users_table_id)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    let orders_table_copied_rows = table_rows
+        .get(&orders_table_id)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    assert_eq!(users_table_copied_rows, expected_users_copied_rows);
+    assert_eq!(orders_table_copied_rows, expected_orders_copied_rows);
+    // We always expect the method to be called since the downstream table should be created
+    // nonetheless.
+    assert_eq!(destination.write_table_rows_called().await, 2);
 
-        pipeline.shutdown_and_wait().await.unwrap();
-
-        // We validate that the table rows are correct.
-        let table_rows = destination.get_table_rows().await;
-        let users_table_copied_rows = table_rows
-            .get(&users_table_id)
-            .map(|rows| rows.len())
-            .unwrap_or(0);
-        let orders_table_copied_rows = table_rows
-            .get(&orders_table_id)
-            .map(|rows| rows.len())
-            .unwrap_or(0);
-
-        let (expected_users_rows, expected_orders_rows) = match table_copy_case {
-            TableCopyCase::IncludeAll => (1, 1),
-            TableCopyCase::SkipAll => (0, 0),
-            TableCopyCase::IncludeOnly => (1, 0),
-            TableCopyCase::SkipOnly => (0, 1),
-        };
-        assert_eq!(users_table_copied_rows, expected_users_rows);
-        assert_eq!(orders_table_copied_rows, expected_orders_rows);
-        // We always expect the method to be called since the downstream table should be created
-        // nonetheless.
-        assert_eq!(destination.write_table_rows_called().await, 2);
-
-        // We validate that the single insert was received.
-        let events = destination.get_events().await;
-        let grouped_events = group_events_by_type_and_table_id(&events);
-        let users_inserts = grouped_events
+    // We validate that the single insert was received.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    assert_eq!(
+        grouped_events
             .get(&(EventType::Insert, users_table_id))
-            .unwrap();
-        let orders_inserts = grouped_events
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        grouped_events
             .get(&(EventType::Insert, orders_table_id))
-            .unwrap();
+            .unwrap()
+            .len(),
+        1
+    );
+}
 
-        assert_eq!(users_inserts.len(), 1);
-        assert_eq!(orders_inserts.len(), 1);
-    }
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_copy_include_all_tables() {
+    run_table_sync_copy_case(|_, _| TableSyncCopyConfig::IncludeAllTables, 1, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_copy_skip_all_tables() {
+    run_table_sync_copy_case(|_, _| TableSyncCopyConfig::SkipAllTables, 0, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_copy_include_only_specified_tables() {
+    run_table_sync_copy_case(
+        |users_table_id, _| TableSyncCopyConfig::IncludeTables {
+            table_ids: vec![users_table_id.into_inner()],
+        },
+        1,
+        0,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_copy_skip_only_specified_tables() {
+    run_table_sync_copy_case(
+        |users_table_id, _| TableSyncCopyConfig::SkipTables {
+            table_ids: vec![users_table_id.into_inner()],
+        },
+        0,
+        1,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1422,4 +1436,230 @@ async fn empty_tables_are_created_at_destination() {
 
     // Verify that the write table rows method was called nonetheless.
     assert_eq!(destination.write_table_rows_called().await, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_processes_concurrent_inserts_during_startup() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Start the pipeline after spawning the insert task.
+    pipeline.start().await.unwrap();
+
+    // Spawn a task that inserts data concurrently using a separate connection.
+    // This creates a race condition where some rows may be captured during table copy
+    // and others during streaming replication.
+    let rows_to_insert = 10;
+    let users_table_name = database_schema.users_schema().name.clone();
+    let orders_table_name = database_schema.orders_schema().name.clone();
+    let mut duplicate_database = database.duplicate().await;
+
+    // Wait for both tables to reach Ready state.
+    let users_ready_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+    let orders_ready_notify = store
+        .notify_on_table_state_type(
+            database_schema.orders_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    // Wait for all rows to be processed (either as table copy or streaming inserts).
+    // This waits for 20 total inserts across both tables (10 users + 10 orders).
+    let all_events_notify = destination
+        .wait_for_all_events(vec![(EventType::Insert, (rows_to_insert * 2) as u64)])
+        .await;
+
+    // Use a JoinHandle to ensure the task completes and the database isn't dropped prematurely.
+    let insert_handle = tokio::spawn(async move {
+        insert_mock_data(
+            &mut duplicate_database,
+            &users_table_name,
+            &orders_table_name,
+            1..=rows_to_insert,
+            true,
+        )
+        .await;
+
+        // Return the database to prevent it from being dropped and destroying the test database.
+        duplicate_database
+    });
+
+    users_ready_notify.notified().await;
+    orders_ready_notify.notified().await;
+    all_events_notify.notified().await;
+
+    // Wait for the insert task to complete and retrieve the database connection.
+    let duplicate_database = insert_handle.await.unwrap();
+
+    // Validate that the sum of table rows (from copy) + insert events (from streaming) equals expected count.
+    let table_rows = destination.get_table_rows().await;
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+
+    let users_copied_rows = table_rows
+        .get(&database_schema.users_schema().id)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    let users_insert_events = grouped_events
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .map(|e| e.len())
+        .unwrap_or(0);
+    let total_users = users_copied_rows + users_insert_events;
+
+    let orders_copied_rows = table_rows
+        .get(&database_schema.orders_schema().id)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    let orders_insert_events = grouped_events
+        .get(&(EventType::Insert, database_schema.orders_schema().id))
+        .map(|e| e.len())
+        .unwrap_or(0);
+    let total_orders = orders_copied_rows + orders_insert_events;
+
+    assert_eq!(total_users, rows_to_insert);
+    assert_eq!(total_orders, rows_to_insert);
+
+    // Validate that both tables are in Ready state after inserts.
+    let states = store.get_table_replication_states().await;
+    assert_eq!(
+        states.get(&database_schema.users_schema().id),
+        Some(&TableReplicationPhase::Ready)
+    );
+    assert_eq!(
+        states.get(&database_schema.orders_schema().id),
+        Some(&TableReplicationPhase::Ready)
+    );
+
+    // Clear events and table rows to prepare for updates and deletes.
+    destination.clear_events().await;
+    destination.clear_table_rows().await;
+
+    // Spawn a task to perform updates and deletes.
+    let rows_to_update = 5;
+    let rows_to_delete = 3;
+    let users_table_name = database_schema.users_schema().name.clone();
+    let orders_table_name = database_schema.orders_schema().name.clone();
+
+    // Wait for all update and delete events to be processed.
+    let updates_deletes_notify = destination
+        .wait_for_events_count(vec![
+            (EventType::Update, (rows_to_update * 2) as u64),
+            (EventType::Delete, (rows_to_delete * 2) as u64),
+        ])
+        .await;
+
+    let update_delete_handle = tokio::spawn(async move {
+        // Update rows 1-5 for both tables.
+        for i in 1..=rows_to_update {
+            duplicate_database
+                .update_with_expressions(
+                    users_table_name.clone(),
+                    &["age = age + 100"],
+                    &["id"],
+                    &[&i.to_string()],
+                    " and ",
+                )
+                .await
+                .unwrap();
+
+            duplicate_database
+                .update_with_expressions(
+                    orders_table_name.clone(),
+                    &["description = description || '_updated'"],
+                    &["id"],
+                    &[&i.to_string()],
+                    " and ",
+                )
+                .await
+                .unwrap();
+        }
+
+        // Delete rows 6-8 for both tables.
+        for i in 6..=(6 + rows_to_delete - 1) {
+            duplicate_database
+                .delete_values(
+                    users_table_name.clone(),
+                    &["id"],
+                    &[&i.to_string()],
+                    " and ",
+                )
+                .await
+                .unwrap();
+
+            duplicate_database
+                .delete_values(
+                    orders_table_name.clone(),
+                    &["id"],
+                    &[&i.to_string()],
+                    " and ",
+                )
+                .await
+                .unwrap();
+        }
+
+        duplicate_database
+    });
+
+    updates_deletes_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Wait for the update/delete task to complete.
+    let _duplicate_database = update_delete_handle.await.unwrap();
+
+    // Validate that both tables are in Ready state.
+    let states = store.get_table_replication_states().await;
+    assert_eq!(
+        states.get(&database_schema.users_schema().id),
+        Some(&TableReplicationPhase::Ready)
+    );
+    assert_eq!(
+        states.get(&database_schema.orders_schema().id),
+        Some(&TableReplicationPhase::Ready)
+    );
+
+    // Validate the update and delete events were received correctly.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+
+    let users_updates = grouped_events
+        .get(&(EventType::Update, database_schema.users_schema().id))
+        .map(|e| e.len())
+        .unwrap_or(0);
+    let users_deletes = grouped_events
+        .get(&(EventType::Delete, database_schema.users_schema().id))
+        .map(|e| e.len())
+        .unwrap_or(0);
+
+    let orders_updates = grouped_events
+        .get(&(EventType::Update, database_schema.orders_schema().id))
+        .map(|e| e.len())
+        .unwrap_or(0);
+    let orders_deletes = grouped_events
+        .get(&(EventType::Delete, database_schema.orders_schema().id))
+        .map(|e| e.len())
+        .unwrap_or(0);
+
+    assert_eq!(users_updates, rows_to_update);
+    assert_eq!(users_deletes, rows_to_delete);
+    assert_eq!(orders_updates, rows_to_update);
+    assert_eq!(orders_deletes, rows_to_delete);
 }

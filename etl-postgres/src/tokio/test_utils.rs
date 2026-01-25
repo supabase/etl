@@ -290,9 +290,10 @@ impl<G: GenericClient> PgDatabase<G> {
             .await
     }
 
-    /// Updates all rows in the table with new values.
+    /// Updates rows in the table with new values.
     ///
-    /// Sets the specified columns to new values across all rows in the table.
+    /// Sets the specified columns to new values for rows matching the WHERE clause.
+    /// If no WHERE clause is provided, updates all rows in the table.
     /// Returns the number of rows affected.
     pub async fn update_values(
         &self,
@@ -317,6 +318,83 @@ impl<G: GenericClient> PgDatabase<G> {
             .as_ref()
             .unwrap()
             .execute(&update_query, values)
+            .await
+    }
+
+    /// Updates rows in the table with new values that match a WHERE clause.
+    ///
+    /// Sets the specified columns to new values for rows matching the WHERE conditions.
+    /// Returns the number of rows affected.
+    pub async fn update_values_where(
+        &self,
+        table_name: TableName,
+        columns: &[&str],
+        values: &[&(dyn ToSql + Sync)],
+        where_columns: &[&str],
+        where_expressions: &[&str],
+        where_operator: &str,
+    ) -> Result<u64, tokio_postgres::Error> {
+        let set_clauses: Vec<String> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, col)| format!("{col} = ${}", i + 1))
+            .collect();
+        let set_clause = set_clauses.join(", ");
+
+        let where_clauses: Vec<String> = where_columns
+            .iter()
+            .zip(where_expressions.iter())
+            .map(|(col, val)| format!("{col} = {val}"))
+            .collect();
+        let where_clause = where_clauses.join(where_operator);
+
+        let update_query = format!(
+            "update {} set {} where {}",
+            table_name.as_quoted_identifier(),
+            set_clause,
+            where_clause
+        );
+
+        self.client
+            .as_ref()
+            .unwrap()
+            .execute(&update_query, values)
+            .await
+    }
+
+    /// Updates rows in the table using raw SQL expressions.
+    ///
+    /// Sets columns using raw SQL expressions for rows matching the WHERE conditions.
+    /// This is useful for updates like `age = age + 100` or `description = description || '_updated'`.
+    /// Returns the number of rows affected.
+    pub async fn update_with_expressions(
+        &self,
+        table_name: TableName,
+        set_expressions: &[&str],
+        where_columns: &[&str],
+        where_expressions: &[&str],
+        where_operator: &str,
+    ) -> Result<u64, tokio_postgres::Error> {
+        let set_clause = set_expressions.join(", ");
+
+        let where_clauses: Vec<String> = where_columns
+            .iter()
+            .zip(where_expressions.iter())
+            .map(|(col, val)| format!("{col} = {val}"))
+            .collect();
+        let where_clause = where_clauses.join(where_operator);
+
+        let update_query = format!(
+            "update {} set {} where {}",
+            table_name.as_quoted_identifier(),
+            set_clause,
+            where_clause
+        );
+
+        self.client
+            .as_ref()
+            .unwrap()
+            .execute(&update_query, &[])
             .await
     }
 

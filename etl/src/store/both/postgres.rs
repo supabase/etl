@@ -97,7 +97,7 @@ impl TryFrom<TableReplicationPhase> for state::TableReplicationState {
                     retry_policy: db_retry_policy,
                 })
             }
-            TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
+            TableReplicationPhase::SyncWait { .. } | TableReplicationPhase::Catchup { .. } => {
                 bail!(
                     ErrorKind::InvalidState,
                     "In-memory replication phase cannot be persisted",
