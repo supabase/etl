@@ -97,6 +97,26 @@ impl TableSyncWorkerPoolInner {
         Some(state)
     }
 
+    /// Checks if an active worker exists for the given table.
+    pub fn has_active_worker(&self, table_id: TableId) -> bool {
+        self.active.contains_key(&table_id)
+    }
+
+    /// Tries to insert a worker handle into the pool.
+    ///
+    /// Returns `true` if the handle was inserted, `false` if a worker for the table already exists.
+    pub fn try_insert_handle(&mut self, table_id: TableId, handle: TableSyncWorkerHandle) -> bool {
+        use std::collections::hash_map::Entry;
+
+        if let Entry::Vacant(e) = self.active.entry(table_id) {
+            e.insert(handle);
+            debug!(%table_id, "added worker to pool");
+            true
+        } else {
+            false
+        }
+    }
+
     /// Waits for all workers to complete or returns a notification for active workers.
     ///
     /// This method implements a non-blocking wait strategy for worker completion.

@@ -11,6 +11,7 @@ use futures::StreamExt;
 use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -41,10 +42,10 @@ use crate::state::table::{
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::{Event, PipelineId};
+use crate::workers::base::Worker;
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 use crate::{bail, etl_error};
-
 
 /// Result type for the apply loop execution.
 ///
@@ -114,7 +115,6 @@ impl ApplyLoopAction {
     }
 }
 
-
 /// Resources for the apply worker during the apply loop.
 ///
 /// Contains all state and dependencies needed by the apply worker to coordinate
@@ -154,14 +154,14 @@ pub struct TableSyncWorkerContext<S> {
 /// This enum replaces the `ApplyLoopHook` trait, providing direct access to
 /// worker-specific resources and enabling different behavior based on the
 /// worker type at various points in the replication cycle.
-pub enum WorkerContext<'a, S, D> {
+pub enum WorkerContext<S, D> {
     /// Context for the apply worker.
-    Apply(&'a mut ApplyWorkerContext<S, D>),
+    Apply(ApplyWorkerContext<S, D>),
     /// Context for a table sync worker.
-    TableSync(&'a mut TableSyncWorkerContext<S>),
+    TableSync(TableSyncWorkerContext<S>),
 }
 
-impl<S, D> WorkerContext<'_, S, D> {
+impl<S, D> WorkerContext<S, D> {
     /// Returns the [`WorkerType`] for this context.
     pub fn worker_type(&self) -> WorkerType {
         match self {
@@ -172,7 +172,6 @@ impl<S, D> WorkerContext<'_, S, D> {
         }
     }
 }
-
 
 /// Tracks the progress of logical replication from PostgreSQL.
 #[derive(Debug, Clone)]
@@ -351,12 +350,11 @@ impl ApplyLoopState {
     }
 }
 
-
 /// Main apply loop implementation that processes replication events.
 ///
 /// [`ApplyLoop`] encapsulates all state and logic for the apply loop, providing
 /// a struct-based approach instead of the previous function-based approach.
-pub struct ApplyLoop<'a, S, D> {
+pub struct ApplyLoop<S, D> {
     /// Unique identifier for the pipeline.
     pipeline_id: PipelineId,
     /// Shared configuration.
@@ -368,12 +366,12 @@ pub struct ApplyLoop<'a, S, D> {
     /// Shutdown signal receiver.
     shutdown_rx: ShutdownRx,
     /// Worker context for worker-specific behavior.
-    worker_context: WorkerContext<'a, S, D>,
+    worker_context: WorkerContext<S, D>,
     /// Internal loop state.
     state: ApplyLoopState,
 }
 
-impl<'a, S, D> ApplyLoop<'a, S, D>
+impl<S, D> ApplyLoop<S, D>
 where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
@@ -389,7 +387,7 @@ where
         replication_client: PgReplicationClient,
         schema_store: S,
         destination: D,
-        worker_context: WorkerContext<'a, S, D>,
+        worker_context: WorkerContext<S, D>,
         shutdown_rx: ShutdownRx,
     ) -> EtlResult<ApplyLoopResult> {
         info!(
@@ -439,7 +437,6 @@ where
             .await?;
 
         let events_stream = EventsStream::wrap(logical_replication_stream, self.pipeline_id);
-
         pin!(events_stream);
 
         loop {
@@ -537,8 +534,8 @@ where
 
         let mut action = result.action;
 
-        let should_flush =
-            self.state.events_batch.len() >= self.config.batch.max_size || result.end_batch.is_some();
+        let should_flush = self.state.events_batch.len() >= self.config.batch.max_size
+            || result.end_batch.is_some();
         if should_flush && !self.state.events_batch.is_empty() {
             info!(
                 batch_size = self.state.events_batch.len(),
@@ -810,7 +807,10 @@ where
 
         let table_id = TableId::new(message.rel_id());
 
-        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
+        if !self
+            .should_apply_changes(table_id, remote_final_lsn)
+            .await?
+        {
             return Ok(HandleMessageResult::no_event());
         }
 
@@ -969,7 +969,8 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        let event = parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, rel_ids);
+        let event =
+            parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, rel_ids);
 
         Ok(HandleMessageResult::return_event(Event::Truncate(event)))
     }
@@ -984,14 +985,12 @@ where
         table_id: TableId,
         remote_final_lsn: PgLsn,
     ) -> EtlResult<bool> {
-        let worker_type = self.worker_context.worker_type();
-
         match &self.worker_context {
             WorkerContext::Apply(ctx) => {
-                should_apply_changes_apply(ctx, table_id, remote_final_lsn, worker_type).await
+                should_apply_changes_apply(ctx, table_id, remote_final_lsn).await
             }
             WorkerContext::TableSync(ctx) => {
-                should_apply_changes_table_sync(ctx, table_id, worker_type).await
+                Ok(should_apply_changes_table_sync(ctx, table_id).await)
             }
         }
     }
@@ -1001,7 +1000,10 @@ where
     /// Processes syncing tables after a commit message.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
-    async fn process_syncing_tables_after_commit(&mut self, lsn: PgLsn) -> EtlResult<ApplyLoopAction> {
+    async fn process_syncing_tables_after_commit(
+        &mut self,
+        lsn: PgLsn,
+    ) -> EtlResult<ApplyLoopAction> {
         match &mut self.worker_context {
             WorkerContext::Apply(ctx) => process_syncing_tables_after_commit_apply(ctx, lsn).await,
             WorkerContext::TableSync(ctx) => {
@@ -1046,14 +1048,19 @@ where
     /// Processes syncing tables outside a transaction.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
+    /// Only processes when outside a transaction and the batch is empty.
     async fn process_syncing_tables_outside_transaction(&mut self) -> EtlResult<ApplyLoopAction> {
         if self.state.handling_transaction() {
             debug!("skipping table sync processing because of in progress transaction");
             return Ok(ApplyLoopAction::Continue);
         }
 
+        if !self.state.events_batch.is_empty() {
+            debug!("skipping table sync processing because batch is not empty");
+            return Ok(ApplyLoopAction::Continue);
+        }
+
         let current_lsn = self.state.effective_flush_lsn();
-        let batch_is_empty = self.state.events_batch.is_empty();
 
         info!(
             worker_type = %self.worker_context.worker_type(),
@@ -1066,8 +1073,7 @@ where
                 process_syncing_tables_outside_transaction_apply(ctx, current_lsn).await
             }
             WorkerContext::TableSync(ctx) => {
-                process_syncing_tables_outside_transaction_table_sync(ctx, current_lsn, batch_is_empty)
-                    .await
+                process_syncing_tables_outside_transaction_table_sync(ctx, current_lsn).await
             }
         }
     }
@@ -1092,60 +1098,46 @@ where
     }
 }
 
+/// Checks whether changes should be applied based on the replication phase.
+///
+/// Returns `true` for `Ready` state or `SyncDone` when the sync LSN is at or
+/// before the remote final LSN.
+fn is_phase_ready_for_changes(phase: TableReplicationPhase, remote_final_lsn: PgLsn) -> bool {
+    match phase {
+        TableReplicationPhase::Ready => true,
+        TableReplicationPhase::SyncDone { lsn } => lsn <= remote_final_lsn,
+        _ => false,
+    }
+}
 
 /// Determines whether changes should be applied for a given table (apply worker).
 ///
-/// Tables in `Ready` state always have changes applied. Tables in `SyncDone`
-/// state only apply changes if the sync LSN is at or before the current
-/// transaction's final LSN.
+/// If an active worker exists for the table, its state is checked while holding
+/// the lock. Otherwise, the replication phase is read from the store.
 async fn should_apply_changes_apply<S, D>(
     ctx: &ApplyWorkerContext<S, D>,
     table_id: TableId,
     remote_final_lsn: PgLsn,
-    worker_type: WorkerType,
 ) -> EtlResult<bool>
 where
     S: StateStore + Clone + Send + Sync + 'static,
 {
     let pool_guard = ctx.pool.lock().await;
+    let active_worker_state = pool_guard.get_active_worker_state(table_id);
 
-    let worker_state = pool_guard.get_active_worker_state(table_id);
-    let replication_phase = match worker_state {
-        Some(worker_state) => {
-            let inner = worker_state.lock().await;
-            inner.replication_phase()
-        }
-        None => {
-            drop(pool_guard);
-            let Some(table_replication_phase) =
-                ctx.store.get_table_replication_state(table_id).await?
-            else {
-                debug!(
-                    %table_id,
-                    %worker_type,
-                    should_apply_changes = false,
-                    "evaluated whether table should apply changes",
-                );
-                return Ok(false);
-            };
-            table_replication_phase
-        }
+    if let Some(active_worker_state) = active_worker_state {
+        let inner = active_worker_state.lock().await;
+        return Ok(is_phase_ready_for_changes(
+            inner.replication_phase(),
+            remote_final_lsn,
+        ));
+    }
+
+    let Some(phase) = ctx.store.get_table_replication_state(table_id).await? else {
+        return Ok(false);
     };
 
-    let should_apply_changes = match replication_phase {
-        TableReplicationPhase::Ready => true,
-        TableReplicationPhase::SyncDone { lsn } => lsn <= remote_final_lsn,
-        _ => false,
-    };
-
-    debug!(
-        %table_id,
-        %worker_type,
-        should_apply_changes = should_apply_changes,
-        "evaluated whether table should apply changes",
-    );
-
-    Ok(should_apply_changes)
+    Ok(is_phase_ready_for_changes(phase, remote_final_lsn))
 }
 
 /// Determines whether changes should be applied for a given table (table sync worker).
@@ -1155,26 +1147,12 @@ where
 async fn should_apply_changes_table_sync<S>(
     ctx: &TableSyncWorkerContext<S>,
     table_id: TableId,
-    worker_type: WorkerType,
-) -> EtlResult<bool> {
+) -> bool {
     let inner = ctx.table_sync_worker_state.lock().await;
-    let is_errored = matches!(
-        inner.replication_phase().as_type(),
-        TableReplicationPhaseType::Errored
-    );
+    let is_errored = inner.replication_phase().as_type() == TableReplicationPhaseType::Errored;
 
-    let should_apply_changes = !is_errored && ctx.table_id == table_id;
-
-    debug!(
-        %table_id,
-        %worker_type,
-        should_apply_changes = should_apply_changes,
-        "evaluated whether table should apply changes",
-    );
-
-    Ok(should_apply_changes)
+    !is_errored && ctx.table_id == table_id
 }
-
 
 /// Processes syncing tables after commit (apply worker).
 ///
@@ -1308,8 +1286,8 @@ where
             _ => {
                 // Start a new worker for this table.
                 let table_sync_worker = build_table_sync_worker(ctx, table_id);
-                let mut pool_guard = ctx.pool.lock().await;
-                if let Err(err) = pool_guard.start_worker(table_sync_worker).await {
+                if let Err(err) = start_table_sync_worker(ctx.pool.clone(), table_sync_worker).await
+                {
                     error!(
                         %table_id,
                         error = %err,
@@ -1350,11 +1328,9 @@ async fn process_syncing_tables_after_commit_table_sync<S>(
     Ok(ApplyLoopAction::Continue)
 }
 
-
 /// Processes syncing tables after batch flush (apply worker).
 ///
-/// Advances SyncDone → Ready and spawns new workers.
-/// Does NOT trigger catchup (no SyncWait handling).
+/// Handles SyncWait → Catchup, SyncDone → Ready transitions, and spawns new workers.
 async fn process_syncing_tables_after_batch_apply<S, D>(
     ctx: &mut ApplyWorkerContext<S, D>,
     current_lsn: PgLsn,
@@ -1389,8 +1365,7 @@ where
 
 /// Processes a single syncing table after batch flush (apply worker).
 ///
-/// Handles SyncDone → Ready transitions and spawns new workers.
-/// Does NOT trigger catchup.
+/// Handles SyncWait → Catchup, SyncDone → Ready transitions, and spawns new workers.
 async fn process_single_syncing_table_after_batch_apply<S, D>(
     ctx: &mut ApplyWorkerContext<S, D>,
     table_id: TableId,
@@ -1421,7 +1396,6 @@ where
                     .await?;
             }
         }
-        // Note: No SyncWait handling here - that only happens after commit.
     } else {
         // No active worker exists.
         match table_replication_phase {
@@ -1440,8 +1414,8 @@ where
             _ => {
                 // Start a new worker for this table.
                 let table_sync_worker = build_table_sync_worker(ctx, table_id);
-                let mut pool_guard = ctx.pool.lock().await;
-                if let Err(err) = pool_guard.start_worker(table_sync_worker).await {
+                if let Err(err) = start_table_sync_worker(ctx.pool.clone(), table_sync_worker).await
+                {
                     error!(
                         %table_id,
                         error = %err,
@@ -1460,6 +1434,196 @@ where
 /// Validates whether catchup position has been reached.
 /// If so, transitions to SyncDone and returns Complete.
 async fn process_syncing_tables_after_batch_table_sync<S>(
+    ctx: &mut TableSyncWorkerContext<S>,
+    current_lsn: PgLsn,
+) -> EtlResult<ApplyLoopAction>
+where
+    S: StateStore + Clone + Send + Sync + 'static,
+{
+    try_complete_table_sync_catchup(ctx, current_lsn).await
+}
+
+/// Processes syncing tables outside transaction (apply worker).
+///
+/// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, and spawns workers.
+/// Only called when outside a transaction and the batch is empty.
+async fn process_syncing_tables_outside_transaction_apply<S, D>(
+    ctx: &mut ApplyWorkerContext<S, D>,
+    current_lsn: PgLsn,
+) -> EtlResult<ApplyLoopAction>
+where
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    D: Destination + Clone + Send + Sync + 'static,
+{
+    let active_table_replication_states = ctx
+        .store
+        .get_table_replication_states()
+        .await?
+        .into_iter()
+        .filter(|(_, state)| !state.as_type().is_done());
+
+    for (table_id, table_replication_phase) in active_table_replication_states {
+        let action = process_single_syncing_table_outside_transaction_apply(
+            ctx,
+            table_id,
+            table_replication_phase,
+            current_lsn,
+        )
+        .await?;
+
+        if action.is_terminating() {
+            return Ok(action);
+        }
+    }
+
+    Ok(ApplyLoopAction::Continue)
+}
+
+/// Processes a single syncing table outside transaction (apply worker).
+///
+/// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, and spawns workers.
+/// Only called when outside a transaction and the batch is empty.
+async fn process_single_syncing_table_outside_transaction_apply<S, D>(
+    ctx: &mut ApplyWorkerContext<S, D>,
+    table_id: TableId,
+    table_replication_phase: TableReplicationPhase,
+    current_lsn: PgLsn,
+) -> EtlResult<ApplyLoopAction>
+where
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    D: Destination + Clone + Send + Sync + 'static,
+{
+    let worker_state = {
+        let pool_guard = ctx.pool.lock().await;
+        pool_guard.get_active_worker_state(table_id)
+    };
+
+    if let Some(worker_state) = worker_state {
+        let mut worker_state_guard = worker_state.lock().await;
+
+        match worker_state_guard.replication_phase() {
+            TableReplicationPhase::SyncWait { lsn: snapshot_lsn } => {
+                // Trigger catchup: SyncWait → Catchup (only when batch is empty).
+                let catchup_lsn = snapshot_lsn.max(current_lsn);
+
+                info!(
+                    %table_id,
+                    %current_lsn,
+                    %snapshot_lsn,
+                    %catchup_lsn,
+                    "table sync worker is waiting to catchup, starting catchup",
+                );
+
+                worker_state_guard
+                    .set_and_store(
+                        TableReplicationPhase::Catchup { lsn: catchup_lsn },
+                        &ctx.store,
+                    )
+                    .await?;
+
+                info!(
+                    %table_id,
+                    "catchup was started, waiting for table sync worker to complete sync",
+                );
+
+                drop(worker_state_guard);
+
+                let result = worker_state
+                    .wait_for_phase_type(
+                        &[
+                            TableReplicationPhaseType::SyncDone,
+                            TableReplicationPhaseType::Errored,
+                        ],
+                        ctx.shutdown_rx.clone(),
+                    )
+                    .await;
+
+                match result {
+                    ShutdownResult::Ok(result) => {
+                        if result.replication_phase().as_type().is_errored() {
+                            info!(
+                                %table_id,
+                                "table sync worker errored, skipping table",
+                            );
+                            return Ok(ApplyLoopAction::Continue);
+                        }
+                    }
+                    ShutdownResult::Shutdown(_) => {
+                        info!(
+                            %table_id,
+                            "table sync worker interrupted by shutdown signal",
+                        );
+                        return Ok(ApplyLoopAction::Pause);
+                    }
+                }
+
+                info!(%table_id, "table sync worker finished syncing");
+            }
+            TableReplicationPhase::SyncDone { lsn } => {
+                if current_lsn >= lsn {
+                    info!(
+                        %table_id,
+                        "table ready, events will be processed by apply worker",
+                    );
+
+                    ctx.store
+                        .update_table_replication_state(table_id, TableReplicationPhase::Ready)
+                        .await?;
+                }
+            }
+            _ => {}
+        }
+    } else {
+        // No active worker exists.
+        match table_replication_phase {
+            TableReplicationPhase::SyncDone { lsn } => {
+                if current_lsn >= lsn {
+                    info!(
+                        %table_id,
+                        "table ready, events will be processed by apply worker",
+                    );
+
+                    ctx.store
+                        .update_table_replication_state(table_id, TableReplicationPhase::Ready)
+                        .await?;
+                }
+            }
+            _ => {
+                // Start a new worker for this table.
+                let table_sync_worker = build_table_sync_worker(ctx, table_id);
+                if let Err(err) = start_table_sync_worker(ctx.pool.clone(), table_sync_worker).await
+                {
+                    error!(
+                        %table_id,
+                        error = %err,
+                        "failed to start table sync worker",
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(ApplyLoopAction::Continue)
+}
+
+/// Processes syncing tables outside transaction (table sync worker).
+///
+/// If catchup position reached, transitions to SyncDone.
+/// Only called when outside a transaction and the batch is empty.
+async fn process_syncing_tables_outside_transaction_table_sync<S>(
+    ctx: &mut TableSyncWorkerContext<S>,
+    current_lsn: PgLsn,
+) -> EtlResult<ApplyLoopAction>
+where
+    S: StateStore + Clone + Send + Sync + 'static,
+{
+    try_complete_table_sync_catchup(ctx, current_lsn).await
+}
+
+/// Attempts to complete catchup and transition to SyncDone.
+///
+/// If catchup position has been reached, transitions to SyncDone and returns Complete.
+async fn try_complete_table_sync_catchup<S>(
     ctx: &mut TableSyncWorkerContext<S>,
     current_lsn: PgLsn,
 ) -> EtlResult<ApplyLoopAction>
@@ -1488,63 +1652,6 @@ where
 
     Ok(ApplyLoopAction::Continue)
 }
-
-
-/// Processes syncing tables outside transaction (apply worker).
-///
-/// Same as after_batch_apply - advances SyncDone → Ready, spawns workers.
-/// Does NOT trigger catchup.
-async fn process_syncing_tables_outside_transaction_apply<S, D>(
-    ctx: &mut ApplyWorkerContext<S, D>,
-    current_lsn: PgLsn,
-) -> EtlResult<ApplyLoopAction>
-where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
-{
-    // Same logic as after_batch_apply.
-    process_syncing_tables_after_batch_apply(ctx, current_lsn).await
-}
-
-/// Processes syncing tables outside transaction (table sync worker).
-///
-/// If batch is empty and catchup position reached, transitions to SyncDone.
-async fn process_syncing_tables_outside_transaction_table_sync<S>(
-    ctx: &mut TableSyncWorkerContext<S>,
-    current_lsn: PgLsn,
-    batch_is_empty: bool,
-) -> EtlResult<ApplyLoopAction>
-where
-    S: StateStore + Clone + Send + Sync + 'static,
-{
-    // Only advance if batch is empty.
-    if !batch_is_empty {
-        return Ok(ApplyLoopAction::Continue);
-    }
-
-    let mut inner = ctx.table_sync_worker_state.lock().await;
-
-    if let TableReplicationPhase::Catchup { lsn } = inner.replication_phase() {
-        if current_lsn >= lsn {
-            inner
-                .set_and_store(
-                    TableReplicationPhase::SyncDone { lsn: current_lsn },
-                    &ctx.state_store,
-                )
-                .await?;
-
-            info!(
-                table_id = %ctx.table_id,
-                "table sync worker is in sync with apply worker (outside transaction), terminating",
-            );
-
-            return Ok(ApplyLoopAction::Complete);
-        }
-    }
-
-    Ok(ApplyLoopAction::Continue)
-}
-
 
 /// Marks a table as errored (apply worker).
 ///
@@ -1592,7 +1699,6 @@ where
     Ok(ApplyLoopAction::Complete)
 }
 
-
 /// Creates a new table sync worker for the specified table.
 fn build_table_sync_worker<S, D>(
     ctx: &ApplyWorkerContext<S, D>,
@@ -1614,4 +1720,36 @@ where
         ctx.shutdown_rx.clone(),
         ctx.table_sync_worker_permits.clone(),
     )
+}
+
+/// Starts a table sync worker and adds it to the pool.
+///
+/// This helper function breaks the recursive type cycle between [`ApplyLoop`]
+/// and [`TableSyncWorker`] by returning an explicitly boxed future. The `dyn Future`
+/// erases the concrete type, preventing the compiler from trying to compute the
+/// infinite size of the recursive future chain.
+fn start_table_sync_worker<S, D>(
+    pool: TableSyncWorkerPool,
+    worker: TableSyncWorker<S, D>,
+) -> Pin<Box<dyn Future<Output = EtlResult<bool>> + Send>>
+where
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
+    D: Destination + Clone + Send + Sync + 'static,
+{
+    let fut = async move {
+        let table_id = worker.table_id();
+        let mut pool_guard = pool.lock().await;
+
+        if pool_guard.has_active_worker(table_id) {
+            warn!(%table_id, "worker already exists in pool");
+            return Ok(false);
+        }
+
+        let handle = worker.start().await?;
+        pool_guard.try_insert_handle(table_id, handle);
+
+        Ok(true)
+    };
+
+    Box::pin(fut)
 }
