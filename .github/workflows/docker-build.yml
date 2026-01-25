@@ -77,13 +77,13 @@ jobs:
 
       - name: Checkout (specific ref)
         if: inputs.checkout_ref != ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.checkout_ref }}
 
       - name: Checkout (default)
         if: inputs.checkout_ref == ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: useblacksmith/setup-docker-builder@v1
@@ -124,7 +124,7 @@ jobs:
 
       - name: Upload Digest
         if: inputs.push == true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: digests-${{ steps.extract-name.outputs.name }}-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -146,7 +146,7 @@ jobs:
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
       - name: Download Digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: /tmp/digests
           pattern: digests-${{ steps.extract-name.outputs.name }}-*
@@ -168,13 +168,13 @@ jobs:
 
       - name: Checkout (specific ref)
         if: inputs.checkout_ref != ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ inputs.checkout_ref }}
 
       - name: Checkout (default)
         if: inputs.checkout_ref == ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Create and Push Multi-Arch Manifest
         run: |

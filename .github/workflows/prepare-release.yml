@@ -33,7 +33,7 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - name: Checkout (Full History)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 

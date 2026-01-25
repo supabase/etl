@@ -53,7 +53,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.experimental == true
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.resolve-ref.outputs.ref }}
           fetch-depth: 0
