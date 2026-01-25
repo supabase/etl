@@ -224,7 +224,10 @@ pub mod tenants {
 /// Pipeline config helpers.
 pub mod pipelines {
     use super::*;
-    use etl_api::configs::{log::LogLevel, pipeline::ApiBatchConfig};
+    use etl_api::configs::{
+        log::LogLevel,
+        pipeline::{ApiBatchConfig, ApiReplicationSlotConfig},
+    };
     use etl_config::shared::TableSyncCopyConfig;
 
     /// Returns a default pipeline config.
@@ -240,6 +243,7 @@ pub mod pipelines {
             max_table_sync_workers: Some(2),
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             log_level: Some(LogLevel::Info),
+            replication_slot: Some(ApiReplicationSlotConfig::default()),
         }
     }
 
@@ -256,6 +260,7 @@ pub mod pipelines {
             max_table_sync_workers: Some(4),
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             log_level: Some(LogLevel::Info),
+            replication_slot: Some(ApiReplicationSlotConfig::default()),
         }
     }
 

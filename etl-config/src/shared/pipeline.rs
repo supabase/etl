@@ -6,7 +6,7 @@ use crate::shared::{
     PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError, batch::BatchConfig,
 };
 
-/// c copy should be performed.Selection rules for tables participating in replication.
+/// Selection rules for tables participating in replication.
 ///
 /// Controls which tables are eligible for initial table copy and streaming.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -60,6 +60,8 @@ pub struct PipelineConfig {
     pub id: u64,
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
+    /// Configuration for the replication slot used
+    pub replication_slot: ReplicationSlotConfig,
     /// The connection configuration for the Postgres instance to which the pipeline connects for
     /// replication.
     pub pg_connection: PgConnectionConfig,
@@ -138,6 +140,8 @@ pub struct PipelineConfigWithoutSecrets {
     pub id: u64,
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
+    /// Configuration for the replication slot used
+    pub replication_slot: ReplicationSlotConfig,
     /// The connection configuration for the Postgres instance to which the pipeline connects for
     /// replication.
     pub pg_connection: PgConnectionConfigWithoutSecrets,
@@ -163,6 +167,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
         PipelineConfigWithoutSecrets {
             id: value.id,
             publication_name: value.publication_name,
+            replication_slot: value.replication_slot,
             pg_connection: value.pg_connection.into(),
             batch: value.batch,
             table_error_retry_delay_ms: value.table_error_retry_delay_ms,
@@ -171,6 +176,20 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             table_sync_copy: value.table_sync_copy,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct ReplicationSlotConfig {
+    pub persistence: ReplicationSlotPersistence,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicationSlotPersistence {
+    #[default]
+    Permanent,
+    Temporary,
 }
 
 #[cfg(test)]

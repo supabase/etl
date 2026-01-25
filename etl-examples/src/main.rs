@@ -33,7 +33,8 @@ The pipeline will automatically:
 
 use clap::{Args, Parser};
 use etl::config::{
-    BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig, TlsConfig,
+    BatchConfig, PgConnectionConfig, PipelineConfig, ReplicationSlotConfig, TableSyncCopyConfig,
+    TlsConfig,
 };
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
@@ -188,6 +189,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.bq_args.max_table_sync_workers,
+        replication_slot: ReplicationSlotConfig::default(),
         table_sync_copy: TableSyncCopyConfig::default(),
     };
 

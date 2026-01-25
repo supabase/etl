@@ -1,4 +1,6 @@
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig};
+use etl_config::shared::{
+    BatchConfig, PgConnectionConfig, PipelineConfig, ReplicationSlotConfig, TableSyncCopyConfig,
+};
 use uuid::Uuid;
 
 use crate::destination::Destination;
@@ -52,6 +54,8 @@ pub struct PipelineBuilder<S, D> {
     max_table_sync_workers: u16,
     /// Table sync copy configuration. Uses default if not specified.
     table_sync_copy: Option<TableSyncCopyConfig>,
+    /// Replication slot config. Uses default if not specified
+    replication_slot: Option<ReplicationSlotConfig>,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -94,6 +98,7 @@ where
             table_error_retry_max_attempts: 2,
             max_table_sync_workers: 1,
             table_sync_copy: None,
+            replication_slot: None,
         }
     }
 
@@ -114,6 +119,16 @@ where
     /// * `table_sync_copy` - Configuration for how table syncs are performed
     pub fn with_table_sync_copy_config(mut self, table_sync_copy: TableSyncCopyConfig) -> Self {
         self.table_sync_copy = Some(table_sync_copy);
+        self
+    }
+
+    /// Sets custom replication slot configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `replication_slot` - Configuration for how replication slots behaviour
+    pub fn with_replication_slot_config(mut self, replication_slot: ReplicationSlotConfig) -> Self {
+        self.replication_slot = Some(replication_slot);
         self
     }
 
@@ -157,6 +172,7 @@ where
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,
             max_table_sync_workers: self.max_table_sync_workers,
             table_sync_copy: self.table_sync_copy.unwrap_or_default(),
+            replication_slot: self.replication_slot.unwrap_or_default(),
         };
 
         Pipeline::new(config, self.store, self.destination)

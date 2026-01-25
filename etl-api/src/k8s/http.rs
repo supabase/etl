@@ -1062,8 +1062,8 @@ mod tests {
     use super::*;
 
     use etl_config::shared::{
-        BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
-        ReplicatorConfigWithoutSecrets, TableSyncCopyConfig, TlsConfig,
+        BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicationSlotConfig,
+        ReplicatorConfig, ReplicatorConfigWithoutSecrets, TableSyncCopyConfig, TlsConfig,
     };
     use insta::assert_json_snapshot;
 
@@ -1149,6 +1149,7 @@ mod tests {
             pipeline: PipelineConfig {
                 id: 42,
                 publication_name: "all-pub".to_string(),
+                replication_slot: ReplicationSlotConfig::default(),
                 pg_connection: PgConnectionConfig {
                     host: "localhost".to_string(),
                     port: 5432,

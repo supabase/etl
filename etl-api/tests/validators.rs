@@ -72,6 +72,7 @@ fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
         table_error_retry_delay_ms: None,
         table_error_retry_max_attempts: None,
         table_sync_copy: None,
+        replication_slot: None,
     }
 }
 

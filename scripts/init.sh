@@ -7,9 +7,14 @@ if ! [ -x "$(command -v psql)" ]; then
   exit 1
 fi
 
-if ! [ -x "$(command -v docker-compose)" ]; then
+# Pick docker compose (plugin) if available, else docker-compose (standalone)
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  DOCKER_COMPOSE=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+  DOCKER_COMPOSE=(docker-compose)
+else
   echo >&2 "❌ Error: Docker Compose is not installed."
-  echo >&2 "Please install it using your system's package manager."
+  echo >&2 "Install either Docker Compose v2 (docker compose) or legacy docker-compose."
   exit 1
 fi
 
@@ -50,16 +55,16 @@ then
 
   # Pull latest images before starting services
   echo "📥 Pulling latest images..."
-  docker-compose -f ./scripts/docker-compose.yaml pull
+  "${DOCKER_COMPOSE[@]}" -f ./scripts/docker-compose.yaml pull
 
   # Start all services using docker-compose
-  docker-compose -f ./scripts/docker-compose.yaml up -d
+  "${DOCKER_COMPOSE[@]}" -f ./scripts/docker-compose.yaml up -d
   echo "✅ All services started"
 fi
 
 # Wait for Postgres to be ready
 echo "⏳ Waiting for Postgres to be ready..."
-until docker-compose -f ./scripts/docker-compose.yaml exec -T source-postgres pg_isready -U postgres > /dev/null 2>&1; do 
+until "${DOCKER_COMPOSE[@]}" -f ./scripts/docker-compose.yaml exec -T source-postgres pg_isready -U postgres > /dev/null 2>&1; do 
   echo "Waiting for Postgres..."
   sleep 1
 done

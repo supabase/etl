@@ -26,6 +26,11 @@ FullApiPipelineConfig {
     table_sync_copy: Some(
         IncludeAllTables,
     ),
+    replication_slot: Some(
+        ApiReplicationSlotConfig {
+            persistence: Permanent,
+        },
+    ),
     log_level: Some(
         Info,
     ),
