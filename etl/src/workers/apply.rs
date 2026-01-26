@@ -11,7 +11,7 @@ use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
-use crate::replication::apply_new::{ApplyLoop, ApplyWorkerContext, WorkerContext};
+use crate::replication::apply::{ApplyLoop, ApplyWorkerContext, WorkerContext};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient};
 use crate::state::table::TableReplicationPhaseType;
 use crate::store::schema::SchemaStore;
