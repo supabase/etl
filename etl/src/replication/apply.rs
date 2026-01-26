@@ -586,7 +586,7 @@ where
             action = action.merge(mark_table_errored_action);
         }
 
-        let synchronize_action = self.process_syncing_tables_outside_transaction().await?;
+        let synchronize_action = self.process_syncing_tables_when_idle().await?;
         action = action.merge(synchronize_action);
 
         Ok(action)
@@ -597,7 +597,7 @@ where
         self.state.reset_batch_deadline();
 
         self.send_batch_to_destination().await?;
-        self.process_syncing_tables_after_batch().await
+        self.process_syncing_tables_after_batch_flush().await
     }
 
     /// Sends the current batch of events to the destination and updates metrics.
@@ -808,7 +808,7 @@ where
         }
 
         // Process syncing tables after commit (worker-specific behavior).
-        let mut action = self.process_syncing_tables_after_commit(end_lsn).await?;
+        let mut action = self.process_syncing_tables_after_commit_event(end_lsn).await?;
 
         // If the shutdown was deferred, we want to pause the loop since now we have reached the end
         // of a transaction, which is the best point where we can consistently and gracefully stop.
@@ -1039,14 +1039,14 @@ where
     /// Processes syncing tables after a commit message.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
-    async fn process_syncing_tables_after_commit(
+    async fn process_syncing_tables_after_commit_event(
         &mut self,
         lsn: PgLsn,
     ) -> EtlResult<ApplyLoopAction> {
         match &mut self.worker_context {
-            WorkerContext::Apply(ctx) => process_syncing_tables_after_commit_apply(ctx, lsn).await,
+            WorkerContext::Apply(ctx) => process_syncing_tables_after_commit_event_apply(ctx, lsn).await,
             WorkerContext::TableSync(ctx) => {
-                process_syncing_tables_after_commit_table_sync(ctx, lsn).await
+                process_syncing_tables_after_commit_event_table_sync(ctx, lsn).await
             }
         }
     }
@@ -1054,7 +1054,7 @@ where
     /// Processes syncing tables after a batch has been flushed.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
-    async fn process_syncing_tables_after_batch(&mut self) -> EtlResult<ApplyLoopAction> {
+    async fn process_syncing_tables_after_batch_flush(&mut self) -> EtlResult<ApplyLoopAction> {
         let Some(last_commit_end_lsn) = self.state.last_commit_end_lsn.take() else {
             return Ok(ApplyLoopAction::Continue);
         };
@@ -1072,10 +1072,10 @@ where
 
         match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
-                process_syncing_tables_after_batch_apply(ctx, current_lsn).await
+                process_syncing_tables_after_batch_flush_apply(ctx, current_lsn).await
             }
             WorkerContext::TableSync(ctx) => {
-                process_syncing_tables_after_batch_table_sync(ctx, current_lsn).await
+                process_syncing_tables_after_batch_flush_table_sync(ctx, current_lsn).await
             }
         }
     }
@@ -1084,7 +1084,7 @@ where
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
     /// Only processes when outside a transaction and the batch is empty.
-    async fn process_syncing_tables_outside_transaction(&mut self) -> EtlResult<ApplyLoopAction> {
+    async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<ApplyLoopAction> {
         if self.state.handling_transaction() {
             debug!("skipping table sync processing because of in progress transaction");
             return Ok(ApplyLoopAction::Continue);
@@ -1105,10 +1105,10 @@ where
 
         match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
-                process_syncing_tables_outside_transaction_apply(ctx, current_lsn).await
+                process_syncing_tables_when_idle_apply(ctx, current_lsn).await
             }
             WorkerContext::TableSync(ctx) => {
-                process_syncing_tables_outside_transaction_table_sync(ctx, current_lsn).await
+                process_syncing_tables_when_idle_table_sync(ctx, current_lsn).await
             }
         }
     }
@@ -1141,6 +1141,19 @@ fn is_phase_ready_for_changes(phase: TableReplicationPhase, remote_final_lsn: Pg
         TableReplicationPhase::SyncDone { lsn } => lsn <= remote_final_lsn,
         _ => false,
     }
+}
+
+/// Returns all tables that are not yet done synchronizing.
+async fn get_not_done_tables<S>(store: &S) -> EtlResult<Vec<(TableId, TableReplicationPhase)>>
+where
+    S: StateStore,
+{
+    Ok(store
+        .get_table_replication_states()
+        .await?
+        .into_iter()
+        .filter(|(_, state)| !state.as_type().is_done())
+        .collect())
 }
 
 /// Determines whether changes should be applied for a given table (apply worker).
@@ -1191,7 +1204,7 @@ async fn should_apply_changes_table_sync<S>(
 ///
 /// Spawns new table sync workers and triggers catchup when encountering SyncWait.
 /// Does NOT perform SyncDone → Ready transitions.
-async fn process_syncing_tables_after_commit_apply<S, D>(
+async fn process_syncing_tables_after_commit_event_apply<S, D>(
     ctx: &mut ApplyWorkerContext<S, D>,
     current_lsn: PgLsn,
 ) -> EtlResult<ApplyLoopAction>
@@ -1199,14 +1212,7 @@ where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    let active_table_replication_states = ctx
-        .store
-        .get_table_replication_states()
-        .await?
-        .into_iter()
-        .filter(|(_, state)| !state.as_type().is_done());
-
-    for (table_id, table_replication_phase) in active_table_replication_states {
+    for (table_id, table_replication_phase) in get_not_done_tables(&ctx.store).await? {
         let action = process_single_syncing_table_after_commit_apply(
             ctx,
             table_id,
@@ -1341,7 +1347,7 @@ where
 /// Validates whether catchup position has been reached.
 /// If so, returns Complete to signal end batch.
 /// Does NOT update state (that happens after flush).
-async fn process_syncing_tables_after_commit_table_sync<S>(
+async fn process_syncing_tables_after_commit_event_table_sync<S>(
     ctx: &TableSyncWorkerContext<S>,
     current_lsn: PgLsn,
 ) -> EtlResult<ApplyLoopAction> {
@@ -1366,7 +1372,7 @@ async fn process_syncing_tables_after_commit_table_sync<S>(
 /// Processes syncing tables after batch flush (apply worker).
 ///
 /// Handles `SyncDone → Ready` transitions and spawns new workers.
-async fn process_syncing_tables_after_batch_apply<S, D>(
+async fn process_syncing_tables_after_batch_flush_apply<S, D>(
     ctx: &mut ApplyWorkerContext<S, D>,
     current_lsn: PgLsn,
 ) -> EtlResult<ApplyLoopAction>
@@ -1374,14 +1380,7 @@ where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    let active_table_replication_states = ctx
-        .store
-        .get_table_replication_states()
-        .await?
-        .into_iter()
-        .filter(|(_, state)| !state.as_type().is_done());
-
-    for (table_id, table_replication_phase) in active_table_replication_states {
+    for (table_id, table_replication_phase) in get_not_done_tables(&ctx.store).await? {
         let action = process_single_syncing_table_after_batch_apply(
             ctx,
             table_id,
@@ -1474,7 +1473,7 @@ where
 ///
 /// Validates whether catchup position has been reached.
 /// If so, transitions to SyncDone and returns Complete.
-async fn process_syncing_tables_after_batch_table_sync<S>(
+async fn process_syncing_tables_after_batch_flush_table_sync<S>(
     ctx: &mut TableSyncWorkerContext<S>,
     current_lsn: PgLsn,
 ) -> EtlResult<ApplyLoopAction>
@@ -1488,7 +1487,7 @@ where
 ///
 /// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, and spawns workers.
 /// Only called when outside a transaction and the batch is empty.
-async fn process_syncing_tables_outside_transaction_apply<S, D>(
+async fn process_syncing_tables_when_idle_apply<S, D>(
     ctx: &mut ApplyWorkerContext<S, D>,
     current_lsn: PgLsn,
 ) -> EtlResult<ApplyLoopAction>
@@ -1496,15 +1495,8 @@ where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    let active_table_replication_states = ctx
-        .store
-        .get_table_replication_states()
-        .await?
-        .into_iter()
-        .filter(|(_, state)| !state.as_type().is_done());
-
-    for (table_id, table_replication_phase) in active_table_replication_states {
-        let action = process_single_syncing_table_outside_transaction_apply(
+    for (table_id, table_replication_phase) in get_not_done_tables(&ctx.store).await? {
+        let action = process_single_syncing_table_when_idle_apply(
             ctx,
             table_id,
             table_replication_phase,
@@ -1524,7 +1516,7 @@ where
 ///
 /// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, and spawns workers.
 /// Only called when outside a transaction and the batch is empty.
-async fn process_single_syncing_table_outside_transaction_apply<S, D>(
+async fn process_single_syncing_table_when_idle_apply<S, D>(
     ctx: &mut ApplyWorkerContext<S, D>,
     table_id: TableId,
     table_replication_phase: TableReplicationPhase,
@@ -1657,7 +1649,7 @@ where
 ///
 /// If catchup position reached, transitions to SyncDone.
 /// Only called when outside a transaction and the batch is empty.
-async fn process_syncing_tables_outside_transaction_table_sync<S>(
+async fn process_syncing_tables_when_idle_table_sync<S>(
     ctx: &mut TableSyncWorkerContext<S>,
     current_lsn: PgLsn,
 ) -> EtlResult<ApplyLoopAction>
