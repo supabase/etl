@@ -1555,14 +1555,26 @@ async fn empty_tables_are_created_at_destination() {
     assert_eq!(destination.write_table_rows_called().await, 1);
 }
 
+/// Tests that resetting a table's state to Init triggers a table sync that truncates the
+/// destination before re-copying data. This ensures no duplicate data after a state reset.
+///
+/// Test flow:
+/// 1. Initial table sync: 5 rows (ids 1-5) written to table_rows for both users and orders
+/// 2. CDC phase: 2 rows (ids 6-7) written as events for both tables
+/// 3. Reset users table state to Init
+/// 4. Insert 3 new rows (ids 100-102) for users only
+/// 5. Verify: users has 10 total rows (table_rows + events), orders unchanged
 #[tokio::test(flavor = "multi_thread")]
 async fn table_sync_truncates_destination_after_state_reset() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
-    // Insert initial test data.
     let initial_rows = 5;
+    let cdc_rows = 2;
+    let new_rows_after_reset = 3;
+
+    // Insert initial test data (ids 1-5).
     insert_mock_data(
         &mut database,
         &database_schema.users_schema().name,
@@ -1575,7 +1587,6 @@ async fn table_sync_truncates_destination_after_state_reset() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1585,7 +1596,7 @@ async fn table_sync_truncates_destination_after_state_reset() {
         destination.clone(),
     );
 
-    // Wait for both tables to be ready.
+    // Wait for initial table sync to complete.
     let users_ready_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
@@ -1604,13 +1615,11 @@ async fn table_sync_truncates_destination_after_state_reset() {
     users_ready_notify.notified().await;
     orders_ready_notify.notified().await;
 
-    // Register wait for the CDC inserts before inserting data.
+    // Insert CDC data (ids 6-7) for both tables.
     let cdc_events_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 4)])
+        .wait_for_events_count(vec![(EventType::Insert, (cdc_rows * 2) as u64)])
         .await;
 
-    // Insert additional data via CDC to ensure streaming is working.
-    let cdc_rows = 2;
     insert_mock_data(
         &mut database,
         &database_schema.users_schema().name,
@@ -1620,10 +1629,9 @@ async fn table_sync_truncates_destination_after_state_reset() {
     )
     .await;
 
-    // Wait for the CDC inserts to be processed.
     cdc_events_notify.notified().await;
 
-    // Verify the data before reset.
+    // Verify state before reset: table_rows has initial data, events has CDC data.
     let table_rows_before = destination.get_table_rows().await;
     assert_eq!(
         table_rows_before
@@ -1640,19 +1648,25 @@ async fn table_sync_truncates_destination_after_state_reset() {
         initial_rows
     );
 
-    // Verify that CDC events (rows 6-7) are in the destination events before reset.
     let events_before = destination.get_events().await;
     let grouped_events_before = group_events_by_type_and_table_id(&events_before);
-    let users_cdc_inserts = grouped_events_before
-        .get(&(EventType::Insert, database_schema.users_schema().id))
-        .unwrap();
-    let orders_cdc_inserts = grouped_events_before
-        .get(&(EventType::Insert, database_schema.orders_schema().id))
-        .unwrap();
-    assert_eq!(users_cdc_inserts.len(), cdc_rows);
-    assert_eq!(orders_cdc_inserts.len(), cdc_rows);
+    assert_eq!(
+        grouped_events_before
+            .get(&(EventType::Insert, database_schema.users_schema().id))
+            .unwrap()
+            .len(),
+        cdc_rows
+    );
+    assert_eq!(
+        grouped_events_before
+            .get(&(EventType::Insert, database_schema.orders_schema().id))
+            .unwrap()
+            .len(),
+        cdc_rows
+    );
 
-    // Register wait for the users table to be ready again after the reset.
+    // Register notify for users table ready BEFORE resetting state.
+    // Uses notify_on_future_table_state_type to avoid triggering on current Ready state.
     let users_ready_notify = store
         .notify_on_future_table_state_type(
             database_schema.users_schema().id,
@@ -1660,16 +1674,23 @@ async fn table_sync_truncates_destination_after_state_reset() {
         )
         .await;
 
-    // Reset the users table state to Init (simulating a state reset).
-    // The pipeline is still running and should automatically handle the table sync.
+    // Reset users table state to Init, triggering a new table sync with truncate.
     store
         .reset_table_state(database_schema.users_schema().id)
         .await
         .unwrap();
 
-    // Insert new users (ids 100, 101, 102) to trigger the automatic table sync.
-    let new_rows = 3;
-    for id in 100i64..102i64 + 1 {
+    users_ready_notify.notified().await;
+
+    // Wait for all user events (table_rows + CDC) to be processed.
+    // After reset, data can end up in either table_rows or events depending on timing.
+    let total_expected_users = initial_rows + cdc_rows + new_rows_after_reset;
+    let all_users_events_notify = destination
+        .wait_for_all_events(vec![(EventType::Insert, total_expected_users as u64)])
+        .await;
+
+    // Insert new users (ids 100-102) after reset.
+    for id in 100i64..103i64 {
         database
             .insert_values(
                 database_schema.users_schema().name.clone(),
@@ -1680,26 +1701,35 @@ async fn table_sync_truncates_destination_after_state_reset() {
             .unwrap();
     }
 
-    // Wait for the automatic table sync to complete.
-    users_ready_notify.notified().await;
+    all_users_events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify the final state: after reset and re-sync, the destination should have all source data.
-    // Source has: initial 5 rows (1-5) + CDC 2 rows (6-7) + new 3 rows (100-102) = 10 rows total.
-    // With truncate: destination should have exactly the current source data (no duplicates).
+    // Verify final state.
     let table_rows_after = destination.get_table_rows().await;
-    let users_rows_after = table_rows_after
-        .get(&database_schema.users_schema().id)
-        .unwrap();
-    let expected_users_rows = initial_rows + cdc_rows + new_rows;
-    assert_eq!(users_rows_after.len(), expected_users_rows);
+    let events_after = destination.get_events().await;
+    let grouped_events_after = group_events_by_type_and_table_id(&events_after);
 
-    // Orders table should be unaffected (still has only initial data).
-    let orders_rows_after = table_rows_after
+    // Users: table_rows + events should equal total expected (data can be in either).
+    let users_rows = table_rows_after
+        .get(&database_schema.users_schema().id)
+        .unwrap()
+        .len();
+    let users_events = grouped_events_after
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .map(|v| v.len())
+        .unwrap_or(0);
+    assert_eq!(users_rows + users_events, total_expected_users);
+
+    // Orders: unchanged, exact counts known (table_rows = initial, events = CDC).
+    let orders_rows = table_rows_after
         .get(&database_schema.orders_schema().id)
         .unwrap();
-    assert_eq!(orders_rows_after.len(), initial_rows);
+    let orders_events = grouped_events_after
+        .get(&(EventType::Insert, database_schema.orders_schema().id))
+        .unwrap();
+    assert_eq!(orders_rows.len(), initial_rows);
+    assert_eq!(orders_events.len(), cdc_rows);
 }
 
 #[tokio::test(flavor = "multi_thread")]
