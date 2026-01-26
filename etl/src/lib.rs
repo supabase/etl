@@ -70,7 +70,7 @@
 //!
 //!     // Create memory-based store and destination for testing
 //!     let store = MemoryStore::new();
-//!     let destination = MemoryDestination::new();
+//!     let destination = MemoryDestination::new(store.clone());
 //!
 //!     // Configure the pipeline
 //!     let config = PipelineConfig {

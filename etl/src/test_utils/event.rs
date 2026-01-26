@@ -129,14 +129,14 @@ pub fn check_all_events_count(
 
 /// Returns a new Vec of events with duplicates removed.
 ///
-/// Events that are not tied to a specific row (Begin/Commit/Relation/Truncate/Unsupported)
-/// are not de-duplicated and are preserved in order.
-/// Returns a new Vec of events with duplicates removed based on full equality of events.
+/// Row-level events (Insert, Update, Delete) are de-duplicated by comparing key fields,
+/// ignoring LSN values that may vary between pipeline runs. Non-row events
+/// (Begin, Commit, Relation, Truncate, Unsupported) are also de-duplicated using the
+/// same equality comparison.
 ///
-/// Two events are considered the same if all their fields are equal. The first
-/// occurrence is kept and subsequent duplicates are dropped.
+/// The first occurrence of each event is kept and subsequent duplicates are dropped.
 ///
-/// The rationale for having this method is that the pipeline doesn't guarantee exactly once delivery
+/// The rationale for having this method is that the pipeline doesn't guarantee exactly once delivery,
 /// thus in some tests we might have to exclude duplicates while performing assertions.
 pub fn deduplicate_events(events: &[Event]) -> Vec<Event> {
     let mut result: Vec<Event> = Vec::with_capacity(events.len());

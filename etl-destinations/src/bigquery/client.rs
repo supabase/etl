@@ -188,14 +188,14 @@ impl BigQueryClient {
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
-        column_schemas: &ReplicatedTableSchema,
+        replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<bool> {
         if self.table_exists(dataset_id, table_id).await? {
             return Ok(false);
         }
 
-        self.create_table(dataset_id, table_id, column_schemas, max_staleness_mins)
+        self.create_table(dataset_id, table_id, replicated_table_schema, max_staleness_mins)
             .await?;
 
         Ok(true)

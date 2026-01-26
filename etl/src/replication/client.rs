@@ -111,9 +111,6 @@ impl PgReplicationSlotTransaction {
     }
 
     /// Retrieves the schema information for the supplied table.
-    ///
-    /// If a publication is specified, only columns included in that publication
-    /// will be returned.
     pub async fn get_table_schema(&self, table_id: TableId) -> EtlResult<TableSchema> {
         self.client.get_table_schema(table_id).await
     }

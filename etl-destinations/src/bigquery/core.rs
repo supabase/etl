@@ -567,11 +567,15 @@ where
 
     /// Handles a schema change event (Relation) by computing the diff and applying changes.
     ///
-    /// This method:
-    /// 1. Gets the current destination schema state from the state store.
-    /// 2. If no state exists, this is the initial schema - just records it as applied.
-    /// 3. If state exists and snapshot_id differs, computes the diff and applies changes.
-    /// 4. If state is in `Applying`, a previous change was interrupted - returns an error.
+    /// This method retrieves the current destination schema state via
+    /// [`state_store.get_destination_table_metadata`] and determines the appropriate action.
+    /// Missing metadata is treated as an invariant violation since the metadata should have been
+    /// recorded during initial table synchronization in [`Self::write_table_rows`]. In this case,
+    /// the method bails with [`ErrorKind::CorruptedTableSchema`]. If the metadata exists but is in
+    /// the `Applying` state, a previous schema change was interrupted and manual intervention is
+    /// required, also resulting in [`ErrorKind::CorruptedTableSchema`]. Otherwise, if the snapshot
+    /// ID or replication mask differs from the incoming [`ReplicatedTableSchema`], the method
+    /// computes and applies the schema diff.
     async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
         let table_id = new_schema.id();
         let new_snapshot_id = new_schema.get_inner().snapshot_id;

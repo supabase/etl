@@ -74,7 +74,7 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
     database
         .client
         .as_ref()
-        .unwrap()
+        .expect("database client should be initialized")
         .execute(&format!("create schema {TEST_DATABASE_SCHEMA}"), &[])
         .await
         .expect("Failed to create test schema");
