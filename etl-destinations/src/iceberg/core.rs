@@ -461,7 +461,7 @@ where
         let namespace = self.create_namespace_if_missing(inner, namespace).await?;
 
         // If the table is already in the cache, we skip the creation. This works assuming that etl
-        // is the only system managing the underlyind tables.
+        // is the only system managing the underlying tables.
         if inner.created_tables.contains(&iceberg_table_name) {
             debug!(
                 "iceberg table {iceberg_table_name} found in creation cache, skipping existence check"

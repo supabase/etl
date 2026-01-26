@@ -18,9 +18,9 @@ use crate::types::{Cell, TableRow};
 /// Panics if the number of parsed values doesn't match the number of column schemas.
 pub fn parse_table_row_from_postgres_copy_bytes<'a>(
     row: &[u8],
-    mut column_schemas: impl Iterator<Item = &'a ColumnSchema>,
+    mut column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
 ) -> EtlResult<TableRow> {
-    let mut values = Vec::new();
+    let mut values = Vec::with_capacity(column_schemas.len());
 
     let row_str = str::from_utf8(row)?;
     let mut chars = row_str.chars();

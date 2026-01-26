@@ -106,7 +106,7 @@ pub fn postgres_to_iceberg_schema(
     // Second pass: assign IDs to nested fields (list elements) and build the schema.
     // Nested field IDs start after all outer field IDs.
     let mut nested_field_id = outer_field_id;
-    let mut fields = Vec::new();
+    let mut fields = Vec::with_capacity(column_schemas.len());
 
     for (column_schema, field_id) in outer_fields {
         let field_type = if is_array_type(&column_schema.typ) {

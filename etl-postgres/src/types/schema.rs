@@ -476,6 +476,51 @@ impl ReplicationMask {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Returns the number of replicated columns (count of 1s in the mask).
+    pub fn replicated_count(&self) -> usize {
+        self.0.iter().filter(|&&m| m == 1).count()
+    }
+}
+
+/// An iterator wrapper that provides an exact size even when the inner iterator doesn't know its length.
+///
+/// This is useful for iterators like `FilterMap` where the exact count is not known upfront,
+/// but can be pre-computed. The wrapper stores the pre-computed length and implements
+/// [`ExactSizeIterator`].
+#[derive(Clone)]
+pub struct SizedIterator<I> {
+    inner: I,
+    len: usize,
+}
+
+impl<I> SizedIterator<I> {
+    /// Creates a new [`SizedIterator`] with a pre-computed length.
+    pub fn new(inner: I, len: usize) -> Self {
+        Self { inner, len }
+    }
+}
+
+impl<I: Iterator> Iterator for SizedIterator<I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.inner.next();
+        if item.is_some() {
+            self.len = self.len.saturating_sub(1);
+        }
+        item
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.len, Some(self.len))
+    }
+}
+
+impl<I: Iterator> ExactSizeIterator for SizedIterator<I> {
+    fn len(&self) -> usize {
+        self.len
+    }
 }
 
 /// A wrapper around [`TableSchema`] that tracks which columns are being replicated.
@@ -537,8 +582,8 @@ impl ReplicatedTableSchema {
     /// Returns an iterator over only the column schemas that are being replicated.
     ///
     /// This filters the columns based on the mask, returning only those where the
-    /// corresponding mask value is 1.
-    pub fn column_schemas(&self) -> impl Iterator<Item = &ColumnSchema> + Clone + '_ {
+    /// corresponding mask value is 1. The returned iterator implements [`ExactSizeIterator`].
+    pub fn column_schemas(&self) -> impl ExactSizeIterator<Item = &ColumnSchema> + Clone + '_ {
         // Assuming that the schema is created via the constructor, we can safely assume that the
         // column schemas and replication mask are of the same length.
         debug_assert!(
@@ -546,11 +591,15 @@ impl ReplicatedTableSchema {
             "the replication mask columns have a different len from the table schema columns, they should be the same"
         );
 
-        self.table_schema
+        let len = self.replication_mask.replicated_count();
+        let inner = self
+            .table_schema
             .column_schemas
             .iter()
             .zip(self.replication_mask.as_slice().iter())
-            .filter_map(|(cs, &m)| if m == 1 { Some(cs) } else { None })
+            .filter_map(|(cs, &m)| if m == 1 { Some(cs) } else { None });
+
+        SizedIterator::new(inner, len)
     }
 
     /// Computes the diff between this schema (old) and another schema (new).

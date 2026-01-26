@@ -195,8 +195,13 @@ impl BigQueryClient {
             return Ok(false);
         }
 
-        self.create_table(dataset_id, table_id, replicated_table_schema, max_staleness_mins)
-            .await?;
+        self.create_table(
+            dataset_id,
+            table_id,
+            replicated_table_schema,
+            max_staleness_mins,
+        )
+        .await?;
 
         Ok(true)
     }

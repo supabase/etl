@@ -22,7 +22,7 @@ pub enum TableModification<'a> {
     DropColumn {
         name: &'a str,
     },
-    /// Alter an existing column with the specified alteration (e.g., "type bigint").
+    /// Alter an existing column. The `alteration` field is a SQL fragment describing how the column should be altered.
     AlterColumn {
         name: &'a str,
         alteration: &'a str,

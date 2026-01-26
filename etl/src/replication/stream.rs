@@ -60,7 +60,7 @@ impl<I> TableCopyStream<I> {
 
 impl<'a, I> Stream for TableCopyStream<I>
 where
-    I: Iterator<Item = &'a ColumnSchema> + Clone,
+    I: ExactSizeIterator<Item = &'a ColumnSchema> + Clone,
 {
     type Item = EtlResult<TableRow>;
 
