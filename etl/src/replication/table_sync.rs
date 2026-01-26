@@ -371,11 +371,12 @@ where
     };
 
     // We mark this worker as `SyncWait` (in memory only) to signal the apply worker that we are
-    // ready to start catchup.
+    // ready to start catchup. We pass the snapshot LSN so the apply worker can use
+    // max(snapshot_lsn, current_lsn) when setting the Catchup LSN.
     {
         let mut inner = table_sync_worker_state.lock().await;
         inner
-            .set_and_store(TableReplicationPhase::SyncWait, &store)
+            .set_and_store(TableReplicationPhase::SyncWait { lsn: start_lsn }, &store)
             .await?;
     }
 

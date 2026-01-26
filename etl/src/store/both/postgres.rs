@@ -68,6 +68,54 @@ fn emit_table_metrics(pipeline_id: PipelineId, counts_by_phase: &HashMap<&'stati
     }
 }
 
+/// Converts ETL table replication phases to Postgres database state format.
+///
+/// This conversion transforms internal ETL replication states into the format
+/// used by the Postgres state store for persistence. It handles all phase
+/// types except in-memory phases that cannot be persisted.
+impl TryFrom<TableReplicationPhase> for state::TableReplicationState {
+    type Error = EtlError;
+
+    fn try_from(value: TableReplicationPhase) -> Result<Self, Self::Error> {
+        match value {
+            TableReplicationPhase::Init => Ok(state::TableReplicationState::Init),
+            TableReplicationPhase::DataSync => Ok(state::TableReplicationState::DataSync),
+            TableReplicationPhase::FinishedCopy => Ok(state::TableReplicationState::FinishedCopy),
+            TableReplicationPhase::SyncDone { lsn } => {
+                Ok(state::TableReplicationState::SyncDone { lsn })
+            }
+            TableReplicationPhase::Ready => Ok(state::TableReplicationState::Ready),
+            TableReplicationPhase::Errored {
+                reason,
+                solution,
+                retry_policy,
+            } => {
+                // Convert ETL RetryPolicy to postgres RetryPolicy
+                let db_retry_policy = match retry_policy {
+                    RetryPolicy::NoRetry => state::RetryPolicy::NoRetry,
+                    RetryPolicy::ManualRetry => state::RetryPolicy::ManualRetry,
+                    RetryPolicy::TimedRetry { next_retry } => {
+                        state::RetryPolicy::TimedRetry { next_retry }
+                    }
+                };
+
+                Ok(state::TableReplicationState::Errored {
+                    reason,
+                    solution,
+                    retry_policy: db_retry_policy,
+                })
+            }
+            TableReplicationPhase::SyncWait { .. } | TableReplicationPhase::Catchup { .. } => {
+                bail!(
+                    ErrorKind::InvalidState,
+                    "In-memory replication phase cannot be persisted",
+                    "In-memory table replication phases (SyncWait, Catchup) cannot be saved to state store"
+                );
+            }
+        }
+    }
+}
+
 /// Inner state of [`PostgresStore`].
 #[derive(Debug)]
 struct Inner {
@@ -680,49 +728,6 @@ impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
                     solution,
                     retry_policy: etl_retry_policy,
                 })
-            }
-        }
-    }
-}
-
-impl TryFrom<TableReplicationPhase> for state::TableReplicationState {
-    type Error = EtlError;
-
-    fn try_from(value: TableReplicationPhase) -> Result<Self, Self::Error> {
-        match value {
-            TableReplicationPhase::Init => Ok(state::TableReplicationState::Init),
-            TableReplicationPhase::DataSync => Ok(state::TableReplicationState::DataSync),
-            TableReplicationPhase::FinishedCopy => Ok(state::TableReplicationState::FinishedCopy),
-            TableReplicationPhase::SyncDone { lsn } => {
-                Ok(state::TableReplicationState::SyncDone { lsn })
-            }
-            TableReplicationPhase::Ready => Ok(state::TableReplicationState::Ready),
-            TableReplicationPhase::Errored {
-                reason,
-                solution,
-                retry_policy,
-            } => {
-                // Convert ETL RetryPolicy to postgres RetryPolicy
-                let db_retry_policy = match retry_policy {
-                    RetryPolicy::NoRetry => state::RetryPolicy::NoRetry,
-                    RetryPolicy::ManualRetry => state::RetryPolicy::ManualRetry,
-                    RetryPolicy::TimedRetry { next_retry } => {
-                        state::RetryPolicy::TimedRetry { next_retry }
-                    }
-                };
-
-                Ok(state::TableReplicationState::Errored {
-                    reason,
-                    solution,
-                    retry_policy: db_retry_policy,
-                })
-            }
-            TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
-                bail!(
-                    ErrorKind::InvalidState,
-                    "In-memory replication phase cannot be persisted",
-                    "In-memory table replication phases (SyncWait, Catchup) cannot be saved to state store"
-                );
             }
         }
     }

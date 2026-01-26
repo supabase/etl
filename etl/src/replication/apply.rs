@@ -918,14 +918,11 @@ where
     //
     // Note that we do this ONLY once a batch is fully saved, since that is the only place where
     // we are guaranteed that data has been safely persisted. In all the other cases, we just update
-    // the `last_received_lsn` which is used by Postgres to get an acknowledgement of how far we have
+    // the `last_received_lsn` which Postgres uses to get an acknowledgement of how far we have
     // processed messages but not flushed them.
     state
         .replication_progress
         .update_last_flush_lsn(last_commit_end_lsn);
-
-    let current_lsn = state.replication_progress.last_received_lsn;
-    info!(worker_type = %hook.worker_type(), %current_lsn, "processing syncing tables after batch flush");
 
     // We call `process_syncing_tables` with `update_state` set to true here *after* we've received
     // and ack for the batch from the destination. This is important to keep a consistent state.
@@ -936,6 +933,8 @@ where
     // because we want to semantically process syncing tables with the same LSN that we tell
     // Postgres that we flushed durably to disk. In practice, `last_flush_lsn` and `last_commit_end_lsn`
     // will be always equal, since LSNs are guaranteed to be monotonically increasing.
+    let current_lsn = state.replication_progress.last_flush_lsn;
+    info!(worker_type = %hook.worker_type(), %current_lsn, "processing syncing tables after batch flush");
     hook.process_syncing_tables(current_lsn, true).await
 }
 

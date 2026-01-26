@@ -31,7 +31,7 @@ type TableStateCondition = (
 
 struct Inner {
     table_replication_states: BTreeMap<TableId, TableReplicationPhase>,
-    table_replication_states_history: HashMap<TableId, Vec<TableReplicationPhase>>, .
+    table_replication_states_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     table_schemas: HashMap<TableId, Vec<Arc<TableSchema>>>,
     destination_tables_metadata: HashMap<TableId, DestinationTableMetadata>,
     table_state_type_conditions: Vec<TableStateTypeCondition>,

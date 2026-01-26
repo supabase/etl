@@ -1,4 +1,4 @@
-use crate::types::{Event, EventType};
+use crate::types::{Event, EventType, TableRow};
 use etl_postgres::types::TableId;
 use std::collections::HashMap;
 
@@ -91,6 +91,40 @@ fn events_equal(a: &Event, b: &Event) -> bool {
         (Event::Unsupported, Event::Unsupported) => true,
         _ => false,
     }
+}
+
+/// Checks if the combined count of events and table rows meets the expected counts across all tables.
+///
+/// This function groups events once for efficient lookup, then checks each condition
+/// to see if the sum of streaming events and copied table rows meets or exceeds the
+/// expected count.
+///
+/// For [`EventType::Insert`], both streaming insert events and table copy rows are counted.
+/// For other event types, only streaming events are counted.
+pub fn check_all_events_count(
+    events: &[Event],
+    table_rows: &HashMap<TableId, Vec<TableRow>>,
+    conditions: Vec<(EventType, u64)>,
+) -> bool {
+    let grouped_events = group_events_by_type(events);
+
+    conditions.iter().all(|(event_type, expected_count)| {
+        // Count events of the specified type across all tables.
+        let event_count = grouped_events
+            .get(event_type)
+            .map(|events| events.len() as u64)
+            .unwrap_or(0);
+
+        // Count all table rows (treated as inserts) across all tables.
+        let table_row_count = if *event_type == EventType::Insert {
+            table_rows.values().map(|rows| rows.len() as u64).sum()
+        } else {
+            0
+        };
+
+        let total = event_count + table_row_count;
+        total >= *expected_count
+    })
 }
 
 /// Returns a new Vec of events with duplicates removed.
