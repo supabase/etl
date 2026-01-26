@@ -1665,13 +1665,13 @@ async fn table_sync_truncates_destination_after_state_reset() {
         cdc_rows
     );
 
-    // We clear the events and table rows for the users table to make assertions easier.
-    destination
-        .clear_events_for_table(database_schema.users_schema().id)
-        .await;
-    destination
-        .clear_table_rows_for_table(database_schema.users_schema().id)
-        .await;
+    // We clear the events and rows to check that only users data is written.
+    //
+    // This deletion becomes a bit confusing when used in the context of truncation that should take
+    // care of deleting data by itself, however, in this test we just want to make sure that truncation
+    // is called and that the data is rewritten from scratch.
+    destination.clear_events().await;
+    destination.clear_table_rows().await;
 
     // Register notify for users table ready BEFORE resetting state.
     // Uses notify_on_future_table_state_type to avoid triggering on current Ready state.
@@ -1717,12 +1717,12 @@ async fn table_sync_truncates_destination_after_state_reset() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify final state.
+    // Verify the final state.
     let table_rows_after = destination.get_table_rows().await;
     let events_after = destination.get_events().await;
     let grouped_events_after = group_events_by_type_and_table_id(&events_after);
 
-    // Users: table_rows + events should equal total expected (data can be in either).
+    // Users: table_rows + events should equal the total expected (data can be in either).
     let users_rows = table_rows_after
         .get(&database_schema.users_schema().id)
         .unwrap()
@@ -1733,15 +1733,24 @@ async fn table_sync_truncates_destination_after_state_reset() {
         .unwrap_or(0);
     assert_eq!(users_rows + users_events, total_expected_users);
 
-    // Orders: unchanged, exact counts known (table_rows = initial, events = CDC).
-    let orders_rows = table_rows_after
-        .get(&database_schema.orders_schema().id)
-        .unwrap();
-    let orders_events = grouped_events_after
-        .get(&(EventType::Insert, database_schema.orders_schema().id))
-        .unwrap();
-    assert_eq!(orders_rows.len(), initial_rows);
-    assert_eq!(orders_events.len(), cdc_rows);
+    // Orders: no data, since we cleared it before restart and nothing should happen on orders.
+    assert!(!table_rows_after.contains_key(&database_schema.orders_schema().id));
+    assert!(
+        !grouped_events_after
+            .contains_key(&(EventType::Insert, database_schema.orders_schema().id))
+    );
+
+    // Verify truncate was called for users (due to reset) but not for orders.
+    assert!(
+        destination
+            .was_table_truncated(database_schema.users_schema().id)
+            .await
+    );
+    assert!(
+        !destination
+            .was_table_truncated(database_schema.orders_schema().id)
+            .await
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

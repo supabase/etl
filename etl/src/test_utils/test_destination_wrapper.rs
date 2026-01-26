@@ -1,5 +1,5 @@
 use etl_postgres::types::{ReplicatedTableSchema, TableId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -22,6 +22,7 @@ struct Inner<D> {
     wrapped_destination: D,
     events: Vec<Event>,
     table_rows: HashMap<TableId, Vec<TableRow>>,
+    truncated_tables: HashSet<TableId>,
     event_conditions: Vec<(EventCheckFn, Arc<Notify>)>,
     table_row_conditions: Vec<(TableRowCheckFn, Arc<Notify>)>,
     combined_conditions: Vec<(CombinedCheckFn, Arc<Notify>)>,
@@ -100,6 +101,7 @@ impl<D> TestDestinationWrapper<D> {
             wrapped_destination: destination,
             events: Vec::new(),
             table_rows: HashMap::new(),
+            truncated_tables: HashSet::new(),
             event_conditions: Vec::new(),
             table_row_conditions: Vec::new(),
             combined_conditions: Vec::new(),
@@ -203,28 +205,13 @@ impl<D> TestDestinationWrapper<D> {
         inner.table_rows.clear();
     }
 
-    pub async fn clear_table_rows_for_table(&self, table_id: TableId) {
-        let mut inner = self.inner.write().await;
-        inner.table_rows.remove(&table_id);
-    }
-
     pub async fn clear_events(&self) {
         let mut inner = self.inner.write().await;
         inner.events.clear();
     }
 
-    pub async fn clear_events_for_table(&self, table_id: TableId) {
-        let mut inner = self.inner.write().await;
-        inner.events.retain(|event| {
-            let event_table_id = match event {
-                Event::Insert(e) => Some(e.replicated_table_schema.id()),
-                Event::Update(e) => Some(e.replicated_table_schema.id()),
-                Event::Delete(e) => Some(e.replicated_table_schema.id()),
-                Event::Relation(e) => Some(e.replicated_table_schema.id()),
-                _ => None,
-            };
-            event_table_id != Some(table_id)
-        });
+    pub async fn was_table_truncated(&self, table_id: TableId) -> bool {
+        self.inner.read().await.truncated_tables.contains(&table_id)
     }
 
     pub async fn write_table_rows_called(&self) -> u64 {
@@ -259,6 +246,7 @@ where
         let mut inner = self.inner.write().await;
 
         let table_id = replicated_table_schema.id();
+        inner.truncated_tables.insert(table_id);
         inner.table_rows.remove(&table_id);
         inner.events.retain_mut(|event| {
             let has_table_id = event.has_table_id(&table_id);
