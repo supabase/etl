@@ -130,7 +130,7 @@ where
         let table_id = replicated_table_schema.id();
 
         // Store destination metadata on first write, like real destinations (BigQuery, Iceberg) do.
-        let existing_metadata = self.store.get_destination_table_metadata(&table_id).await?;
+        let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
         if existing_metadata.is_none() {
             let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
             let replication_mask = replicated_table_schema.replication_mask().clone();

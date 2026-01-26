@@ -1,8 +1,5 @@
 use etl_postgres::tokio::test_utils::{PgDatabase, id_column_schema};
-use etl_postgres::types::{
-    ColumnSchema, ReplicatedTableSchema, ReplicationMask, TableId, TableName, TableSchema,
-};
-use std::collections::HashSet;
+use etl_postgres::types::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 use tokio_postgres::types::{PgLsn, Type};
@@ -341,15 +338,7 @@ pub fn build_expected_users_inserts(
     let mut events = Vec::new();
 
     // We build the replicated table schema with a mask for all columns.
-    let users_table_column_names = users_table_schema
-        .column_schemas
-        .iter()
-        .map(|c| c.name.clone())
-        .collect::<HashSet<_>>();
-    let replicated_table_schema = ReplicatedTableSchema::from_mask(
-        Arc::new(users_table_schema.clone()),
-        ReplicationMask::build_or_all(users_table_schema, &users_table_column_names),
-    );
+    let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(users_table_schema.clone()));
 
     for (name, age) in expected_rows {
         events.push(Event::Insert(InsertEvent {
@@ -379,15 +368,7 @@ pub fn build_expected_orders_inserts(
     let mut events = Vec::new();
 
     // We build the replicated table schema with a mask for all columns.
-    let orders_table_column_names = orders_table_schema
-        .column_schemas
-        .iter()
-        .map(|c| c.name.clone())
-        .collect::<HashSet<_>>();
-    let replicated_table_schema = ReplicatedTableSchema::from_mask(
-        Arc::new(orders_table_schema.clone()),
-        ReplicationMask::build_or_all(orders_table_schema, &orders_table_column_names),
-    );
+    let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(orders_table_schema.clone()));
 
     for name in expected_rows {
         events.push(Event::Insert(InsertEvent {

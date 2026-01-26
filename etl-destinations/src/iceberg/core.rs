@@ -198,7 +198,7 @@ where
         //
         // If no metadata exists, it means the table was never created in Iceberg (e.g., due to
         // errors during copy). In this case, we skip the truncate since there's nothing to truncate.
-        let Some(metadata) = self.store.get_destination_table_metadata(&table_id).await? else {
+        let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
             warn!(
                 %table_id,
                 "skipping truncate because no metadata exists (table was likely never created)",
@@ -343,7 +343,7 @@ where
                             relation.replicated_table_schema.replication_mask();
 
                         if let Some(metadata) =
-                            self.store.get_destination_table_metadata(&table_id).await?
+                            self.store.get_destination_table_metadata(table_id).await?
                         {
                             if metadata.snapshot_id != new_snapshot_id
                                 || &metadata.replication_mask != new_replication_mask
@@ -446,7 +446,7 @@ where
         let column_schemas = Self::build_cdc_column_schemas(replicated_table_schema);
 
         // Check if we have existing metadata for this table.
-        let existing_metadata = self.store.get_destination_table_metadata(&table_id).await?;
+        let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
 
         let iceberg_table_name =
             table_name_to_iceberg_table_name(table_name, inner.namespace.is_single());

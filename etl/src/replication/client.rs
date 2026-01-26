@@ -131,9 +131,8 @@ impl PgReplicationSlotTransaction {
 
     /// Retrieves the names of columns being replicated for a table in a publication.
     ///
-    /// Returns a HashSet containing the names of columns that are included in the publication
-    /// for the specified table. If no publication is specified, returns all column names from
-    /// the table schema.
+    /// Returns a [`HashSet`] containing the names of columns from the given [`TableSchema`]
+    /// that are included in the specified publication for the given [`TableId`].
     pub async fn get_replicated_column_names(
         &self,
         table_id: TableId,

@@ -1596,7 +1596,7 @@ async fn table_array_with_null_values() {
     store.reset_table_state(table_id).await.unwrap();
 
     // We also clear the events so that it's more idiomatic to wait for them, since we don't have
-    // the insert of before.
+    // the prior insert.
     destination.clear_events().await;
 
     // We recreate the pipeline and try again.
@@ -1861,7 +1861,7 @@ async fn table_schema_change() {
 
     // Verify destination schema state is applied after initial table creation.
     let initial_state = store
-        .get_destination_table_metadata(&table_id)
+        .get_destination_table_metadata(table_id)
         .await
         .unwrap()
         .expect("destination schema state should exist after table creation");
@@ -1945,7 +1945,7 @@ async fn table_schema_change() {
 
     // Verify destination schema state is applied after schema changes.
     let final_state = store
-        .get_destination_table_metadata(&table_id)
+        .get_destination_table_metadata(table_id)
         .await
         .unwrap()
         .expect("destination schema state should exist after schema change");

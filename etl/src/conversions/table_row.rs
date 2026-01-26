@@ -13,9 +13,11 @@ use crate::types::{Cell, TableRow};
 /// and converts it into strongly-typed [`Cell`] values according to the provided
 /// column schemas. It handles Postgres's specific escaping rules and type formats.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the number of parsed values doesn't match the number of column schemas.
+/// Returns an error if the row data is not valid UTF-8, the column count doesn't
+/// match the schema, the row is not properly terminated, or a cell value cannot
+/// be parsed according to its column type.
 pub fn parse_table_row_from_postgres_copy_bytes<'a>(
     row: &[u8],
     mut column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,

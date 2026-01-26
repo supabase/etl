@@ -224,7 +224,7 @@ async fn create_table_if_missing() {
             .unwrap()
     );
 
-    // Verify identifier fields are set correctly
+    // Verify identifier fields are set correctly.
     let table = client
         .load_table(namespace.to_string(), table_name.clone())
         .await
@@ -234,7 +234,7 @@ async fn create_table_if_missing() {
         .current_schema()
         .identifier_field_ids()
         .collect();
-    // The "id" column is the primary key and should be the only identifier field (field_id = 1)
+    // The "id" column is the primary key and should be the only identifier field (field_id = 1).
     assert_eq!(identifier_field_ids, vec![1]);
 
     // Creating the same table again should be a no-op (no error)

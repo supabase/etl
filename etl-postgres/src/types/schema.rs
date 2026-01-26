@@ -630,7 +630,7 @@ impl ReplicatedTableSchema {
             .collect();
 
         // Columns to rename: same position, different name.
-        let columns_to_rename: Vec<ColumnRename> = common_positions
+        let mut columns_to_rename: Vec<ColumnRename> = common_positions
             .iter()
             .filter_map(|pos| {
                 let old_col = old_columns.get(pos).unwrap();
@@ -647,26 +647,25 @@ impl ReplicatedTableSchema {
                 }
             })
             .collect();
+        columns_to_rename.sort_by_key(|c| c.ordinal_position);
 
         // Columns to remove: positions in old but not in new.
         let positions_to_remove: HashSet<i32> =
             old_positions.difference(&new_positions).copied().collect();
-        let columns_to_remove: Vec<ColumnSchema> = positions_to_remove
+        let mut columns_to_remove: Vec<ColumnSchema> = positions_to_remove
             .iter()
-            .map(|pos| old_columns.get(pos).unwrap())
-            .cloned()
-            .cloned()
+            .map(|pos| (*old_columns.get(pos).unwrap()).clone())
             .collect();
+        columns_to_remove.sort_by_key(|c| c.ordinal_position);
 
         // Columns to add: positions in new but not in old.
         let positions_to_add: HashSet<i32> =
             new_positions.difference(&old_positions).copied().collect();
-        let columns_to_add: Vec<ColumnSchema> = positions_to_add
+        let mut columns_to_add: Vec<ColumnSchema> = positions_to_add
             .iter()
-            .map(|pos| new_columns.get(pos).unwrap())
-            .cloned()
-            .cloned()
+            .map(|pos| (*new_columns.get(pos).unwrap()).clone())
             .collect();
+        columns_to_add.sort_by_key(|c| c.ordinal_position);
 
         SchemaDiff {
             columns_to_add,

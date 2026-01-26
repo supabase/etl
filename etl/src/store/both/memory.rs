@@ -139,11 +139,11 @@ impl StateStore for MemoryStore {
 
     async fn get_destination_table_metadata(
         &self,
-        table_id: &TableId,
+        table_id: TableId,
     ) -> EtlResult<Option<DestinationTableMetadata>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.destination_tables_metadata.get(table_id).cloned())
+        Ok(inner.destination_tables_metadata.get(&table_id).cloned())
     }
 
     async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
@@ -176,7 +176,7 @@ impl SchemaStore for MemoryStore {
     ) -> EtlResult<Option<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
-        // Find the best matching schema (largest snapshot_id <= requested)
+        // Find the best matching schema (largest snapshot_id <= requested).
         let best_match = inner
             .table_schemas
             .iter()

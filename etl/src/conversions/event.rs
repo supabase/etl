@@ -92,7 +92,6 @@ impl FromStr for SchemaChangeMessage {
 }
 
 /// Represents a column schema in a schema change message.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ColumnSchemaMessage {
     /// The name of the column.

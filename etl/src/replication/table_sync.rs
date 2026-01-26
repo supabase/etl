@@ -161,16 +161,23 @@ where
             // both the snapshot_id and replication_mask. If available, we can load the
             // corresponding table schema and truncate the destination table before starting a copy.
             // If the metadata is not present, we can safely assume that no data is there in the
-            // table, thus a truncate won't be issued.
-            if let Some(metadata) = store.get_destination_table_metadata(&table_id).await? {
+            // table; thus a truncate won't be issued.
+            if let Some(current_metadata) = store.get_destination_table_metadata(table_id).await? {
                 if let Some(table_schema) = store
-                    .get_table_schema(&table_id, metadata.snapshot_id)
+                    .get_table_schema(&table_id, current_metadata.snapshot_id)
                     .await?
                 {
-                    let replicated_table_schema =
-                        ReplicatedTableSchema::from_mask(table_schema, metadata.replication_mask);
+                    let replicated_table_schema = ReplicatedTableSchema::from_mask(
+                        table_schema,
+                        current_metadata.replication_mask,
+                    );
                     destination.truncate_table(&replicated_table_schema).await?;
                     info!(%table_id, "truncated destination table before starting copy");
+                } else {
+                    bail!(
+                        ErrorKind::InvalidState,
+                        "Destination table metadata found, but not corresponding table schema exists"
+                    );
                 }
             }
 

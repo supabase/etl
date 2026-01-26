@@ -1337,9 +1337,6 @@ where
 
     let replicated_columns = parse_replicated_column_names(message)?;
 
-    let table_schema =
-        get_table_schema(schema_store, &table_id, state.current_schema_snapshot_id).await?;
-
     info!(
         table_id = %table_id,
         replicated_columns = ?replicated_columns,
@@ -1353,8 +1350,9 @@ where
     // TODO: Currently we fail and require manual intervention. In the future, we might want to
     //  handle this case automatically (e.g., by rebuilding the schema from the source) if this
     //  error becomes common.
+    let table_schema =
+        get_table_schema(schema_store, &table_id, state.current_schema_snapshot_id).await?;
     let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
-
     replication_masks
         .set(table_id, replication_mask.clone())
         .await;

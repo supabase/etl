@@ -372,7 +372,7 @@ where
         // Check if we have existing metadata for this table.
         let existing_metadata = self
             .state_store
-            .get_destination_table_metadata(&table_id)
+            .get_destination_table_metadata(table_id)
             .await?;
 
         let sequenced_bigquery_table_id = match &existing_metadata {
@@ -460,7 +460,7 @@ where
     ) -> EtlResult<Option<SequencedBigQueryTableId>> {
         let Some(metadata) = self
             .state_store
-            .get_destination_table_metadata(table_id)
+            .get_destination_table_metadata(*table_id)
             .await?
         else {
             return Ok(None);
@@ -583,7 +583,7 @@ where
         // Get current destination metadata.
         let current_metadata = self
             .state_store
-            .get_destination_table_metadata(&table_id)
+            .get_destination_table_metadata(table_id)
             .await?;
 
         match current_metadata {

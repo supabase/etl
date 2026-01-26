@@ -55,7 +55,7 @@ pub trait StateStore {
     /// Does not load any new data into the cache.
     fn get_destination_table_metadata(
         &self,
-        table_id: &TableId,
+        table_id: TableId,
     ) -> impl Future<Output = EtlResult<Option<DestinationTableMetadata>>> + Send;
 
     /// Loads all destination table metadata from the persistent state into the cache.

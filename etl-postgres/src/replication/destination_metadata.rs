@@ -19,6 +19,23 @@ pub enum DestinationTableSchemaStatus {
     Applied,
 }
 
+/// Parses snapshot IDs from PG LSN strings.
+///
+/// Converts a required snapshot_id string and optional previous_snapshot_id string
+/// into their corresponding [`SnapshotId`] values.
+fn parse_snapshot_ids(
+    snapshot_id_str: &str,
+    previous_snapshot_id_str: Option<String>,
+) -> Result<(SnapshotId, Option<SnapshotId>), sqlx::Error> {
+    let snapshot_id = SnapshotId::from_pg_lsn_string(snapshot_id_str)
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let previous_snapshot_id = previous_snapshot_id_str
+        .map(|s| SnapshotId::from_pg_lsn_string(&s))
+        .transpose()
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    Ok((snapshot_id, previous_snapshot_id))
+}
+
 /// Database row representation of destination table metadata.
 #[derive(Debug, Clone)]
 pub struct DestinationTableMetadataRow {
@@ -101,13 +118,8 @@ pub async fn load_destination_tables_metadata(
         let table_id = TableId::new(table_id.0);
         let snapshot_id_str: String = row.get("snapshot_id");
         let previous_snapshot_id_str: Option<String> = row.get("previous_snapshot_id");
-
-        let snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str)
-            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-        let previous_snapshot_id = previous_snapshot_id_str
-            .map(|s| SnapshotId::from_pg_lsn_string(&s))
-            .transpose()
-            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        let (snapshot_id, previous_snapshot_id) =
+            parse_snapshot_ids(&snapshot_id_str, previous_snapshot_id_str)?;
 
         metadata.insert(
             table_id,
@@ -149,13 +161,8 @@ pub async fn get_destination_table_metadata(
             let table_id: SqlxTableId = r.get("table_id");
             let snapshot_id_str: String = r.get("snapshot_id");
             let previous_snapshot_id_str: Option<String> = r.get("previous_snapshot_id");
-
-            let snapshot_id = SnapshotId::from_pg_lsn_string(&snapshot_id_str)
-                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-            let previous_snapshot_id = previous_snapshot_id_str
-                .map(|s| SnapshotId::from_pg_lsn_string(&s))
-                .transpose()
-                .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+            let (snapshot_id, previous_snapshot_id) =
+                parse_snapshot_ids(&snapshot_id_str, previous_snapshot_id_str)?;
 
             Ok(Some(DestinationTableMetadataRow {
                 table_id: TableId::new(table_id.0),

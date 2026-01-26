@@ -183,11 +183,11 @@ impl Inner {
         let table_id = table_schema.id;
         let snapshot_id = table_schema.snapshot_id;
 
-        // Insert the new schema
+        // Insert the new schema.
         self.table_schemas
             .insert((table_id, snapshot_id), table_schema);
 
-        // Collect all snapshot_ids for this table
+        // Collect all snapshot_ids for this table.
         let mut snapshots_for_table: Vec<SnapshotId> = self
             .table_schemas
             .keys()
@@ -195,12 +195,12 @@ impl Inner {
             .map(|(_, sid)| *sid)
             .collect();
 
-        // If we exceed the limit, evict oldest snapshots
+        // If we exceed the limit, evict oldest snapshots.
         if snapshots_for_table.len() > MAX_CACHED_SCHEMAS_PER_TABLE {
-            // Sort ascending so oldest are first
+            // Sort ascending so oldest are first.
             snapshots_for_table.sort();
 
-            // Remove oldest entries until we're at the limit
+            // Remove oldest entries until we're at the limit.
             let to_remove = snapshots_for_table.len() - MAX_CACHED_SCHEMAS_PER_TABLE;
             for &old_snapshot_id in snapshots_for_table.iter().take(to_remove) {
                 self.table_schemas.remove(&(table_id, old_snapshot_id));
@@ -387,11 +387,11 @@ impl StateStore for PostgresStore {
     /// from the in-memory cache.
     async fn get_destination_table_metadata(
         &self,
-        table_id: &TableId,
+        table_id: TableId,
     ) -> EtlResult<Option<DestinationTableMetadata>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.destination_tables_metadata.get(table_id).cloned())
+        Ok(inner.destination_tables_metadata.get(&table_id).cloned())
     }
 
     /// Loads all destination table metadata from Postgres into memory cache.
@@ -451,8 +451,8 @@ impl StateStore for PostgresStore {
     ) -> EtlResult<()> {
         debug!(
             %table_id,
-            detination_table_id = %metadata.destination_table_id,
-            "storing table mapping"
+            destination_table_id = %metadata.destination_table_id,
+            "storing destination table metadata"
         );
 
         destination_metadata::store_destination_table_metadata(

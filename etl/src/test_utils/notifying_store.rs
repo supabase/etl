@@ -78,7 +78,7 @@ impl Inner {
     }
 }
 
-/// A state store which notifying about changes to the table states
+/// A state store that notifies listeners about changes to table states.
 #[derive(Clone)]
 pub struct NotifyingStore {
     inner: Arc<RwLock<Inner>>,
@@ -289,10 +289,10 @@ impl StateStore for NotifyingStore {
 
     async fn get_destination_table_metadata(
         &self,
-        table_id: &TableId,
+        table_id: TableId,
     ) -> EtlResult<Option<DestinationTableMetadata>> {
         let inner = self.inner.read().await;
-        Ok(inner.destination_tables_metadata.get(table_id).cloned())
+        Ok(inner.destination_tables_metadata.get(&table_id).cloned())
     }
 
     async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
