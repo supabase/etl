@@ -4,7 +4,7 @@ use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use etl::test_utils::database::{spawn_source_database, test_table_name};
-use etl::test_utils::event::group_events_by_type_and_table_id;
+use etl::test_utils::event::{EventCondition, group_events_by_type_and_table_id};
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{
     create_pipeline, create_pipeline_with_batch_config, create_pipeline_with_table_sync_copy_config,
@@ -1665,6 +1665,14 @@ async fn table_sync_truncates_destination_after_state_reset() {
         cdc_rows
     );
 
+    // We clear the events and table rows for the users table to make assertions easier.
+    destination
+        .clear_events_for_table(database_schema.users_schema().id)
+        .await;
+    destination
+        .clear_table_rows_for_table(database_schema.users_schema().id)
+        .await;
+
     // Register notify for users table ready BEFORE resetting state.
     // Uses notify_on_future_table_state_type to avoid triggering on current Ready state.
     let users_ready_notify = store
@@ -1686,7 +1694,11 @@ async fn table_sync_truncates_destination_after_state_reset() {
     // After reset, data can end up in either table_rows or events depending on timing.
     let total_expected_users = initial_rows + cdc_rows + new_rows_after_reset;
     let all_users_events_notify = destination
-        .wait_for_all_events(vec![(EventType::Insert, total_expected_users as u64)])
+        .wait_for_all_events(vec![EventCondition::Table(
+            EventType::Insert,
+            database_schema.users_schema().id,
+            total_expected_users as u64,
+        )])
         .await;
 
     // Insert new users (ids 100-102) after reset.
@@ -1778,7 +1790,10 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     // Wait for all rows to be processed (either as table copy or streaming inserts).
     // This waits for 20 total inserts across both tables (10 users + 10 orders).
     let all_events_notify = destination
-        .wait_for_all_events(vec![(EventType::Insert, (rows_to_insert * 2) as u64)])
+        .wait_for_all_events(vec![EventCondition::Any(
+            EventType::Insert,
+            (rows_to_insert * 2) as u64,
+        )])
         .await;
 
     // Use a JoinHandle to ensure the task completes and the database isn't dropped prematurely.

@@ -2,6 +2,15 @@ use crate::types::{Event, EventType, TableRow};
 use etl_postgres::types::TableId;
 use std::collections::HashMap;
 
+/// Condition for waiting on events in tests.
+#[derive(Clone, Debug)]
+pub enum EventCondition {
+    /// Wait for a count of events of the given type across all tables.
+    Any(EventType, u64),
+    /// Wait for a count of events of the given type for a specific table.
+    Table(EventType, TableId, u64),
+}
+
 pub fn group_events_by_type(events: &[Event]) -> HashMap<EventType, Vec<Event>> {
     let mut grouped = HashMap::new();
     for event in events {
@@ -93,37 +102,54 @@ fn events_equal(a: &Event, b: &Event) -> bool {
     }
 }
 
-/// Checks if the combined count of events and table rows meets the expected counts across all tables.
+/// Checks if the combined count of events and table rows meets the expected counts.
 ///
-/// This function groups events once for efficient lookup, then checks each condition
-/// to see if the sum of streaming events and copied table rows meets or exceeds the
-/// expected count.
+/// Supports two condition types:
+/// - [`EventCondition::Any`]: counts events across all tables
+/// - [`EventCondition::Table`]: counts events for a specific table only
 ///
 /// For [`EventType::Insert`], both streaming insert events and table copy rows are counted.
 /// For other event types, only streaming events are counted.
 pub fn check_all_events_count(
     events: &[Event],
     table_rows: &HashMap<TableId, Vec<TableRow>>,
-    conditions: Vec<(EventType, u64)>,
+    conditions: Vec<EventCondition>,
 ) -> bool {
-    let grouped_events = group_events_by_type(events);
+    let grouped_events_by_type = group_events_by_type(events);
+    let grouped_events_by_type_and_table = group_events_by_type_and_table_id(events);
 
-    conditions.iter().all(|(event_type, expected_count)| {
-        // Count events of the specified type across all tables.
-        let event_count = grouped_events
-            .get(event_type)
-            .map(|events| events.len() as u64)
-            .unwrap_or(0);
+    conditions.iter().all(|condition| match condition {
+        EventCondition::Any(event_type, expected_count) => {
+            let event_count = grouped_events_by_type
+                .get(event_type)
+                .map(|events| events.len() as u64)
+                .unwrap_or(0);
 
-        // Count all table rows (treated as inserts) across all tables.
-        let table_row_count = if *event_type == EventType::Insert {
-            table_rows.values().map(|rows| rows.len() as u64).sum()
-        } else {
-            0
-        };
+            let table_row_count = if *event_type == EventType::Insert {
+                table_rows.values().map(|rows| rows.len() as u64).sum()
+            } else {
+                0
+            };
 
-        let total = event_count + table_row_count;
-        total >= *expected_count
+            event_count + table_row_count >= *expected_count
+        }
+        EventCondition::Table(event_type, table_id, expected_count) => {
+            let event_count = grouped_events_by_type_and_table
+                .get(&(event_type.clone(), *table_id))
+                .map(|events| events.len() as u64)
+                .unwrap_or(0);
+
+            let table_row_count = if *event_type == EventType::Insert {
+                table_rows
+                    .get(table_id)
+                    .map(|rows| rows.len() as u64)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            event_count + table_row_count >= *expected_count
+        }
     })
 }
 

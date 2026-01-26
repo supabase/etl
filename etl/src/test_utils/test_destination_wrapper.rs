@@ -7,22 +7,24 @@ use tokio::sync::{Notify, RwLock};
 
 use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::test_utils::event::{check_all_events_count, check_events_count, deduplicate_events};
+use crate::test_utils::event::{
+    EventCondition, check_all_events_count, check_events_count, deduplicate_events,
+};
 use crate::test_utils::notify::TimedNotify;
 use crate::types::{Event, EventType, TableRow};
 
-type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
-type TableRowCondition = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
-type CombinedCondition =
+type EventCheckFn = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
+type TableRowCheckFn = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
+type CombinedCheckFn =
     Box<dyn Fn(&[Event], &HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
 
 struct Inner<D> {
     wrapped_destination: D,
     events: Vec<Event>,
     table_rows: HashMap<TableId, Vec<TableRow>>,
-    event_conditions: Vec<(EventCondition, Arc<Notify>)>,
-    table_row_conditions: Vec<(TableRowCondition, Arc<Notify>)>,
-    combined_conditions: Vec<(CombinedCondition, Arc<Notify>)>,
+    event_conditions: Vec<(EventCheckFn, Arc<Notify>)>,
+    table_row_conditions: Vec<(TableRowCheckFn, Arc<Notify>)>,
+    combined_conditions: Vec<(CombinedCheckFn, Arc<Notify>)>,
     write_table_rows_called: u64,
     shutdown_called: bool,
 }
@@ -170,21 +172,21 @@ impl<D> TestDestinationWrapper<D> {
         .await
     }
 
-    /// Registers a notification that fires when a specific number of events are received,
-    /// counting both insert events from streaming and table rows from the initial copy phase.
+    /// Registers a notification that fires when event conditions are met.
     ///
-    /// This is useful for tests that need to verify all data was captured regardless of
-    /// whether it arrived during table copy or streaming replication.
+    /// Supports two condition types:
+    /// - [`EventCondition::Any`]: counts events across all tables
+    /// - [`EventCondition::Table`]: counts events for a specific table only
     ///
-    /// Counts are aggregated across all tables for the specified event types.
+    /// For insert events, both streaming events and table copy rows are counted.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
-    /// expected count is not reached. This prevents tests from hanging indefinitely.
-    pub async fn wait_for_all_events(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
+    /// expected count is not reached.
+    pub async fn wait_for_all_events(&self, conditions: Vec<EventCondition>) -> TimedNotify {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
 
-        let condition: CombinedCondition = Box::new(move |events, table_rows| {
+        let condition: CombinedCheckFn = Box::new(move |events, table_rows| {
             check_all_events_count(events, table_rows, conditions.clone())
         });
 
@@ -201,9 +203,28 @@ impl<D> TestDestinationWrapper<D> {
         inner.table_rows.clear();
     }
 
+    pub async fn clear_table_rows_for_table(&self, table_id: TableId) {
+        let mut inner = self.inner.write().await;
+        inner.table_rows.remove(&table_id);
+    }
+
     pub async fn clear_events(&self) {
         let mut inner = self.inner.write().await;
         inner.events.clear();
+    }
+
+    pub async fn clear_events_for_table(&self, table_id: TableId) {
+        let mut inner = self.inner.write().await;
+        inner.events.retain(|event| {
+            let event_table_id = match event {
+                Event::Insert(e) => Some(e.replicated_table_schema.id()),
+                Event::Update(e) => Some(e.replicated_table_schema.id()),
+                Event::Delete(e) => Some(e.replicated_table_schema.id()),
+                Event::Relation(e) => Some(e.replicated_table_schema.id()),
+                _ => None,
+            };
+            event_table_id != Some(table_id)
+        });
     }
 
     pub async fn write_table_rows_called(&self) -> u64 {
