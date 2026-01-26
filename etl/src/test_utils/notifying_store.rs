@@ -31,8 +31,7 @@ type TableStateCondition = (
 
 struct Inner {
     table_replication_states: BTreeMap<TableId, TableReplicationPhase>,
-    table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
-    /// Stores table schemas in insertion order per table.
+    table_replication_states_history: HashMap<TableId, Vec<TableReplicationPhase>>, .
     table_schemas: HashMap<TableId, Vec<Arc<TableSchema>>>,
     destination_tables_metadata: HashMap<TableId, DestinationTableMetadata>,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
@@ -89,7 +88,7 @@ impl NotifyingStore {
     pub fn new() -> Self {
         let inner = Inner {
             table_replication_states: BTreeMap::new(),
-            table_state_history: HashMap::new(),
+            table_replication_states_history: HashMap::new(),
             table_schemas: HashMap::new(),
             destination_tables_metadata: HashMap::new(),
             table_state_type_conditions: Vec::new(),
@@ -177,7 +176,7 @@ impl NotifyingStore {
     pub async fn reset_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
         inner.table_replication_states.remove(&table_id);
-        inner.table_state_history.remove(&table_id);
+        inner.table_replication_states_history.remove(&table_id);
 
         inner
             .table_replication_states
@@ -242,7 +241,7 @@ impl StateStore for NotifyingStore {
         // Store the current state in history before updating
         if let Some(current_state) = inner.table_replication_states.get(&table_id).cloned() {
             inner
-                .table_state_history
+                .table_replication_states_history
                 .entry(table_id)
                 .or_insert_with(Vec::new)
                 .push(current_state);
@@ -265,7 +264,7 @@ impl StateStore for NotifyingStore {
 
         // Get the previous state from history
         let previous_state = inner
-            .table_state_history
+            .table_replication_states_history
             .get_mut(&table_id)
             .and_then(|history| history.pop())
             .ok_or_else(|| {
@@ -367,7 +366,7 @@ impl CleanupStore for NotifyingStore {
         let mut inner = self.inner.write().await;
 
         inner.table_replication_states.remove(&table_id);
-        inner.table_state_history.remove(&table_id);
+        inner.table_replication_states_history.remove(&table_id);
         inner.table_schemas.remove(&table_id);
         inner.destination_tables_metadata.remove(&table_id);
 

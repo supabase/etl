@@ -722,7 +722,7 @@ async fn partitioned_table_schema_change_updates_relation_message() {
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(

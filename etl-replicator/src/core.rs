@@ -46,7 +46,7 @@ pub async fn start_replicator_with_config(
     // we prefer more performance at the cost of ergonomics.
     match &replicator_config.destination {
         DestinationConfig::Memory => {
-            let destination = MemoryDestination::new();
+            let destination = MemoryDestination::new(state_store.clone());
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;

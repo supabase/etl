@@ -168,18 +168,6 @@ impl<D> TestDestinationWrapper<D> {
     pub async fn shutdown_called(&self) -> bool {
         self.inner.read().await.shutdown_called
     }
-
-    /// Returns a clone of the wrapped destination.
-    ///
-    /// This allows accessing destination-specific methods that are not part
-    /// of the `Destination` trait.
-    pub async fn get_wrapped_destination(&self) -> D
-    where
-        D: Clone,
-    {
-        let inner = self.inner.read().await;
-        inner.wrapped_destination.clone()
-    }
 }
 
 impl<D> Destination for TestDestinationWrapper<D>

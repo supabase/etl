@@ -52,7 +52,7 @@ async fn partitioned_table_copy_replicates_existing_data() {
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Register notification for initial copy completion.
     let parent_ready_notify = state_store
@@ -152,7 +152,7 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Register notification for initial copy completion.
     let parent_ready_notify = state_store
@@ -247,7 +247,7 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let parent_ready_notify = state_store
         .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
@@ -354,7 +354,7 @@ async fn parent_table_truncate_does_emit_truncate_event() {
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let parent_ready_notify = state_store
         .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
@@ -431,7 +431,7 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let parent_ready_notify = state_store
         .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
@@ -520,7 +520,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let parent_ready_notify = state_store
         .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
@@ -639,7 +639,7 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let parent_ready_notify = state_store
         .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
@@ -768,7 +768,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Start pipeline and wait for initial sync.
     let parent_ready_notify = state_store
@@ -894,7 +894,7 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let parent_ready_notify = state_store
         .notify_on_table_state_type(parent_table_id, TableReplicationPhaseType::Ready)
@@ -1034,7 +1034,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Start pipeline and wait for initial sync.
     let parent_ready_notify = state_store
@@ -1225,7 +1225,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Register notification for initial copy completion.
     let parent_ready_notify = state_store
@@ -1370,7 +1370,7 @@ async fn partitioned_table_with_publish_via_partition_root_false_and_partitioned
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -1410,7 +1410,7 @@ async fn partitioned_table_with_publish_via_partition_root_false_and_no_partitio
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(

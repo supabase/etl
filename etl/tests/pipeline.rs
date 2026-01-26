@@ -1680,7 +1680,7 @@ async fn table_sync_truncates_destination_after_state_reset() {
             .insert_values(
                 database_schema.users_schema().name.clone(),
                 &["id", "name", "age"],
-                &[&id, &format!("user_{}", id), &(id as i32)],
+                &[&id, &format!("user_{id}"), &(id as i32)],
             )
             .await
             .unwrap();

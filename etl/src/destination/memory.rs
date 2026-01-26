@@ -134,7 +134,8 @@ where
         if existing_metadata.is_none() {
             let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
             let replication_mask = replicated_table_schema.replication_mask().clone();
-            let destination_table_id = format!("memory_{}", table_id.into_inner());
+            let table_id_inner = table_id.into_inner();
+            let destination_table_id = format!("memory_{table_id_inner}");
 
             let metadata = DestinationTableMetadata::new_applied(
                 destination_table_id,
