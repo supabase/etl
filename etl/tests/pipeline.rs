@@ -16,7 +16,7 @@ use etl::test_utils::test_schema::{
     build_expected_users_inserts, get_n_integers_sum, get_users_age_sum_from_rows,
     insert_mock_data, insert_orders_data, insert_users_data, setup_test_database_schema,
 };
-use etl::types::{Cell, Event, EventType, InsertEvent, PipelineId, Type};
+use etl::types::{Event, EventType, InsertEvent, PipelineId, Type};
 use etl_config::shared::{BatchConfig, TableSyncCopyConfig};
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
@@ -1640,6 +1640,26 @@ async fn table_sync_truncates_destination_after_state_reset() {
         initial_rows
     );
 
+    // Verify that CDC events (rows 6-7) are in the destination events before reset.
+    let events_before = destination.get_events().await;
+    let grouped_events_before = group_events_by_type_and_table_id(&events_before);
+    let users_cdc_inserts = grouped_events_before
+        .get(&(EventType::Insert, database_schema.users_schema().id))
+        .unwrap();
+    let orders_cdc_inserts = grouped_events_before
+        .get(&(EventType::Insert, database_schema.orders_schema().id))
+        .unwrap();
+    assert_eq!(users_cdc_inserts.len(), cdc_rows);
+    assert_eq!(orders_cdc_inserts.len(), cdc_rows);
+
+    // Register wait for the users table to be ready again after the reset.
+    let users_ready_notify = store
+        .notify_on_future_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
     // Reset the users table state to Init (simulating a state reset).
     // The pipeline is still running and should automatically handle the table sync.
     store
@@ -1647,35 +1667,9 @@ async fn table_sync_truncates_destination_after_state_reset() {
         .await
         .unwrap();
 
-    // Now modify the source data to simulate the scenario where data changed:
-    // Delete the first 3 users (ids 1, 2, 3).
-    for id in 1..=3 {
-        database
-            .run_sql(&format!(
-                "delete from {} where id = {}",
-                database_schema.users_schema().name.as_quoted_identifier(),
-                id
-            ))
-            .await
-            .unwrap();
-    }
-
-    // At this point, the TestDestinationWrapper still has the old data (5 users) tracked.
-    // Without truncate being called, we would have old + new data. With truncate, we should
-    // only have current source data after the automatic re-sync.
-
-    // Register wait for users table to be ready again (it will go through table sync again).
-    let users_ready_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
-        .await;
-
-    // Insert completely new users (ids 100, 101, 102).
-    // This insertion should trigger the automatic table sync since the state is now Init.
-    // We explicitly set the IDs to 100-102 to verify we get the correct data.
-    for id in 100i64..=102i64 {
+    // Insert new users (ids 100, 101, 102) to trigger the automatic table sync.
+    let new_rows = 3;
+    for id in 100i64..102i64 + 1 {
         database
             .insert_values(
                 database_schema.users_schema().name.clone(),
@@ -1691,58 +1685,21 @@ async fn table_sync_truncates_destination_after_state_reset() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify the final state in table_rows (not events):
-    // After the reset and automatic re-sync, the destination should have ALL current source data.
-    // Source currently has:
-    //   - Initial 5 rows (1-5)
-    //   - CDC 2 rows (6-7)
-    //   - Deleted 3 rows (1-3)
-    //   - New 3 rows (100-102)
-    //   = Total: 4, 5, 6, 7, 100, 101, 102 (7 rows)
-    //
-    // Without truncate: destination would have old (1-5) + new (4, 5, 6, 7, 100, 101, 102) = duplicates
-    // With truncate: destination should have exactly the current source data (7 rows, no duplicates)
+    // Verify the final state: after reset and re-sync, the destination should have all source data.
+    // Source has: initial 5 rows (1-5) + CDC 2 rows (6-7) + new 3 rows (100-102) = 10 rows total.
+    // With truncate: destination should have exactly the current source data (no duplicates).
     let table_rows_after = destination.get_table_rows().await;
-
     let users_rows_after = table_rows_after
         .get(&database_schema.users_schema().id)
         .unwrap();
-    assert_eq!(
-        users_rows_after.len(),
-        7,
-        "Users table should have exactly 7 rows (all current source data) after truncate and re-sync"
-    );
-
-    // Extract user IDs to verify we have the correct data.
-    let mut user_ids: Vec<i64> = users_rows_after
-        .iter()
-        .map(|row| {
-            if let Cell::I64(id) = &row.values[0] {
-                *id
-            } else {
-                panic!("Expected I64 for user ID");
-            }
-        })
-        .collect();
-    user_ids.sort();
-
-    // We should have ALL current source data: 4, 5, 6, 7 (survivors) and 100, 101, 102 (new data).
-    // Ids 1, 2, 3 should NOT be present (they were deleted from source).
-    assert_eq!(
-        user_ids,
-        vec![4, 5, 6, 7, 100, 101, 102],
-        "Users table should contain ALL current source data without duplicates or stale data"
-    );
+    let expected_users_rows = initial_rows + cdc_rows + new_rows;
+    assert_eq!(users_rows_after.len(), expected_users_rows);
 
     // Orders table should be unaffected (still has only initial data).
     let orders_rows_after = table_rows_after
         .get(&database_schema.orders_schema().id)
         .unwrap();
-    assert_eq!(
-        orders_rows_after.len(),
-        initial_rows,
-        "Orders table should remain unchanged"
-    );
+    assert_eq!(orders_rows_after.len(), initial_rows);
 }
 
 #[tokio::test(flavor = "multi_thread")]

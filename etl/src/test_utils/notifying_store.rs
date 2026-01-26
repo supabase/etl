@@ -149,11 +149,21 @@ impl NotifyingStore {
             .table_state_type_conditions
             .push((table_id, expected_state, notify.clone()));
 
-        // Checking conditions here as well because it is possible that the state
-        // the conditions are checking for is already reached by the time
-        // this method is called, in which case this notification will not ever
-        // fire if conditions are not checked here.
         inner.check_conditions().await;
+
+        TimedNotify::new(notify)
+    }
+
+    pub async fn notify_on_future_table_state_type(
+        &self,
+        table_id: TableId,
+        expected_state: TableReplicationPhaseType,
+    ) -> TimedNotify {
+        let notify = Arc::new(Notify::new());
+        let mut inner = self.inner.write().await;
+        inner
+            .table_state_type_conditions
+            .push((table_id, expected_state, notify.clone()));
 
         TimedNotify::new(notify)
     }
