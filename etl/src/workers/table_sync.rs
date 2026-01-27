@@ -27,9 +27,6 @@ use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
 use crate::{bail, etl_error};
 
-/// Maximum time to wait for a phase change before trying again.
-const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
-
 /// Maximum time to wait for the slot deletion call to complete.
 ///
 /// The reason for setting a timer on deletion is that we wait for the slot to become unused before
@@ -216,89 +213,49 @@ impl TableSyncWorkerState {
     /// This method blocks until either the table reaches one of the desired phases or
     /// a shutdown signal is received. It uses an efficient notification system
     /// to avoid polling and provides immediate response to state changes.
-    ///
-    /// The method returns a `ShutdownResult` that indicates whether the wait
-    /// completed successfully or was interrupted by shutdown.
     pub async fn wait_for_phase_type(
         &self,
         phase_types: &[TableReplicationPhaseType],
         mut shutdown_rx: ShutdownRx,
     ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
-        let table_id = {
-            let inner = self.inner.lock().await;
-            inner.table_id
-        };
-        info!(
-            %table_id,
-            phase_types = ?phase_types,
-            "waiting for table replication phase",
-        );
-
         loop {
+            let phase_change = {
+                let inner = self.inner.lock().await;
+                let current_phase = inner.table_replication_phase.as_type();
+                if phase_types.contains(&current_phase) {
+                    info!(
+                        table_id = %inner.table_id,
+                        %current_phase,
+                        "table replication phase reached",
+                    );
+
+                    return ShutdownResult::Ok(inner);
+                }
+
+                info!(
+                    table_id = %inner.table_id,
+                    %current_phase,
+                    phase_types = ?phase_types,
+                    "waiting for table replication phase",
+                );
+
+                inner.phase_change.clone()
+            };
+
             tokio::select! {
                 biased;
 
-                // Shutdown signal received, exit loop.
                 _ = shutdown_rx.changed() => {
-                    info!(phase_types = ?phase_types, "shutdown signal received, cancelling wait for phase types");
+                    info!(phase_types = ?phase_types, "shutdown signal received, cancelling wait for phase");
 
                     return ShutdownResult::Shutdown(());
                 }
 
-                // Try to wait for the phase type.
-                acquired = self.wait(phase_types) => {
-                    if let Some(acquired) = acquired {
-                        return ShutdownResult::Ok(acquired);
-                    }
+                _ = phase_change.notified() => {
+                    // Phase changed, loop to check if it's the desired phase.
                 }
             }
         }
-    }
-
-    /// Internal wait implementation with timeout-based retry logic.
-    ///
-    /// This method implements the core waiting mechanism with built-in timeout
-    /// protection to handle potential missed notifications. It combines immediate
-    /// state checking with notification-based waiting to provide reliable phase
-    /// transition detection.
-    async fn wait(
-        &self,
-        phase_types: &[TableReplicationPhaseType],
-    ) -> Option<MutexGuard<'_, TableSyncWorkerStateInner>> {
-        // We grab hold of the phase change notify in case we don't immediately have the state
-        // that we want.
-        let phase_change = {
-            let inner = self.inner.lock().await;
-            let current_phase = inner.table_replication_phase.as_type();
-            if phase_types.contains(&current_phase) {
-                info!(
-                    %current_phase,
-                    "table replication phase already set, no wait needed",
-                );
-                return Some(inner);
-            }
-
-            inner.phase_change.clone()
-        };
-
-        // TODO: check if we can avoid this frequency check and just rely on the notification exclusively.
-        // We wait for a state change within a timeout. This is done since it might be that a
-        // notification is missed and in that case we want to avoid blocking indefinitely.
-        let _ = tokio::time::timeout(PHASE_CHANGE_REFRESH_FREQUENCY, phase_change.notified()).await;
-
-        // We read the state and return the lock to the state.
-        let inner = self.inner.lock().await;
-        let current_phase = inner.table_replication_phase.as_type();
-        if phase_types.contains(&current_phase) {
-            info!(
-                table_id = %inner.table_id,
-                %current_phase,
-                "table replication phase was reached",
-            );
-            return Some(inner);
-        }
-
-        None
     }
 }
 

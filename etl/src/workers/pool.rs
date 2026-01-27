@@ -100,10 +100,6 @@ impl TableSyncWorkerPoolInner {
     pub async fn wait_all(&mut self) -> EtlResult<Option<Arc<Notify>>> {
         // If there are active workers, we return the notify, signaling that not all of them are
         // ready.
-        //
-        // This is done since if we wait on active workers, there will be a deadlock because the
-        // worker within the `ReactiveFuture` will not be able to hold the lock onto the pool to
-        // mark itself as finished.
         if !self.active.is_empty() {
             return Ok(Some(self.pool_update.clone()));
         }
