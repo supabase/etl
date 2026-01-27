@@ -1,28 +1,24 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::replication::worker::WorkerType;
-use etl_postgres::types::TableId;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
-use tracing::{Instrument, debug, error, info};
+use tracing::{Instrument, error, info};
 
 use crate::bail;
-use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
-use crate::replication::apply::{ApplyLoopAction, ApplyLoopHook, start_apply_loop};
+use crate::replication::apply::{ApplyLoop, ApplyWorkerContext, WorkerContext};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient};
 use crate::replication::masks::ReplicationMasks;
-use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use crate::state::table::TableReplicationPhaseType;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
-use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
-use crate::workers::table_sync::TableSyncWorker;
 
 /// Handle for monitoring and controlling the apply worker.
 ///
@@ -34,25 +30,27 @@ pub struct ApplyWorkerHandle {
     handle: Option<JoinHandle<EtlResult<()>>>,
 }
 
-impl WorkerHandle<()> for ApplyWorkerHandle {
-    /// Returns the current state of the apply worker.
-    ///
-    /// Since the apply worker doesn't expose detailed state information,
-    /// this method returns unit type and serves as a placeholder.
-    fn state(&self) {}
-
+impl ApplyWorkerHandle {
     /// Waits for the apply worker to complete execution.
     ///
     /// This method blocks until the apply worker finishes processing, either
     /// due to successful completion, shutdown signal, or error. It properly
     /// handles panics that might occur within the worker task.
-    async fn wait(mut self) -> EtlResult<()> {
+    pub async fn wait(mut self) -> EtlResult<()> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
 
         handle.await.map_err(|err| {
-            etl_error!(ErrorKind::ApplyWorkerPanic, "Apply worker panicked", err)
+            if err.is_cancelled() {
+                etl_error!(
+                    ErrorKind::ApplyWorkerCancelled,
+                    "Apply worker was cancelled",
+                    err
+                )
+            } else {
+                etl_error!(ErrorKind::ApplyWorkerPanic, "Apply worker panicked", err)
+            }
         })??;
 
         Ok(())
@@ -73,7 +71,7 @@ pub struct ApplyWorker<S, D> {
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
-    pool: TableSyncWorkerPool,
+    pool: Arc<TableSyncWorkerPool>,
     store: S,
     destination: D,
     replication_masks: ReplicationMasks,
@@ -92,7 +90,7 @@ impl<S, D> ApplyWorker<S, D> {
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
         replication_client: PgReplicationClient,
-        pool: TableSyncWorkerPool,
+        pool: Arc<TableSyncWorkerPool>,
         store: S,
         destination: D,
         replication_masks: ReplicationMasks,
@@ -113,19 +111,17 @@ impl<S, D> ApplyWorker<S, D> {
     }
 }
 
-impl<S, D> Worker<ApplyWorkerHandle, ()> for ApplyWorker<S, D>
+impl<S, D> ApplyWorker<S, D>
 where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = EtlError;
-
-    /// Starts the apply worker and returns a handle for monitoring.
+    /// Spawns the apply worker and returns a handle for monitoring.
     ///
     /// This method initializes the apply worker by determining the starting LSN,
     /// creating coordination signals, and launching the main apply loop. The worker
     /// runs asynchronously and can be monitored through the returned handle.
-    async fn start(self) -> EtlResult<ApplyWorkerHandle> {
+    pub async fn spawn(self) -> EtlResult<ApplyWorkerHandle> {
         info!("starting apply worker");
 
         let apply_worker_span = tracing::info_span!(
@@ -137,24 +133,26 @@ where
             let start_lsn =
                 get_start_lsn(self.pipeline_id, &self.replication_client, &self.store).await?;
 
-            let result = start_apply_loop(
+let worker_context = WorkerContext::Apply(ApplyWorkerContext {
+                pipeline_id: self.pipeline_id,
+                config: self.config.clone(),
+                pool: self.pool,
+                store: self.store.clone(),
+                destination: self.destination.clone(),
+                replication_masks: self.replication_masks.clone(),
+                shutdown_rx: self.shutdown_rx.clone(),
+                table_sync_worker_permits: self.table_sync_worker_permits,
+            });
+
+            let result = ApplyLoop::start(
                 self.pipeline_id,
                 start_lsn,
-                self.config.clone(),
-                self.replication_client.clone(),
-                self.store.clone(),
-                self.destination.clone(),
-                ApplyWorkerHook::new(
-                    self.pipeline_id,
-                    self.config,
-                    self.pool,
-                    self.store,
-                    self.destination,
-                    self.replication_masks.clone(),
-                    self.shutdown_rx.clone(),
-                    self.table_sync_worker_permits.clone(),
-                ),
+                self.config,
+                self.replication_client,
+                self.store,
+                self.destination,
                 self.replication_masks,
+                worker_context,
                 self.shutdown_rx,
             )
             .await;
@@ -254,350 +252,4 @@ async fn validate_tables_in_init_state<S: StateStore>(store: &S) -> EtlResult<()
             table_details.join(", ")
         )
     );
-}
-
-/// Internal coordination hook that implements apply loop integration with table sync workers.
-///
-/// [`ApplyWorkerHook`] serves as the critical coordination layer between the main apply loop
-/// that processes replication events and the table sync worker pool that handles initial data
-/// copying. This hook implements the [`ApplyLoopHook`] trait to provide custom logic for
-/// managing table lifecycle transitions and worker coordination.
-#[derive(Debug)]
-struct ApplyWorkerHook<S, D> {
-    /// Unique identifier for the pipeline this hook serves.
-    pipeline_id: PipelineId,
-    /// Shared configuration for all coordinated operations.
-    config: Arc<PipelineConfig>,
-    /// Pool of table sync workers that this hook coordinates.
-    pool: TableSyncWorkerPool,
-    /// State store for tracking table replication progress.
-    store: S,
-    /// Destination where replicated data is written.
-    destination: D,
-    /// Shared replication masks container for tracking column replication status.
-    replication_masks: ReplicationMasks,
-    /// Shutdown signal receiver for graceful termination.
-    shutdown_rx: ShutdownRx,
-    /// Semaphore controlling maximum concurrent table sync workers.
-    table_sync_worker_permits: Arc<Semaphore>,
-}
-
-impl<S, D> ApplyWorkerHook<S, D> {
-    /// Creates a new apply worker hook with the given dependencies.
-    ///
-    /// This constructor initializes the hook with all necessary components
-    /// for coordinating between the apply loop and table sync workers.
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        pipeline_id: PipelineId,
-        config: Arc<PipelineConfig>,
-        pool: TableSyncWorkerPool,
-        store: S,
-        destination: D,
-        replication_masks: ReplicationMasks,
-        shutdown_rx: ShutdownRx,
-        table_sync_worker_permits: Arc<Semaphore>,
-    ) -> Self {
-        Self {
-            pipeline_id,
-            config,
-            pool,
-            store,
-            destination,
-            replication_masks,
-            shutdown_rx,
-            table_sync_worker_permits,
-        }
-    }
-}
-
-impl<S, D> ApplyWorkerHook<S, D>
-where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
-{
-    /// Creates a new table sync worker for the specified table.
-    ///
-    /// This method constructs a fully configured table sync worker that can
-    /// handle the initial data synchronization for the given table. The worker
-    /// inherits the hook's configuration and coordination channels.
-    async fn build_table_sync_worker(&self, table_id: TableId) -> TableSyncWorker<S, D> {
-        info!(%table_id, "creating table sync worker");
-
-        TableSyncWorker::new(
-            self.pipeline_id,
-            self.config.clone(),
-            self.pool.clone(),
-            table_id,
-            self.store.clone(),
-            self.destination.clone(),
-            self.replication_masks.clone(),
-            self.shutdown_rx.clone(),
-            self.table_sync_worker_permits.clone(),
-        )
-    }
-
-    /// Processes a single syncing table during the apply loop iteration.
-    ///
-    /// This method handles one table's synchronization lifecycle by checking if an active
-    /// worker exists, resolving the effective replication phase, and taking appropriate
-    /// action based on the phase. The pool lock must be held by the caller.
-    ///
-    /// Returns an action that indicates whether the apply loop should continue, pause, or
-    /// terminate based on the table's processing outcome.
-    async fn process_single_syncing_table(
-        &self,
-        table_id: TableId,
-        table_replication_phase: TableReplicationPhase,
-        current_lsn: PgLsn,
-        update_state: bool,
-    ) -> EtlResult<ApplyLoopAction> {
-        // Request the active worker state once per table. This is the single source of
-        // truth for the current state if a worker exists.
-        let worker_state = {
-            let pool_guard = self.pool.lock().await;
-            pool_guard.get_active_worker_state(table_id)
-        };
-
-        // If an active worker exists, lock its state once to read the phase for this
-        // loop cycle. This ensures we make all decisions based on a consistent snapshot
-        // of the state at this moment.
-        if let Some(worker_state) = worker_state {
-            // Lock the worker state once and read the effective phase.
-            let mut worker_state_guard = worker_state.lock().await;
-
-            // Handle `SyncDone` tables by promoting them to Ready when the apply worker
-            // has caught up to their sync LSN.
-            match worker_state_guard.replication_phase() {
-                TableReplicationPhase::SyncDone { lsn } => {
-                    if current_lsn >= lsn && update_state {
-                        info!(
-                            %table_id,
-                            "table ready, events will be processed by apply worker",
-                        );
-
-                        self.store
-                            .update_table_replication_state(table_id, TableReplicationPhase::Ready)
-                            .await?;
-                    }
-                }
-                TableReplicationPhase::SyncWait { lsn: snapshot_lsn } => {
-                    // Following PostgreSQL's pattern, we use max(snapshot_lsn, current_lsn) to ensure
-                    // no data loss. If the apply worker is behind the snapshot LSN, we must catch up
-                    // to the snapshot LSN to avoid missing transactions between current_lsn and snapshot_lsn.
-                    let catchup_lsn = snapshot_lsn.max(current_lsn);
-
-                    info!(
-                        %table_id,
-                        %current_lsn,
-                        %snapshot_lsn,
-                        %catchup_lsn,
-                        "table sync worker is waiting to catchup, starting catchup",
-                    );
-
-                    worker_state_guard
-                        .set_and_store(
-                            TableReplicationPhase::Catchup { lsn: catchup_lsn },
-                            &self.store,
-                        )
-                        .await?;
-
-                    info!(
-                        %table_id,
-                        "catchup was started, waiting for table sync worker to complete sync",
-                    );
-
-                    // We drop the guard before waiting for a phase to let the workers make progress.
-                    drop(worker_state_guard);
-
-                    // Wait for the table to be in `SyncDone` or `Errored`.
-                    let result = worker_state
-                        .wait_for_phase_type(
-                            &[
-                                TableReplicationPhaseType::SyncDone,
-                                TableReplicationPhaseType::Errored,
-                            ],
-                            self.shutdown_rx.clone(),
-                        )
-                        .await;
-
-                    match result {
-                        ShutdownResult::Ok(result) => {
-                            // If the table sync worker errored, skip this table and continue.
-                            if result.replication_phase().as_type().is_errored() {
-                                info!(
-                                    %table_id,
-                                    "table sync worker errored, skipping table",
-                                );
-
-                                return Ok(ApplyLoopAction::Continue);
-                            }
-                        }
-                        ShutdownResult::Shutdown(_) => {
-                            // If we are told to shut down while waiting, signal to cancel the
-                            // apply loop.
-                            info!(
-                                %table_id,
-                                "table sync worker interrupted by shutdown signal",
-                            );
-
-                            return Ok(ApplyLoopAction::Pause);
-                        }
-                    }
-
-                    info!(%table_id, "table sync worker finished syncing");
-                }
-                _ => {
-                    // For other phases, no action needed in this loop cycle.
-                }
-            }
-        } else {
-            // No active worker exists, use the store phase and potentially start a new worker.
-            match table_replication_phase {
-                TableReplicationPhase::SyncDone { lsn } => {
-                    if current_lsn >= lsn && update_state {
-                        info!(
-                            %table_id,
-                            "table ready, events will be processed by apply worker",
-                        );
-
-                        self.store
-                            .update_table_replication_state(table_id, TableReplicationPhase::Ready)
-                            .await?;
-                    }
-                }
-                _ => {
-                    // Start a new worker for this table for any other state.
-                    let table_sync_worker = self.build_table_sync_worker(table_id).await;
-                    let mut pool_guard = self.pool.lock().await;
-                    if let Err(err) = pool_guard.start_worker(table_sync_worker).await {
-                        error!(
-                            %table_id,
-                            error = %err,
-                            "failed to start table sync worker",
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(ApplyLoopAction::Continue)
-    }
-}
-
-impl<S, D> ApplyLoopHook for ApplyWorkerHook<S, D>
-where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
-{
-    /// Processes all tables currently in synchronization phases.
-    ///
-    /// This method coordinates the lifecycle of syncing tables by promoting
-    /// `SyncDone` tables to the `Ready` state when the apply worker catches up
-    /// to their sync LSN. For other tables, it handles the typical sync process.
-    async fn process_syncing_tables(
-        &self,
-        current_lsn: PgLsn,
-        update_state: bool,
-    ) -> EtlResult<ApplyLoopAction> {
-        // TODO: this is a very hot path and we have to optimize it as much as possible.
-        //
-        // We fetch the tables that are in active syncing state. For more predictability and performance
-        // we leverage the order of the BTreeMap.
-        //
-        // This load takes a snapshot of the current table states, independently of whether a table
-        // sync worker is currently active or not.
-        let active_table_replication_states = self
-            .store
-            .get_table_replication_states()
-            .await?
-            .into_iter()
-            .filter(|(_, state)| !state.as_type().is_done());
-
-        for (table_id, table_replication_phase) in active_table_replication_states {
-            let action = self
-                .process_single_syncing_table(
-                    table_id,
-                    table_replication_phase,
-                    current_lsn,
-                    update_state,
-                )
-                .await?;
-
-            // If the action is terminating, stop iterating and return immediately.
-            if action.is_terminating() {
-                return Ok(action);
-            }
-        }
-
-        Ok(ApplyLoopAction::Continue)
-    }
-
-    /// Determines whether changes should be applied for a given table.
-    ///
-    /// This method evaluates the table's replication state to decide if events
-    /// should be processed by the apply worker. It considers both in-memory
-    /// worker states and persistent storage states to make the decision.
-    ///
-    /// Tables in `Ready` state always have changes applied. Tables in `SyncDone`
-    /// state only apply changes if the sync LSN is at or before the current
-    /// transaction's final LSN.
-    async fn should_apply_changes(
-        &self,
-        table_id: TableId,
-        remote_final_lsn: PgLsn,
-    ) -> EtlResult<bool> {
-        let pool_guard = self.pool.lock().await;
-
-        // We try to load the state first from memory, if we don't find it, we try to load from the
-        // state store.
-        let worker_state = pool_guard.get_active_worker_state(table_id);
-        let replication_phase = match worker_state {
-            Some(worker_state) => {
-                let inner = worker_state.lock().await;
-                inner.replication_phase()
-            }
-            None => {
-                let Some(table_replication_phase) =
-                    self.store.get_table_replication_state(table_id).await?
-                else {
-                    // If we don't even find the phase for this table, we skip the event entirely.
-                    debug!(
-                        %table_id,
-                        worker_type = %self.worker_type(),
-                        should_apply_changes = false,
-                        "evaluated whether table should apply changes",
-                    );
-
-                    return Ok(false);
-                };
-
-                table_replication_phase
-            }
-        };
-
-        let should_apply_changes = match replication_phase {
-            TableReplicationPhase::Ready => true,
-            TableReplicationPhase::SyncDone { lsn } => lsn <= remote_final_lsn,
-            _ => false,
-        };
-
-        debug!(
-            %table_id,
-            worker_type = %self.worker_type(),
-            should_apply_changes = should_apply_changes,
-            "evaluated whether table should apply changes",
-        );
-
-        Ok(should_apply_changes)
-    }
-
-    /// Returns the worker type for this hook.
-    ///
-    /// This method identifies this hook as belonging to an apply worker,
-    /// which is used for coordination and logging purposes throughout
-    /// the replication system.
-    fn worker_type(&self) -> WorkerType {
-        WorkerType::Apply
-    }
 }
