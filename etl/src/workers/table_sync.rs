@@ -321,6 +321,17 @@ pub struct TableSyncWorkerHandle {
     handle: Option<JoinHandle<EtlResult<()>>>,
 }
 
+impl TableSyncWorkerHandle {
+    /// Aborts the worker task.
+    ///
+    /// Cancels the underlying tokio task if it is still running.
+    pub fn abort(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
     /// Returns a handle to the table sync worker's state.
     ///
@@ -342,11 +353,19 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
         };
 
         handle.await.map_err(|err| {
-            etl_error!(
-                ErrorKind::TableSyncWorkerPanic,
-                "Table sync worker panicked",
-                err
-            )
+            if err.is_cancelled() {
+                etl_error!(
+                    ErrorKind::TableSyncWorkerCancelled,
+                    "Table sync worker was cancelled",
+                    err
+                )
+            } else {
+                etl_error!(
+                    ErrorKind::TableSyncWorkerPanic,
+                    "Table sync worker panicked",
+                    err
+                )
+            }
         })??;
 
         Ok(())

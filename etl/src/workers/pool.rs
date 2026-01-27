@@ -5,7 +5,7 @@ use std::mem;
 use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::error::EtlResult;
 use crate::workers::base::WorkerHandle;
@@ -71,16 +71,20 @@ impl TableSyncWorkerPoolInner {
         self.active.contains_key(&table_id)
     }
 
-    /// Tries to insert a worker handle into the pool.
+    /// Inserts a worker handle into the pool.
     ///
-    /// Returns `true` if the handle was inserted, `false` if a worker for the table already exists.
-    pub fn try_insert_handle(&mut self, table_id: TableId, handle: TableSyncWorkerHandle) -> bool {
-        if let Entry::Vacant(entry) = self.active.entry(table_id) {
-            entry.insert(handle);
-            debug!(%table_id, "added worker to pool");
-            true
-        } else {
-            false
+    /// If a worker for the table already exists, logs a warning, aborts the new handle,
+    /// and skips insertion. Callers should check [`has_active_worker`] before calling.
+    pub fn insert_handle(&mut self, table_id: TableId, mut handle: TableSyncWorkerHandle) {
+        match self.active.entry(table_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(handle);
+                debug!(%table_id, "added worker to pool");
+            }
+            Entry::Occupied(_) => {
+                warn!(%table_id, "worker already exists in pool, aborting new handle");
+                handle.abort();
+            }
         }
     }
 

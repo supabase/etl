@@ -48,7 +48,15 @@ impl WorkerHandle<()> for ApplyWorkerHandle {
         };
 
         handle.await.map_err(|err| {
-            etl_error!(ErrorKind::ApplyWorkerPanic, "Apply worker panicked", err)
+            if err.is_cancelled() {
+                etl_error!(
+                    ErrorKind::ApplyWorkerCancelled,
+                    "Apply worker was cancelled",
+                    err
+                )
+            } else {
+                etl_error!(ErrorKind::ApplyWorkerPanic, "Apply worker panicked", err)
+            }
         })??;
 
         Ok(())

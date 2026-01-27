@@ -375,7 +375,7 @@ impl ApplyLoopState {
     /// Returns the effective flush LSN to report to PostgreSQL.
     ///
     /// When idle (no active transaction and empty batch), returns the last received LSN since no
-    /// actual flushes occur. Otherwise returns the last flush LSN from completed transactions.
+    /// actual flushes occur. Otherwise, returns the last flush LSN from completed transactions.
     ///
     /// Note that when a transaction is now started, the last flush lsn will be used, and it might
     /// jump back compared to the last received lsn that we sent before, however this is fine since the
@@ -1845,16 +1845,16 @@ mod apply_worker {
         D: Destination + Clone + Send + Sync + 'static,
     {
         let fut = async move {
-            let table_id = worker.table_id();
             let mut pool_guard = pool.lock().await;
 
+            let table_id = worker.table_id();
             if pool_guard.has_active_worker(table_id) {
                 warn!(%table_id, "worker already exists in pool");
                 return Ok(false);
             }
 
             let handle = worker.start().await?;
-            pool_guard.try_insert_handle(table_id, handle);
+            pool_guard.insert_handle(table_id, handle);
 
             Ok(true)
         };
