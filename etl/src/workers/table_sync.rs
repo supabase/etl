@@ -281,6 +281,7 @@ impl TableSyncWorkerState {
             inner.phase_change.clone()
         };
 
+        // TODO: check if we can avoid this frequency check and just rely on the notification exclusively.
         // We wait for a state change within a timeout. This is done since it might be that a
         // notification is missed and in that case we want to avoid blocking indefinitely.
         let _ = tokio::time::timeout(PHASE_CHANGE_REFRESH_FREQUENCY, phase_change.notified()).await;
@@ -349,18 +350,6 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
         })??;
 
         Ok(())
-    }
-}
-
-impl Drop for TableSyncWorkerHandle {
-    /// Aborts the worker task if the handle is dropped without being awaited.
-    ///
-    /// This prevents orphaned workers from continuing to run when their handle
-    /// is dropped due to a race condition or error during pool insertion.
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
     }
 }
 

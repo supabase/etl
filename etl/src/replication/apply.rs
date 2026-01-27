@@ -113,7 +113,7 @@ pub enum ApplyLoopAction {
 impl ApplyLoopAction {
     /// Builds an [`ApplyLoopResult`] given this [`ApplyLoopAction`].
     ///
-    /// Returns `Some(result)` if the action can lead to a result of the loop, `None`
+    /// Returns [`Some`] if the action can lead to a result of the loop, [`None`]
     /// otherwise.
     pub fn to_result(self) -> Option<ApplyLoopResult> {
         match self {
@@ -188,7 +188,7 @@ pub struct TableSyncWorkerContext<S> {
 
 /// Context for the worker driving the apply loop.
 ///
-/// This enum replaces the `ApplyLoopHook` trait, providing direct access to
+/// This enum replaces the [`ApplyLoopHook`] trait, providing direct access to
 /// worker-specific resources and enabling different behavior based on the
 /// worker type at various points in the replication cycle.
 pub enum WorkerContext<S, D> {
@@ -252,12 +252,12 @@ enum EndBatch {
     Exclusive,
 }
 
-/// Result returned from `handle_replication_message` and related functions.
+/// Result returned from [`ApplyLoop::handle_replication_message`] and related functions.
 #[derive(Debug, Default)]
 struct HandleMessageResult {
     /// The event converted from the replication message.
     event: Option<Event>,
-    /// Set to a commit message's end_lsn value, `None` otherwise.
+    /// Set to a commit message's end_lsn value, [`None`] otherwise.
     end_lsn: Option<PgLsn>,
     /// Set when a batch should be ended earlier than the normal batching parameters.
     end_batch: Option<EndBatch>,
@@ -294,7 +294,7 @@ impl HandleMessageResult {
 /// A shared state that is used throughout the apply loop to track progress.
 #[derive(Debug)]
 struct ApplyLoopState {
-    /// The highest LSN received from the `end_lsn` field of a `Commit` message.
+    /// The highest LSN received from the [`end_lsn`] field of a [`Commit`] message.
     last_commit_end_lsn: Option<PgLsn>,
     /// The LSN of the commit WAL entry of the transaction that is currently being processed.
     remote_final_lsn: Option<PgLsn>,
@@ -482,17 +482,28 @@ where
 
                 // PRIORITY 1: Handle shutdown signals.
                 _ = self.shutdown_rx.changed() => {
+                    let worker_type = self.worker_context.worker_type();
+
                     if self.state.shutdown_deferred {
-                        info!("shutdown already requested, continuing due to running transaction");
+                        info!(
+                            %worker_type,
+                            "shutdown signal received but already deferred, continuing until transaction completes",
+                        );
                         continue;
                     }
 
                     if !self.state.handling_transaction() {
-                        info!("shutting down apply loop outside transaction");
+                        info!(
+                            %worker_type,
+                            "shutdown signal received outside transaction, pausing apply loop",
+                        );
                         return Ok(ApplyLoopResult::Paused);
                     }
 
-                    info!("deferring shutdown until transaction boundary");
+                    info!(
+                        %worker_type,
+                        "shutdown signal received during transaction, deferring until transaction boundary",
+                    );
                     self.state.shutdown_deferred = true;
                 }
 
@@ -504,8 +515,9 @@ where
                     }
                 } => {
                     info!(
+                        worker_type = %self.worker_context.worker_type(),
                         batch_size = self.state.events_batch.len(),
-                        "batch flush timer expired, flushing batch",
+                        "batch flush deadline reached, flushing batch",
                     );
 
                     let action = self.flush_batch().await?;
@@ -518,14 +530,21 @@ where
                 // PRIORITY 3: Process incoming replication messages from Postgres.
                 message = events_stream.next() => {
                     let Some(message) = message else {
+                        let worker_type = self.worker_context.worker_type();
                         if replication_client.is_closed() {
-                            warn!("replication stream ended due to closed postgres connection");
+                            warn!(
+                                %worker_type,
+                                "replication stream ended: PostgreSQL connection closed",
+                            );
                             bail!(
                                 ErrorKind::SourceConnectionFailed,
                                 "PostgreSQL connection has been closed during the apply loop"
                             )
                         } else {
-                            warn!("replication stream ended unexpectedly");
+                            warn!(
+                                %worker_type,
+                                "replication stream ended unexpectedly",
+                            );
                             bail!(
                                 ErrorKind::SourceConnectionFailed,
                                 "Replication stream ended unexpectedly during the apply loop"
@@ -569,12 +588,20 @@ where
 
         let mut action = result.action;
 
-        let should_flush = self.state.events_batch.len() >= self.config.batch.max_size
-            || result.end_batch.is_some();
+        let batch_size_reached = self.state.events_batch.len() >= self.config.batch.max_size;
+        let early_flush_requested = result.end_batch.is_some();
+        let should_flush = batch_size_reached || early_flush_requested;
         if should_flush && !self.state.events_batch.is_empty() {
+            let reason = if batch_size_reached {
+                "max batch size reached"
+            } else {
+                "early flush requested"
+            };
             info!(
+                worker_type = %self.worker_context.worker_type(),
                 batch_size = self.state.events_batch.len(),
-                "batch flush condition reached, flushing batch"
+                %reason,
+                "flushing batch",
             );
 
             let flush_batch_action = self.flush_batch().await?;
@@ -1269,7 +1296,7 @@ mod apply_worker {
                         %current_lsn,
                         %snapshot_lsn,
                         %catchup_lsn,
-                        "transitioning from sync wait to catchup",
+                        "transitioning sync_wait -> catchup",
                     );
 
                     worker_state_guard
@@ -1282,9 +1309,11 @@ mod apply_worker {
                     info!(
                         worker_type = %WorkerType::Apply,
                         %table_id,
-                        "catchup started, waiting for table sync worker to complete",
+                        %catchup_lsn,
+                        "table sync worker entered catchup phase, apply worker blocking until table sync worker reaches sync_done",
                     );
 
+                    // It's important to drop the state guard before waiting, otherwise we deadlock.
                     drop(worker_state_guard);
 
                     let result = worker_state
@@ -1299,33 +1328,40 @@ mod apply_worker {
 
                     match result {
                         ShutdownResult::Ok(result) => {
-                            if result.replication_phase().as_type().is_errored() {
+                            let final_phase = result.replication_phase();
+                            if final_phase.as_type().is_errored() {
                                 info!(
                                     worker_type = %WorkerType::Apply,
                                     %table_id,
-                                    "table sync worker errored, skipping table",
+                                    ?final_phase,
+                                    "apply worker unblocked: table sync worker errored, skipping table",
                                 );
                                 return Ok(ApplyLoopAction::Continue);
                             }
+
+                            info!(
+                                worker_type = %WorkerType::Apply,
+                                %table_id,
+                                ?final_phase,
+                                "apply worker unblocked: table sync worker reached sync_done",
+                            );
                         }
                         ShutdownResult::Shutdown(_) => {
                             info!(
                                 worker_type = %WorkerType::Apply,
                                 %table_id,
-                                "table sync worker interrupted by shutdown signal",
+                                "apply worker unblocked: shutdown signal received while waiting for table sync worker",
                             );
                             return Ok(ApplyLoopAction::Pause);
                         }
                     }
-
-                    info!(worker_type = %WorkerType::Apply, %table_id, "table sync worker finished syncing");
                 }
                 TableReplicationPhase::SyncDone { lsn } => {
                     debug!(
                         worker_type = %WorkerType::Apply,
                         %table_id,
                         sync_done_lsn = %lsn,
-                        "table in sync done state, will transition to ready after batch flush",
+                        "table in sync_done state, will transition to ready after batch flush",
                     );
                 }
                 _ => {
@@ -1352,7 +1388,7 @@ mod apply_worker {
                         worker_type = %WorkerType::Apply,
                         %table_id,
                         sync_done_lsn = %lsn,
-                        "table in sync done state, will transition to ready after batch flush",
+                        "table in sync_done state, will transition to ready after batch flush",
                     );
                 }
                 _ => {
@@ -1422,6 +1458,9 @@ mod apply_worker {
             pool_guard.get_active_worker_state(table_id)
         };
 
+        // If there is an active worker, we want to see if we can switch it to the ready state.
+        // If there isn't an active worker, we just try to see if we can switch the table to ready
+        // state or start a new worker for that table.
         if let Some(worker_state) = worker_state {
             let worker_state_guard = worker_state.lock().await;
             let phase = worker_state_guard.replication_phase();
@@ -1441,7 +1480,7 @@ mod apply_worker {
                         %table_id,
                         %sync_done_lsn,
                         %current_lsn,
-                        "table transitioned to ready",
+                        "transitioning sync_done -> ready",
                     );
 
                     ctx.store
@@ -1465,7 +1504,6 @@ mod apply_worker {
                 "checking table without active worker after batch flush",
             );
 
-            // No active worker exists.
             match table_replication_phase {
                 TableReplicationPhase::SyncDone { lsn: sync_done_lsn } => {
                     if current_lsn >= sync_done_lsn {
@@ -1474,7 +1512,7 @@ mod apply_worker {
                             %table_id,
                             %sync_done_lsn,
                             %current_lsn,
-                            "table transitioned to ready",
+                            "transitioning sync_done -> ready",
                         );
 
                         ctx.store
@@ -1559,6 +1597,10 @@ mod apply_worker {
             pool_guard.get_active_worker_state(table_id)
         };
 
+        // If there is an active worker, we want to see if we can start the catchup or if we can
+        // switch it to ready state.
+        // If there isn't an active worker, we just try to see if we can switch the table to ready
+        // state or start a new worker for that table.
         if let Some(worker_state) = worker_state {
             let mut worker_state_guard = worker_state.lock().await;
             let phase = worker_state_guard.replication_phase();
@@ -1584,7 +1626,7 @@ mod apply_worker {
                         %current_lsn,
                         %snapshot_lsn,
                         %catchup_lsn,
-                        "transitioning from sync wait to catchup",
+                        "transitioning sync_wait -> catchup",
                     );
 
                     worker_state_guard
@@ -1597,9 +1639,11 @@ mod apply_worker {
                     info!(
                         worker_type = %WorkerType::Apply,
                         %table_id,
-                        "catchup started, waiting for table sync worker to complete",
+                        %catchup_lsn,
+                        "table sync worker entered catchup phase, apply worker blocking until table sync worker reaches sync_done",
                     );
 
+                    // It's important to drop the state guard before waiting, otherwise we deadlock.
                     drop(worker_state_guard);
 
                     let result = worker_state
@@ -1614,26 +1658,35 @@ mod apply_worker {
 
                     match result {
                         ShutdownResult::Ok(result) => {
-                            if result.replication_phase().as_type().is_errored() {
+                            let final_phase = result.replication_phase();
+                            if final_phase.as_type().is_errored() {
                                 info!(
                                     worker_type = %WorkerType::Apply,
                                     %table_id,
-                                    "table sync worker errored, skipping table",
+                                    ?final_phase,
+                                    "apply worker unblocked: table sync worker errored, skipping table",
                                 );
+
                                 return Ok(ApplyLoopAction::Continue);
                             }
+
+                            info!(
+                                worker_type = %WorkerType::Apply,
+                                %table_id,
+                                ?final_phase,
+                                "apply worker unblocked: table sync worker reached sync_done",
+                            );
                         }
                         ShutdownResult::Shutdown(_) => {
                             info!(
                                 worker_type = %WorkerType::Apply,
                                 %table_id,
-                                "table sync worker interrupted by shutdown signal",
+                                "apply worker unblocked: shutdown signal received while waiting for table sync worker",
                             );
+
                             return Ok(ApplyLoopAction::Pause);
                         }
                     }
-
-                    info!(worker_type = %WorkerType::Apply, %table_id, "table sync worker finished syncing");
                 }
                 TableReplicationPhase::SyncDone { lsn: sync_done_lsn } => {
                     if current_lsn >= sync_done_lsn {
@@ -1642,7 +1695,7 @@ mod apply_worker {
                             %table_id,
                             %sync_done_lsn,
                             %current_lsn,
-                            "table transitioned to ready",
+                            "transitioning sync_done -> ready",
                         );
 
                         ctx.store
@@ -1675,7 +1728,6 @@ mod apply_worker {
                 "checking table without active worker when idle",
             );
 
-            // No active worker exists.
             match table_replication_phase {
                 TableReplicationPhase::SyncDone { lsn: sync_done_lsn } => {
                     if current_lsn >= sync_done_lsn {
@@ -1684,7 +1736,7 @@ mod apply_worker {
                             %table_id,
                             %sync_done_lsn,
                             %current_lsn,
-                            "table transitioned to ready",
+                            "transitioning sync_done -> ready",
                         );
 
                         ctx.store
@@ -1694,6 +1746,7 @@ mod apply_worker {
                 }
                 _ => {
                     debug!(worker_type = %WorkerType::Apply, %table_id, ?table_replication_phase, "spawning new table sync worker");
+
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
@@ -1763,7 +1816,7 @@ mod apply_worker {
     /// Starts a table sync worker and adds it to the pool.
     ///
     /// This helper function breaks the recursive type cycle between [`ApplyLoop`]
-    /// and [`TableSyncWorker`] by returning an explicitly boxed future. The `dyn Future`
+    /// and [`TableSyncWorker`] by returning an explicitly boxed future. The [`dyn Future`]
     /// erases the concrete type, preventing the compiler from trying to compute the
     /// infinite size of the recursive future chain.
     fn start_table_sync_worker<S, D>(
@@ -1821,12 +1874,6 @@ mod table_sync_worker {
             table_id: ctx.table_id,
         };
 
-        debug!(
-            %worker_type,
-            %current_lsn,
-            "processing syncing tables after commit",
-        );
-
         // Check if catchup position reached, if so, signal end batch but don't update the state yet.
         let inner = ctx.table_sync_worker_state.lock().await;
         if let TableReplicationPhase::Catchup { lsn: catchup_lsn } = inner.replication_phase() {
@@ -1835,15 +1882,18 @@ mod table_sync_worker {
                     %worker_type,
                     %catchup_lsn,
                     %current_lsn,
-                    "catchup position reached after commit, signaling end batch",
+                    "catchup target lsn reached after commit, requesting early batch flush before transitioning to sync_done",
                 );
+
                 return Ok(ApplyLoopAction::Complete);
             }
+
             debug!(
                 %worker_type,
                 %catchup_lsn,
                 %current_lsn,
-                "catchup position not yet reached",
+                remaining_lsn = %(u64::from(catchup_lsn) - u64::from(current_lsn)),
+                "catchup in progress, target lsn not yet reached",
             );
         }
 
@@ -1894,20 +1944,13 @@ mod table_sync_worker {
         let mut inner = ctx.table_sync_worker_state.lock().await;
         let phase = inner.replication_phase();
 
-        debug!(
-            %worker_type,
-            ?phase,
-            %current_lsn,
-            "checking if catchup complete",
-        );
-
         if let TableReplicationPhase::Catchup { lsn: catchup_lsn } = phase {
             if current_lsn >= catchup_lsn {
                 info!(
                     %worker_type,
                     %catchup_lsn,
                     %current_lsn,
-                    "catchup complete, transitioning to sync done",
+                    "catchup target lsn reached, transitioning catchup -> sync_done",
                 );
 
                 inner
@@ -1919,7 +1962,8 @@ mod table_sync_worker {
 
                 info!(
                     %worker_type,
-                    "table sync worker is in sync with apply worker, terminating",
+                    %current_lsn,
+                    "table sync worker completed: now in sync_done state, apply worker will be unblocked",
                 );
 
                 return Ok(ApplyLoopAction::Complete);
@@ -1929,7 +1973,8 @@ mod table_sync_worker {
                 %worker_type,
                 %catchup_lsn,
                 %current_lsn,
-                "catchup not yet complete",
+                remaining_lsn = %(u64::from(catchup_lsn) - u64::from(current_lsn)),
+                "catchup in progress, target lsn not yet reached",
             );
         }
 
