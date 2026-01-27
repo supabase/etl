@@ -218,28 +218,34 @@ impl TableSyncWorkerState {
         mut shutdown_rx: ShutdownRx,
     ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
         loop {
-            let phase_change = {
-                let inner = self.inner.lock().await;
-                let current_phase = inner.table_replication_phase.as_type();
-                if phase_types.contains(&current_phase) {
-                    info!(
-                        table_id = %inner.table_id,
-                        %current_phase,
-                        "table replication phase reached",
-                    );
+            let inner = self.inner.lock().await;
 
-                    return ShutdownResult::Ok(inner);
-                }
-
+            let current_phase = inner.table_replication_phase.as_type();
+            if phase_types.contains(&current_phase) {
                 info!(
                     table_id = %inner.table_id,
                     %current_phase,
-                    phase_types = ?phase_types,
-                    "waiting for table replication phase",
+                    "table replication phase reached",
                 );
 
-                inner.phase_change.clone()
-            };
+                return ShutdownResult::Ok(inner);
+            }
+
+            info!(
+                table_id = %inner.table_id,
+                %current_phase,
+                phase_types = ?phase_types,
+                "waiting for table replication phase",
+            );
+
+            // We listen for the phase change while holding the lock to avoid the race condition which
+            // occurs when we release the lock, the value changes, and then we wait for a value change,
+            // in that case, we will miss the notification and the system will stall.
+            let phase_change = inner.phase_change.clone();
+            let phase_change_notified = phase_change.notified();
+
+            // We must drop the lock here so that state changes can actually happen.
+            drop(inner);
 
             tokio::select! {
                 biased;
@@ -250,7 +256,7 @@ impl TableSyncWorkerState {
                     return ShutdownResult::Shutdown(());
                 }
 
-                _ = phase_change.notified() => {
+                _ = phase_change_notified => {
                     // Phase changed, loop to check if it's the desired phase.
                 }
             }
