@@ -808,8 +808,6 @@ where
             );
         }
 
-        let end_lsn = PgLsn::from(message.end_lsn());
-
         if let Some(begin_ts) = self.state.current_tx_begin_ts.take() {
             let now = Instant::now();
             let duration_seconds = (now - begin_ts).as_secs_f64();
@@ -833,6 +831,8 @@ where
 
             self.state.current_tx_events = 0;
         }
+
+        let end_lsn = PgLsn::from(message.end_lsn());
 
         // Process syncing tables after commit (worker-specific behavior).
         let mut action = self
@@ -1118,11 +1118,13 @@ where
     async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<ApplyLoopAction> {
         if self.state.handling_transaction() {
             debug!("skipping table sync processing because of in progress transaction");
+
             return Ok(ApplyLoopAction::Continue);
         }
 
         if !self.state.events_batch.is_empty() {
             debug!("skipping table sync processing because batch is not empty");
+
             return Ok(ApplyLoopAction::Continue);
         }
 
