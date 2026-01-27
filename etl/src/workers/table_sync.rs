@@ -24,7 +24,7 @@ use crate::state::table::{
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
-use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
+use crate::workers::pool::{TableSyncWorkerId, TableSyncWorkerPool};
 
 /// Maximum time to wait for the slot deletion call to complete.
 ///
@@ -179,17 +179,16 @@ impl TableSyncWorkerState {
     ///
     /// This static method provides a unified interface for updating table state
     /// regardless of whether the table has an active worker in the pool.
-    pub async fn set_and_store<P, S>(
-        pool: &P,
+    pub async fn set_and_store<S>(
+        pool: &TableSyncWorkerPool,
         state_store: &S,
         table_id: TableId,
         table_replication_phase: TableReplicationPhase,
     ) -> EtlResult<()>
     where
-        P: Deref<Target = TableSyncWorkerPoolInner>,
         S: StateStore,
     {
-        let table_sync_worker_state = pool.get_active_worker_state(table_id);
+        let table_sync_worker_state = pool.get_active_worker_state(table_id).await;
 
         // In case we have the state in memory, we will atomically update the memory and state store
         // states. Otherwise, we just update the state store.
@@ -279,17 +278,28 @@ impl Deref for TableSyncWorkerState {
 /// status, enabling coordination with other parts of the system.
 #[derive(Debug)]
 pub struct TableSyncWorkerHandle {
+    worker_id: TableSyncWorkerId,
     state: TableSyncWorkerState,
     abort_handle: AbortHandle,
 }
 
 impl TableSyncWorkerHandle {
-    /// Creates a new handle with the given state and abort handle.
-    pub fn new(state: TableSyncWorkerState, abort_handle: AbortHandle) -> Self {
+    /// Creates a new handle with the given worker ID, state, and abort handle.
+    pub fn new(
+        worker_id: TableSyncWorkerId,
+        state: TableSyncWorkerState,
+        abort_handle: AbortHandle,
+    ) -> Self {
         Self {
+            worker_id,
             state,
             abort_handle,
         }
+    }
+
+    /// Returns the unique identifier for this worker run.
+    pub fn worker_id(&self) -> TableSyncWorkerId {
+        self.worker_id
     }
 
     /// Returns the worker's state.
@@ -320,7 +330,7 @@ impl TableSyncWorkerHandle {
 pub struct TableSyncWorker<S, D> {
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
-    pool: TableSyncWorkerPool,
+    pool: Arc<TableSyncWorkerPool>,
     table_id: TableId,
     store: S,
     destination: D,
@@ -338,7 +348,7 @@ impl<S, D> TableSyncWorker<S, D> {
     pub fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
-        pool: TableSyncWorkerPool,
+        pool: Arc<TableSyncWorkerPool>,
         table_id: TableId,
         store: S,
         destination: D,
@@ -614,7 +624,7 @@ where
     /// This method initializes the worker by loading its replication state from
     /// storage, creating the state management structure, and spawning the
     /// synchronization process into the pool.
-    pub async fn spawn_into_pool(self, pool: &mut TableSyncWorkerPoolInner) -> EtlResult<()> {
+    pub async fn spawn_into_pool(self, pool: &TableSyncWorkerPool) -> EtlResult<()> {
         info!(table_id = %self.table_id, "starting table sync worker");
 
         let Some(table_replication_phase) = self
@@ -651,7 +661,7 @@ where
             .guarded_run_table_sync_worker(state.clone())
             .instrument(table_sync_worker_span);
 
-        pool.spawn(table_id, state, fut);
+        pool.spawn(table_id, state, fut).await;
 
         Ok(())
     }

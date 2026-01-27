@@ -161,7 +161,7 @@ pub struct ApplyWorkerContext<S, D> {
     /// Shared configuration for all coordinated operations.
     pub config: Arc<PipelineConfig>,
     /// Pool of table sync workers that this worker coordinates.
-    pub pool: TableSyncWorkerPool,
+    pub pool: Arc<TableSyncWorkerPool>,
     /// State store for tracking table replication progress.
     pub store: S,
     /// Destination where replicated data is written.
@@ -1219,8 +1219,7 @@ mod apply_worker {
             }
         }
 
-        let pool_guard = ctx.pool.lock().await;
-        let active_worker_state = pool_guard.get_active_worker_state(table_id);
+        let active_worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
         if let Some(active_worker_state) = active_worker_state {
             let inner = active_worker_state.lock().await;
@@ -1282,10 +1281,7 @@ mod apply_worker {
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
-        let worker_state = {
-            let pool_guard = ctx.pool.lock().await;
-            pool_guard.get_active_worker_state(table_id)
-        };
+        let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
         if let Some(worker_state) = worker_state {
             let mut worker_state_guard = worker_state.lock().await;
@@ -1440,7 +1436,7 @@ mod apply_worker {
         D: Destination + Clone + Send + Sync + 'static,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
-            let action = process_single_syncing_table_after_batch(
+            let action = process_single_syncing_table_after_batch_flush(
                 ctx,
                 table_id,
                 table_replication_phase,
@@ -1459,7 +1455,7 @@ mod apply_worker {
     /// Processes a single syncing table after batch flush.
     ///
     /// Handles `SyncDone → Ready` transitions and spawns new workers.
-    async fn process_single_syncing_table_after_batch<S, D>(
+    async fn process_single_syncing_table_after_batch_flush<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         table_id: TableId,
         table_replication_phase: TableReplicationPhase,
@@ -1469,10 +1465,7 @@ mod apply_worker {
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
-        let worker_state = {
-            let pool_guard = ctx.pool.lock().await;
-            pool_guard.get_active_worker_state(table_id)
-        };
+        let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
         // If there is an active worker, we want to see if we can switch it to the ready state.
         // If there isn't an active worker, we just try to see if we can switch the table to ready
@@ -1546,6 +1539,7 @@ mod apply_worker {
                 }
                 _ => {
                     debug!(worker_type = %WorkerType::Apply, %table_id, ?table_replication_phase, "spawning new table sync worker");
+
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
@@ -1608,10 +1602,7 @@ mod apply_worker {
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
-        let worker_state = {
-            let pool_guard = ctx.pool.lock().await;
-            pool_guard.get_active_worker_state(table_id)
-        };
+        let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
         // If there is an active worker, we want to see if we can start the catchup or if we can
         // switch it to ready state.
@@ -1792,11 +1783,9 @@ mod apply_worker {
     where
         S: StateStore + Clone + Send + Sync + 'static,
     {
-        let pool = ctx.pool.lock().await;
-
         let table_id = table_replication_error.table_id();
         TableSyncWorkerState::set_and_store(
-            &pool,
+            &ctx.pool,
             &ctx.store,
             table_id,
             table_replication_error.into(),
@@ -1836,7 +1825,7 @@ mod apply_worker {
     /// erases the concrete type, preventing the compiler from trying to compute the
     /// infinite size of the recursive future chain.
     fn start_table_sync_worker<S, D>(
-        pool: TableSyncWorkerPool,
+        pool: Arc<TableSyncWorkerPool>,
         worker: TableSyncWorker<S, D>,
     ) -> Pin<Box<dyn Future<Output = EtlResult<bool>> + Send>>
     where
@@ -1844,15 +1833,13 @@ mod apply_worker {
         D: Destination + Clone + Send + Sync + 'static,
     {
         let fut = async move {
-            let mut pool_guard = pool.lock().await;
-
             let table_id = worker.table_id();
-            if pool_guard.has_active_worker(table_id) {
+            if pool.has_active_worker(table_id).await {
                 warn!(%table_id, "worker already exists in pool");
                 return Ok(false);
             }
 
-            worker.spawn_into_pool(&mut pool_guard).await?;
+            worker.spawn_into_pool(&pool).await?;
 
             Ok(true)
         };

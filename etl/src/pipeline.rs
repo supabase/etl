@@ -33,10 +33,8 @@ enum PipelineState {
     NotStarted,
     /// Pipeline is running with active workers.
     Started {
-        // TODO: investigate whether we could benefit from a central launcher that deals at a high-level
-        //  with workers management, which should not be done in the pipeline.
         apply_worker: ApplyWorkerHandle,
-        pool: TableSyncWorkerPool,
+        pool: Arc<TableSyncWorkerPool>,
     },
 }
 
@@ -139,7 +137,7 @@ where
         self.initialize_table_states(&replication_client).await?;
 
         // We create the table sync workers pool to manage all table sync workers in a central place.
-        let pool = TableSyncWorkerPool::new();
+        let pool = Arc::new(TableSyncWorkerPool::new());
 
         // We create the permits semaphore which is used to control how many table sync workers can
         // be running at the same time.
