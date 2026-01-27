@@ -86,7 +86,7 @@ jobs:
           git cliff --config cliff.toml --tag "v${NEXT_VERSION}" --unreleased --prepend CHANGELOG.md
 
       - name: Create Release Pull Request
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           commit-message: "chore(release): v${{ steps.ver.outputs.next }}"
           title: "chore(release): v${{ steps.ver.outputs.next }}"
