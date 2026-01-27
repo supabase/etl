@@ -319,11 +319,6 @@ impl TableSyncWorkerHandle {
     pub fn is_finished(&self) -> bool {
         self.abort_handle.is_finished()
     }
-
-    /// Aborts the worker task.
-    pub fn abort(&self) {
-        self.abort_handle.abort();
-    }
 }
 
 /// Worker responsible for synchronizing individual tables from Postgres to destinations.
@@ -390,6 +385,53 @@ where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
+    /// Spawns the table sync worker into the pool.
+    ///
+    /// This method initializes the worker by loading its replication state from
+    /// storage, creating the state management structure, and spawning the
+    /// synchronization process into the pool.
+    pub async fn spawn_into_pool(self, pool: &TableSyncWorkerPool) -> EtlResult<()> {
+        info!(table_id = %self.table_id, "starting table sync worker");
+
+        let Some(table_replication_phase) = self
+            .store
+            .get_table_replication_state(self.table_id)
+            .await?
+        else {
+            error!(table_id = %self.table_id, "no replication state found, cannot start sync worker");
+
+            bail!(
+                ErrorKind::InvalidState,
+                "Table replication state not found",
+                format!("Replication state missing for table {}", self.table_id)
+            );
+        };
+
+        info!(
+            table_id = %self.table_id,
+            %table_replication_phase,
+            "loaded table sync worker state",
+        );
+
+        let state = TableSyncWorkerState::new(self.table_id, table_replication_phase);
+        let table_id = self.table_id;
+
+        let table_sync_worker_span = tracing::info_span!(
+            "table_sync_worker",
+            pipeline_id = self.pipeline_id,
+            publication_name = self.config.publication_name,
+            table_id = %self.table_id,
+        );
+
+        let fut = self
+            .guarded_run_table_sync_worker(state.clone())
+            .instrument(table_sync_worker_span);
+
+        pool.spawn(table_id, state, fut).await;
+
+        Ok(())
+    }
+
     /// Runs the table sync worker with retry logic and error handling.
     ///
     /// This method implements the retry loop for table synchronization, handling
@@ -617,59 +659,6 @@ where
         drop(permit);
 
         info!(table_id = %self.table_id, "table sync worker completed successfully");
-
-        Ok(())
-    }
-}
-
-impl<S, D> TableSyncWorker<S, D>
-where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
-{
-    /// Spawns the table sync worker into the pool.
-    ///
-    /// This method initializes the worker by loading its replication state from
-    /// storage, creating the state management structure, and spawning the
-    /// synchronization process into the pool.
-    pub async fn spawn_into_pool(self, pool: &TableSyncWorkerPool) -> EtlResult<()> {
-        info!(table_id = %self.table_id, "starting table sync worker");
-
-        let Some(table_replication_phase) = self
-            .store
-            .get_table_replication_state(self.table_id)
-            .await?
-        else {
-            error!(table_id = %self.table_id, "no replication state found, cannot start sync worker");
-
-            bail!(
-                ErrorKind::InvalidState,
-                "Table replication state not found",
-                format!("Replication state missing for table {}", self.table_id)
-            );
-        };
-
-        info!(
-            table_id = %self.table_id,
-            %table_replication_phase,
-            "loaded table sync worker state",
-        );
-
-        let state = TableSyncWorkerState::new(self.table_id, table_replication_phase);
-        let table_id = self.table_id;
-
-        let table_sync_worker_span = tracing::info_span!(
-            "table_sync_worker",
-            pipeline_id = self.pipeline_id,
-            publication_name = self.config.publication_name,
-            table_id = %self.table_id,
-        );
-
-        let fut = self
-            .guarded_run_table_sync_worker(state.clone())
-            .instrument(table_sync_worker_span);
-
-        pool.spawn(table_id, state, fut).await;
 
         Ok(())
     }
