@@ -630,7 +630,7 @@ where
             replication_client.clone(),
             self.store,
             self.destination,
-self.replication_masks,
+            self.replication_masks,
             worker_context,
             self.shutdown_rx,
         )

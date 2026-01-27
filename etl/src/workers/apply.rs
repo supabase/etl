@@ -133,7 +133,7 @@ where
             let start_lsn =
                 get_start_lsn(self.pipeline_id, &self.replication_client, &self.store).await?;
 
-let worker_context = WorkerContext::Apply(ApplyWorkerContext {
+            let worker_context = WorkerContext::Apply(ApplyWorkerContext {
                 pipeline_id: self.pipeline_id,
                 config: self.config.clone(),
                 pool: self.pool,

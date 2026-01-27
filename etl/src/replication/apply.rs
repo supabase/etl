@@ -824,7 +824,10 @@ where
         let table_id = TableId::new(schema_change_message.table_id as u32);
 
         // Check if we should apply changes for this table.
-        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
+        if !self
+            .should_apply_changes(table_id, remote_final_lsn)
+            .await?
+        {
             return Ok(HandleMessageResult::no_event());
         }
 
@@ -1034,7 +1037,10 @@ where
 
         let table_id = TableId::new(message.rel_id());
 
-        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
+        if !self
+            .should_apply_changes(table_id, remote_final_lsn)
+            .await?
+        {
             return Ok(HandleMessageResult::no_event());
         }
 
@@ -1073,7 +1079,10 @@ where
 
         let table_id = TableId::new(message.rel_id());
 
-        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
+        if !self
+            .should_apply_changes(table_id, remote_final_lsn)
+            .await?
+        {
             return Ok(HandleMessageResult::no_event());
         }
 
@@ -1112,7 +1121,10 @@ where
 
         let table_id = TableId::new(message.rel_id());
 
-        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
+        if !self
+            .should_apply_changes(table_id, remote_final_lsn)
+            .await?
+        {
             return Ok(HandleMessageResult::no_event());
         }
 
@@ -1288,8 +1300,7 @@ where
             }
         }
     }
-
-    }
+}
 
 /// Returns an iterator over tables that are still synchronizing.
 async fn get_syncing_tables<S>(
