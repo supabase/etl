@@ -372,7 +372,14 @@ impl ApplyLoopState {
         self.replication_progress.last_received_lsn
     }
 
-    /// Returns the effective flush LSN that should be reported to the PostgreSQL server.
+    /// Returns the effective flush LSN to report to PostgreSQL.
+    ///
+    /// When idle (no active transaction and empty batch), returns the last received LSN since no
+    /// actual flushes occur. Otherwise returns the last flush LSN from completed transactions.
+    ///
+    /// Note that when a transaction is now started, the last flush lsn will be used, and it might
+    /// jump back compared to the last received lsn that we sent before, however this is fine since the
+    /// status update logic guarantees monotonically increasing LSNs.
     fn effective_flush_lsn(&self) -> PgLsn {
         if !self.handling_transaction() && self.events_batch.is_empty() {
             self.replication_progress.last_received_lsn
@@ -711,6 +718,8 @@ where
                 events_stream
                     .send_status_update(
                         self.state.last_received_lsn(),
+                        // Use effective flush LSN to report last received LSN when idle, since
+                        // last flush LSN only advances during actual flushes.
                         self.state.effective_flush_lsn(),
                         message.reply() == 1,
                         StatusUpdateType::KeepAlive,
@@ -1086,10 +1095,15 @@ where
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
     async fn process_syncing_tables_after_batch_flush(&mut self) -> EtlResult<ApplyLoopAction> {
+        // Take the last commit end LSN, which is the highest LSN from any commit message in this
+        // batch. Batches can flush mid-transaction, so this may refer to the previous transaction.
         let Some(last_commit_end_lsn) = self.state.last_commit_end_lsn.take() else {
             return Ok(ApplyLoopAction::Continue);
         };
 
+        // Update replication progress to notify PostgreSQL of durable flush. Only reports progress
+        // up to the last completed transaction, which may cause duplicates on restart for partial
+        // transactions. Destinations must handle at-least-once delivery semantics.
         self.state
             .replication_progress
             .update_last_flush_lsn(last_commit_end_lsn);
@@ -1128,6 +1142,7 @@ where
             return Ok(ApplyLoopAction::Continue);
         }
 
+        // Use effective flush LSN to report last received LSN when idle.
         let current_lsn = self.state.effective_flush_lsn();
 
         debug!(
