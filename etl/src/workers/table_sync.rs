@@ -192,6 +192,14 @@ impl TableSyncWorkerState {
 
         // In case we have the state in memory, we will atomically update the memory and state store
         // states. Otherwise, we just update the state store.
+        //
+        // Note: There is a potential race condition here where `get_active_worker_state` returns
+        // `None` (worker finished), then a new worker starts and loads old state from the store,
+        // and finally we update the store with the new state, leaving the new worker with stale
+        // in-memory state. However, this is not a problem in practice because if we are calling
+        // this from the table sync worker, the apply worker sees this worker as active and will not
+        // launch any new worker and if we are the apply worker, no one can start a table sync worker
+        // besides the apply worker itself, which is running this code.
         if let Some(table_sync_worker_state) = table_sync_worker_state {
             let mut inner = table_sync_worker_state.lock().await;
             inner
@@ -211,7 +219,7 @@ impl TableSyncWorkerState {
     /// This method blocks until either the table reaches one of the desired phases or
     /// a shutdown signal is received. It uses an efficient notification system
     /// to avoid polling and provides immediate response to state changes.
-    pub async fn wait_for_phase_type(
+    pub async fn wait_forg_phase_type(
         &self,
         phase_types: &[TableReplicationPhaseType],
         mut shutdown_rx: ShutdownRx,
