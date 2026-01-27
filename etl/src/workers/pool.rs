@@ -40,8 +40,8 @@ impl std::fmt::Display for TableSyncWorkerId {
 /// - A [`Mutex`] protects the [`JoinSet`] for task spawning and waiting.
 /// - An [`RwLock`] protects the workers map for cheap read access to worker state.
 ///
-/// Locking order during spawn is: join_set lock -> workers write lock. This ensures
-/// that [`wait_all`] (which holds the join_set lock) blocks any new spawns until
+/// Locking order during spawn is: workers_join_set lock -> workers write lock. This ensures
+/// that [`wait_all`] (which holds the workers_join_set lock) blocks any new spawns until
 /// all existing workers have completed.
 #[derive(Debug)]
 pub struct TableSyncWorkerPool {
@@ -69,13 +69,13 @@ impl TableSyncWorkerPool {
     /// a warning and skips spawning. If no worker exists or the previous worker
     /// has finished, spawns a new worker with a unique run ID.
     ///
-    /// The locking order is: join_set -> workers (write). This ensures that if
+    /// The locking order is: workers_join_set -> workers (write). This ensures that if
     /// [`wait_all`] is in progress, this method blocks until it completes.
     pub async fn spawn<F>(&self, table_id: TableId, state: TableSyncWorkerState, future: F)
     where
         F: Future<Output = EtlResult<()>> + Send + 'static,
     {
-        // Lock join_set first to ensure we block if wait_all is in progress.
+        // Lock workers_join_set first to ensure we block if wait_all is in progress.
         let mut workers_join_set = self.workers_join_set.lock().await;
         let mut workers = self.workers.write().await;
 
@@ -134,7 +134,7 @@ impl TableSyncWorkerPool {
 
     /// Waits for all workers in the pool to complete.
     ///
-    /// This method holds the join_set lock while draining all tasks, which blocks
+    /// This method holds the workers_join_set lock while draining all tasks, which blocks
     /// any new spawn attempts. For each completed task, it briefly acquires a write
     /// lock on the workers map to remove the entry only if the worker_id matches.
     ///
