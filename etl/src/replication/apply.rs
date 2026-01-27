@@ -1820,31 +1820,23 @@ mod apply_worker {
 
     /// Starts a table sync worker and adds it to the pool.
     ///
-    /// This helper function breaks the recursive type cycle between [`ApplyLoop`]
-    /// and [`TableSyncWorker`] by returning an explicitly boxed future. The [`dyn Future`]
-    /// erases the concrete type, preventing the compiler from trying to compute the
-    /// infinite size of the recursive future chain.
+    /// We optimistically start the worker without checking if another one already exists since
+    /// it's highly likely that if we didn't find the worker state during process syncing table, then
+    /// the worker doesn't exist. If it were to exist, the pool itself performs de-duplication in a
+    /// consistent way.
+    ///
+    /// This helper function uses type erasure via [`Box::pin`] to enforce `Send` bounds
+    /// on the future. Without this, the compiler cannot verify that the recursive async
+    /// call chain (ApplyLoop -> TableSyncWorker -> ApplyLoop for catchup) satisfies `Send`.
     fn start_table_sync_worker<S, D>(
         pool: Arc<TableSyncWorkerPool>,
         worker: TableSyncWorker<S, D>,
-    ) -> Pin<Box<dyn Future<Output = EtlResult<bool>> + Send>>
+    ) -> Pin<Box<dyn Future<Output = EtlResult<()>> + Send>>
     where
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
-        let fut = async move {
-            let table_id = worker.table_id();
-            if pool.has_active_worker(table_id).await {
-                warn!(%table_id, "worker already exists in pool");
-                return Ok(false);
-            }
-
-            worker.spawn_into_pool(&pool).await?;
-
-            Ok(true)
-        };
-
-        Box::pin(fut)
+        Box::pin(async move { worker.spawn_into_pool(&pool).await })
     }
 }
 
