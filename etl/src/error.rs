@@ -132,7 +132,9 @@ pub enum ErrorKind {
     // State & Workflow Errors
     InvalidState,
     ApplyWorkerPanic,
+    ApplyWorkerCancelled,
     TableSyncWorkerPanic,
+    TableSyncWorkerCancelled,
     StateRollbackError,
 
     // Replication Errors
