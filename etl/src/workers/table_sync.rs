@@ -219,7 +219,7 @@ impl TableSyncWorkerState {
     /// This method blocks until either the table reaches one of the desired phases or
     /// a shutdown signal is received. It uses an efficient notification system
     /// to avoid polling and provides immediate response to state changes.
-    pub async fn wait_forg_phase_type(
+    pub async fn wait_for_phase_type(
         &self,
         phase_types: &[TableReplicationPhaseType],
         mut shutdown_rx: ShutdownRx,

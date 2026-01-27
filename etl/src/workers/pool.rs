@@ -17,7 +17,9 @@ use crate::workers::table_sync::{TableSyncWorkerHandle, TableSyncWorkerState};
 /// for the same table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TableSyncWorkerId {
+    /// Identifier of the table being synchronized by this worker.
     pub table_id: TableId,
+    /// Monotonically increasing identifier distinguishing individual worker runs for the same table.
     pub run_id: u64,
 }
 
