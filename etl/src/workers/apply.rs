@@ -9,7 +9,7 @@ use tracing::{Instrument, info};
 use crate::bail;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 use crate::replication::apply::{ApplyLoop, ApplyWorkerContext, WorkerContext};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient};
@@ -17,7 +17,6 @@ use crate::state::table::TableReplicationPhaseType;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
-use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 
 /// Handle for monitoring and controlling the apply worker.
@@ -30,19 +29,13 @@ pub struct ApplyWorkerHandle {
     handle: Option<JoinHandle<EtlResult<()>>>,
 }
 
-impl WorkerHandle<()> for ApplyWorkerHandle {
-    /// Returns the current state of the apply worker.
-    ///
-    /// Since the apply worker doesn't expose detailed state information,
-    /// this method returns unit type and serves as a placeholder.
-    fn state(&self) {}
-
+impl ApplyWorkerHandle {
     /// Waits for the apply worker to complete execution.
     ///
     /// This method blocks until the apply worker finishes processing, either
     /// due to successful completion, shutdown signal, or error. It properly
     /// handles panics that might occur within the worker task.
-    async fn wait(mut self) -> EtlResult<()> {
+    pub async fn wait(mut self) -> EtlResult<()> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
@@ -114,19 +107,17 @@ impl<S, D> ApplyWorker<S, D> {
     }
 }
 
-impl<S, D> Worker<ApplyWorkerHandle, ()> for ApplyWorker<S, D>
+impl<S, D> ApplyWorker<S, D>
 where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = EtlError;
-
-    /// Starts the apply worker and returns a handle for monitoring.
+    /// Spawns the apply worker and returns a handle for monitoring.
     ///
     /// This method initializes the apply worker by determining the starting LSN,
     /// creating coordination signals, and launching the main apply loop. The worker
     /// runs asynchronously and can be monitored through the returned handle.
-    async fn start(self) -> EtlResult<ApplyWorkerHandle> {
+    pub async fn spawn(self) -> EtlResult<ApplyWorkerHandle> {
         info!("starting apply worker");
 
         let apply_worker_span = tracing::info_span!(

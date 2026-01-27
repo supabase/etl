@@ -6,12 +6,13 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::task::AbortHandle;
 use tracing::{Instrument, debug, error, info, warn};
 
+use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorKind, EtlResult};
 use crate::replication::apply::{
     ApplyLoop, ApplyLoopResult, TableSyncWorkerContext, WorkerContext,
 };
@@ -23,9 +24,7 @@ use crate::state::table::{
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
-use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
-use crate::{bail, etl_error};
 
 /// Maximum time to wait for the slot deletion call to complete.
 ///
@@ -275,57 +274,31 @@ impl Deref for TableSyncWorkerState {
 #[derive(Debug)]
 pub struct TableSyncWorkerHandle {
     state: TableSyncWorkerState,
-    handle: Option<JoinHandle<EtlResult<()>>>,
+    abort_handle: AbortHandle,
 }
 
 impl TableSyncWorkerHandle {
-    /// Aborts the worker task.
-    ///
-    /// Cancels the underlying tokio task if it is still running.
-    pub fn abort(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
+    /// Creates a new handle with the given state and abort handle.
+    pub fn new(state: TableSyncWorkerState, abort_handle: AbortHandle) -> Self {
+        Self {
+            state,
+            abort_handle,
         }
     }
-}
 
-impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
-    /// Returns a handle to the table sync worker's state.
-    ///
-    /// This method provides access to the worker's state management structure,
-    /// enabling external coordination and monitoring of the worker's progress
-    /// through different synchronization phases.
-    fn state(&self) -> TableSyncWorkerState {
+    /// Returns the worker's state.
+    pub fn state(&self) -> TableSyncWorkerState {
         self.state.clone()
     }
 
-    /// Waits for the table sync worker to complete execution.
-    ///
-    /// This method blocks until the worker finishes processing, either due to
-    /// successful synchronization completion, shutdown signal, or error. It
-    /// properly handles panics that might occur within the worker task.
-    async fn wait(mut self) -> EtlResult<()> {
-        let Some(handle) = self.handle.take() else {
-            return Ok(());
-        };
+    /// Checks if the worker task has finished.
+    pub fn is_finished(&self) -> bool {
+        self.abort_handle.is_finished()
+    }
 
-        handle.await.map_err(|err| {
-            if err.is_cancelled() {
-                etl_error!(
-                    ErrorKind::TableSyncWorkerCancelled,
-                    "Table sync worker was cancelled",
-                    err
-                )
-            } else {
-                etl_error!(
-                    ErrorKind::TableSyncWorkerPanic,
-                    "Table sync worker panicked",
-                    err
-                )
-            }
-        })??;
-
-        Ok(())
+    /// Aborts the worker task.
+    pub fn abort(&self) {
+        self.abort_handle.abort();
     }
 }
 
@@ -428,13 +401,8 @@ where
 
             match result {
                 Ok(_) => {
-                    // Worker completed successfully, mark as finished.
-                    let mut pool_guard = pool.lock().await;
-                    {
-                        let mut state_guard = state.lock().await;
-                        state_guard.reset_retry_attempts();
-                    }
-                    pool_guard.mark_worker_finished(table_id);
+                    let mut state_guard = state.lock().await;
+                    state_guard.reset_retry_attempts();
 
                     return Ok(());
                 }
@@ -446,8 +414,6 @@ where
                         TableReplicationError::from_etl_error(&config, table_id, &err);
                     let mut retry_policy = table_error.retry_policy().clone();
 
-                    // We lock both the pool and the table sync worker state to be consistent.
-                    let mut pool_guard = pool.lock().await;
                     let mut state_guard = state.lock().await;
 
                     // If it's a timed retry, we want to see if we reached the maximum number of attempts
@@ -468,17 +434,9 @@ where
                     }
 
                     // Update the state and store with the error.
-                    if let Err(err) = state_guard.set_and_store(table_error.into(), &store).await {
-                        error!(
-                            %table_id,
-                            error = %err,
-                            "failed to update table sync worker state",
-                        );
-
-                        pool_guard.mark_worker_finished(table_id);
-
-                        return Err(err);
-                    };
+                    state_guard
+                        .set_and_store(table_error.into(), &store)
+                        .await?;
 
                     match retry_policy {
                         RetryPolicy::TimedRetry { next_retry } => {
@@ -494,12 +452,6 @@ where
                                     "retrying table sync worker",
                                 );
 
-                                // We drop the lock on the pool while waiting. We do not do the same
-                                // for the state guard since we want to hold the lock for that state
-                                // since when we are waiting to retry, nobody should be allowed to
-                                // modify it.
-                                drop(pool_guard);
-
                                 tokio::time::sleep(sleep_duration).await;
                             } else {
                                 info!(%table_id, "retrying table sync worker");
@@ -507,9 +459,6 @@ where
 
                             // We mark that we attempted a retry.
                             state_guard.increment_retry_attempts();
-
-                            // Before rolling back, we acquire the pool lock again for consistency.
-                            let mut pool_guard = pool.lock().await;
 
                             // After sleeping, we rollback to the previous state and retry.
                             //
@@ -525,23 +474,12 @@ where
                             // The in-memory states like SyncWait and Catchup won't ever be in a rollback
                             // since they are just states used for synchronization and never saved in the
                             // state store.
-                            if let Err(err) = state_guard.rollback(&store).await {
-                                error!(
-                                    %table_id,
-                                    error = %err,
-                                    "failed to rollback table sync worker state",
-                                );
-
-                                pool_guard.mark_worker_finished(table_id);
-
-                                return Err(err);
-                            };
+                            state_guard.rollback(&store).await?;
 
                             continue;
                         }
                         RetryPolicy::NoRetry | RetryPolicy::ManualRetry => {
                             state_guard.reset_retry_attempts();
-                            pool_guard.mark_worker_finished(table_id);
 
                             return Err(err);
                         }
@@ -660,19 +598,17 @@ where
     }
 }
 
-impl<S, D> Worker<TableSyncWorkerHandle, TableSyncWorkerState> for TableSyncWorker<S, D>
+impl<S, D> TableSyncWorker<S, D>
 where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    type Error = EtlError;
-
-    /// Starts the table sync worker and returns a handle for monitoring.
+    /// Spawns the table sync worker into the pool.
     ///
     /// This method initializes the worker by loading its replication state from
-    /// storage, creating the state management structure, and launching the
-    /// synchronization process in a background task.
-    async fn start(self) -> EtlResult<TableSyncWorkerHandle> {
+    /// storage, creating the state management structure, and spawning the
+    /// synchronization process into the pool.
+    pub async fn spawn_into_pool(self, pool: &mut TableSyncWorkerPoolInner) -> EtlResult<()> {
         info!(table_id = %self.table_id, "starting table sync worker");
 
         let Some(table_replication_phase) = self
@@ -696,6 +632,7 @@ where
         );
 
         let state = TableSyncWorkerState::new(self.table_id, table_replication_phase);
+        let table_id = self.table_id;
 
         let table_sync_worker_span = tracing::info_span!(
             "table_sync_worker",
@@ -703,14 +640,13 @@ where
             publication_name = self.config.publication_name,
             table_id = %self.table_id,
         );
-        let table_sync_worker = self.guarded_run_table_sync_worker(state.clone());
 
-        let fut = table_sync_worker.instrument(table_sync_worker_span);
-        let handle = tokio::spawn(fut);
+        let fut = self
+            .guarded_run_table_sync_worker(state.clone())
+            .instrument(table_sync_worker_span);
 
-        Ok(TableSyncWorkerHandle {
-            state,
-            handle: Some(handle),
-        })
+        pool.spawn(table_id, state, fut);
+
+        Ok(())
     }
 }

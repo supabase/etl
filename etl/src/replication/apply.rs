@@ -45,7 +45,6 @@ use crate::state::table::{
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::{Event, PipelineId};
-use crate::workers::base::Worker;
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 use crate::{bail, etl_error};
@@ -1853,8 +1852,7 @@ mod apply_worker {
                 return Ok(false);
             }
 
-            let handle = worker.start().await?;
-            pool_guard.insert_handle(table_id, handle);
+            worker.spawn_into_pool(&mut pool_guard).await?;
 
             Ok(true)
         };

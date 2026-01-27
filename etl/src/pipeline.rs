@@ -15,7 +15,6 @@ use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
-use crate::workers::base::{Worker, WorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 use etl_config::shared::PipelineConfig;
 use etl_postgres::types::TableId;
@@ -159,7 +158,7 @@ where
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
         )
-        .start()
+        .spawn()
         .await?;
 
         self.state = PipelineState::Started { apply_worker, pool };
