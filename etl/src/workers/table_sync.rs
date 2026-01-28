@@ -17,6 +17,7 @@ use crate::replication::apply::{
     ApplyLoop, ApplyLoopResult, TableSyncWorkerContext, WorkerContext,
 };
 use crate::replication::client::PgReplicationClient;
+use crate::replication::masks::ReplicationMasks;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::state::table::{
     RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -337,6 +338,7 @@ pub struct TableSyncWorker<S, D> {
     table_id: TableId,
     store: S,
     destination: D,
+    replication_masks: ReplicationMasks,
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
 }
@@ -355,6 +357,7 @@ impl<S, D> TableSyncWorker<S, D> {
         table_id: TableId,
         store: S,
         destination: D,
+        replication_masks: ReplicationMasks,
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
     ) -> Self {
@@ -365,6 +368,7 @@ impl<S, D> TableSyncWorker<S, D> {
             table_id,
             store,
             destination,
+            replication_masks,
             shutdown_rx,
             run_permit,
         }
@@ -447,6 +451,7 @@ where
         // Clone all the fields we need for retries.
         let pipeline_id = self.pipeline_id;
         let destination = self.destination.clone();
+        let replication_masks = self.replication_masks.clone();
         let shutdown_rx = self.shutdown_rx.clone();
         let run_permit = self.run_permit.clone();
 
@@ -459,6 +464,7 @@ where
                 table_id,
                 store: store.clone(),
                 destination: destination.clone(),
+                replication_masks: replication_masks.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 run_permit: run_permit.clone(),
             };
@@ -595,6 +601,7 @@ where
             state.clone(),
             self.store.clone(),
             self.destination.clone(),
+            &self.replication_masks,
             self.shutdown_rx.clone(),
         )
         .await;
@@ -623,6 +630,7 @@ where
             replication_client.clone(),
             self.store,
             self.destination,
+            self.replication_masks,
             worker_context,
             self.shutdown_rx,
         )

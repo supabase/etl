@@ -70,7 +70,7 @@
 //!
 //!     // Create memory-based store and destination for testing
 //!     let store = MemoryStore::new();
-//!     let destination = MemoryDestination::new();
+//!     let destination = MemoryDestination::new(store.clone());
 //!
 //!     // Configure the pipeline
 //!     let config = PipelineConfig {
@@ -111,6 +111,7 @@ pub mod error;
 pub mod failpoints;
 pub mod macros;
 pub mod metrics;
+pub mod migrations;
 pub mod pipeline;
 pub mod replication;
 pub mod state;
