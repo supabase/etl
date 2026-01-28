@@ -36,6 +36,24 @@ const INITIAL_BACKOFF_MS: u64 = 500;
 /// Maximum backoff delay in milliseconds to cap exponential growth.
 const MAX_BACKOFF_MS: u64 = 60_000;
 
+/// Checks if an error is a throttling error that should be retried.
+fn is_throttling_error(error: &EtlError) -> bool {
+    error.kinds().contains(&ErrorKind::DestinationThrottled)
+}
+
+/// Calculates exponential backoff delay with full jitter.
+///
+/// Uses the "full jitter" approach: random value between 0 and min(max_backoff, base * 2^attempt).
+/// This provides better spread than additive jitter, especially at higher attempts, helping
+/// prevent thundering herd when many clients retry simultaneously.
+fn calculate_backoff(attempt: u32) -> Duration {
+    let exponential = INITIAL_BACKOFF_MS
+        .saturating_mul(1u64 << attempt.min(10))
+        .min(MAX_BACKOFF_MS);
+    let jitter = rand::rng().random_range(0..=exponential);
+    Duration::from_millis(jitter)
+}
+
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
 /// Escapes underscores in schema and table names to prevent collisions when combining them.
@@ -507,24 +525,6 @@ where
         Ok(true)
     }
 
-    /// Checks if an error is a throttling error that should be retried.
-    fn is_throttling_error(error: &EtlError) -> bool {
-        error.kinds().contains(&ErrorKind::DestinationThrottled)
-    }
-
-    /// Calculates exponential backoff delay with full jitter.
-    ///
-    /// Uses the "full jitter" approach: random value between 0 and min(max_backoff, base * 2^attempt).
-    /// This provides better spread than additive jitter, especially at higher attempts, helping
-    /// prevent thundering herd when many clients retry simultaneously.
-    fn calculate_backoff(attempt: u32) -> Duration {
-        let exponential = INITIAL_BACKOFF_MS
-            .saturating_mul(1u64 << attempt.min(10))
-            .min(MAX_BACKOFF_MS);
-        let jitter = rand::rng().random_range(0..=exponential);
-        Duration::from_millis(jitter)
-    }
-
     /// Streams table batches to BigQuery with automatic retry on throttling errors.
     ///
     /// When BigQuery returns throttling errors (Code::Unavailable), this method retries with
@@ -556,7 +556,7 @@ where
             {
                 Ok(result) => return Ok(result),
                 Err(err) => {
-                    if !Self::is_throttling_error(&err) {
+                    if !is_throttling_error(&err) {
                         return Err(err);
                     }
 
@@ -565,7 +565,7 @@ where
                         return Err(err);
                     }
 
-                    let backoff = Self::calculate_backoff(attempt);
+                    let backoff = calculate_backoff(attempt);
                     warn!(
                         attempt = attempt + 1,
                         max_attempts = MAX_THROTTLE_RETRY_ATTEMPTS,
