@@ -331,7 +331,7 @@ impl BigQueryClient {
         }
     }
 
-    /// Streams table batches to BigQuery using the concurrent Storage Write API.
+    /// Appends table batches to BigQuery using the concurrent Storage Write API.
     ///
     /// Accepts pre-constructed TableBatch objects wrapped in Arc and processes them concurrently
     /// with controlled parallelism. This allows streaming to multiple different tables efficiently
@@ -341,7 +341,7 @@ impl BigQueryClient {
     /// which can be processed concurrently.
     /// If ordering guarantees are needed, all data for a given table must be included
     /// in a single batch.
-    pub async fn stream_table_batches_concurrent<I>(
+    pub async fn append_table_batches<I>(
         &self,
         table_batches: I,
         max_concurrent_streams: usize,

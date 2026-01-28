@@ -29,15 +29,15 @@ const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 
-/// Maximum number of retry attempts for throttling errors.
-const MAX_THROTTLE_RETRY_ATTEMPTS: u32 = 10;
+/// Maximum number of retry attempts for errors.
+const MAX_RETRY_ATTEMPTS: u32 = 10;
 /// Initial backoff delay in milliseconds for exponential backoff.
 const INITIAL_BACKOFF_MS: u64 = 500;
 /// Maximum backoff delay in milliseconds to cap exponential growth.
 const MAX_BACKOFF_MS: u64 = 60_000;
 
-/// Checks if an error is a throttling error that should be retried.
-fn is_throttling_error(error: &EtlError) -> bool {
+/// Checks if an error should be retried.
+fn is_retryable_error(error: &EtlError) -> bool {
     error.kinds().contains(&ErrorKind::DestinationThrottled)
 }
 
@@ -51,6 +51,7 @@ fn calculate_backoff(attempt: u32) -> Duration {
         .saturating_mul(1u64 << attempt.min(10))
         .min(MAX_BACKOFF_MS);
     let jitter = rand::rng().random_range(0..=exponential);
+
     Duration::from_millis(jitter)
 }
 
@@ -535,7 +536,7 @@ where
     /// Takes a slice of `Arc<TableBatch>` to enable efficient retries - on each attempt,
     /// we iterate over the slice and clone the `Arc`s (O(1) per batch) rather than
     /// recreating the batches.
-    async fn stream_with_backoff_retry(
+    async fn append_table_batches_with_retry(
         &self,
         table_batches: &[Arc<TableBatch<BigQueryTableRow>>],
     ) -> EtlResult<(usize, usize)> {
@@ -545,33 +546,33 @@ where
 
         let mut last_error = None;
 
-        for attempt in 0..MAX_THROTTLE_RETRY_ATTEMPTS {
+        for attempt in 0..MAX_RETRY_ATTEMPTS {
             // Clone Arc references (O(1) per batch) to create an iterator for this attempt.
             let batches_iter = table_batches.iter().cloned();
 
             match self
                 .client
-                .stream_table_batches_concurrent(batches_iter, self.max_concurrent_streams)
+                .append_table_batches(batches_iter, self.max_concurrent_streams)
                 .await
             {
                 Ok(result) => return Ok(result),
                 Err(err) => {
-                    if !is_throttling_error(&err) {
+                    if !is_retryable_error(&err) {
                         return Err(err);
                     }
 
                     // Don't retry on last attempt
-                    if attempt == MAX_THROTTLE_RETRY_ATTEMPTS - 1 {
+                    if attempt == MAX_RETRY_ATTEMPTS - 1 {
                         return Err(err);
                     }
 
                     let backoff = calculate_backoff(attempt);
                     warn!(
                         attempt = attempt + 1,
-                        max_attempts = MAX_THROTTLE_RETRY_ATTEMPTS,
+                        max_attempts = MAX_RETRY_ATTEMPTS,
                         backoff_ms = backoff.as_millis(),
                         error = %err,
-                        "bigquery throttled, backing off before retry"
+                        "bigquery append table batches encountered an error, backing off before retry"
                     );
 
                     last_error = Some(err);
@@ -625,7 +626,7 @@ where
         if !table_batches.is_empty() {
             #[allow(unused_variables)]
             let (bytes_sent, bytes_received) =
-                self.stream_with_backoff_retry(&table_batches).await?;
+                self.append_table_batches_with_retry(&table_batches).await?;
 
             #[cfg(feature = "egress")]
             log_processed_bytes(
@@ -727,7 +728,7 @@ where
                 if !table_batches.is_empty() {
                     #[allow(unused_variables)]
                     let (bytes_sent, bytes_received) =
-                        self.stream_with_backoff_retry(&table_batches).await?;
+                        self.append_table_batches_with_retry(&table_batches).await?;
 
                     #[cfg(feature = "egress")]
                     log_processed_bytes(
