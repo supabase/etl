@@ -68,8 +68,12 @@ pub static ETL_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
 
 /// Connection options for logical replication streams.
 ///
-/// Disables statement and idle timeouts to allow large COPY operations and long-running
+/// Disables statement, lock, and idle timeouts to allow large COPY operations and long-running
 /// transactions during initial table synchronization and WAL streaming.
+///
+/// Lock timeout is disabled because `CREATE_REPLICATION_SLOT` must wait for all in-progress
+/// write transactions to reach a consistent snapshot point. On heavily-loaded databases this
+/// can take minutes, and a timeout would only cause retries that will also fail.
 pub static ETL_REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions {
         datestyle: COMMON_DATESTYLE.to_string(),
@@ -78,7 +82,7 @@ pub static ETL_REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> =
         client_encoding: COMMON_CLIENT_ENCODING.to_string(),
         timezone: COMMON_TIMEZONE.to_string(),
         statement_timeout: 0,
-        lock_timeout: 30_000,
+        lock_timeout: 0,
         idle_in_transaction_session_timeout: 0,
         application_name: APP_NAME_REPLICATOR_STREAMING.to_string(),
     });
@@ -398,7 +402,7 @@ mod tests {
 
         assert_eq!(
             options_string,
-            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=30000 -c idle_in_transaction_session_timeout=0 -c application_name=supabase_etl_replicator_streaming"
+            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=0 -c idle_in_transaction_session_timeout=0 -c application_name=supabase_etl_replicator_streaming"
         );
     }
 
