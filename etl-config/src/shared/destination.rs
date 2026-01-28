@@ -55,7 +55,7 @@ pub enum DestinationConfig {
 
 impl DestinationConfig {
     /// Default maximum number of concurrent streams for BigQuery destinations.
-    pub const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 8;
+    pub const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 2;
 }
 
 /// Configuration for the iceberg destination with two variants

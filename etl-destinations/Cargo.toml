@@ -11,6 +11,8 @@ homepage.workspace = true
 bigquery = [
     "dep:gcp-bigquery-client",
     "dep:prost",
+    "dep:rand",
+    "dep:tonic",
     "dep:tracing",
     "dep:tokio",
     "dep:base64",
@@ -48,10 +50,12 @@ iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
 prost = { workspace = true, optional = true }
+rand = { workspace = true, optional = true, features = ["thread_rng"] }
 reqwest = { workspace = true, optional = true, features = ["json"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["sync"] }
+tonic = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true, default-features = true }
 uuid = { workspace = true, optional = true, features = ["v4"] }
 

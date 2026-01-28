@@ -8,7 +8,7 @@ use etl::types::{
 };
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::{TableBatch, TableDescriptor};
-
+use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
@@ -30,13 +30,37 @@ const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 
-/// Maximum number of retry attempts for schema mismatch errors.
+/// Maximum number of retry attempts for retryable errors.
+const MAX_RETRY_ATTEMPTS: u32 = 10;
+/// Initial backoff delay in milliseconds for exponential backoff.
+const INITIAL_BACKOFF_MS: u64 = 500;
+/// Maximum backoff delay in milliseconds to cap exponential growth.
+const MAX_BACKOFF_MS: u64 = 60_000;
+
+/// Checks if an error should be retried.
 ///
-/// After DDL changes, the BigQuery Storage Write API may cache stale schema information.
-/// These retries allow the cache to refresh before failing permanently.
-const MAX_SCHEMA_MISMATCH_ATTEMPTS: usize = 10;
-/// Delay between schema mismatch retry attempts in milliseconds.
-const SCHEMA_MISMATCH_RETRY_DELAY_MS: u64 = 1000;
+/// Returns `true` for:
+/// - [`ErrorKind::DestinationThrottled`] - transient throttling from BigQuery
+/// - [`ErrorKind::DestinationSchemaMismatch`] - stale schema cache after DDL changes
+fn is_retryable_error(error: &EtlError) -> bool {
+    let kinds = error.kinds();
+    kinds.contains(&ErrorKind::DestinationThrottled)
+        || kinds.contains(&ErrorKind::DestinationSchemaMismatch)
+}
+
+/// Calculates exponential backoff delay with full jitter.
+///
+/// Uses the "full jitter" approach: random value between 0 and min(max_backoff, base * 2^attempt).
+/// This provides better spread than additive jitter, especially at higher attempts, helping
+/// prevent thundering herd when many clients retry simultaneously.
+fn calculate_backoff(attempt: u32) -> Duration {
+    let exponential = INITIAL_BACKOFF_MS
+        .saturating_mul(1u64 << attempt.min(10))
+        .min(MAX_BACKOFF_MS);
+    let jitter = rand::rng().random_range(0..=exponential);
+
+    Duration::from_millis(jitter)
+}
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
@@ -510,6 +534,65 @@ where
         Ok(true)
     }
 
+    /// Streams table batches to BigQuery with automatic retry on throttling errors.
+    ///
+    /// When BigQuery returns throttling errors (Code::Unavailable), this method retries with
+    /// exponential backoff using full jitter. The backoff doubles with each attempt (500ms,
+    /// 1s, 2s, ...), capped at 60 seconds, with the actual delay randomized between 0 and the
+    /// calculated value to prevent thundering herd.
+    ///
+    /// Takes a slice of `Arc<TableBatch>` to enable efficient retries - on each attempt,
+    /// we iterate over the slice and clone the `Arc`s (O(1) per batch) rather than
+    /// recreating the batches.
+    async fn append_table_batches_with_retry(
+        &self,
+        table_batches: &[Arc<TableBatch<BigQueryTableRow>>],
+    ) -> EtlResult<(usize, usize)> {
+        if table_batches.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRY_ATTEMPTS {
+            // Clone Arc references (O(1) per batch) to create an iterator for this attempt.
+            let batches_iter = table_batches.iter().cloned();
+
+            match self
+                .client
+                .append_table_batches(batches_iter, self.max_concurrent_streams)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    if !is_retryable_error(&err) {
+                        return Err(err);
+                    }
+
+                    // Don't retry on last attempt
+                    if attempt == MAX_RETRY_ATTEMPTS - 1 {
+                        return Err(err);
+                    }
+
+                    let backoff = calculate_backoff(attempt);
+                    warn!(
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRY_ATTEMPTS,
+                        backoff_ms = backoff.as_millis(),
+                        error = %err,
+                        "bigquery append table batches encountered an error, backing off before retry"
+                    );
+
+                    last_error = Some(err);
+                    sleep(backoff).await;
+                }
+            }
+        }
+
+        // Should only reach here if all retries exhausted
+        Err(last_error.expect("at least one error should have occurred"))
+    }
+
     /// Writes table rows with CDC metadata for non-event streaming operations.
     ///
     /// Adds an `Upsert` operation type to each row, splits them into optimal batches based on
@@ -548,9 +631,10 @@ where
             }
         }
 
-        // Stream with schema mismatch retry.
+        // Stream all the batches concurrently with retry on throttling and schema mismatch.
         #[allow(unused_variables)]
-        let (bytes_sent, bytes_received) = self.stream_with_retry(&table_batches).await?;
+        let (bytes_sent, bytes_received) =
+            self.append_table_batches_with_retry(&table_batches).await?;
 
         if bytes_sent > 0 {
             #[cfg(feature = "egress")]
@@ -767,80 +851,17 @@ where
                 .await?;
         }
 
+        // Release all connections in the pool after DDL operations.
+        // BigQuery's Storage Write API may cache stale schema information in existing connections,
+        // so we clear them to force fresh connections with updated schema metadata.
+        self.client.release_all_connections();
+
         info!(
-            "schema changes applied successfully to table {}",
+            "schema changes applied successfully to table {}, connection pool cleared",
             bigquery_table_id
         );
 
         Ok(())
-    }
-
-    /// Checks if an error is a transient streaming error that can be retried.
-    ///
-    /// Returns `true` if any of the error kinds is [`ErrorKind::DestinationSchemaMismatch`],
-    /// which indicates transient BigQuery issues after DDL changes such as:
-    /// - Stale cached schema information ("extra field" errors)
-    /// - Streaming endpoint not yet available ("entity not found" errors)
-    fn is_retryable_streaming_error(error: &EtlError) -> bool {
-        error
-            .kinds()
-            .contains(&ErrorKind::DestinationSchemaMismatch)
-    }
-
-    /// Streams table batches to BigQuery with automatic retry on transient errors.
-    ///
-    /// After DDL changes (e.g., `ALTER TABLE ADD COLUMN`, column renames), the BigQuery
-    /// Storage Write API may temporarily:
-    /// - Cache stale schema information and reject inserts with "extra field" errors
-    /// - Return "entity not found" errors for streaming endpoints
-    ///
-    /// This method retries streaming operations when such transient errors are detected,
-    /// allowing time for BigQuery to propagate DDL changes.
-    ///
-    /// Takes a slice of `Arc<TableBatch>` to enable efficient retries - on each attempt,
-    /// we iterate over the slice and clone the `Arc`s (O(1) per batch) rather than
-    /// recreating the batches.
-    async fn stream_with_retry(
-        &self,
-        table_batches: &[Arc<TableBatch<BigQueryTableRow>>],
-    ) -> EtlResult<(usize, usize)> {
-        if table_batches.is_empty() {
-            return Ok((0, 0));
-        }
-
-        let retry_delay = Duration::from_millis(SCHEMA_MISMATCH_RETRY_DELAY_MS);
-        let mut attempts = 0;
-
-        loop {
-            // Clone the Arc references (O(1) per batch) to create an iterator for this attempt.
-            let batches_iter = table_batches.iter().cloned();
-
-            match self
-                .client
-                .stream_table_batches_concurrent(batches_iter, self.max_concurrent_streams)
-                .await
-            {
-                Ok(result) => return Ok(result),
-                Err(error) => {
-                    if !Self::is_retryable_streaming_error(&error) {
-                        return Err(error);
-                    }
-
-                    attempts += 1;
-                    if attempts >= MAX_SCHEMA_MISMATCH_ATTEMPTS {
-                        return Err(error);
-                    }
-
-                    warn!(
-                        attempt = attempts,
-                        max_attempts = MAX_SCHEMA_MISMATCH_ATTEMPTS,
-                        error = %error,
-                        "transient streaming error detected; retrying after delay"
-                    );
-                    sleep(retry_delay).await;
-                }
-            }
-        }
     }
 
     /// Processes CDC events in batches with proper ordering and truncate handling.
@@ -954,9 +975,10 @@ where
                     table_batches.push(table_batch);
                 }
 
-                // Stream with schema mismatch retry.
+                // Stream all the batches concurrently with retry on throttling and schema mismatch.
                 #[allow(unused_variables)]
-                let (bytes_sent, bytes_received) = self.stream_with_retry(&table_batches).await?;
+                let (bytes_sent, bytes_received) =
+                    self.append_table_batches_with_retry(&table_batches).await?;
 
                 if bytes_sent > 0 {
                     #[cfg(feature = "egress")]
