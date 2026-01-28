@@ -75,8 +75,8 @@ tikv-jemalloc-ctl = { version = "0.6.0", default-features = false, features = ["
 tikv-jemallocator = { version = "0.6.1", default-features = false, features = ["background_threads_runtime_support", "unprefixed_malloc_on_supported_platforms"] }
 tokio = { version = "1.47.0", default-features = false }
 tokio-postgres = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, rev = "c4b473b478b3adfbf8667d2fbe895d8423f1290b" }
-tonic = { version = "0.14.2", default-features = false }
 tokio-rustls = { version = "0.26.2", default-features = false }
+tonic = { version = "0.14.2", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
 tracing-actix-web = { version = "0.7.19", default-features = false }
 tracing-appender = { version = "0.2.3", default-features = false }
