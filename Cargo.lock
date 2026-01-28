@@ -1694,6 +1694,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tonic",
  "tracing",
  "uuid",
 ]
@@ -2040,8 +2041,7 @@ dependencies = [
 [[package]]
 name = "gcp-bigquery-client"
 version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb75ad03f4fffd15675c6fed7c37715176d7fc3f681b91c055a9f0a5cd34973d"
+source = "git+https://github.com/iambriccardo/gcp-bigquery-client?rev=66d97a521785c14c90fa6b7d76829e00a476bf19#66d97a521785c14c90fa6b7d76829e00a476bf19"
 dependencies = [
  "async-stream",
  "async-trait",

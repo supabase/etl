@@ -7,14 +7,19 @@ use etl::{bail, etl_error};
 
 #[cfg(feature = "egress")]
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
-use gcp_bigquery_client::storage::TableDescriptor;
+use gcp_bigquery_client::storage::{TableBatch, TableDescriptor};
+use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::sleep;
 use tracing::{debug, info, warn};
+
+use crate::bigquery::encoding::BigQueryTableRow;
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
@@ -23,6 +28,32 @@ use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
+
+/// Maximum number of retry attempts for errors.
+const MAX_RETRY_ATTEMPTS: u32 = 10;
+/// Initial backoff delay in milliseconds for exponential backoff.
+const INITIAL_BACKOFF_MS: u64 = 500;
+/// Maximum backoff delay in milliseconds to cap exponential growth.
+const MAX_BACKOFF_MS: u64 = 60_000;
+
+/// Checks if an error should be retried.
+fn is_retryable_error(error: &EtlError) -> bool {
+    error.kinds().contains(&ErrorKind::DestinationThrottled)
+}
+
+/// Calculates exponential backoff delay with full jitter.
+///
+/// Uses the "full jitter" approach: random value between 0 and min(max_backoff, base * 2^attempt).
+/// This provides better spread than additive jitter, especially at higher attempts, helping
+/// prevent thundering herd when many clients retry simultaneously.
+fn calculate_backoff(attempt: u32) -> Duration {
+    let exponential = INITIAL_BACKOFF_MS
+        .saturating_mul(1u64 << attempt.min(10))
+        .min(MAX_BACKOFF_MS);
+    let jitter = rand::rng().random_range(0..=exponential);
+
+    Duration::from_millis(jitter)
+}
 
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
@@ -495,6 +526,65 @@ where
         Ok(true)
     }
 
+    /// Streams table batches to BigQuery with automatic retry on throttling errors.
+    ///
+    /// When BigQuery returns throttling errors (Code::Unavailable), this method retries with
+    /// exponential backoff using full jitter. The backoff doubles with each attempt (500ms,
+    /// 1s, 2s, ...), capped at 60 seconds, with the actual delay randomized between 0 and the
+    /// calculated value to prevent thundering herd.
+    ///
+    /// Takes a slice of `Arc<TableBatch>` to enable efficient retries - on each attempt,
+    /// we iterate over the slice and clone the `Arc`s (O(1) per batch) rather than
+    /// recreating the batches.
+    async fn append_table_batches_with_retry(
+        &self,
+        table_batches: &[Arc<TableBatch<BigQueryTableRow>>],
+    ) -> EtlResult<(usize, usize)> {
+        if table_batches.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRY_ATTEMPTS {
+            // Clone Arc references (O(1) per batch) to create an iterator for this attempt.
+            let batches_iter = table_batches.iter().cloned();
+
+            match self
+                .client
+                .append_table_batches(batches_iter, self.max_concurrent_streams)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    if !is_retryable_error(&err) {
+                        return Err(err);
+                    }
+
+                    // Don't retry on last attempt
+                    if attempt == MAX_RETRY_ATTEMPTS - 1 {
+                        return Err(err);
+                    }
+
+                    let backoff = calculate_backoff(attempt);
+                    warn!(
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRY_ATTEMPTS,
+                        backoff_ms = backoff.as_millis(),
+                        error = %err,
+                        "bigquery append table batches encountered an error, backing off before retry"
+                    );
+
+                    last_error = Some(err);
+                    sleep(backoff).await;
+                }
+            }
+        }
+
+        // Should only reach here if all retries exhausted
+        Err(last_error.expect("at least one error should have occurred"))
+    }
+
     /// Writes table rows with CDC metadata for non-event streaming operations.
     ///
     /// Adds an `Upsert` operation type to each row, splits them into optimal batches based on
@@ -532,13 +622,11 @@ where
             }
         }
 
-        // Stream all the batches concurrently.
+        // Stream all the batches concurrently with retry on throttling.
         if !table_batches.is_empty() {
             #[allow(unused_variables)]
-            let (bytes_sent, bytes_received) = self
-                .client
-                .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
-                .await?;
+            let (bytes_sent, bytes_received) =
+                self.append_table_batches_with_retry(&table_batches).await?;
 
             #[cfg(feature = "egress")]
             log_processed_bytes(
@@ -639,10 +727,8 @@ where
 
                 if !table_batches.is_empty() {
                     #[allow(unused_variables)]
-                    let (bytes_sent, bytes_received) = self
-                        .client
-                        .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
-                        .await?;
+                    let (bytes_sent, bytes_received) =
+                        self.append_table_batches_with_retry(&table_batches).await?;
 
                     #[cfg(feature = "egress")]
                     log_processed_bytes(

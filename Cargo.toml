@@ -46,7 +46,7 @@ const-oid = { version = "0.9.6", default-features = false }
 constant_time_eq = { version = "0.4.2" }
 fail = { version = "0.5.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
-gcp-bigquery-client = { version = "0.27.0", default-features = false }
+gcp-bigquery-client = { git = "https://github.com/iambriccardo/gcp-bigquery-client", default-features = false, rev = "66d97a521785c14c90fa6b7d76829e00a476bf19" }
 iceberg = { version = "0.7.0", default-features = false }
 iceberg-catalog-rest = { version = "0.7.0", default-features = false }
 insta = { version = "1.43.1", default-features = false }
@@ -76,6 +76,7 @@ tikv-jemallocator = { version = "0.6.1", default-features = false, features = ["
 tokio = { version = "1.47.0", default-features = false }
 tokio-postgres = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, rev = "c4b473b478b3adfbf8667d2fbe895d8423f1290b" }
 tokio-rustls = { version = "0.26.2", default-features = false }
+tonic = { version = "0.14.2", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
 tracing-actix-web = { version = "0.7.19", default-features = false }
 tracing-appender = { version = "0.2.3", default-features = false }
