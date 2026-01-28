@@ -30,7 +30,7 @@ const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 
 /// Maximum number of retry attempts for throttling errors.
-const MAX_THROTTLE_RETRY_ATTEMPTS: u32 = 5;
+const MAX_THROTTLE_RETRY_ATTEMPTS: u32 = 10;
 /// Initial backoff delay in milliseconds for exponential backoff.
 const INITIAL_BACKOFF_MS: u64 = 500;
 /// Maximum backoff delay in milliseconds to cap exponential growth.
@@ -512,21 +512,25 @@ where
         error.kinds().contains(&ErrorKind::DestinationThrottled)
     }
 
-    /// Calculates exponential backoff delay with jitter.
+    /// Calculates exponential backoff delay with full jitter.
     ///
-    /// Uses the formula: min(max_backoff, initial_backoff * 2^attempt) + random_jitter
-    /// where jitter is a random value between 0 and 1000ms.
+    /// Uses the "full jitter" approach: random value between 0 and min(max_backoff, base * 2^attempt).
+    /// This provides better spread than additive jitter, especially at higher attempts, helping
+    /// prevent thundering herd when many clients retry simultaneously.
     fn calculate_backoff(attempt: u32) -> Duration {
-        let exponential = INITIAL_BACKOFF_MS.saturating_mul(1u64 << attempt.min(10));
-        let jitter = rand::rng().random_range(0..1000);
-        Duration::from_millis(exponential.saturating_add(jitter).min(MAX_BACKOFF_MS))
+        let exponential = INITIAL_BACKOFF_MS
+            .saturating_mul(1u64 << attempt.min(10))
+            .min(MAX_BACKOFF_MS);
+        let jitter = rand::rng().random_range(0..=exponential);
+        Duration::from_millis(jitter)
     }
 
     /// Streams table batches to BigQuery with automatic retry on throttling errors.
     ///
-    /// When BigQuery returns throttling errors (Unavailable, ResourceExhausted), this method
-    /// retries with exponential backoff. The backoff starts at 500ms and doubles with each
-    /// attempt, capped at 60 seconds, with random jitter to prevent thundering herd.
+    /// When BigQuery returns throttling errors (Code::Unavailable), this method retries with
+    /// exponential backoff using full jitter. The backoff doubles with each attempt (500ms,
+    /// 1s, 2s, ...), capped at 60 seconds, with the actual delay randomized between 0 and the
+    /// calculated value to prevent thundering herd.
     ///
     /// Takes a slice of `Arc<TableBatch>` to enable efficient retries - on each attempt,
     /// we iterate over the slice and clone the `Arc`s (O(1) per batch) rather than
