@@ -580,7 +580,7 @@ where
 
     /// Checks if a message completes the pending shutdown.
     ///
-    /// Returns `Some(Paused)` if the message is a keepalive with `wal_end >= expected_lsn`,
+    /// Returns `Some(`[`ApplyLoopResult::Paused`]`)` if the message is a keepalive with `wal_end >= expected_lsn`,
     /// `None` if still waiting for the right keepalive.
     fn try_complete_shutdown(
         &self,
@@ -639,7 +639,7 @@ where
 
     /// Handles a shutdown signal by transitioning to the appropriate shutdown state.
     ///
-    /// If outside a transaction, sends a status update and transitions to `WaitingForKeepAlive`.
+    /// If outside a transaction, sends a status update and transitions to [`ShutdownState::WaitingForPrimaryKeepAlive`].
     /// If inside a transaction, defers shutdown until the transaction boundary.
     ///
     /// The goal of the shutdown procedure is to reduce duplicates on restart as much as possible
@@ -690,7 +690,7 @@ where
     }
 
     /// Initiates graceful shutdown by sending a status update and transitioning to
-    /// `WaitingForKeepAlive` state.
+    /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
     async fn initiate_graceful_shutdown(
         &mut self,
         events_stream: Pin<&mut EventsStream>,
