@@ -508,6 +508,10 @@ where
         let events_stream = EventsStream::wrap(logical_replication_stream, self.pipeline_id);
         pin!(events_stream);
 
+        // If the loop produces a result while waiting for shutdown acknowledgement,
+        // we store it here and return it once the keepalive is received.
+        let mut pending_result: Option<ApplyLoopResult> = None;
+
         loop {
             // If waiting for shutdown acknowledgement, the loop is now just waiting for the keep alive
             // message before shutting off.
@@ -515,8 +519,9 @@ where
                 self.state.shutdown_state
             {
                 let message = events_stream.next().await;
-                if let Some(result) = self.try_complete_shutdown(message, expected_lsn)? {
-                    return Ok(result);
+                if self.try_complete_shutdown(message, expected_lsn)? {
+                    // Return the pending result if one was stored, otherwise default to Paused.
+                    return Ok(pending_result.unwrap_or(ApplyLoopResult::Paused));
                 }
 
                 continue;
@@ -545,7 +550,12 @@ where
 
                     let action = self.flush_batch(events_stream.as_mut()).await?;
                     if let Some(result) = action.to_result() {
-                        return Ok(result);
+                        // If we're waiting for shutdown acknowledgement, store the result and continue.
+                        if matches!(self.state.shutdown_state, ShutdownState::WaitingForPrimaryKeepAlive { .. }) {
+                            pending_result = Some(result);
+                        } else {
+                            return Ok(result);
+                        }
                     }
                 }
 
@@ -563,7 +573,12 @@ where
                         .await?;
 
                     if let Some(result) = action.to_result() {
-                        return Ok(result);
+                        // If we're waiting for shutdown acknowledgement, store the result and continue.
+                        if matches!(self.state.shutdown_state, ShutdownState::WaitingForPrimaryKeepAlive { .. }) {
+                            pending_result = Some(result);
+                        } else {
+                            return Ok(result);
+                        }
                     }
                 }
             }
@@ -580,13 +595,13 @@ where
 
     /// Checks if a message completes the pending shutdown.
     ///
-    /// Returns `Some(`[`ApplyLoopResult::Paused`]`)` if the message is a keepalive with `wal_end >= expected_lsn`,
-    /// `None` if still waiting for the right keepalive.
+    /// Returns `true` if the message is a keepalive with `wal_end >= expected_lsn`,
+    /// `false` if still waiting for the right keepalive.
     fn try_complete_shutdown(
         &self,
         message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         expected_lsn: PgLsn,
-    ) -> EtlResult<Option<ApplyLoopResult>> {
+    ) -> EtlResult<bool> {
         let worker_type = self.worker_context.worker_type();
 
         let Some(message) = message else {
@@ -612,7 +627,7 @@ where
                         %expected_lsn,
                         "received keepalive acknowledgement, safe to shutdown",
                     );
-                    return Ok(Some(ApplyLoopResult::Paused));
+                    return Ok(true);
                 }
 
                 // This shouldn't happen in practice because if we did process up to LSN `x` it means
@@ -634,7 +649,7 @@ where
             }
         }
 
-        Ok(None)
+        Ok(false)
     }
 
     /// Handles a shutdown signal by transitioning to the appropriate shutdown state.
