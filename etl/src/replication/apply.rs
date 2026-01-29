@@ -1077,8 +1077,10 @@ where
             .process_syncing_tables_after_commit_event(end_lsn)
             .await?;
 
-        // If the shutdown was deferred, we want to signal pause so the main loop can send
-        // a status update and wait for PostgreSQL acknowledgement before shutting down.
+        // If shutdown was deferred (see [`ShutdownState::Deferred`]), we merge
+        // [`ApplyLoopAction::Pause`] so the apply loop pauses after this commit. This allows
+        // [`Self::flush_batch`] to perform the status update and wait for PostgreSQL
+        // acknowledgement before shutting down.
         if matches!(self.state.shutdown_state, ShutdownState::Deferred) {
             action = action.merge(ApplyLoopAction::Pause);
         }
