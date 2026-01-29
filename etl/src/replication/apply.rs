@@ -908,10 +908,9 @@ where
                     .replication_progress
                     .update_last_received_lsn(end_lsn);
 
-                info!(
+                debug!(
                     %start_lsn,
                     %end_lsn,
-                    ?message,
                     "handling logical replication data message",
                 );
 
@@ -924,7 +923,7 @@ where
                     .replication_progress
                     .update_last_received_lsn(end_lsn);
 
-                info!(
+                debug!(
                     wal_end = %end_lsn,
                     reply_requested = message.reply() == 1,
                     "received keep alive",
