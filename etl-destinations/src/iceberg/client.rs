@@ -8,10 +8,7 @@ use etl::{
 use iceberg::{
     Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent,
     io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_REGION, S3_SECRET_ACCESS_KEY},
-    spec::{
-        PROPERTY_COMMIT_MAX_RETRY_WAIT_MS, PROPERTY_COMMIT_MIN_RETRY_WAIT_MS,
-        PROPERTY_COMMIT_NUM_RETRIES, PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS,
-    },
+    spec::TableProperties,
     table::Table,
     transaction::{ApplyTransactionAction, Transaction},
     writer::{
@@ -20,6 +17,7 @@ use iceberg::{
         file_writer::{
             ParquetWriterBuilder,
             location_generator::{DefaultFileNameGenerator, DefaultLocationGenerator},
+            rolling_writer::RollingFileWriterBuilder,
         },
     },
 };
@@ -205,16 +203,16 @@ impl IcebergClient {
     fn get_table_properties() -> HashMap<String, String> {
         let mut props = HashMap::new();
         props.insert(
-            PROPERTY_COMMIT_MIN_RETRY_WAIT_MS.to_string(),
+            TableProperties::PROPERTY_COMMIT_MIN_RETRY_WAIT_MS.to_string(),
             "100".to_string(),
         );
         props.insert(
-            PROPERTY_COMMIT_MAX_RETRY_WAIT_MS.to_string(),
+            TableProperties::PROPERTY_COMMIT_MAX_RETRY_WAIT_MS.to_string(),
             "10000".to_string(),
         );
-        props.insert(PROPERTY_COMMIT_NUM_RETRIES.to_string(), "10".to_string());
+        props.insert(TableProperties::PROPERTY_COMMIT_NUM_RETRIES.to_string(), "10".to_string());
         props.insert(
-            PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS.to_string(),
+            TableProperties::PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS.to_string(),
             "1800000".to_string(),
         );
         props
@@ -346,25 +344,23 @@ impl IcebergClient {
             iceberg::spec::DataFileFormat::Parquet,
         );
 
-        // Create Parquet writer builder
-        let parquet_writer_builder = ParquetWriterBuilder::new(
-            writer_props,
-            table.metadata().current_schema().clone(),
-            None,
+        // Create Parquet writer builder (now only takes props and schema)
+        let parquet_writer_builder =
+            ParquetWriterBuilder::new(writer_props, table.metadata().current_schema().clone());
+
+        // Create rolling file writer builder (handles file I/O and location generation)
+        let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
+            parquet_writer_builder,
             table.file_io().clone(),
             location_gen,
             file_name_gen,
         );
 
-        // Create data file writer with empty partition (unpartitioned table)
-        let data_file_writer_builder = DataFileWriterBuilder::new(
-            parquet_writer_builder,
-            None, // No partition value for unpartitioned tables
-            table.metadata().default_partition_spec_id(),
-        );
+        // Create data file writer builder
+        let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
 
-        // Build the writer
-        let mut data_file_writer = data_file_writer_builder.build().await?;
+        // Build the writer (pass None for partition key on unpartitioned tables)
+        let mut data_file_writer = data_file_writer_builder.build(None).await?;
 
         // Write the record batch using Iceberg writer
         data_file_writer.write(record_batch.clone()).await?;
