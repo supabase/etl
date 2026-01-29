@@ -543,7 +543,7 @@ where
                         "batch flush deadline reached, flushing batch",
                     );
 
-                    let action = self.flush_batch().await?;
+                    let action = self.flush_batch(events_stream.as_mut()).await?;
                     if let Some(result) = action.to_result() {
                         return Ok(result);
                     }
@@ -666,10 +666,10 @@ where
             return Ok(());
         }
 
-        // If we are processing a transaction, or if the batch is empty (meaning we haven't accumulated
-        // any data yet), we defer shutdown until we hit a transaction boundary (e.g. a commit message).
-        // When that is encountered, the batch will be force flushed and graceful shutdown will begin.
-        if self.state.handling_transaction() || self.state.events_batch.is_empty() {
+        // If we are processing a transaction, or if the batch has pending data, we defer shutdown
+        // until we hit a transaction boundary (e.g. a commit message). When that is encountered,
+        // the batch will be force flushed and graceful shutdown will begin.
+        if self.state.handling_transaction() || !self.state.events_batch.is_empty() {
             info!(
                 %worker_type,
                 "shutdown signal received during transaction/non-empty batch, deferring until transaction boundary",
@@ -738,25 +738,6 @@ where
             self.state.start_batch_timer_if_needed();
         }
 
-        // If the loop is instructed to be terminated, and we are in deferred shutdown, then we initiate
-        // the graceful shutdown. If we are terminating mid-transaction or mid-batch is not a problem,
-        // since we will communicate progress only up to the latest flushed data, and we are just going to
-        // get data duplicated on restart, but ETL never guarantees exactly-once delivery.
-        if action.is_terminating() && matches!(self.state.shutdown_state, ShutdownState::Deferred) {
-            let worker_type = self.worker_context.worker_type();
-
-            info!(
-                %worker_type,
-                "deferred shutdown at transaction boundary, sending status update and waiting for acknowledgement",
-            );
-
-            self.initiate_graceful_shutdown(events_stream.as_mut())
-                .await?;
-
-            // We continue the loop since at the next iteration, the shutdown will take over.
-            return Ok(ApplyLoopAction::Continue);
-        }
-
         Ok(action)
     }
 
@@ -823,7 +804,7 @@ where
                 "flushing batch",
             );
 
-            let flush_batch_action = self.flush_batch().await?;
+            let flush_batch_action = self.flush_batch(events_stream.as_mut()).await?;
             action = action.merge(flush_batch_action);
         }
 
@@ -839,11 +820,32 @@ where
     }
 
     /// Flushes the current batch of events to the destination.
-    async fn flush_batch(&mut self) -> EtlResult<ApplyLoopAction> {
+    ///
+    /// If we are in deferred shutdown and the batch ended with a commit (i.e., we're no longer
+    /// mid-transaction), this will initiate graceful shutdown.
+    async fn flush_batch(
+        &mut self,
+        events_stream: Pin<&mut EventsStream>,
+    ) -> EtlResult<ApplyLoopAction> {
         self.state.reset_batch_deadline();
 
         self.send_batch_to_destination().await?;
-        self.process_syncing_tables_after_batch_flush().await
+        let action = self.process_syncing_tables_after_batch_flush().await?;
+
+        // If we're in deferred shutdown and the batch ended with a commit (i.e., we're no longer
+        // mid-transaction), initiate graceful shutdown now.
+        if matches!(self.state.shutdown_state, ShutdownState::Deferred)
+            && !self.state.handling_transaction()
+        {
+            info!(
+                worker_type = %self.worker_context.worker_type(),
+                "deferred shutdown: batch flush completed transaction, initiating graceful shutdown",
+            );
+
+            self.initiate_graceful_shutdown(events_stream).await?;
+        }
+
+        Ok(action)
     }
 
     /// Sends the current batch of events to the destination and updates metrics.
