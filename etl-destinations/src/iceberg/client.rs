@@ -210,7 +210,10 @@ impl IcebergClient {
             TableProperties::PROPERTY_COMMIT_MAX_RETRY_WAIT_MS.to_string(),
             "10000".to_string(),
         );
-        props.insert(TableProperties::PROPERTY_COMMIT_NUM_RETRIES.to_string(), "10".to_string());
+        props.insert(
+            TableProperties::PROPERTY_COMMIT_NUM_RETRIES.to_string(),
+            "10".to_string(),
+        );
         props.insert(
             TableProperties::PROPERTY_COMMIT_TOTAL_RETRY_TIME_MS.to_string(),
             "1800000".to_string(),
