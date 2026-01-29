@@ -31,7 +31,7 @@ use crate::conversions::event::{
     parse_event_from_update_message,
 };
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
     ETL_EVENTS_PROCESSED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
@@ -122,11 +122,6 @@ impl ApplyLoopAction {
         }
     }
 
-    /// Returns `true` if this action indicates a pause (graceful shutdown).
-    pub fn is_pause(&self) -> bool {
-        matches!(self, Self::Pause)
-    }
-
     /// Returns `true` if the apply loop action is terminating the loop, `false` otherwise.
     pub fn is_terminating(&self) -> bool {
         match self {
@@ -179,11 +174,6 @@ impl ShutdownState {
     /// Returns `true` if a shutdown has been requested (either deferred or waiting).
     pub fn is_shutdown_requested(&self) -> bool {
         !matches!(self, Self::NoShutdown)
-    }
-
-    /// Returns `true` if we're waiting for a keepalive acknowledgement before shutdown.
-    pub fn is_waiting_for_keepalive(&self) -> bool {
-        matches!(self, Self::WaitingForPrimaryKeepAlive { .. })
     }
 }
 
@@ -651,12 +641,21 @@ where
     ///
     /// If outside a transaction, sends a status update and transitions to `WaitingForKeepAlive`.
     /// If inside a transaction, defers shutdown until the transaction boundary.
+    ///
+    /// The goal of the shutdown procedure is to reduce duplicates on restart as much as possible
+    /// by ensuring the replication slot's confirmed LSN reflects the latest flushed data.
+    ///
+    /// Note: the shutdown system is best-effort. Graceful shutdown may not complete if we are
+    /// blocked on non-interruptible code or if keepalive messages never arrive from the server.
+    /// It is the responsibility of the caller to forcefully kill the process if shutdown does
+    /// not complete within an acceptable timeframe.
     async fn handle_shutdown_signal(
         &mut self,
         mut events_stream: Pin<&mut EventsStream>,
     ) -> EtlResult<()> {
         let worker_type = self.worker_context.worker_type();
 
+        // If the shutdown was already requested, we silently skip it.
         if self.state.shutdown_state.is_shutdown_requested() {
             info!(
                 %worker_type,
@@ -667,10 +666,13 @@ where
             return Ok(());
         }
 
-        if self.state.handling_transaction() {
+        // If we are processing a transaction, or if the batch is empty (meaning we haven't accumulated
+        // any data yet), we defer shutdown until we hit a transaction boundary (e.g. a commit message).
+        // When that is encountered, the batch will be force flushed and graceful shutdown will begin.
+        if self.state.handling_transaction() || self.state.events_batch.is_empty() {
             info!(
                 %worker_type,
-                "shutdown signal received during transaction, deferring until transaction boundary",
+                "shutdown signal received during transaction/non-empty batch, deferring until transaction boundary",
             );
             self.state.shutdown_state = ShutdownState::Deferred;
 
@@ -682,6 +684,7 @@ where
             "shutdown signal received outside transaction, sending status update and waiting for acknowledgement",
         );
 
+        // In all other cases we just initiate the graceful shutdown.
         self.initiate_graceful_shutdown(events_stream.as_mut())
             .await
     }
@@ -721,8 +724,10 @@ where
         message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<ApplyLoopAction> {
+        // If there is no message anymore, it means that the connection has been closed or had some
+        // issues, we must handle this case.
         let Some(message) = message else {
-            return Err(self.stream_ended_error(replication_client));
+            return Err(self.build_stream_ended_error(replication_client));
         };
 
         let action = self
@@ -733,9 +738,11 @@ where
             self.state.start_batch_timer_if_needed();
         }
 
-        // If the action is a pause due to deferred shutdown, initiate graceful shutdown
-        // instead of pausing immediately.
-        if action.is_pause() && matches!(self.state.shutdown_state, ShutdownState::Deferred) {
+        // If the loop is instructed to be terminated, and we are in deferred shutdown, then we initiate
+        // the graceful shutdown. If we are terminating mid-transaction or mid-batch is not a problem,
+        // since we will communicate progress only up to the latest flushed data, and we are just going to
+        // get data duplicated on restart, but ETL never guarantees exactly-once delivery.
+        if action.is_terminating() && matches!(self.state.shutdown_state, ShutdownState::Deferred) {
             let worker_type = self.worker_context.worker_type();
 
             info!(
@@ -746,6 +753,7 @@ where
             self.initiate_graceful_shutdown(events_stream.as_mut())
                 .await?;
 
+            // We continue the loop since at the next iteration, the shutdown will take over.
             return Ok(ApplyLoopAction::Continue);
         }
 
@@ -753,10 +761,7 @@ where
     }
 
     /// Creates an error for when the replication stream ends unexpectedly.
-    fn stream_ended_error(
-        &self,
-        replication_client: &PgReplicationClient,
-    ) -> crate::error::EtlError {
+    fn build_stream_ended_error(&self, replication_client: &PgReplicationClient) -> EtlError {
         let worker_type = self.worker_context.worker_type();
 
         if replication_client.is_closed() {
@@ -764,6 +769,7 @@ where
                 %worker_type,
                 "replication stream ended: PostgreSQL connection closed",
             );
+
             etl_error!(
                 ErrorKind::SourceConnectionFailed,
                 "PostgreSQL connection has been closed during the apply loop"
@@ -773,6 +779,7 @@ where
                 %worker_type,
                 "replication stream ended unexpectedly",
             );
+
             etl_error!(
                 ErrorKind::SourceConnectionFailed,
                 "Replication stream ended unexpectedly during the apply loop"
