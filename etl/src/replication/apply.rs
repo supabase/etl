@@ -163,10 +163,10 @@ pub enum ShutdownState {
     /// Once the transaction commits, we'll send a status update and wait for acknowledgement.
     Deferred,
     /// Shutdown in progress, waiting for PostgreSQL to acknowledge our flush position.
-    /// The loop will only process keepalive messages until one arrives with `wal_end >= expected_lsn`.
+    /// The loop will only process keepalive messages until one arrives with `wal_end >= acknowledged_lsn`.
     WaitingForPrimaryKeepAlive {
         /// The LSN we sent in the status update that PostgreSQL should acknowledge.
-        expected_lsn: PgLsn,
+        acknowledged_lsn: PgLsn,
     },
 }
 
@@ -515,11 +515,11 @@ where
         loop {
             // If waiting for shutdown acknowledgement, the loop is now just waiting for the keep alive
             // message before shutting off.
-            if let ShutdownState::WaitingForPrimaryKeepAlive { expected_lsn } =
+            if let ShutdownState::WaitingForPrimaryKeepAlive { acknowledged_lsn } =
                 self.state.shutdown_state
             {
                 let message = events_stream.next().await;
-                if self.try_complete_shutdown(message, expected_lsn)? {
+                if self.try_complete_shutdown(message, acknowledged_lsn)? {
                     // Return the pending result if one was stored, otherwise default to Paused.
                     return Ok(pending_result.unwrap_or(ApplyLoopResult::Paused));
                 }
@@ -595,12 +595,12 @@ where
 
     /// Checks if a message completes the pending shutdown.
     ///
-    /// Returns `true` if the message is a keepalive with `wal_end >= expected_lsn`,
+    /// Returns `true` if the message is a keepalive with `wal_end >= acknowledged_lsn`,
     /// `false` if still waiting for the right keepalive.
     fn try_complete_shutdown(
         &self,
         message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
-        expected_lsn: PgLsn,
+        acknowledged_lsn: PgLsn,
     ) -> EtlResult<bool> {
         let worker_type = self.worker_context.worker_type();
 
@@ -620,11 +620,11 @@ where
             ReplicationMessage::PrimaryKeepAlive(keepalive) => {
                 let wal_end = PgLsn::from(keepalive.wal_end());
 
-                if wal_end >= expected_lsn {
+                if wal_end >= acknowledged_lsn {
                     info!(
                         %worker_type,
                         %wal_end,
-                        %expected_lsn,
+                        %acknowledged_lsn,
                         "received keepalive acknowledgement, safe to shutdown",
                     );
                     return Ok(true);
@@ -635,8 +635,8 @@ where
                 debug!(
                     %worker_type,
                     %wal_end,
-                    %expected_lsn,
-                    "received keepalive but wal_end < expected_lsn, continuing to wait",
+                    %acknowledged_lsn,
+                    "received keepalive but wal_end < acknowledged_lsn, continuing to wait",
                 );
             }
             _ => {
@@ -723,7 +723,7 @@ where
             .await?;
 
         self.state.shutdown_state = ShutdownState::WaitingForPrimaryKeepAlive {
-            expected_lsn: flush_lsn,
+            acknowledged_lsn: flush_lsn,
         };
 
         Ok(())
