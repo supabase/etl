@@ -105,8 +105,10 @@ impl<'a> Stream for TableCopyStream<'a> {
 /// The status update type when sending a status update message back to Postgres.
 #[derive(Debug)]
 pub enum StatusUpdateType {
-    /// Represents an update requested by Postgres.
+    /// Represents an update in response to a keep alive from Postgres.
     KeepAlive,
+    /// Represents an update before shutdown that requires acknowledgement from Postgres.
+    ShutdownFlush,
 }
 
 impl StatusUpdateType {
@@ -114,6 +116,7 @@ impl StatusUpdateType {
     fn request_reply(&self) -> bool {
         match self {
             Self::KeepAlive => false,
+            Self::ShutdownFlush => true,
         }
     }
 }
@@ -122,6 +125,7 @@ impl Display for StatusUpdateType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::KeepAlive => write!(f, "keep_alive"),
+            Self::ShutdownFlush => write!(f, "shutdown_flush"),
         }
     }
 }

@@ -122,6 +122,11 @@ impl ApplyLoopAction {
         }
     }
 
+    /// Returns `true` if this action indicates a pause (graceful shutdown).
+    pub fn is_pause(&self) -> bool {
+        matches!(self, Self::Pause)
+    }
+
     /// Returns `true` if the apply loop action is terminating the loop, `false` otherwise.
     pub fn is_terminating(&self) -> bool {
         match self {
@@ -148,6 +153,37 @@ impl ApplyLoopAction {
             },
             Self::Complete => Self::Complete,
         }
+    }
+}
+
+/// Represents the shutdown state of the apply loop.
+///
+/// Tracks the progress of a graceful shutdown, ensuring that PostgreSQL acknowledges
+/// our flush position before we terminate to prevent data duplication on restart.
+#[derive(Debug, Clone)]
+pub enum ShutdownState {
+    /// No shutdown requested, normal operation.
+    NoShutdown,
+    /// Shutdown requested but deferred because we're mid-transaction.
+    /// Once the transaction commits, we'll send a status update and wait for acknowledgement.
+    Deferred,
+    /// Shutdown in progress, waiting for PostgreSQL to acknowledge our flush position.
+    /// The loop will only process keepalive messages until one arrives with `wal_end >= expected_lsn`.
+    WaitingForPrimaryKeepAlive {
+        /// The LSN we sent in the status update that PostgreSQL should acknowledge.
+        expected_lsn: PgLsn,
+    },
+}
+
+impl ShutdownState {
+    /// Returns `true` if a shutdown has been requested (either deferred or waiting).
+    pub fn is_shutdown_requested(&self) -> bool {
+        !matches!(self, Self::NoShutdown)
+    }
+
+    /// Returns `true` if we're waiting for a keepalive acknowledgement before shutdown.
+    pub fn is_waiting_for_keepalive(&self) -> bool {
+        matches!(self, Self::WaitingForPrimaryKeepAlive { .. })
     }
 }
 
@@ -305,8 +341,8 @@ struct ApplyLoopState {
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
     current_tx_events: u64,
-    /// Boolean representing whether the shutdown was requested but could not be processed.
-    shutdown_deferred: bool,
+    /// The current shutdown state tracking graceful shutdown progress.
+    shutdown_state: ShutdownState,
     /// The deadline by which the current batch must be flushed.
     batch_flush_deadline: Option<Instant>,
     /// The maximum duration to wait before forcibly flushing a batch.
@@ -327,7 +363,7 @@ impl ApplyLoopState {
             events_batch: Vec::with_capacity(max_batch_size),
             current_tx_begin_ts: None,
             current_tx_events: 0,
-            shutdown_deferred: false,
+            shutdown_state: ShutdownState::NoShutdown,
             batch_flush_deadline: None,
             max_batch_fill_duration,
         }
@@ -483,43 +519,34 @@ where
         pin!(events_stream);
 
         loop {
+            // If waiting for shutdown acknowledgement, the loop is now just waiting for the keep alive
+            // message before shutting off.
+            if let ShutdownState::WaitingForPrimaryKeepAlive { expected_lsn } =
+                self.state.shutdown_state
+            {
+                let message = events_stream.next().await;
+                if let Some(result) = self.try_complete_shutdown(message, expected_lsn)? {
+                    return Ok(result);
+                }
+
+                continue;
+            }
+
             tokio::select! {
                 biased;
 
                 // PRIORITY 1: Handle shutdown signals.
+                // Shutdown takes highest priority to ensure graceful termination. When received,
+                // we either defer (if mid-transaction) or initiate graceful shutdown by sending
+                // a status update and waiting for PostgreSQL acknowledgement.
                 _ = self.shutdown_rx.changed() => {
-                    let worker_type = self.worker_context.worker_type();
-
-                    if self.state.shutdown_deferred {
-                        info!(
-                            %worker_type,
-                            "shutdown signal received but already deferred, continuing until transaction completes",
-                        );
-                        continue;
-                    }
-
-                    if !self.state.handling_transaction() {
-                        info!(
-                            %worker_type,
-                            "shutdown signal received outside transaction, pausing apply loop",
-                        );
-                        return Ok(ApplyLoopResult::Paused);
-                    }
-
-                    info!(
-                        %worker_type,
-                        "shutdown signal received during transaction, deferring until transaction boundary",
-                    );
-                    self.state.shutdown_deferred = true;
+                    self.handle_shutdown_signal(events_stream.as_mut()).await?;
                 }
 
                 // PRIORITY 2: Handle batch flush timer expiry.
-                _ = async {
-                    match self.state.batch_flush_deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
-                        None => std::future::pending().await,
-                    }
-                } => {
+                // Ensures batches don't wait indefinitely when message rate is low. The timer
+                // is started when the first event enters the batch and reset after each flush.
+                _ = Self::wait_for_batch_deadline(&self.state) => {
                     info!(
                         worker_type = %self.worker_context.worker_type(),
                         batch_size = self.state.events_batch.len(),
@@ -527,50 +554,229 @@ where
                     );
 
                     let action = self.flush_batch().await?;
-
                     if let Some(result) = action.to_result() {
                         return Ok(result);
                     }
                 }
 
-                // PRIORITY 3: Process incoming replication messages from Postgres.
+                // PRIORITY 3: Process incoming replication messages from PostgreSQL.
+                // This is the main work of the apply loop - receiving WAL events and converting
+                // them to destination writes. Has lowest priority so shutdown and flush timer
+                // are always handled promptly.
                 message = events_stream.next() => {
-                    let Some(message) = message else {
-                        let worker_type = self.worker_context.worker_type();
-                        if replication_client.is_closed() {
-                            warn!(
-                                %worker_type,
-                                "replication stream ended: PostgreSQL connection closed",
-                            );
-                            bail!(
-                                ErrorKind::SourceConnectionFailed,
-                                "PostgreSQL connection has been closed during the apply loop"
-                            )
-                        } else {
-                            warn!(
-                                %worker_type,
-                                "replication stream ended unexpectedly",
-                            );
-                            bail!(
-                                ErrorKind::SourceConnectionFailed,
-                                "Replication stream ended unexpectedly during the apply loop"
-                            )
-                        }
-                    };
-
                     let action = self
-                        .handle_replication_message_and_flush(events_stream.as_mut(), message?)
+                        .handle_stream_message(
+                            events_stream.as_mut(),
+                            message,
+                            &replication_client,
+                        )
                         .await?;
-
-                    if !self.state.events_batch.is_empty() {
-                        self.state.start_batch_timer_if_needed();
-                    }
 
                     if let Some(result) = action.to_result() {
                         return Ok(result);
                     }
                 }
             }
+        }
+    }
+
+    /// Waits for the batch flush deadline if one is set.
+    async fn wait_for_batch_deadline(state: &ApplyLoopState) {
+        match state.batch_flush_deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Checks if a message completes the pending shutdown.
+    ///
+    /// Returns `Some(Paused)` if the message is a keepalive with `wal_end >= expected_lsn`,
+    /// `None` if still waiting for the right keepalive.
+    fn try_complete_shutdown(
+        &self,
+        message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
+        expected_lsn: PgLsn,
+    ) -> EtlResult<Option<ApplyLoopResult>> {
+        let worker_type = self.worker_context.worker_type();
+
+        let Some(message) = message else {
+            warn!(
+                %worker_type,
+                "replication stream ended while waiting for keepalive acknowledgement",
+            );
+
+            bail!(
+                ErrorKind::SourceConnectionFailed,
+                "Replication stream ended while waiting for keepalive acknowledgement"
+            )
+        };
+
+        match message? {
+            ReplicationMessage::PrimaryKeepAlive(keepalive) => {
+                let wal_end = PgLsn::from(keepalive.wal_end());
+
+                if wal_end >= expected_lsn {
+                    info!(
+                        %worker_type,
+                        %wal_end,
+                        %expected_lsn,
+                        "received keepalive acknowledgement, safe to shutdown",
+                    );
+                    return Ok(Some(ApplyLoopResult::Paused));
+                }
+
+                // This shouldn't happen in practice because if we did process up to LSN `x` it means
+                // next keep alive messages from that must be at least `x`.
+                debug!(
+                    %worker_type,
+                    %wal_end,
+                    %expected_lsn,
+                    "received keepalive but wal_end < expected_lsn, continuing to wait",
+                );
+            }
+            _ => {
+                // Ignore non-keepalive messages while waiting for shutdown acknowledgement.
+                // These events will be replayed on restart from the confirmed LSN.
+                debug!(
+                    %worker_type,
+                    "ignoring non-keepalive message while waiting for shutdown acknowledgement",
+                );
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Handles a shutdown signal by transitioning to the appropriate shutdown state.
+    ///
+    /// If outside a transaction, sends a status update and transitions to `WaitingForKeepAlive`.
+    /// If inside a transaction, defers shutdown until the transaction boundary.
+    async fn handle_shutdown_signal(
+        &mut self,
+        mut events_stream: Pin<&mut EventsStream>,
+    ) -> EtlResult<()> {
+        let worker_type = self.worker_context.worker_type();
+
+        if self.state.shutdown_state.is_shutdown_requested() {
+            info!(
+                %worker_type,
+                shutdown_state = ?self.state.shutdown_state,
+                "shutdown signal received but already in shutdown state, continuing",
+            );
+
+            return Ok(());
+        }
+
+        if self.state.handling_transaction() {
+            info!(
+                %worker_type,
+                "shutdown signal received during transaction, deferring until transaction boundary",
+            );
+            self.state.shutdown_state = ShutdownState::Deferred;
+
+            return Ok(());
+        }
+
+        info!(
+            %worker_type,
+            "shutdown signal received outside transaction, sending status update and waiting for acknowledgement",
+        );
+
+        self.initiate_graceful_shutdown(events_stream.as_mut())
+            .await
+    }
+
+    /// Initiates graceful shutdown by sending a status update and transitioning to
+    /// `WaitingForKeepAlive` state.
+    async fn initiate_graceful_shutdown(
+        &mut self,
+        events_stream: Pin<&mut EventsStream>,
+    ) -> EtlResult<()> {
+        // Use effective flush LSN to report last received LSN when idle, since
+        // last flush LSN only advances during actual flushes.
+        let flush_lsn = self.state.effective_flush_lsn();
+        events_stream
+            .send_status_update(
+                self.state.last_received_lsn(),
+                flush_lsn,
+                true,
+                StatusUpdateType::ShutdownFlush,
+            )
+            .await?;
+
+        self.state.shutdown_state = ShutdownState::WaitingForPrimaryKeepAlive {
+            expected_lsn: flush_lsn,
+        };
+
+        Ok(())
+    }
+
+    /// Handles a message from the replication stream.
+    ///
+    /// Processes the message, manages batch timing, and handles deferred shutdown
+    /// at transaction boundaries.
+    async fn handle_stream_message(
+        &mut self,
+        mut events_stream: Pin<&mut EventsStream>,
+        message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
+        replication_client: &PgReplicationClient,
+    ) -> EtlResult<ApplyLoopAction> {
+        let Some(message) = message else {
+            return Err(self.stream_ended_error(replication_client));
+        };
+
+        let action = self
+            .handle_replication_message_and_flush(events_stream.as_mut(), message?)
+            .await?;
+
+        if !self.state.events_batch.is_empty() {
+            self.state.start_batch_timer_if_needed();
+        }
+
+        // If the action is a pause due to deferred shutdown, initiate graceful shutdown
+        // instead of pausing immediately.
+        if action.is_pause() && matches!(self.state.shutdown_state, ShutdownState::Deferred) {
+            let worker_type = self.worker_context.worker_type();
+
+            info!(
+                %worker_type,
+                "deferred shutdown at transaction boundary, sending status update and waiting for acknowledgement",
+            );
+
+            self.initiate_graceful_shutdown(events_stream.as_mut())
+                .await?;
+
+            return Ok(ApplyLoopAction::Continue);
+        }
+
+        Ok(action)
+    }
+
+    /// Creates an error for when the replication stream ends unexpectedly.
+    fn stream_ended_error(
+        &self,
+        replication_client: &PgReplicationClient,
+    ) -> crate::error::EtlError {
+        let worker_type = self.worker_context.worker_type();
+
+        if replication_client.is_closed() {
+            warn!(
+                %worker_type,
+                "replication stream ended: PostgreSQL connection closed",
+            );
+            etl_error!(
+                ErrorKind::SourceConnectionFailed,
+                "PostgreSQL connection has been closed during the apply loop"
+            )
+        } else {
+            warn!(
+                %worker_type,
+                "replication stream ended unexpectedly",
+            );
+            etl_error!(
+                ErrorKind::SourceConnectionFailed,
+                "Replication stream ended unexpectedly during the apply loop"
+            )
         }
     }
 
@@ -693,9 +899,10 @@ where
                     .replication_progress
                     .update_last_received_lsn(end_lsn);
 
-                debug!(
+                info!(
                     %start_lsn,
                     %end_lsn,
+                    ?message,
                     "handling logical replication data message",
                 );
 
@@ -708,7 +915,7 @@ where
                     .replication_progress
                     .update_last_received_lsn(end_lsn);
 
-                debug!(
+                info!(
                     wal_end = %end_lsn,
                     reply_requested = message.reply() == 1,
                     "received keep alive",
@@ -847,9 +1054,9 @@ where
             .process_syncing_tables_after_commit_event(end_lsn)
             .await?;
 
-        // If the shutdown was deferred, we want to pause the loop since now we have reached the end
-        // of a transaction, which is the best point where we can consistently and gracefully stop.
-        if self.state.shutdown_deferred {
+        // If the shutdown was deferred, we want to signal pause so the main loop can send
+        // a status update and wait for PostgreSQL acknowledgement before shutting down.
+        if matches!(self.state.shutdown_state, ShutdownState::Deferred) {
             action = action.merge(ApplyLoopAction::Pause);
         }
 
