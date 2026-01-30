@@ -804,7 +804,7 @@ where
             let next_sequenced_bigquery_table_id = sequenced_bigquery_table_id.next();
 
             info!(
-                %table_id,
+                table_id = table_id.0,
                 %next_sequenced_bigquery_table_id,
                 "processing truncate, creating new version"
             );
@@ -851,7 +851,7 @@ where
             //   is successfully processed, the system should be consistent.
 
             info!(
-                %table_id,
+                table_id = table_id.0,
                 %next_sequenced_bigquery_table_id,
                 "successfully processed truncate, view updated"
             );
