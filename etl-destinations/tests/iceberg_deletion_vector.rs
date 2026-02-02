@@ -193,6 +193,11 @@ async fn deletion_vector_write_infrastructure() {
         .await
         .unwrap();
 
+    // Note: iceberg-rust doesn't currently support applying DVv2 deletion vectors
+    // during table scans. The deletion vectors are correctly written and committed,
+    // but reading back the data would require custom logic to apply the deletions.
+    // This is tracked in: https://github.com/apache/iceberg-rust/issues/XXX
+
     // Cleanup
     client
         .drop_table_if_exists(namespace, table_name)

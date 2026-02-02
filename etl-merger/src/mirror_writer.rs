@@ -11,15 +11,23 @@ use tracing::debug;
 use crate::error::{MergerError, MergerResult};
 use crate::index::RowLocation;
 
+/// Information about rows inserted into a single data file.
+#[derive(Debug, Clone)]
+pub struct FileInsertInfo {
+    /// Path to the data file containing the inserted rows.
+    pub data_file_path: String,
+    /// Starting row index in the data file (always 0 for new files).
+    pub starting_row_index: u64,
+    /// Number of rows inserted into this file.
+    pub row_count: u64,
+}
+
 /// Result of an insert operation.
 #[derive(Debug)]
 pub struct InsertResult {
-    /// Path to the data file containing the inserted rows.
-    pub data_file_path: String,
-    /// Starting row index in the data file.
-    pub starting_row_index: u64,
-    /// Number of rows inserted.
-    pub row_count: u64,
+    /// Information about each data file created during the insert.
+    /// Multiple files can be created when using RollingFileWriter.
+    pub files: Vec<FileInsertInfo>,
 }
 
 /// Writes merged data to mirror tables using deletion vectors for updates/deletes.
@@ -66,10 +74,8 @@ impl MirrorWriter {
 
     /// Inserts new rows into the mirror table.
     ///
-    /// Returns the data file path and row count for index updates.
-    /// Note: This currently doesn't return the actual file path used, which would
-    /// require changes to the IcebergClient. For now, we use a placeholder that
-    /// will be updated when we implement proper file tracking.
+    /// Returns information about the created data files and row counts.
+    /// Multiple data files may be created if the data exceeds the file size limit.
     pub async fn insert_rows(
         &self,
         table_name: &str,
@@ -78,19 +84,24 @@ impl MirrorWriter {
         let row_count = rows.len() as u64;
         debug!(%table_name, %row_count, "inserting rows into mirror table");
 
-        self.client
+        let insert_result = self
+            .client
             .insert_rows(self.namespace.clone(), table_name.to_string(), rows)
             .await
             .map_err(MergerError::Etl)?;
 
-        // TODO: The current IcebergClient doesn't return the actual data file path.
-        // For now, we use a placeholder. This will need to be updated when we
-        // implement proper file tracking in the index.
-        Ok(InsertResult {
-            data_file_path: format!("data/placeholder-{}.parquet", uuid::Uuid::new_v4()),
-            starting_row_index: 0,
-            row_count,
-        })
+        // Convert IcebergClient result to MirrorWriter result
+        let files: Vec<FileInsertInfo> = insert_result
+            .data_files
+            .into_iter()
+            .map(|df| FileInsertInfo {
+                data_file_path: df.file_path,
+                starting_row_index: 0, // Each file starts at row 0
+                row_count: df.record_count,
+            })
+            .collect();
+
+        Ok(InsertResult { files })
     }
 
     /// Marks rows as deleted using deletion vectors.

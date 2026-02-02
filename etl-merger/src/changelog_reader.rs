@@ -7,7 +7,6 @@ use arrow::datatypes::TimeUnit;
 use etl::types::{ArrayCell, Cell, TableRow};
 use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
 use futures::StreamExt;
-use iceberg::table::Table;
 use tracing::debug;
 
 use crate::error::{MergerError, MergerResult};
@@ -76,8 +75,12 @@ impl ChangelogBatch {
 
 /// Reads batches of CDC events from Iceberg changelog tables.
 pub struct ChangelogReader {
-    /// The loaded changelog table.
-    table: Table,
+    /// The Iceberg client for loading the table.
+    client: IcebergClient,
+    /// Namespace of the changelog table.
+    namespace: String,
+    /// Name of the changelog table.
+    table_name: String,
     /// Column index for cdc_operation.
     cdc_operation_col_idx: usize,
     /// Column index for sequence_number.
@@ -120,7 +123,9 @@ impl ChangelogReader {
         let data_column_count = fields.len() - 2;
 
         Ok(Self {
-            table,
+            client: client.clone(),
+            namespace: namespace.to_string(),
+            table_name: changelog_table_name.to_string(),
             cdc_operation_col_idx,
             sequence_number_col_idx,
             pk_column_indices,
@@ -141,17 +146,23 @@ impl ChangelogReader {
     /// Reads a batch of changelog entries starting after the given sequence number.
     ///
     /// Events are returned sorted by sequence_number for correct ordering.
+    /// The table is reloaded on each call to get the latest snapshot.
     pub async fn read_batch(
         &self,
         after_sequence_number: Option<&str>,
         batch_size: usize,
     ) -> MergerResult<ChangelogBatch> {
-        let Some(current_snapshot) = self.table.metadata().current_snapshot_id() else {
+        // Reload the table to get the latest snapshot
+        let table = self
+            .client
+            .load_table(self.namespace.clone(), self.table_name.clone())
+            .await?;
+
+        let Some(current_snapshot) = table.metadata().current_snapshot_id() else {
             return Ok(ChangelogBatch::empty());
         };
 
-        let mut stream = self
-            .table
+        let mut stream = table
             .scan()
             .snapshot_id(current_snapshot)
             .select_all()

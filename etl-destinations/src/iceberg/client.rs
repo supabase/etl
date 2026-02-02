@@ -37,6 +37,26 @@ use crate::iceberg::{
 /// Authentication token key for catalog configuration.
 const CATALOG_TOKEN: &str = "token";
 
+/// Information about a data file written to an Iceberg table.
+#[derive(Debug, Clone)]
+pub struct DataFileInfo {
+    /// The full path to the data file.
+    pub file_path: String,
+    /// Number of records in this file.
+    pub record_count: u64,
+    /// Size of the file in bytes.
+    pub file_size_in_bytes: u64,
+}
+
+/// Result of inserting rows into an Iceberg table.
+#[derive(Debug, Clone)]
+pub struct InsertFilesResult {
+    /// Information about each data file created.
+    pub data_files: Vec<DataFileInfo>,
+    /// Total bytes written across all files.
+    pub total_bytes: u64,
+}
+
 /// Client for managing Apache Iceberg data lake operations.
 ///
 /// This client provides a high-level interface for interacting with Iceberg catalogs,
@@ -300,14 +320,14 @@ impl IcebergClient {
     /// This method performs a batch insert operation, converting the provided
     /// table rows into Arrow RecordBatch format and writing them to the Iceberg
     /// table using Parquet format. The operation uses a fast append strategy
-    /// without duplicate checking for optimal performance. Returns the total
-    /// size in bytes of the written data files.
+    /// without duplicate checking for optimal performance. Returns information
+    /// about the data files created, including their paths and record counts.
     pub async fn insert_rows(
         &self,
         namespace: String,
         table_name: String,
         table_rows: Vec<TableRow>,
-    ) -> EtlResult<u64> {
+    ) -> EtlResult<InsertFilesResult> {
         let namespace_ident = NamespaceIdent::new(namespace);
         let table_ident = TableIdent::new(namespace_ident, table_name);
 
@@ -336,12 +356,12 @@ impl IcebergClient {
     /// This method handles the low-level details of writing Arrow RecordBatch data
     /// to an Iceberg table. It creates the necessary writers, applies the data,
     /// and commits the transaction to make the data visible in the table. Returns
-    /// the total number of bytes of the written data files.
+    /// information about the data files created, including their paths and record counts.
     async fn write_record_batch(
         &self,
         table: &Table,
         record_batch: RecordBatch,
-    ) -> Result<u64, iceberg::Error> {
+    ) -> Result<InsertFilesResult, iceberg::Error> {
         // Create Parquet writer properties
         let writer_props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
@@ -379,10 +399,19 @@ impl IcebergClient {
         // Close writer and get data files
         let data_files = data_file_writer.close().await?;
 
-        let bytes_sent: u64 = data_files
-            .iter()
-            .map(|data_file| data_file.file_size_in_bytes())
-            .sum();
+        // Extract file information before committing
+        let mut file_infos = Vec::with_capacity(data_files.len());
+        let mut total_bytes = 0u64;
+
+        for data_file in &data_files {
+            let info = DataFileInfo {
+                file_path: data_file.file_path().to_string(),
+                record_count: data_file.record_count(),
+                file_size_in_bytes: data_file.file_size_in_bytes(),
+            };
+            total_bytes += info.file_size_in_bytes;
+            file_infos.push(info);
+        }
 
         // Create transaction and fast append action
         let transaction = Transaction::new(table);
@@ -397,6 +426,9 @@ impl IcebergClient {
         // Commit the transaction to the catalog
         let _updated_table = updated_transaction.commit(&*self.catalog).await?;
 
-        Ok(bytes_sent)
+        Ok(InsertFilesResult {
+            data_files: file_infos,
+            total_bytes,
+        })
     }
 }

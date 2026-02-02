@@ -267,13 +267,37 @@ impl Merger {
                 .await?;
 
             // Update index with new row locations
-            for (i, (_, pk, seq_num)) in rows_to_insert.iter().enumerate() {
+            // Track row assignment across potentially multiple files
+            let mut file_idx = 0usize;
+            let mut row_within_file = 0u64;
+
+            for (_, pk, seq_num) in rows_to_insert.iter() {
+                // Move to next file if current file is full
+                while file_idx < insert_result.files.len() {
+                    let file_info = &insert_result.files[file_idx];
+                    if row_within_file < file_info.row_count {
+                        break;
+                    }
+                    // Move to next file
+                    file_idx += 1;
+                    row_within_file = 0;
+                }
+
+                // This should not happen if record counts are correct
+                debug_assert!(
+                    file_idx < insert_result.files.len(),
+                    "Row count mismatch: more rows than files can hold"
+                );
+
+                let file_info = &insert_result.files[file_idx];
                 let location = RowLocation::new(
-                    insert_result.data_file_path.clone(),
-                    insert_result.starting_row_index + i as u64,
+                    file_info.data_file_path.clone(),
+                    row_within_file,
                     seq_num.clone(),
                 );
                 self.index.insert(pk.clone(), location);
+
+                row_within_file += 1;
             }
         }
 

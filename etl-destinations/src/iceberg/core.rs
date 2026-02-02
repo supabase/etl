@@ -253,13 +253,13 @@ where
 
         if !table_rows.is_empty() {
             #[allow(unused_variables)]
-            let bytes_sent = self
+            let insert_result = self
                 .client
                 .insert_rows(namespace, iceberg_table_name, table_rows)
                 .await?;
 
             #[cfg(feature = "egress")]
-            log_processed_bytes(Self::name(), PROCESSING_TYPE_TABLE_COPY, bytes_sent, 0);
+            log_processed_bytes(Self::name(), PROCESSING_TYPE_TABLE_COPY, insert_result.total_bytes, 0);
         }
 
         Ok(())
@@ -362,7 +362,8 @@ where
                 #[cfg_attr(not(feature = "egress"), allow(unused_assignments))]
                 while let Some(insert_result) = join_set.join_next().await {
                     bytes_sent += insert_result
-                        .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
+                        .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??
+                        .total_bytes;
                 }
 
                 #[cfg(feature = "egress")]

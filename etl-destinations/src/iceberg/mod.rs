@@ -10,7 +10,7 @@ mod schema;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
 
-pub use client::IcebergClient;
+pub use client::{DataFileInfo, IcebergClient, InsertFilesResult};
 pub use core::{
     DestinationNamespace, IcebergDestination, IcebergOperationType,
     table_name_to_iceberg_table_name,
