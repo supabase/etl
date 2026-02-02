@@ -154,26 +154,59 @@ impl LakekeeperClient {
         let url = format!("{}/warehouse", self.base_url);
 
         let warehouse = CreateWarehouseRequest::default();
-        let response = self
-            .client
-            .post(url)
-            .header(PROJECT_ID_HEADER, PROJECT_ID)
-            .json(&warehouse)
-            .send()
-            .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            panic!(
-                "Failed to create warehouse: status={}, body={}",
-                status, error_text
-            );
+        const MAX_RETRIES: u8 = 5;
+        let mut last_error = None;
+
+        for retry in 0..MAX_RETRIES {
+            if retry > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+
+            let response = match self
+                .client
+                .post(&url)
+                .header(PROJECT_ID_HEADER, PROJECT_ID)
+                .json(&warehouse)
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    last_error = Some(format!("Request failed: {}", e));
+                    continue;
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                let error_text = response.text().await.unwrap_or_default();
+                let error_msg = format!("status={}, body={}", status, error_text);
+
+                if status.as_u16() == 408 || status.is_server_error() {
+                    last_error = Some(error_msg);
+                    continue;
+                }
+
+                panic!("Failed to create warehouse: {}", error_msg);
+            }
+
+            let response: CreateWarehouseResponse = match response.json().await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_error = Some(format!("Failed to parse response: {}", e));
+                    continue;
+                }
+            };
+
+            return Ok((warehouse.warehouse_name, response.warehouse_id));
         }
 
-        let response: CreateWarehouseResponse = response.json().await?;
-
-        Ok((warehouse.warehouse_name, response.warehouse_id))
+        panic!(
+            "Failed to create warehouse after {} retries. Last error: {}",
+            MAX_RETRIES,
+            last_error.unwrap_or_else(|| "Unknown error".to_string())
+        );
     }
 
     /// Drops a warehouse with retries.
