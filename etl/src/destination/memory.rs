@@ -119,7 +119,11 @@ impl Destination for MemoryDestination {
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        info!(table_id = table_id.0, row_count = table_rows.len(), "writing table rows");
+        info!(
+            table_id = table_id.0,
+            row_count = table_rows.len(),
+            "writing table rows"
+        );
         inner.table_rows.insert(table_id, table_rows);
 
         Ok(())

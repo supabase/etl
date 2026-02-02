@@ -83,7 +83,10 @@ impl TableSyncWorkerPool {
         if let Some(handle) = workers.get(&table_id)
             && !handle.is_finished()
         {
-            warn!(table_id = table_id.0, "worker already exists in pool and is still running");
+            warn!(
+                table_id = table_id.0,
+                "worker already exists in pool and is still running"
+            );
             return;
         }
 

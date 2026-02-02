@@ -281,7 +281,10 @@ where
                             // If we received a shutdown in the middle of a table copy, we bail knowing
                             // that the system can automatically recover if a table copy has failed in
                             // the middle of processing.
-                            info!(table_id = table_id.0, "shutting down table sync during copy");
+                            info!(
+                                table_id = table_id.0,
+                                "shutting down table sync during copy"
+                            );
 
                             return Ok(TableSyncResult::SyncStopped);
                         }
@@ -297,7 +300,10 @@ where
             // table creation.
             if !table_rows_written {
                 destination.write_table_rows(table_id, vec![]).await?;
-                info!(table_id = table_id.0, "writing empty table rows for empty table");
+                info!(
+                    table_id = table_id.0,
+                    "writing empty table rows for empty table"
+                );
             }
 
             // Record the table copy duration.
@@ -308,7 +314,10 @@ where
             )
             .record(table_copy_duration);
 
-            info!(table_id = table_id.0, total_rows_copied, "completed table copy");
+            info!(
+                table_id = table_id.0,
+                total_rows_copied, "completed table copy"
+            );
 
             // We mark that we finished the copy of the table schema and data.
             {
@@ -347,12 +356,18 @@ where
     // If we are told to shut down while waiting for a phase change, we will signal this to
     // the caller.
     if result.should_shutdown() {
-        info!(table_id = table_id.0, "shutting down table sync while waiting for catchup");
+        info!(
+            table_id = table_id.0,
+            "shutting down table sync while waiting for catchup"
+        );
 
         return Ok(TableSyncResult::SyncStopped);
     }
 
-    info!(table_id = table_id.0, "table sync completed, starting streaming");
+    info!(
+        table_id = table_id.0,
+        "table sync completed, starting streaming"
+    );
 
     Ok(TableSyncResult::SyncCompleted { start_lsn })
 }

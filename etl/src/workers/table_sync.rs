@@ -398,7 +398,10 @@ where
             .get_table_replication_state(self.table_id)
             .await?
         else {
-            error!(table_id = self.table_id.0, "no replication state found, cannot start sync worker");
+            error!(
+                table_id = self.table_id.0,
+                "no replication state found, cannot start sync worker"
+            );
 
             bail!(
                 ErrorKind::InvalidState,
@@ -562,7 +565,10 @@ where
     /// running catchup replication, and cleaning up resources. It handles both
     /// the bulk data copy phase and the incremental replication phase.
     async fn run_table_sync_worker(mut self, state: TableSyncWorkerState) -> EtlResult<()> {
-        debug!(table_id = self.table_id.0, "waiting to acquire a running permit for table sync worker");
+        debug!(
+            table_id = self.table_id.0,
+            "waiting to acquire a running permit for table sync worker"
+        );
 
         // We acquire a permit to run the table sync worker. This helps us limit the number
         // of table sync workers running in parallel which in turn helps limit the max
@@ -578,7 +584,10 @@ where
             }
         };
 
-        info!(table_id = self.table_id.0, "acquired running permit for table sync worker");
+        info!(
+            table_id = self.table_id.0,
+            "acquired running permit for table sync worker"
+        );
 
         // We create a new replication connection specifically for this table sync worker.
         //
@@ -658,7 +667,10 @@ where
         // connections.
         drop(permit);
 
-        info!(table_id = self.table_id.0, "table sync worker completed successfully");
+        info!(
+            table_id = self.table_id.0,
+            "table sync worker completed successfully"
+        );
 
         Ok(())
     }
