@@ -162,6 +162,15 @@ impl LakekeeperClient {
             .send()
             .await?;
 
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            panic!(
+                "Failed to create warehouse: status={}, body={}",
+                status, error_text
+            );
+        }
+
         let response: CreateWarehouseResponse = response.json().await?;
 
         Ok((warehouse.warehouse_name, response.warehouse_id))
