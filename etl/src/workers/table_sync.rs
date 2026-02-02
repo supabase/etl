@@ -55,7 +55,7 @@ impl TableSyncWorkerStateInner {
     /// that may be waiting for state transitions.
     pub fn set(&mut self, phase: TableReplicationPhase) {
         info!(
-            table_id = %self.table_id,
+            table_id = self.table_id.0,
             from_phase = %self.table_replication_phase,
             to_phase = %phase,
             "table phase changing",
@@ -103,7 +103,7 @@ impl TableSyncWorkerStateInner {
         // Conditionally persist based on phase type requirements
         if phase.as_type().should_store() {
             info!(
-                table_id = %self.table_id,
+                table_id = self.table_id.0,
                 %phase,
                 "storing phase change",
             );
@@ -230,7 +230,7 @@ impl TableSyncWorkerState {
             let current_phase = inner.table_replication_phase.as_type();
             if phase_types.contains(&current_phase) {
                 info!(
-                    table_id = %inner.table_id,
+                    table_id = inner.table_id.0,
                     %current_phase,
                     "table replication phase reached",
                 );
@@ -239,7 +239,7 @@ impl TableSyncWorkerState {
             }
 
             info!(
-                table_id = %inner.table_id,
+                table_id = inner.table_id.0,
                 %current_phase,
                 phase_types = ?phase_types,
                 "waiting for table replication phase",
@@ -391,14 +391,17 @@ where
     /// storage, creating the state management structure, and spawning the
     /// synchronization process into the pool.
     pub async fn spawn_into_pool(self, pool: &TableSyncWorkerPool) -> EtlResult<()> {
-        info!(table_id = %self.table_id, "starting table sync worker");
+        info!(table_id = self.table_id.0, "starting table sync worker");
 
         let Some(table_replication_phase) = self
             .store
             .get_table_replication_state(self.table_id)
             .await?
         else {
-            error!(table_id = %self.table_id, "no replication state found, cannot start sync worker");
+            error!(
+                table_id = self.table_id.0,
+                "no replication state found, cannot start sync worker"
+            );
 
             bail!(
                 ErrorKind::InvalidState,
@@ -408,7 +411,7 @@ where
         };
 
         info!(
-            table_id = %self.table_id,
+            table_id = self.table_id.0,
             %table_replication_phase,
             "loaded table sync worker state",
         );
@@ -420,7 +423,7 @@ where
             "table_sync_worker",
             pipeline_id = self.pipeline_id,
             publication_name = self.config.publication_name,
-            table_id = %self.table_id,
+            table_id = self.table_id.0,
         );
 
         let fut = self
@@ -473,7 +476,7 @@ where
                     return Ok(());
                 }
                 Err(err) => {
-                    error!(%table_id, error = %err, "table sync worker failed");
+                    error!(table_id = table_id.0, error = %err, "table sync worker failed");
 
                     // Convert error to table replication error to determine retry policy.
                     let mut table_error =
@@ -488,7 +491,7 @@ where
                         && state_guard.retry_attempts() >= config.table_error_retry_max_attempts
                     {
                         info!(
-                            %table_id,
+                            table_id = table_id.0,
                             max_attempts = config.table_error_retry_max_attempts,
                             "max automatic retry attempts reached, switching to manual retry"
                         );
@@ -513,14 +516,14 @@ where
                                     .unwrap_or(Duration::from_secs(0));
 
                                 info!(
-                                    %table_id,
+                                    table_id = table_id.0,
                                     sleep_duration = ?sleep_duration,
                                     "retrying table sync worker",
                                 );
 
                                 tokio::time::sleep(sleep_duration).await;
                             } else {
-                                info!(%table_id, "retrying table sync worker");
+                                info!(table_id = table_id.0, "retrying table sync worker");
                             }
 
                             // We mark that we attempted a retry.
@@ -562,14 +565,17 @@ where
     /// running catchup replication, and cleaning up resources. It handles both
     /// the bulk data copy phase and the incremental replication phase.
     async fn run_table_sync_worker(mut self, state: TableSyncWorkerState) -> EtlResult<()> {
-        debug!(table_id = %self.table_id, "waiting to acquire a running permit for table sync worker");
+        debug!(
+            table_id = self.table_id.0,
+            "waiting to acquire a running permit for table sync worker"
+        );
 
         // We acquire a permit to run the table sync worker. This helps us limit the number
         // of table sync workers running in parallel which in turn helps limit the max
         // number of concurrent connections to the source database.
         let permit = tokio::select! {
             _ = self.shutdown_rx.changed() => {
-                info!(table_id = %self.table_id, "shutting down table sync worker while waiting for a run permit");
+                info!(table_id = self.table_id.0, "shutting down table sync worker while waiting for a run permit");
                 return Ok(());
             }
 
@@ -578,7 +584,10 @@ where
             }
         };
 
-        info!(table_id = %self.table_id, "acquired running permit for table sync worker");
+        info!(
+            table_id = self.table_id.0,
+            "acquired running permit for table sync worker"
+        );
 
         // We create a new replication connection specifically for this table sync worker.
         //
@@ -605,7 +614,7 @@ where
                 return Ok(());
             }
             Err(err) => {
-                error!(table_id = %self.table_id, error = %err, "table sync failed");
+                error!(table_id = self.table_id.0, error = %err, "table sync failed");
                 return Err(err);
             }
         };
@@ -646,7 +655,7 @@ where
             .await;
             if result.is_err() {
                 warn!(
-                    table_id = %self.table_id,
+                    table_id = self.table_id.0,
                     %slot_name,
                     "failed to delete the replication slot of the table sync worker due to timeout",
                 );
@@ -658,7 +667,10 @@ where
         // connections.
         drop(permit);
 
-        info!(table_id = %self.table_id, "table sync worker completed successfully");
+        info!(
+            table_id = self.table_id.0,
+            "table sync worker completed successfully"
+        );
 
         Ok(())
     }

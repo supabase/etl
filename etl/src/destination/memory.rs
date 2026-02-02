@@ -86,7 +86,7 @@ impl Destination for MemoryDestination {
         // of that table.
         let mut inner = self.inner.lock().await;
 
-        info!(%table_id, "truncating table");
+        info!(table_id = table_id.0, "truncating table");
 
         inner.table_rows.remove(&table_id);
         inner.events.retain_mut(|event| {
@@ -119,7 +119,11 @@ impl Destination for MemoryDestination {
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        info!(%table_id, row_count = table_rows.len(), "writing table rows");
+        info!(
+            table_id = table_id.0,
+            row_count = table_rows.len(),
+            "writing table rows"
+        );
         inner.table_rows.insert(table_id, table_rows);
 
         Ok(())

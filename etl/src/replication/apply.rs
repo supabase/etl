@@ -1521,7 +1521,7 @@ mod apply_worker {
 
             debug!(
                 worker_type = %WorkerType::Apply,
-                %table_id,
+                table_id = table_id.0,
                 ?phase,
                 %current_lsn,
                 "checking table with active worker after commit",
@@ -1536,7 +1536,7 @@ mod apply_worker {
 
                     info!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         %current_lsn,
                         %snapshot_lsn,
                         %catchup_lsn,
@@ -1552,7 +1552,7 @@ mod apply_worker {
 
                     info!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         %catchup_lsn,
                         "table sync worker entered catchup phase, apply worker blocking until table sync worker reaches sync_done",
                     );
@@ -1576,7 +1576,7 @@ mod apply_worker {
                             if final_phase.as_type().is_errored() {
                                 info!(
                                     worker_type = %WorkerType::Apply,
-                                    %table_id,
+                                    table_id = table_id.0,
                                     ?final_phase,
                                     "apply worker unblocked: table sync worker errored, skipping table",
                                 );
@@ -1585,7 +1585,7 @@ mod apply_worker {
 
                             info!(
                                 worker_type = %WorkerType::Apply,
-                                %table_id,
+                                table_id = table_id.0,
                                 ?final_phase,
                                 "apply worker unblocked: table sync worker reached sync_done",
                             );
@@ -1593,7 +1593,7 @@ mod apply_worker {
                         ShutdownResult::Shutdown(_) => {
                             info!(
                                 worker_type = %WorkerType::Apply,
-                                %table_id,
+                                table_id = table_id.0,
                                 "apply worker unblocked: shutdown signal received while waiting for table sync worker",
                             );
                             return Ok(ApplyLoopAction::Pause);
@@ -1603,7 +1603,7 @@ mod apply_worker {
                 TableReplicationPhase::SyncDone { lsn } => {
                     debug!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         sync_done_lsn = %lsn,
                         "table in sync_done state, will transition to ready after batch flush",
                     );
@@ -1611,7 +1611,7 @@ mod apply_worker {
                 _ => {
                     debug!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         ?phase,
                         "no action needed for current phase after commit",
                     );
@@ -1620,7 +1620,7 @@ mod apply_worker {
         } else {
             debug!(
                 worker_type = %WorkerType::Apply,
-                %table_id,
+                table_id = table_id.0,
                 ?table_replication_phase,
                 "checking table without active worker after commit",
             );
@@ -1630,13 +1630,13 @@ mod apply_worker {
                 TableReplicationPhase::SyncDone { lsn } => {
                     debug!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         sync_done_lsn = %lsn,
                         "table in sync_done state, will transition to ready after batch flush",
                     );
                 }
                 _ => {
-                    debug!(worker_type = %WorkerType::Apply, %table_id, ?table_replication_phase, "spawning new table sync worker");
+                    debug!(worker_type = %WorkerType::Apply, table_id = table_id.0, ?table_replication_phase, "spawning new table sync worker");
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
@@ -1644,7 +1644,7 @@ mod apply_worker {
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             error = %err,
                             "failed to start table sync worker",
                         );
@@ -1708,7 +1708,7 @@ mod apply_worker {
 
             debug!(
                 worker_type = %WorkerType::Apply,
-                %table_id,
+                table_id = table_id.0,
                 ?phase,
                 %current_lsn,
                 "checking table with active worker after batch flush",
@@ -1718,7 +1718,7 @@ mod apply_worker {
                 if current_lsn >= sync_done_lsn {
                     info!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         %sync_done_lsn,
                         %current_lsn,
                         "transitioning sync_done -> ready",
@@ -1730,7 +1730,7 @@ mod apply_worker {
                 } else {
                     debug!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         %sync_done_lsn,
                         %current_lsn,
                         "table not yet ready, current lsn below sync done lsn",
@@ -1740,7 +1740,7 @@ mod apply_worker {
         } else {
             debug!(
                 worker_type = %WorkerType::Apply,
-                %table_id,
+                table_id = table_id.0,
                 ?table_replication_phase,
                 "checking table without active worker after batch flush",
             );
@@ -1750,7 +1750,7 @@ mod apply_worker {
                     if current_lsn >= sync_done_lsn {
                         info!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             %sync_done_lsn,
                             %current_lsn,
                             "transitioning sync_done -> ready",
@@ -1762,7 +1762,7 @@ mod apply_worker {
                     } else {
                         debug!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             %sync_done_lsn,
                             %current_lsn,
                             "table not yet ready, current lsn below sync done lsn",
@@ -1770,7 +1770,7 @@ mod apply_worker {
                     }
                 }
                 _ => {
-                    debug!(worker_type = %WorkerType::Apply, %table_id, ?table_replication_phase, "spawning new table sync worker");
+                    debug!(worker_type = %WorkerType::Apply, table_id = table_id.0, ?table_replication_phase, "spawning new table sync worker");
 
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
@@ -1779,7 +1779,7 @@ mod apply_worker {
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             error = %err,
                             "failed to start table sync worker",
                         );
@@ -1846,7 +1846,7 @@ mod apply_worker {
 
             debug!(
                 worker_type = %WorkerType::Apply,
-                %table_id,
+                table_id = table_id.0,
                 ?phase,
                 %current_lsn,
                 "checking table with active worker when idle",
@@ -1861,7 +1861,7 @@ mod apply_worker {
 
                     info!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         %current_lsn,
                         %snapshot_lsn,
                         %catchup_lsn,
@@ -1877,7 +1877,7 @@ mod apply_worker {
 
                     info!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         %catchup_lsn,
                         "table sync worker entered catchup phase, apply worker blocking until table sync worker reaches sync_done",
                     );
@@ -1901,7 +1901,7 @@ mod apply_worker {
                             if final_phase.as_type().is_errored() {
                                 info!(
                                     worker_type = %WorkerType::Apply,
-                                    %table_id,
+                                    table_id = table_id.0,
                                     ?final_phase,
                                     "apply worker unblocked: table sync worker errored, skipping table",
                                 );
@@ -1911,7 +1911,7 @@ mod apply_worker {
 
                             info!(
                                 worker_type = %WorkerType::Apply,
-                                %table_id,
+                                table_id = table_id.0,
                                 ?final_phase,
                                 "apply worker unblocked: table sync worker reached sync_done",
                             );
@@ -1919,7 +1919,7 @@ mod apply_worker {
                         ShutdownResult::Shutdown(_) => {
                             info!(
                                 worker_type = %WorkerType::Apply,
-                                %table_id,
+                                table_id = table_id.0,
                                 "apply worker unblocked: shutdown signal received while waiting for table sync worker",
                             );
 
@@ -1931,7 +1931,7 @@ mod apply_worker {
                     if current_lsn >= sync_done_lsn {
                         info!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             %sync_done_lsn,
                             %current_lsn,
                             "transitioning sync_done -> ready",
@@ -1943,7 +1943,7 @@ mod apply_worker {
                     } else {
                         debug!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             %sync_done_lsn,
                             %current_lsn,
                             "table not yet ready, current lsn below sync done lsn",
@@ -1953,7 +1953,7 @@ mod apply_worker {
                 _ => {
                     debug!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         ?phase,
                         "no action needed for current phase when idle",
                     );
@@ -1962,7 +1962,7 @@ mod apply_worker {
         } else {
             debug!(
                 worker_type = %WorkerType::Apply,
-                %table_id,
+                table_id = table_id.0,
                 ?table_replication_phase,
                 "checking table without active worker when idle",
             );
@@ -1972,7 +1972,7 @@ mod apply_worker {
                     if current_lsn >= sync_done_lsn {
                         info!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             %sync_done_lsn,
                             %current_lsn,
                             "transitioning sync_done -> ready",
@@ -1984,7 +1984,7 @@ mod apply_worker {
                     }
                 }
                 _ => {
-                    debug!(worker_type = %WorkerType::Apply, %table_id, ?table_replication_phase, "spawning new table sync worker");
+                    debug!(worker_type = %WorkerType::Apply, table_id = table_id.0, ?table_replication_phase, "spawning new table sync worker");
 
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
@@ -1993,7 +1993,7 @@ mod apply_worker {
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             error = %err,
                             "failed to start table sync worker",
                         );
@@ -2036,7 +2036,7 @@ mod apply_worker {
         S: Clone,
         D: Clone,
     {
-        info!(%table_id, "creating table sync worker");
+        info!(table_id = table_id.0, "creating table sync worker");
 
         TableSyncWorker::new(
             ctx.pipeline_id,

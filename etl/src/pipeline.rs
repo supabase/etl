@@ -358,7 +358,7 @@ where
         for (table_id, _) in table_replication_states {
             if !publication_set.contains(&table_id) {
                 info!(
-                    %table_id,
+                    table_id = table_id.0,
                     "table removed from publication, purging stored state"
                 );
 
