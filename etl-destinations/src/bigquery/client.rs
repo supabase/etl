@@ -12,7 +12,6 @@ use gcp_bigquery_client::{
 };
 use prost::Message;
 use std::fmt;
-use std::sync::Arc;
 use tonic::Code;
 use tracing::{debug, info};
 
@@ -347,7 +346,7 @@ impl BigQueryClient {
         max_concurrent_streams: usize,
     ) -> EtlResult<(usize, usize)>
     where
-        I: IntoIterator<Item = Arc<TableBatch<BigQueryTableRow>>>,
+        I: IntoIterator<Item = TableBatch<BigQueryTableRow>>,
         I::IntoIter: ExactSizeIterator,
     {
         let table_batches = table_batches.into_iter();
@@ -420,9 +419,9 @@ impl BigQueryClient {
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
-        table_descriptor: Arc<TableDescriptor>,
+        table_descriptor: TableDescriptor,
         rows: Vec<TableRow>,
-    ) -> EtlResult<Arc<TableBatch<BigQueryTableRow>>> {
+    ) -> EtlResult<TableBatch<BigQueryTableRow>> {
         let validated_rows = rows
             .into_iter()
             .map(BigQueryTableRow::try_from)
@@ -437,11 +436,11 @@ impl BigQueryClient {
             table_id.to_string(),
         );
 
-        Ok(Arc::new(TableBatch::new(
+        Ok(TableBatch::new(
             stream_name,
-            Arc::unwrap_or_clone(table_descriptor),
+            table_descriptor,
             validated_rows,
-        )))
+        ))
     }
 
     /// Executes a BigQuery SQL query and returns the result set.
