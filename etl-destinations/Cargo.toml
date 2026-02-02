@@ -29,6 +29,8 @@ iceberg = [
     "dep:async-trait",
     "dep:serde",
     "dep:serde_json",
+    "dep:roaring",
+    "dep:crc32fast",
 ]
 egress = ["etl/egress"]
 # We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only
@@ -52,6 +54,8 @@ parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
 prost = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }
 reqwest = { workspace = true, optional = true, features = ["json"] }
+roaring = { workspace = true, optional = true }
+crc32fast = { workspace = true, optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["sync"] }
