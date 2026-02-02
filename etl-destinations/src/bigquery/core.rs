@@ -374,7 +374,7 @@ where
         &self,
         table_id: &TableId,
         use_cdc_sequence_column: bool,
-    ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableDescriptor>)> {
+    ) -> EtlResult<(SequencedBigQueryTableId, TableDescriptor)> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
         let mut inner = self.inner.lock().await;
@@ -440,7 +440,7 @@ where
             use_cdc_sequence_column,
         );
 
-        Ok((sequenced_bigquery_table_id, Arc::new(table_descriptor)))
+        Ok((sequenced_bigquery_table_id, table_descriptor))
     }
 
     /// Adds a table to the creation cache to avoid redundant existence checks.
@@ -533,12 +533,10 @@ where
     /// 1s, 2s, ...), capped at 60 seconds, with the actual delay randomized between 0 and the
     /// calculated value to prevent thundering herd.
     ///
-    /// Takes a slice of `Arc<TableBatch>` to enable efficient retries - on each attempt,
-    /// we iterate over the slice and clone the `Arc`s (O(1) per batch) rather than
-    /// recreating the batches.
+    /// Takes a slice of [`TableBatch`] to enable retries by cloning batches on each attempt.
     async fn append_table_batches_with_retry(
         &self,
-        table_batches: &[Arc<TableBatch<BigQueryTableRow>>],
+        table_batches: &[TableBatch<BigQueryTableRow>],
     ) -> EtlResult<(usize, usize)> {
         if table_batches.is_empty() {
             return Ok((0, 0));
@@ -547,7 +545,7 @@ where
         let mut last_error = None;
 
         for attempt in 0..MAX_RETRY_ATTEMPTS {
-            // Clone Arc references (O(1) per batch) to create an iterator for this attempt.
+            // Clone batches to create an iterator for this attempt.
             let batches_iter = table_batches.iter().cloned();
 
             match self
