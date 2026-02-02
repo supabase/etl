@@ -7,6 +7,7 @@ members = [
     "etl-config",
     "etl-destinations",
     "etl-examples",
+    "etl-merger",
     "etl-postgres",
     "etl-replicator",
     "etl-telemetry",
@@ -26,6 +27,7 @@ etl-config = { path = "etl-config", default-features = false }
 etl-destinations = { path = "etl-destinations", default-features = false }
 etl-postgres = { path = "etl-postgres", default-features = false }
 etl-replicator = { path = "etl-replicator", default-features = false }
+etl-merger = { path = "etl-merger", default-features = false }
 etl-telemetry = { path = "etl-telemetry", default-features = false }
 
 actix-web = { version = "4.11.0", default-features = false }

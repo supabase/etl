@@ -53,6 +53,14 @@ pub struct IcebergClient {
 }
 
 impl IcebergClient {
+    /// Returns a reference to the underlying catalog.
+    ///
+    /// This is useful for operations that require direct catalog access,
+    /// such as committing deletion vectors.
+    pub fn catalog(&self) -> &Arc<dyn Catalog> {
+        &self.catalog
+    }
+
     /// Creates a new [`IcebergClient`] using a REST catalog configuration.
     ///
     /// This constructor initializes a client that connects to an Iceberg catalog

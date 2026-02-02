@@ -1,0 +1,48 @@
+[package]
+name = "etl-merger"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "etl-merger"
+path = "src/main.rs"
+
+[features]
+default = []
+test-utils = ["dep:tempfile"]
+
+[dependencies]
+etl = { workspace = true }
+etl-destinations = { workspace = true, features = ["iceberg"] }
+etl-postgres = { workspace = true }
+
+arrow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+clap = { workspace = true, features = ["derive", "std"] }
+futures = { workspace = true }
+iceberg = { workspace = true }
+iceberg-catalog-rest = { workspace = true }
+parquet = { workspace = true, features = ["async", "arrow"] }
+roaring = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros"] }
+tokio-postgres = { workspace = true }
+tracing = { workspace = true, default-features = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "std"] }
+uuid = { workspace = true, features = ["v4"] }
+
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+etl = { workspace = true, features = ["test-utils"] }
+etl-destinations = { workspace = true, features = ["iceberg", "test-utils"] }
+etl-telemetry = { workspace = true }
+
+tokio = { workspace = true, features = ["full"] }

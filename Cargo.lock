@@ -1721,6 +1721,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "etl-merger"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "chrono",
+ "clap",
+ "etl",
+ "etl-destinations",
+ "etl-postgres",
+ "etl-telemetry",
+ "futures",
+ "iceberg",
+ "iceberg-catalog-rest",
+ "parquet",
+ "roaring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "etl-postgres"
 version = "0.1.0"
 dependencies = [
