@@ -100,8 +100,7 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum StoredDestinationConfig {
     Memory,
     BigQuery {
@@ -109,11 +108,9 @@ pub enum StoredDestinationConfig {
         dataset_id: String,
         service_account_key: SerializableSecretString,
         max_staleness_mins: Option<u16>,
-        #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
     },
     Iceberg {
-        #[serde(flatten)]
         config: StoredIcebergConfig,
     },
 }
@@ -333,6 +330,7 @@ pub enum EncryptedStoredDestinationConfig {
         dataset_id: String,
         service_account_key: EncryptedValue,
         max_staleness_mins: Option<u16>,
+        #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
     },
     Iceberg {
@@ -441,8 +439,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum StoredIcebergConfig {
     Supabase {
         project_ref: String,
@@ -539,173 +536,6 @@ mod tests {
     use super::*;
     use crate::configs::encryption::{EncryptionKey, generate_random_key};
     use insta::assert_json_snapshot;
-
-    #[test]
-    fn test_stored_destination_config_serialization_bigquery() {
-        let config = StoredDestinationConfig::BigQuery {
-            project_id: "test-project".to_string(),
-            dataset_id: "test_dataset".to_string(),
-            service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_string()),
-            max_staleness_mins: Some(15),
-            connection_pool_size: 8,
-        };
-
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: StoredDestinationConfig = serde_json::from_str(&json).unwrap();
-
-        match (config, deserialized) {
-            (
-                StoredDestinationConfig::BigQuery {
-                    project_id: p1_project_id,
-                    dataset_id: p1_dataset_id,
-                    service_account_key: p1_service_account_key,
-                    max_staleness_mins: p1_max_staleness_mins,
-                    connection_pool_size: p1_connection_pool_size,
-                },
-                StoredDestinationConfig::BigQuery {
-                    project_id: p2_project_id,
-                    dataset_id: p2_dataset_id,
-                    service_account_key: p2_service_account_key,
-                    max_staleness_mins: p2_max_staleness_mins,
-                    connection_pool_size: p2_connection_pool_size,
-                },
-            ) => {
-                assert_eq!(p1_project_id, p2_project_id);
-                assert_eq!(p1_dataset_id, p2_dataset_id);
-                assert_eq!(
-                    p1_service_account_key.expose_secret(),
-                    p2_service_account_key.expose_secret()
-                );
-                assert_eq!(p1_max_staleness_mins, p2_max_staleness_mins);
-                assert_eq!(p1_connection_pool_size, p2_connection_pool_size);
-            }
-            _ => panic!("Config types don't match"),
-        }
-    }
-
-    #[test]
-    fn test_stored_destination_config_serialization_iceberg_supabase() {
-        let config = StoredDestinationConfig::Iceberg {
-            config: StoredIcebergConfig::Supabase {
-                project_ref: "abcdefghijklmnopqrst".to_string(),
-                warehouse_name: "my-warehouse".to_string(),
-                namespace: Some("my-namespace".to_string()),
-                catalog_token: SerializableSecretString::from("eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IjFkNzFjMGEyNmIxMDFjODQ5ZTkxZmQ1NjdjYjA5NTJmIn0.eyJleHAiOjIwNzA3MTcxNjAsImlhdCI6MTc1NjE0NTE1MCwiaXNzIjoic3VwYWJhc2UiLCJyZWYiOiJhYmNkZWZnaGlqbGttbm9wcXJzdCIsInJvbGUiOiJzZXJ2aWNlX3JvbGUifQ.YdTWkkIvwjSkXot3NC07xyjPjGWQMNzLq5EPzumzrdLzuHrj-zuzI-nlyQtQ5V7gZauysm-wGwmpztRXfPc3AQ".to_string()),
-                s3_access_key_id: SerializableSecretString::from("9156667efc2c70d89af6588da86d2924".to_string()),
-                s3_secret_access_key: SerializableSecretString::from("ca833e890916d848c69135924bcd75e5909184814a0ebc6c988937ee094120d4".to_string()),
-                s3_region: "ap-southeast-1".to_string(),
-            },
-        };
-
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: StoredDestinationConfig = serde_json::from_str(&json).unwrap();
-
-        match (deserialized, config) {
-            (
-                StoredDestinationConfig::Iceberg {
-                    config:
-                        StoredIcebergConfig::Supabase {
-                            project_ref: p1_project_ref,
-                            warehouse_name: p1_warehouse_name,
-                            namespace: p1_namespace,
-                            catalog_token: p1_catalog_token,
-                            s3_access_key_id: p1_s3_access_key_id,
-                            s3_secret_access_key: p1_s3_secret_access_key,
-                            s3_region: p1_s3_region,
-                        },
-                },
-                StoredDestinationConfig::Iceberg {
-                    config:
-                        StoredIcebergConfig::Supabase {
-                            project_ref: p2_project_ref,
-                            warehouse_name: p2_warehouse_name,
-                            namespace: p2_namespace,
-                            catalog_token: p2_catalog_token,
-                            s3_access_key_id: p2_s3_access_key_id,
-                            s3_secret_access_key: p2_s3_secret_access_key,
-                            s3_region: p2_s3_region,
-                        },
-                },
-            ) => {
-                assert_eq!(p1_project_ref, p2_project_ref);
-                assert_eq!(p1_warehouse_name, p2_warehouse_name);
-                assert_eq!(p1_namespace, p2_namespace);
-                assert_eq!(
-                    p1_catalog_token.expose_secret(),
-                    p2_catalog_token.expose_secret()
-                );
-                assert_eq!(
-                    p1_s3_access_key_id.expose_secret(),
-                    p2_s3_access_key_id.expose_secret()
-                );
-                assert_eq!(
-                    p1_s3_secret_access_key.expose_secret(),
-                    p2_s3_secret_access_key.expose_secret()
-                );
-                assert_eq!(p1_s3_region, p2_s3_region);
-            }
-            _ => panic!("Config types don't match"),
-        }
-    }
-
-    #[test]
-    fn test_stored_destination_config_serialization_iceberg_rest() {
-        let config = StoredDestinationConfig::Iceberg {
-            config: StoredIcebergConfig::Rest {
-                catalog_uri: "https://abcdefghijklmnopqrst.storage.supabase.com/storage/v1/iceberg"
-                    .to_string(),
-                warehouse_name: "my-warehouse".to_string(),
-                namespace: Some("my-namespace".to_string()),
-                s3_access_key_id: SerializableSecretString::from("id".to_string()),
-                s3_secret_access_key: SerializableSecretString::from("key".to_string()),
-                s3_endpoint: "http://localhost:8080".to_string(),
-            },
-        };
-
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: StoredDestinationConfig = serde_json::from_str(&json).unwrap();
-
-        match (deserialized, config) {
-            (
-                StoredDestinationConfig::Iceberg {
-                    config:
-                        StoredIcebergConfig::Rest {
-                            catalog_uri: p1_catalog_uri,
-                            warehouse_name: p1_warehouse_name,
-                            namespace: p1_namespace,
-                            s3_access_key_id: p1_s3_access_key_id,
-                            s3_secret_access_key: p1_s3_secret_access_key,
-                            s3_endpoint: p1_s3_endpoint,
-                        },
-                },
-                StoredDestinationConfig::Iceberg {
-                    config:
-                        StoredIcebergConfig::Rest {
-                            catalog_uri: p2_catalog_uri,
-                            warehouse_name: p2_warehouse_name,
-                            namespace: p2_namespace,
-                            s3_access_key_id: p2_s3_access_key_id,
-                            s3_secret_access_key: p2_s3_secret_access_key,
-                            s3_endpoint: p2_s3_endpoint,
-                        },
-                },
-            ) => {
-                assert_eq!(p1_catalog_uri, p2_catalog_uri);
-                assert_eq!(p1_warehouse_name, p2_warehouse_name);
-                assert_eq!(p1_namespace, p2_namespace);
-                assert_eq!(
-                    p1_s3_access_key_id.expose_secret(),
-                    p2_s3_access_key_id.expose_secret()
-                );
-                assert_eq!(
-                    p1_s3_secret_access_key.expose_secret(),
-                    p2_s3_secret_access_key.expose_secret()
-                );
-                assert_eq!(p1_s3_endpoint, p2_s3_endpoint);
-            }
-            _ => panic!("Config types don't match"),
-        }
-    }
 
     #[test]
     fn test_stored_destination_config_encryption_decryption_bigquery() {
