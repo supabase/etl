@@ -333,6 +333,7 @@ pub enum EncryptedStoredDestinationConfig {
         dataset_id: String,
         service_account_key: EncryptedValue,
         max_staleness_mins: Option<u16>,
+        #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
     },
     Iceberg {
