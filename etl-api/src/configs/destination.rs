@@ -11,8 +11,8 @@ use crate::configs::encryption::{
 use crate::configs::store::Store;
 
 /// Returns the default connection pool size for BigQuery destinations.
-pub const fn default_pool_size() -> usize {
-    DestinationConfig::DEFAULT_POOL_SIZE
+pub const fn default_connection_pool_size() -> usize {
+    DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -33,7 +33,7 @@ pub enum FullApiDestinationConfig {
         max_staleness_mins: Option<u16>,
         #[schema(example = 8)]
         #[serde(skip_serializing_if = "Option::is_none")]
-        pool_size: Option<usize>,
+        connection_pool_size: Option<usize>,
     },
     Iceberg {
         #[serde(flatten)]
@@ -50,13 +50,13 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 dataset_id,
                 service_account_key,
                 max_staleness_mins,
-                pool_size,
+                connection_pool_size,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key,
                 max_staleness_mins,
-                pool_size: Some(pool_size),
+                connection_pool_size: Some(connection_pool_size),
             },
             StoredDestinationConfig::Iceberg { config } => match config {
                 StoredIcebergConfig::Supabase {
@@ -109,8 +109,8 @@ pub enum StoredDestinationConfig {
         dataset_id: String,
         service_account_key: SerializableSecretString,
         max_staleness_mins: Option<u16>,
-        #[serde(default = "default_pool_size")]
-        pool_size: usize,
+        #[serde(default = "default_connection_pool_size")]
+        connection_pool_size: usize,
     },
     Iceberg {
         #[serde(flatten)]
@@ -127,13 +127,13 @@ impl StoredDestinationConfig {
                 dataset_id,
                 service_account_key,
                 max_staleness_mins,
-                pool_size,
+                connection_pool_size,
             } => DestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key: service_account_key.into(),
                 max_staleness_mins,
-                pool_size,
+                connection_pool_size,
             },
             Self::Iceberg { config } => match config {
                 StoredIcebergConfig::Supabase {
@@ -186,13 +186,14 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 dataset_id,
                 service_account_key,
                 max_staleness_mins,
-                pool_size,
+                connection_pool_size,
             } => Self::BigQuery {
                 project_id,
                 dataset_id,
                 service_account_key,
                 max_staleness_mins,
-                pool_size: pool_size.unwrap_or(DestinationConfig::DEFAULT_POOL_SIZE),
+                connection_pool_size: connection_pool_size
+                    .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
             },
             FullApiDestinationConfig::Iceberg { config } => match config {
                 FullApiIcebergConfig::Supabase {
@@ -248,7 +249,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 dataset_id,
                 service_account_key,
                 max_staleness_mins,
-                pool_size,
+                connection_pool_size,
             } => {
                 let encrypted_service_account_key = encrypt_text(
                     service_account_key.expose_secret().to_owned(),
@@ -260,7 +261,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     dataset_id,
                     service_account_key: encrypted_service_account_key,
                     max_staleness_mins,
-                    pool_size,
+                    connection_pool_size,
                 })
             }
             Self::Iceberg { config } => match config {
@@ -332,7 +333,7 @@ pub enum EncryptedStoredDestinationConfig {
         dataset_id: String,
         service_account_key: EncryptedValue,
         max_staleness_mins: Option<u16>,
-        pool_size: usize,
+        connection_pool_size: usize,
     },
     Iceberg {
         #[serde(flatten)]
@@ -354,7 +355,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 dataset_id,
                 service_account_key: encrypted_service_account_key,
                 max_staleness_mins,
-                pool_size,
+                connection_pool_size,
             } => {
                 let service_account_key = SerializableSecretString::from(decrypt_text(
                     encrypted_service_account_key,
@@ -366,7 +367,7 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     dataset_id,
                     service_account_key,
                     max_staleness_mins,
-                    pool_size,
+                    connection_pool_size,
                 })
             }
             Self::Iceberg { config } => match config {
@@ -546,7 +547,7 @@ mod tests {
             dataset_id: "test_dataset".to_string(),
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_string()),
             max_staleness_mins: Some(15),
-            pool_size: 8,
+            connection_pool_size: 8,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -559,14 +560,14 @@ mod tests {
                     dataset_id: p1_dataset_id,
                     service_account_key: p1_service_account_key,
                     max_staleness_mins: p1_max_staleness_mins,
-                    pool_size: p1_pool_size,
+                    connection_pool_size: p1_connection_pool_size,
                 },
                 StoredDestinationConfig::BigQuery {
                     project_id: p2_project_id,
                     dataset_id: p2_dataset_id,
                     service_account_key: p2_service_account_key,
                     max_staleness_mins: p2_max_staleness_mins,
-                    pool_size: p2_pool_size,
+                    connection_pool_size: p2_connection_pool_size,
                 },
             ) => {
                 assert_eq!(p1_project_id, p2_project_id);
@@ -576,7 +577,7 @@ mod tests {
                     p2_service_account_key.expose_secret()
                 );
                 assert_eq!(p1_max_staleness_mins, p2_max_staleness_mins);
-                assert_eq!(p1_pool_size, p2_pool_size);
+                assert_eq!(p1_connection_pool_size, p2_connection_pool_size);
             }
             _ => panic!("Config types don't match"),
         }
@@ -713,7 +714,7 @@ mod tests {
             dataset_id: "test_dataset".to_string(),
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_string()),
             max_staleness_mins: Some(15),
-            pool_size: 8,
+            connection_pool_size: 8,
         };
 
         let key = EncryptionKey {
@@ -731,20 +732,20 @@ mod tests {
                     dataset_id: d1,
                     service_account_key: key1,
                     max_staleness_mins: staleness1,
-                    pool_size: pool_size1,
+                    connection_pool_size: connection_pool_size1,
                 },
                 StoredDestinationConfig::BigQuery {
                     project_id: p2,
                     dataset_id: d2,
                     service_account_key: key2,
                     max_staleness_mins: staleness2,
-                    pool_size: pool_size2,
+                    connection_pool_size: connection_pool_size2,
                 },
             ) => {
                 assert_eq!(p1, p2);
                 assert_eq!(d1, d2);
                 assert_eq!(staleness1, staleness2);
-                assert_eq!(pool_size1, pool_size2);
+                assert_eq!(connection_pool_size1, connection_pool_size2);
                 // Assert that service account key was encrypted and decrypted correctly
                 assert_eq!(key1.expose_secret(), key2.expose_secret());
             }
@@ -894,7 +895,7 @@ mod tests {
             dataset_id: "test_dataset".to_string(),
             service_account_key: SerializableSecretString::from("{\"test\": \"key\"}".to_string()),
             max_staleness_mins: Some(15),
-            pool_size: None,
+            connection_pool_size: None,
         };
 
         let stored: StoredDestinationConfig = full_config.clone().into();
@@ -907,14 +908,14 @@ mod tests {
                     dataset_id: p1_dataset_id,
                     service_account_key: p1_service_account_key,
                     max_staleness_mins: p1_max_staleness_mins,
-                    pool_size: p1_pool_size,
+                    connection_pool_size: p1_connection_pool_size,
                 },
                 FullApiDestinationConfig::BigQuery {
                     project_id: p2_project_id,
                     dataset_id: p2_dataset_id,
                     service_account_key: p2_service_account_key,
                     max_staleness_mins: p2_max_staleness_mins,
-                    pool_size: p2_pool_size,
+                    connection_pool_size: p2_connection_pool_size,
                 },
             ) => {
                 assert_eq!(p1_project_id, p2_project_id);
@@ -924,9 +925,12 @@ mod tests {
                     p2_service_account_key.expose_secret()
                 );
                 assert_eq!(p1_max_staleness_mins, p2_max_staleness_mins);
-                // Note: pool_size should be set to DEFAULT_POOL_SIZE when None
-                assert_eq!(p1_pool_size, None);
-                assert_eq!(p2_pool_size, Some(DestinationConfig::DEFAULT_POOL_SIZE));
+                // Note: connection_pool_size should be set to DEFAULT_POOL_SIZE when None
+                assert_eq!(p1_connection_pool_size, None);
+                assert_eq!(
+                    p2_connection_pool_size,
+                    Some(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE)
+                );
             }
             _ => panic!("Config types don't match"),
         }

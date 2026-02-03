@@ -23,8 +23,14 @@ const ETL_TRACE_ID: &str = "ETL BigQueryClient";
 
 /// Multiplier for calculating max inflight requests from pool size.
 ///
-/// The maximum number of inflight requests is `pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION`.
+/// The maximum number of inflight requests is `connection_pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION`.
 const MAX_INFLIGHT_REQUESTS_PER_CONNECTION: usize = 100;
+
+/// Maximum safe value for inflight requests to prevent resource exhaustion.
+///
+/// This upper bound ensures reasonable memory usage and prevents overflow when computing
+/// max inflight requests from connection pool size.
+const MAX_SAFE_INFLIGHT_REQUESTS: usize = 100_000;
 
 /// Special column name for Change Data Capture operations in BigQuery.
 const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
@@ -62,6 +68,18 @@ impl fmt::Display for BigQueryOperationType {
     }
 }
 
+/// Computes the maximum number of inflight requests for the BigQuery Storage Write API.
+///
+/// Uses checked arithmetic to safely multiply the connection pool size by the per-connection
+/// limit, clamping the result to [`MAX_SAFE_INFLIGHT_REQUESTS`] to prevent overflow and
+/// resource exhaustion.
+fn compute_max_inflight_requests(connection_pool_size: usize) -> usize {
+    connection_pool_size
+        .checked_mul(MAX_INFLIGHT_REQUESTS_PER_CONNECTION)
+        .unwrap_or(MAX_SAFE_INFLIGHT_REQUESTS)
+        .min(MAX_SAFE_INFLIGHT_REQUESTS)
+}
+
 /// Client for interacting with Google BigQuery.
 ///
 /// Provides methods for table management, data insertion, and query execution
@@ -80,11 +98,11 @@ impl BigQueryClient {
     pub async fn new_with_key_path(
         project_id: BigQueryProjectId,
         sa_key_file: &str,
-        pool_size: usize,
+        connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
-        let max_inflight_requests = pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION;
+        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         let storage_config = StorageApiConfig {
-            pool_size,
+            connection_pool_size,
             max_inflight_requests,
         };
 
@@ -104,11 +122,11 @@ impl BigQueryClient {
     pub async fn new_with_key(
         project_id: BigQueryProjectId,
         sa_key: &str,
-        pool_size: usize,
+        connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
-        let max_inflight_requests = pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION;
+        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         let storage_config = StorageApiConfig {
-            pool_size,
+            connection_pool_size,
             max_inflight_requests,
         };
 
@@ -131,11 +149,11 @@ impl BigQueryClient {
     /// Returns an error if credentials are missing or invalid.
     pub async fn new_with_adc(
         project_id: BigQueryProjectId,
-        pool_size: usize,
+        connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
-        let max_inflight_requests = pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION;
+        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         let storage_config = StorageApiConfig {
-            pool_size,
+            connection_pool_size,
             max_inflight_requests,
         };
 
@@ -156,11 +174,11 @@ impl BigQueryClient {
         project_id: BigQueryProjectId,
         secret: S,
         persistent_file_path: P,
-        pool_size: usize,
+        connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
-        let max_inflight_requests = pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION;
+        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         let storage_config = StorageApiConfig {
-            pool_size,
+            connection_pool_size,
             max_inflight_requests,
         };
 

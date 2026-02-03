@@ -242,16 +242,17 @@ where
     ///
     /// Initializes the BigQuery client with the provided credentials and project settings.
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
-    /// The `pool_size` parameter controls the connection pool size.
+    /// The `connection_pool_size` parameter controls the connection pool size.
     pub async fn new_with_key_path(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        pool_size: usize,
+        connection_pool_size: usize,
         store: S,
     ) -> EtlResult<Self> {
-        let client = BigQueryClient::new_with_key_path(project_id, sa_key, pool_size).await?;
+        let client =
+            BigQueryClient::new_with_key_path(project_id, sa_key, connection_pool_size).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -270,16 +271,16 @@ where
     ///
     /// Similar to [`BigQueryDestination::new_with_key_path`] but accepts the key content directly
     /// rather than a file path. Useful when credentials are stored in environment variables.
-    /// The `pool_size` parameter controls the connection pool size.
+    /// The `connection_pool_size` parameter controls the connection pool size.
     pub async fn new_with_key(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        pool_size: usize,
+        connection_pool_size: usize,
         store: S,
     ) -> EtlResult<Self> {
-        let client = BigQueryClient::new_with_key(project_id, sa_key, pool_size).await?;
+        let client = BigQueryClient::new_with_key(project_id, sa_key, connection_pool_size).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -297,15 +298,15 @@ where
     ///
     /// Initializes the BigQuery client with the default credentials and project settings.
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
-    /// The `pool_size` parameter controls the connection pool size.
+    /// The `connection_pool_size` parameter controls the connection pool size.
     pub async fn new_with_adc(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         max_staleness_mins: Option<u16>,
-        pool_size: usize,
+        connection_pool_size: usize,
         store: S,
     ) -> EtlResult<Self> {
-        let client = BigQueryClient::new_with_adc(project_id, pool_size).await?;
+        let client = BigQueryClient::new_with_adc(project_id, connection_pool_size).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -324,14 +325,14 @@ where
     ///
     /// Initializes the BigQuery client with a flow authenticator using the provided secret and persistent file path.
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
-    /// The `pool_size` parameter controls the connection pool size.
+    /// The `connection_pool_size` parameter controls the connection pool size.
     pub async fn new_with_flow_authenticator<Secret, Path>(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         secret: Secret,
         persistent_file_path: Path,
         max_staleness_mins: Option<u16>,
-        pool_size: usize,
+        connection_pool_size: usize,
         store: S,
     ) -> EtlResult<Self>
     where
@@ -342,7 +343,7 @@ where
             project_id,
             secret,
             persistent_file_path,
-            pool_size,
+            connection_pool_size,
         )
         .await?;
         let inner = Inner {

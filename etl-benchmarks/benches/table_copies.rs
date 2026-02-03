@@ -126,7 +126,7 @@ enum Commands {
         bq_max_staleness_mins: Option<u16>,
         /// BigQuery connection pool size (optional)
         #[arg(long, default_value = "32")]
-        bq_pool_size: usize,
+        bq_connection_pool_size: usize,
     },
     /// Prepare the benchmark environment by cleaning up replication slots
     Prepare {
@@ -184,7 +184,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bq_dataset_id,
             bq_sa_key_file,
             bq_max_staleness_mins,
-            bq_pool_size,
+            bq_connection_pool_size,
         } => {
             start_pipeline(RunArgs {
                 host,
@@ -204,7 +204,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 bq_dataset_id,
                 bq_sa_key_file,
                 bq_max_staleness_mins,
-                bq_pool_size,
+                bq_connection_pool_size,
             })
             .await
         }
@@ -248,7 +248,7 @@ struct RunArgs {
     bq_dataset_id: Option<String>,
     bq_sa_key_file: Option<String>,
     bq_max_staleness_mins: Option<u16>,
-    bq_pool_size: usize,
+    bq_connection_pool_size: usize,
 }
 
 #[derive(Debug)]
@@ -377,7 +377,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
                 dataset_id,
                 &sa_key_file,
                 args.bq_max_staleness_mins,
-                args.bq_pool_size,
+                args.bq_connection_pool_size,
                 store.clone(),
             )
             .await?;

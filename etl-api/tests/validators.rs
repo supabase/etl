@@ -59,7 +59,7 @@ fn create_bigquery_config(
         dataset_id: dataset_id.to_string(),
         service_account_key: SerializableSecretString::from(sa_key.to_string()),
         max_staleness_mins: None,
-        pool_size: None,
+        connection_pool_size: None,
     }
 }
 

@@ -1,8 +1,8 @@
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
-fn default_pool_size() -> usize {
-    DestinationConfig::DEFAULT_POOL_SIZE
+fn default_connection_pool_size() -> usize {
+    DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
 }
 
 /// Configuration for supported ETL data destinations.
@@ -38,11 +38,11 @@ pub enum DestinationConfig {
         ///
         /// Controls the number of concurrent connections maintained in the pool
         /// for writing to BigQuery. The maximum number of inflight requests is
-        /// calculated as `pool_size * 100`.
+        /// calculated as `connection_pool_size * 100`.
         ///
-        /// A higher pool size allows more parallel writes but consumes more resources.
-        #[serde(default = "default_pool_size")]
-        pool_size: usize,
+        /// A higher connection pool size allows more parallel writes but consumes more resources.
+        #[serde(default = "default_connection_pool_size")]
+        connection_pool_size: usize,
     },
     Iceberg {
         #[serde(flatten)]
@@ -52,7 +52,7 @@ pub enum DestinationConfig {
 
 impl DestinationConfig {
     /// Default connection pool size for BigQuery destinations.
-    pub const DEFAULT_POOL_SIZE: usize = 4;
+    pub const DEFAULT_CONNECTION_POOL_SIZE: usize = 4;
 }
 
 /// Configuration for the iceberg destination with two variants
@@ -193,11 +193,11 @@ pub enum DestinationConfigWithoutSecrets {
         ///
         /// Controls the number of concurrent connections maintained in the pool
         /// for writing to BigQuery. The maximum number of inflight requests is
-        /// calculated as `pool_size * 100`.
+        /// calculated as `connection_pool_size * 100`.
         ///
-        /// A higher pool size allows more parallel writes but consumes more resources.
-        #[serde(default = "default_pool_size")]
-        pool_size: usize,
+        /// A higher connection pool size allows more parallel writes but consumes more resources.
+        #[serde(default = "default_connection_pool_size")]
+        connection_pool_size: usize,
     },
     Iceberg {
         #[serde(flatten)]
@@ -214,12 +214,12 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 dataset_id,
                 service_account_key: _,
                 max_staleness_mins,
-                pool_size,
+                connection_pool_size,
             } => DestinationConfigWithoutSecrets::BigQuery {
                 project_id,
                 dataset_id,
                 max_staleness_mins,
-                pool_size,
+                connection_pool_size,
             },
             DestinationConfig::Iceberg { config } => DestinationConfigWithoutSecrets::Iceberg {
                 config: config.into(),
