@@ -431,22 +431,25 @@ impl Validator for BigQueryValidator {
         &self,
         _ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let client =
-            match BigQueryClient::new_with_key(self.project_id.clone(), &self.service_account_key, 1)
-                .await
-            {
-                Ok(client) => client,
-                Err(_) => {
-                    return Ok(vec![ValidationFailure::critical(
-                        "BigQuery Authentication Failed",
-                        "Unable to authenticate with BigQuery.\n\n\
+        let client = match BigQueryClient::new_with_key(
+            self.project_id.clone(),
+            &self.service_account_key,
+            1,
+        )
+        .await
+        {
+            Ok(client) => client,
+            Err(_) => {
+                return Ok(vec![ValidationFailure::critical(
+                    "BigQuery Authentication Failed",
+                    "Unable to authenticate with BigQuery.\n\n\
                     Please verify:\n\
                     (1) The service account key is valid JSON\n\
                     (2) The key has not expired or been revoked\n\
                     (3) The project ID is correct",
-                    )]);
-                }
-            };
+                )]);
+            }
+        };
 
         match client.dataset_exists(&self.dataset_id).await {
             Ok(true) => Ok(vec![]),

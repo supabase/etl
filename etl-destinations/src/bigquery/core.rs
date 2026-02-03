@@ -1369,4 +1369,54 @@ mod tests {
         let result = split_table_rows(rows.clone(), 5);
         assert_eq!(result, vec![rows]);
     }
+
+    #[test]
+    fn test_calculate_target_batches_empty_rows() {
+        let rows: Vec<TableRow> = vec![];
+        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_calculate_target_batches_single_small_row() {
+        // Create a single row with one small string value
+        let rows = vec![TableRow::new(vec![Cell::String("test".to_string())])];
+        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn test_calculate_target_batches_many_small_rows() {
+        // Create many rows with small values (estimated ~50 bytes each when encoded)
+        let rows: Vec<TableRow> = (0..100_000)
+            .map(|i| TableRow::new(vec![Cell::String(format!("value_{}", i))]))
+            .collect();
+
+        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn test_calculate_target_batches_large_rows() {
+        // Create rows with large string values (each ~1MB)
+        let large_string = "x".repeat(1024 * 1024); // 1MB string
+        let rows: Vec<TableRow> = (0..50)
+            .map(|_| TableRow::new(vec![Cell::String(large_string.clone())]))
+            .collect();
+
+        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
+        assert_eq!(result, 7);
+    }
+
+    #[test]
+    fn test_calculate_target_batches_very_large_single_row() {
+        // Create a row larger than max batch size (>10MB)
+        let huge_string = "x".repeat(15 * 1024 * 1024); // 15MB string
+        let rows = vec![TableRow::new(vec![Cell::String(huge_string)])];
+
+        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
+        // Even though the row is too large, we should still get 1 batch
+        // (the actual send will fail, but batching logic should handle it)
+        assert_eq!(result, 1);
+    }
 }
