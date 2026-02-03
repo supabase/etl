@@ -432,7 +432,7 @@ impl Validator for BigQueryValidator {
         _ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
         let client =
-            match BigQueryClient::new_with_key(self.project_id.clone(), &self.service_account_key)
+            match BigQueryClient::new_with_key(self.project_id.clone(), &self.service_account_key, 1)
                 .await
             {
                 Ok(client) => client,

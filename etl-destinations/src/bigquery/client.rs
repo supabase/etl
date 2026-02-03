@@ -1,8 +1,9 @@
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
 use etl::types::{Cell, ColumnSchema, TableRow, Type, is_array_type};
+use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
-use gcp_bigquery_client::storage::ColumnMode;
+use gcp_bigquery_client::storage::{ColumnMode, StorageApiConfig};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
     Client,
@@ -19,6 +20,11 @@ use crate::bigquery::encoding::BigQueryTableRow;
 
 /// Trace identifier for ETL operations in BigQuery client.
 const ETL_TRACE_ID: &str = "ETL BigQueryClient";
+
+/// Multiplier for calculating max inflight requests from pool size.
+///
+/// The maximum number of inflight requests is `pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION`.
+const MAX_INFLIGHT_REQUESTS_PER_CONNECTION: usize = 100;
 
 /// Special column name for Change Data Capture operations in BigQuery.
 const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
@@ -70,11 +76,21 @@ impl BigQueryClient {
     /// Creates a new [`BigQueryClient`] from a service account key file.
     ///
     /// Authenticates with BigQuery using the service account key at the specified file path.
+    /// Configures the Storage Write API with the given pool size.
     pub async fn new_with_key_path(
         project_id: BigQueryProjectId,
-        sa_key_path: &str,
+        sa_key_file: &str,
+        pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
-        let client = Client::from_service_account_key_file(sa_key_path)
+        let max_inflight_requests = pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION;
+        let storage_config = StorageApiConfig {
+            pool_size,
+            max_inflight_requests,
+        };
+
+        let client = ClientBuilder::new()
+            .with_storage_config(storage_config)
+            .build_from_service_account_key_file(sa_key_file)
             .await
             .map_err(bq_error_to_etl_error)?;
 
@@ -84,14 +100,24 @@ impl BigQueryClient {
     /// Creates a new [`BigQueryClient`] from a service account key JSON string.
     ///
     /// Parses and uses the provided service account key to authenticate with BigQuery.
+    /// Configures the Storage Write API with the given pool size.
     pub async fn new_with_key(
         project_id: BigQueryProjectId,
         sa_key: &str,
+        pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
+        let max_inflight_requests = pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION;
+        let storage_config = StorageApiConfig {
+            pool_size,
+            max_inflight_requests,
+        };
+
         let sa_key = parse_service_account_key(sa_key)
             .map_err(BQError::from)
             .map_err(bq_error_to_etl_error)?;
-        let client = Client::from_service_account_key(sa_key, false)
+        let client = ClientBuilder::new()
+            .with_storage_config(storage_config)
+            .build_from_service_account_key(sa_key, false)
             .await
             .map_err(bq_error_to_etl_error)?;
 
@@ -101,9 +127,21 @@ impl BigQueryClient {
     /// Creates a new [`BigQueryClient`] using Application Default Credentials.
     ///
     /// Authenticates with BigQuery using the environment's default credentials.
+    /// Configures the Storage Write API with the given pool size.
     /// Returns an error if credentials are missing or invalid.
-    pub async fn new_with_adc(project_id: BigQueryProjectId) -> EtlResult<BigQueryClient> {
-        let client = Client::from_application_default_credentials()
+    pub async fn new_with_adc(
+        project_id: BigQueryProjectId,
+        pool_size: usize,
+    ) -> EtlResult<BigQueryClient> {
+        let max_inflight_requests = pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION;
+        let storage_config = StorageApiConfig {
+            pool_size,
+            max_inflight_requests,
+        };
+
+        let client = ClientBuilder::new()
+            .with_storage_config(storage_config)
+            .build_from_application_default_credentials()
             .await
             .map_err(bq_error_to_etl_error)?;
 
@@ -113,12 +151,22 @@ impl BigQueryClient {
     /// Creates a new [`BigQueryClient`] using OAuth2 installed flow authentication.
     ///
     /// Authenticates with BigQuery using the OAuth2 installed flow.
+    /// Configures the Storage Write API with the given pool size.
     pub async fn new_with_flow_authenticator<S: AsRef<[u8]>, P: Into<std::path::PathBuf>>(
         project_id: BigQueryProjectId,
         secret: S,
-        persistant_file_path: P,
+        persistent_file_path: P,
+        pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
-        let client = Client::from_installed_flow_authenticator(secret, persistant_file_path)
+        let max_inflight_requests = pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION;
+        let storage_config = StorageApiConfig {
+            pool_size,
+            max_inflight_requests,
+        };
+
+        let client = ClientBuilder::new()
+            .with_storage_config(storage_config)
+            .build_from_installed_flow_authenticator(secret, persistent_file_path)
             .await
             .map_err(bq_error_to_etl_error)?;
 
@@ -332,19 +380,15 @@ impl BigQueryClient {
 
     /// Appends table batches to BigQuery using the concurrent Storage Write API.
     ///
-    /// Accepts pre-constructed TableBatch objects wrapped in Arc and processes them concurrently
+    /// Accepts pre-constructed TableBatch objects and processes them concurrently
     /// with controlled parallelism. This allows streaming to multiple different tables efficiently
-    /// in a single call. The Arc wrapping enables efficient retry operations without cloning data.
+    /// in a single call.
     ///
     /// If ordering is not required, you may split a table's data into multiple batches,
     /// which can be processed concurrently.
     /// If ordering guarantees are needed, all data for a given table must be included
-    /// in a single batch.
-    pub async fn append_table_batches<I>(
-        &self,
-        table_batches: I,
-        max_concurrent_streams: usize,
-    ) -> EtlResult<(usize, usize)>
+    /// in a single batch, and it will be processed in order.
+    pub async fn append_table_batches<I>(&self, table_batches: I) -> EtlResult<(usize, usize)>
     where
         I: IntoIterator<Item = TableBatch<BigQueryTableRow>>,
         I::IntoIter: ExactSizeIterator,
@@ -356,7 +400,6 @@ impl BigQueryClient {
 
         debug!(
             batch_count = table_batches.len(),
-            %max_concurrent_streams,
             "streaming table batches concurrently"
         );
 
@@ -364,7 +407,7 @@ impl BigQueryClient {
         let batch_results = self
             .client
             .storage()
-            .append_table_batches_concurrent(table_batches, max_concurrent_streams, ETL_TRACE_ID)
+            .append_table_batches_concurrent(table_batches, ETL_TRACE_ID)
             .await
             .map_err(bq_error_to_etl_error)?;
 

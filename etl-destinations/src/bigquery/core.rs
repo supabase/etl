@@ -7,7 +7,8 @@ use etl::{bail, etl_error};
 
 #[cfg(feature = "egress")]
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
-use gcp_bigquery_client::storage::{TableBatch, TableDescriptor};
+use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableBatch, TableDescriptor};
+use prost::Message;
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -204,7 +205,6 @@ pub struct BigQueryDestination<S> {
     client: BigQueryClient,
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
-    max_concurrent_streams: usize,
     store: S,
     inner: Arc<Mutex<Inner>>,
 }
@@ -222,7 +222,6 @@ where
         client: BigQueryClient,
         dataset_id: BigQueryDatasetId,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: usize,
         store: S,
     ) -> Self {
         let inner = Inner {
@@ -234,7 +233,6 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams,
             store,
             inner: Arc::new(Mutex::new(inner)),
         }
@@ -244,17 +242,16 @@ where
     ///
     /// Initializes the BigQuery client with the provided credentials and project settings.
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
-    /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
-    /// and determines how table rows are split into batches for concurrent processing.
+    /// The `pool_size` parameter controls the connection pool size.
     pub async fn new_with_key_path(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: usize,
+        pool_size: usize,
         store: S,
     ) -> EtlResult<Self> {
-        let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
+        let client = BigQueryClient::new_with_key_path(project_id, sa_key, pool_size).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -264,7 +261,6 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -274,17 +270,16 @@ where
     ///
     /// Similar to [`BigQueryDestination::new_with_key_path`] but accepts the key content directly
     /// rather than a file path. Useful when credentials are stored in environment variables.
-    /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
-    /// and determines how table rows are split into batches for concurrent processing.
+    /// The `pool_size` parameter controls the connection pool size.
     pub async fn new_with_key(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: usize,
+        pool_size: usize,
         store: S,
     ) -> EtlResult<Self> {
-        let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
+        let client = BigQueryClient::new_with_key(project_id, sa_key, pool_size).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -294,7 +289,6 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -303,16 +297,15 @@ where
     ///
     /// Initializes the BigQuery client with the default credentials and project settings.
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
-    /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
-    /// and determines how table rows are split into batches for concurrent processing.
+    /// The `pool_size` parameter controls the connection pool size.
     pub async fn new_with_adc(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: usize,
+        pool_size: usize,
         store: S,
     ) -> EtlResult<Self> {
-        let client = BigQueryClient::new_with_adc(project_id).await?;
+        let client = BigQueryClient::new_with_adc(project_id, pool_size).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -322,7 +315,6 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -332,24 +324,27 @@ where
     ///
     /// Initializes the BigQuery client with a flow authenticator using the provided secret and persistent file path.
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
-    /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
-    /// and determines how table rows are split into batches for concurrent processing.
+    /// The `pool_size` parameter controls the connection pool size.
     pub async fn new_with_flow_authenticator<Secret, Path>(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         secret: Secret,
         persistent_file_path: Path,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: usize,
+        pool_size: usize,
         store: S,
     ) -> EtlResult<Self>
     where
         Secret: AsRef<[u8]>,
         Path: Into<std::path::PathBuf>,
     {
-        let client =
-            BigQueryClient::new_with_flow_authenticator(project_id, secret, persistent_file_path)
-                .await?;
+        let client = BigQueryClient::new_with_flow_authenticator(
+            project_id,
+            secret,
+            persistent_file_path,
+            pool_size,
+        )
+        .await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -359,7 +354,6 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -548,11 +542,7 @@ where
             // Clone batches to create an iterator for this attempt.
             let batches_iter = table_batches.iter().cloned();
 
-            match self
-                .client
-                .append_table_batches(batches_iter, self.max_concurrent_streams)
-                .await
-            {
+            match self.client.append_table_batches(batches_iter).await {
                 Ok(result) => return Ok(result),
                 Err(err) => {
                     if !is_retryable_error(&err) {
@@ -586,7 +576,8 @@ where
     /// Writes table rows with CDC metadata for non-event streaming operations.
     ///
     /// Adds an `Upsert` operation type to each row, splits them into optimal batches based on
-    /// `max_concurrent_streams`, and streams to BigQuery using concurrent processing.
+    /// estimated row size to maximize the 10MB per request limit, and streams to BigQuery
+    /// using concurrent processing.
     async fn write_table_rows(
         &self,
         table_id: TableId,
@@ -603,8 +594,11 @@ where
                 .push(BigQueryOperationType::Upsert.into_cell());
         }
 
+        // Calculate optimal target batches based on estimated row size.
+        let target_batches = calculate_target_batches_for_table_copy(&table_rows)?;
+
         // Split table rows into optimal batches for parallel execution.
-        let table_rows_batches = split_table_rows(table_rows, self.max_concurrent_streams);
+        let table_rows_batches = split_table_rows(table_rows, target_batches);
 
         // Create table batches from the split rows.
         let mut table_batches = Vec::with_capacity(table_rows_batches.len());
@@ -915,27 +909,63 @@ where
     }
 }
 
+/// Calculates the optimal number of batches for table copy operations.
+///
+/// Estimates the size of a single row by encoding the first row, then calculates how many
+/// rows would fit in approximately 10MB per batch.
+fn calculate_target_batches_for_table_copy(table_rows: &[TableRow]) -> EtlResult<usize> {
+    let Some(first_row) = table_rows.first() else {
+        return Ok(0);
+    };
+    let total_rows = table_rows.len();
+
+    // Encode first row to cheaply estimate row size.
+    let encoded_row = BigQueryTableRow::try_from(first_row.clone())?;
+    let estimated_row_size = encoded_row.encoded_len();
+
+    // Calculate how many rows would fit in target batch size.
+    let rows_per_batch = if estimated_row_size > 0 {
+        MAX_BATCH_SIZE_BYTES / estimated_row_size
+    } else {
+        total_rows
+    };
+
+    // Calculate target number of batches, ensuring at least 1. We don't care about the limit of
+    // inflight requests since that is enforced by the client.
+    let target_batches = if rows_per_batch > 0 {
+        total_rows.div_ceil(rows_per_batch)
+    } else {
+        1
+    };
+
+    debug!(
+        total_rows,
+        estimated_row_size,
+        rows_per_batch,
+        target_batches,
+        "calculated target batches for table copy"
+    );
+
+    Ok(target_batches)
+}
+
 /// Splits table rows into optimal sub-batches for parallel execution.
 ///
-/// Calculates the optimal distribution of rows across batches to maximize
-/// utilization of available concurrent streams. Creates approximately equal-sized
-/// sub-batches when splitting is beneficial for parallelism.
-fn split_table_rows(
-    table_rows: Vec<TableRow>,
-    max_concurrent_streams: usize,
-) -> Vec<Vec<TableRow>> {
+/// Calculates the optimal distribution of rows across batches to produce the target amount of
+/// batches.
+fn split_table_rows(table_rows: Vec<TableRow>, target_batches: usize) -> Vec<Vec<TableRow>> {
     let total_rows = table_rows.len();
 
     if total_rows == 0 {
         return vec![];
     }
 
-    if total_rows <= 1 || max_concurrent_streams == 1 || total_rows <= max_concurrent_streams {
+    if total_rows <= 1 || target_batches == 1 || total_rows <= target_batches {
         return vec![table_rows];
     }
 
     // Calculate optimal rows per batch to maximize parallelism.
-    let optimal_rows_per_batch = total_rows.div_ceil(max_concurrent_streams);
+    let optimal_rows_per_batch = total_rows.div_ceil(target_batches);
 
     if optimal_rows_per_batch == 0 {
         return vec![table_rows];

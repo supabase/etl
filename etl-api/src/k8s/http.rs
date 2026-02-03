@@ -1144,7 +1144,7 @@ mod tests {
                 dataset_id: "dataset-id".to_string(),
                 service_account_key: "sa-key".into(),
                 max_staleness_mins: None,
-                max_concurrent_streams: 4,
+                pool_size: 4,
             },
             pipeline: PipelineConfig {
                 id: 42,
