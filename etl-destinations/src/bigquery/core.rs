@@ -1389,7 +1389,7 @@ mod tests {
     fn test_calculate_target_batches_many_small_rows() {
         // Create many rows with small values (estimated ~50 bytes each when encoded)
         let rows: Vec<TableRow> = (0..100_000)
-            .map(|i| TableRow::new(vec![Cell::String(format!("value_{}", i))]))
+            .map(|i| TableRow::new(vec![Cell::String(format!("value_{i}"))]))
             .collect();
 
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
