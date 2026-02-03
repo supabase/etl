@@ -51,7 +51,7 @@ pub mod destinations {
                 "service-account-key-updated".to_string(),
             ),
             max_staleness_mins: Some(10),
-            max_concurrent_streams: Some(1),
+            connection_pool_size: Some(1),
         }
     }
 
@@ -62,7 +62,7 @@ pub mod destinations {
             dataset_id: "dataset-id".to_string(),
             service_account_key: SerializableSecretString::from("service-account-key".to_string()),
             max_staleness_mins: None,
-            max_concurrent_streams: Some(1),
+            connection_pool_size: Some(1),
         }
     }
 

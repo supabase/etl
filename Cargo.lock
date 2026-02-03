@@ -2046,8 +2046,8 @@ dependencies = [
 
 [[package]]
 name = "gcp-bigquery-client"
-version = "0.27.0"
-source = "git+https://github.com/iambriccardo/gcp-bigquery-client?rev=2bc93b00ae6608b47224081eb654f48e39f6f8c6#2bc93b00ae6608b47224081eb654f48e39f6f8c6"
+version = "0.28.0"
+source = "git+https://github.com/iambriccardo/gcp-bigquery-client?rev=69d4ab80a3f4d4d6ab859f8b0b3bffee44dd99d1#69d4ab80a3f4d4d6ab859f8b0b3bffee44dd99d1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -2071,6 +2071,7 @@ dependencies = [
  "tonic-build",
  "tonic-prost",
  "tonic-prost-build",
+ "tracing",
  "url",
  "yup-oauth2",
 ]
