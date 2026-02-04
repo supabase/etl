@@ -20,6 +20,11 @@ use tonic::Code;
 use tracing::{debug, error, info, warn};
 
 use crate::bigquery::encoding::BigQueryTableRow;
+use crate::bigquery::metrics::{
+    ETL_BQ_APPEND_BATCHES_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_ROW_ERRORS_TOTAL,
+    ETL_BQ_BATCH_RETRIES_TOTAL, ETL_BQ_BATCH_SIZE,
+};
+use metrics::{counter, histogram};
 
 /// Trace identifier for ETL operations in BigQuery client.
 const ETL_TRACE_ID: &str = "ETL BigQueryClient";
@@ -217,6 +222,32 @@ fn calculate_backoff(attempt: u32) -> Duration {
     let jitter = rand::rng().random_range(0..=exponential);
 
     Duration::from_millis(jitter)
+}
+
+/// Extracts the gRPC status code as a string from a [`BQError`] for metrics labeling.
+fn error_code_label(error: &BQError) -> &'static str {
+    match error {
+        BQError::TonicStatusError(status) => match status.code() {
+            Code::Ok => "ok",
+            Code::Cancelled => "cancelled",
+            Code::Unknown => "unknown",
+            Code::InvalidArgument => "invalid_argument",
+            Code::DeadlineExceeded => "deadline_exceeded",
+            Code::NotFound => "not_found",
+            Code::AlreadyExists => "already_exists",
+            Code::PermissionDenied => "permission_denied",
+            Code::ResourceExhausted => "resource_exhausted",
+            Code::FailedPrecondition => "failed_precondition",
+            Code::Aborted => "aborted",
+            Code::OutOfRange => "out_of_range",
+            Code::Unimplemented => "unimplemented",
+            Code::Internal => "internal",
+            Code::Unavailable => "unavailable",
+            Code::DataLoss => "data_loss",
+            Code::Unauthenticated => "unauthenticated",
+        },
+        _ => "other",
+    }
 }
 
 /// Client for interacting with Google BigQuery.
@@ -558,6 +589,11 @@ impl BigQueryClient {
             return Ok((0, 0));
         }
 
+        // Record batch sizes
+        for batch in &table_batches {
+            histogram!(ETL_BQ_BATCH_SIZE).record(batch.rows().len() as f64);
+        }
+
         debug!(
             batch_count = table_batches.len(),
             "streaming table batches concurrently"
@@ -597,8 +633,23 @@ impl BigQueryClient {
             {
                 Ok(results) => results,
                 Err(err) => {
+                    let error_code = error_code_label(&err);
+                    let is_retryable = is_retryable_bq_error(&err);
+
+                    counter!(ETL_BQ_APPEND_BATCHES_ERRORS_TOTAL,
+                        "error_code" => error_code,
+                        "retryable" => is_retryable.to_string()
+                    )
+                    .increment(1);
+
                     // Connection-level error before any batch processing.
-                    if is_retryable_bq_error(&err) && attempt < MAX_RETRY_ATTEMPTS - 1 {
+                    if is_retryable && attempt < MAX_RETRY_ATTEMPTS - 1 {
+                        counter!(ETL_BQ_BATCH_RETRIES_TOTAL,
+                            "error_code" => error_code,
+                            "attempt" => (attempt + 1).to_string()
+                        )
+                        .increment(1);
+
                         let backoff = calculate_backoff(attempt);
                         warn!(
                             attempt = attempt + 1,
@@ -639,11 +690,14 @@ impl BigQueryClient {
                     }
                     BatchProcessResult::RowErrors { errors } => {
                         // Row errors are permanent (bad data, schema mismatch, etc).
+                        let error_count = errors.len();
                         error!(
                             batch_index,
-                            error_count = errors.len(),
-                            "batch has row errors, failing immediately"
+                            error_count, "batch has row errors, failing immediately"
                         );
+
+                        counter!(ETL_BQ_APPEND_BATCHES_ROW_ERRORS_TOTAL)
+                            .increment(error_count as u64);
 
                         // Convert all row errors to EtlErrors.
                         for row_error in errors {
@@ -651,13 +705,28 @@ impl BigQueryClient {
                         }
                     }
                     BatchProcessResult::RequestError { error } => {
-                        if is_retryable_bq_error(&error) {
+                        let error_code = error_code_label(&error);
+                        let is_retryable = is_retryable_bq_error(&error);
+
+                        counter!(ETL_BQ_APPEND_BATCHES_ERRORS_TOTAL,
+                            "error_code" => error_code,
+                            "retryable" => is_retryable.to_string()
+                        )
+                        .increment(1);
+
+                        if is_retryable {
                             // Retryable request error, queue batch for retry.
                             warn!(
                                 batch_index,
                                 error = %error,
                                 "batch has retryable request error, will retry"
                             );
+
+                            counter!(ETL_BQ_BATCH_RETRIES_TOTAL,
+                                "error_code" => error_code,
+                                "attempt" => (attempt + 1).to_string()
+                            )
+                            .increment(1);
 
                             retry_batches.push((current_batches[batch_index].clone(), error));
                         } else {

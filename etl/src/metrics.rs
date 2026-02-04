@@ -14,6 +14,7 @@ pub const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
 pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
+pub const ETL_ROW_SIZE_BYTES: &str = "etl_row_size_bytes";
 
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
@@ -95,6 +96,12 @@ pub(crate) fn register_metrics() {
             ETL_STATUS_UPDATES_SKIPPED_TOTAL,
             Unit::Count,
             "Total number of status updates skipped due to throttling, labeled by pipeline_id"
+        );
+
+        describe_histogram!(
+            ETL_ROW_SIZE_BYTES,
+            Unit::Bytes,
+            "Distribution of individual row sizes in bytes, labeled by event_type"
         );
     });
 }

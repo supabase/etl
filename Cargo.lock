@@ -1692,6 +1692,7 @@ dependencies = [
  "gcp-bigquery-client",
  "iceberg",
  "iceberg-catalog-rest",
+ "metrics",
  "parquet",
  "prost",
  "rand 0.9.2",

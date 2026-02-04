@@ -16,6 +16,7 @@ bigquery = [
     "dep:tracing",
     "dep:tokio",
     "dep:base64",
+    "dep:metrics",
 ]
 iceberg = [
     "dep:iceberg",
@@ -48,6 +49,7 @@ gcp-bigquery-client = { workspace = true, optional = true, features = [
 ] }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
+metrics = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
 prost = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }

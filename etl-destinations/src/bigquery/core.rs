@@ -1,5 +1,6 @@
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::metrics::{ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_number};
@@ -8,6 +9,7 @@ use etl::{bail, etl_error};
 #[cfg(feature = "egress")]
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
+use metrics::histogram;
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -20,6 +22,7 @@ use tracing::{debug, info, warn};
 use crate::bigquery::encoding::BigQueryTableRow;
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use crate::bigquery::metrics::register_metrics;
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
@@ -195,6 +198,8 @@ where
         max_staleness_mins: Option<u16>,
         store: S,
     ) -> Self {
+        register_metrics();
+
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -222,6 +227,8 @@ where
         connection_pool_size: usize,
         store: S,
     ) -> EtlResult<Self> {
+        register_metrics();
+
         let client =
             BigQueryClient::new_with_key_path(project_id, sa_key, connection_pool_size).await?;
         let inner = Inner {
@@ -251,6 +258,8 @@ where
         connection_pool_size: usize,
         store: S,
     ) -> EtlResult<Self> {
+        register_metrics();
+
         let client = BigQueryClient::new_with_key(project_id, sa_key, connection_pool_size).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
@@ -277,6 +286,8 @@ where
         connection_pool_size: usize,
         store: S,
     ) -> EtlResult<Self> {
+        register_metrics();
+
         let client = BigQueryClient::new_with_adc(project_id, connection_pool_size).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
@@ -310,6 +321,9 @@ where
         Secret: AsRef<[u8]>,
         Path: Into<std::path::PathBuf>,
     {
+        // Register BigQuery-specific metrics on initialization.
+        register_metrics();
+
         let client = BigQueryClient::new_with_flow_authenticator(
             project_id,
             secret,
@@ -533,7 +547,6 @@ where
             }
         }
 
-        // Stream all the batches concurrently (retry logic is inside append_table_batches).
         if !table_batches.is_empty() {
             #[allow(unused_variables)]
             let (bytes_sent, bytes_received) =
@@ -578,6 +591,12 @@ where
                             .push(BigQueryOperationType::Upsert.into_cell());
                         insert.table_row.values.push(Cell::String(sequence_number));
 
+                        // Emit row size metric for insert.
+                        let encoded_row = BigQueryTableRow::try_from(insert.table_row.clone())?;
+                        let row_size_bytes = encoded_row.encoded_len();
+                        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "insert")
+                            .record(row_size_bytes as f64);
+
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(insert.table_id).or_default();
                         table_rows.push(insert.table_row);
@@ -590,6 +609,12 @@ where
                             .values
                             .push(BigQueryOperationType::Upsert.into_cell());
                         update.table_row.values.push(Cell::String(sequence_number));
+
+                        // Emit row size metric for update.
+                        let encoded_row = BigQueryTableRow::try_from(update.table_row.clone())?;
+                        let row_size_bytes = encoded_row.encoded_len();
+                        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "update")
+                            .record(row_size_bytes as f64);
 
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(update.table_id).or_default();
@@ -607,6 +632,12 @@ where
                             .values
                             .push(BigQueryOperationType::Delete.into_cell());
                         old_table_row.values.push(Cell::String(sequence_number));
+
+                        // Emit row size metric for delete.
+                        let encoded_row = BigQueryTableRow::try_from(old_table_row.clone())?;
+                        let row_size_bytes = encoded_row.encoded_len();
+                        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "delete")
+                            .record(row_size_bytes as f64);
 
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(delete.table_id).or_default();
