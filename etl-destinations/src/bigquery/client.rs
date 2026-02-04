@@ -3,7 +3,7 @@ use etl::etl_error;
 use etl::types::{Cell, ColumnSchema, TableRow, Type, is_array_type};
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
-use gcp_bigquery_client::storage::{ColumnMode, StorageApiConfig};
+use gcp_bigquery_client::storage::{BatchAppendResult, ColumnMode, StorageApiConfig};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
     Client,
@@ -105,23 +105,59 @@ enum BatchProcessResult {
 
 /// Checks if a [`BQError`] represents a transient condition that should be retried.
 ///
-/// Returns `true` for errors that indicate temporary service unavailability or server
-/// restarts where retrying may succeed.
+/// Returns `true` for errors that indicate temporary service unavailability, server
+/// restarts, quota exhaustion, or other transient failures where retrying may succeed.
+///
+/// Based on BigQuery Storage Write API documentation and Google AIP-194.
+/// See: https://github.com/googleapis/python-bigquery-storage/issues/593
 fn is_retryable_bq_error(error: &BQError) -> bool {
     match error {
         BQError::TonicStatusError(status) => match status.code() {
-            // Code::Unavailable is the primary retryable code per Google AIP-194.
-            // It indicates transient conditions like network issues or intentional throttling.
+            // Code::Unavailable (14) - Primary retryable code per Google AIP-194.
+            // Network hiccups, connection draining, service temporarily unavailable.
+            // Examples: "the connection is draining", "recvmsg: Connection reset by peer"
             Code::Unavailable => true,
 
-            // Code::Aborted may indicate server restart, which is retryable if the
-            // message explicitly mentions server restart or advises reconnection.
+            // Code::Aborted (10) - Server restarts, stream closed after inactivity (600s timeout).
+            // Only retry if message indicates server restart or reconnection needed.
+            // Example: "Closing the stream because server is restarted. This is expected
+            // and client is advised to reconnect."
             Code::Aborted => {
                 let message = status.message();
-                message.contains("server is restarted") || message.contains("advised to reconnect")
+                message.contains("server is restarted")
+                    || message.contains("advised to reconnect")
+                    || message.contains("connection is draining")
             }
 
-            // All other codes are not retryable at this level.
+            // Code::ResourceExhausted (8) - Quota exceeded, task overloaded.
+            // Examples: "Exceeds 'AppendRows throughput' quota",
+            // "Task is overloaded (memory-protection)", "Task is overloaded (cpu-protection)"
+            // Retry with exponential backoff allows quota to reset.
+            Code::ResourceExhausted => true,
+
+            // Code::Internal (13) - Internal server errors.
+            // Examples: "Received RST_STREAM with error code 2"
+            // While AIP-194 suggests surfacing these, BigQuery docs indicate they're retryable.
+            Code::Internal => true,
+
+            // Code::DeadlineExceeded (4) - Request timeout.
+            // Can retry with a fresh deadline.
+            Code::DeadlineExceeded => true,
+
+            // Code::Cancelled (1) - Operation cancelled.
+            // May be retryable in some contexts (e.g., server-initiated cancellation).
+            Code::Cancelled => true,
+
+            // All other codes are non-retryable:
+            // - InvalidArgument (3): Bad request, schema mismatch
+            // - PermissionDenied (7): Authorization failure
+            // - Unauthenticated (16): Missing/invalid credentials
+            // - NotFound (5): Resource doesn't exist
+            // - AlreadyExists (6): Conflict
+            // - FailedPrecondition (9): System state issue
+            // - OutOfRange (11): Invalid offset
+            // - Unimplemented (12): Operation not supported
+            // - DataLoss (15): Data corruption
             _ => false,
         },
         // Other BQError variants are not retryable.
@@ -133,14 +169,14 @@ fn is_retryable_bq_error(error: &BQError) -> bool {
 ///
 /// Row errors are treated as batch failures that should trigger retry.
 /// Request errors are surfaced for retry decision by the caller.
-fn process_single_batch_result(
-    batch_result: gcp_bigquery_client::storage::BatchResult,
+fn process_single_batch_append_result(
+    batch_append_result: BatchAppendResult,
 ) -> BatchProcessResult {
-    let bytes_sent = batch_result.bytes_sent;
+    let bytes_sent = batch_append_result.bytes_sent;
     let mut total_bytes_received = 0;
     let mut row_errors = Vec::new();
 
-    for response in batch_result.responses {
+    for response in batch_append_result.responses {
         match response {
             Ok(response) => {
                 total_bytes_received += response.encoded_len();
@@ -529,10 +565,13 @@ impl BigQueryClient {
         // Two vectors for efficient batch retry tracking.
         // We swap them each iteration to reuse allocations.
         let mut current_batches = table_batches;
-        let mut retry_batches = Vec::new();
+        let mut retry_batches = Vec::with_capacity(current_batches.len());
 
         let mut total_bytes_sent = 0;
         let mut total_bytes_received = 0;
+
+        // Reusable error accumulator across iterations.
+        let mut non_retryable_errors = Vec::new();
 
         // Retry loop for transient errors.
         for attempt in 0..MAX_RETRY_ATTEMPTS {
@@ -547,7 +586,7 @@ impl BigQueryClient {
             );
 
             // Attempt to send batches concurrently.
-            let batch_results = match self
+            let batch_append_results = match self
                 .client
                 .storage()
                 .append_table_batches_concurrent(current_batches.clone(), ETL_TRACE_ID)
@@ -575,17 +614,14 @@ impl BigQueryClient {
                 }
             };
 
-            // Clear retry vector and reuse allocation.
+            // Clear vectors and reuse allocations.
             retry_batches.clear();
+            non_retryable_errors.clear();
 
-            // Process each batch result and separate into success/retry/fail.
-            // Reuse retry_batches vec (now empty) for collecting non-retryable errors initially.
-            let mut non_retryable_errors = Vec::new();
+            for batch_append_result in batch_append_results {
+                let batch_index = batch_append_result.batch_index;
 
-            for batch_result in batch_results {
-                let batch_index = batch_result.batch_index;
-
-                match process_single_batch_result(batch_result) {
+                match process_single_batch_append_result(batch_append_result) {
                     BatchProcessResult::Success {
                         bytes_sent,
                         bytes_received,
@@ -599,14 +635,17 @@ impl BigQueryClient {
                         total_bytes_received += bytes_received;
                     }
                     BatchProcessResult::RowErrors { errors } => {
-                        // Row errors are treated as retryable, retry the whole batch.
+                        // Row errors are permanent (bad data, schema mismatch, etc).
                         debug!(
                             batch_index,
                             error_count = errors.len(),
-                            "batch has row errors, will retry"
+                            "batch has row errors, failing immediately"
                         );
 
-                        retry_batches.push(current_batches[batch_index].clone());
+                        // Convert all row errors to EtlErrors.
+                        for row_error in errors {
+                            non_retryable_errors.push(row_error_to_etl_error(row_error));
+                        }
                     }
                     BatchProcessResult::RequestError { error } => {
                         if is_retryable_bq_error(&error) {

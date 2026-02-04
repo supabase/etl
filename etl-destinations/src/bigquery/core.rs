@@ -7,7 +7,7 @@ use etl::{bail, etl_error};
 
 #[cfg(feature = "egress")]
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
-use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableBatch, TableDescriptor};
+use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
