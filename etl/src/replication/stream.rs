@@ -78,7 +78,12 @@ impl<'a> Stream for TableCopyStream<'a> {
                 )
                 .increment(row.len() as u64);
 
-                histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy").record(row.len() as f64);
+                histogram!(
+                    ETL_ROW_SIZE_BYTES,
+                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
+                    EVENT_TYPE_LABEL => "copy"
+                )
+                .record(row.len() as f64);
 
                 // CONVERSION PHASE: Transform raw bytes into structured TableRow
                 // This is where most errors occur due to data format or type issues

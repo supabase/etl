@@ -7,8 +7,8 @@ static REGISTER_METRICS: Once = Once::new();
 // Core metrics - only what's essential for debugging
 pub const ETL_BQ_APPEND_BATCHES_BATCH_SIZE: &str = "etl_bq_append_batches_batch_size";
 pub const ETL_BQ_APPEND_BATCHES_RETRIES_TOTAL: &str = "etl_bq_append_batches_retries_total";
-pub const ETL_BQ_APPEND_BATCHES_ERRORS_TOTAL: &str = "etl_bq_append_batches_errors";
-pub const ETL_BQ_APPEND_BATCHES_ROW_ERRORS_TOTAL: &str = "etl_bq_append_batches_row_errors";
+pub const ETL_BQ_APPEND_BATCHES_ERRORS_TOTAL: &str = "etl_bq_append_batches_errors_total";
+pub const ETL_BQ_APPEND_BATCHES_ROW_ERRORS_TOTAL: &str = "etl_bq_append_batches_row_errors_total";
 
 /// Register BigQuery-specific metrics.
 ///
