@@ -1,6 +1,6 @@
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
-use etl::types::{Cell, ColumnSchema, TableRow, Type, is_array_type};
+use etl::types::{Cell, ColumnSchema, PipelineId, TableRow, Type, is_array_type};
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{BatchAppendResult, ColumnMode, StorageApiConfig};
@@ -583,6 +583,7 @@ impl BigQueryClient {
     /// data, row errors) fail immediately.
     pub async fn append_table_batches(
         &self,
+        pipeline_id: PipelineId,
         table_batches: Vec<TableBatch<BigQueryTableRow>>,
     ) -> EtlResult<(usize, usize)> {
         if table_batches.is_empty() {
@@ -591,7 +592,8 @@ impl BigQueryClient {
 
         // Record batch sizes
         for batch in &table_batches {
-            histogram!(ETL_BQ_BATCH_SIZE).record(batch.rows().len() as f64);
+            histogram!(ETL_BQ_BATCH_SIZE, "pipeline_id" => pipeline_id.to_string())
+                .record(batch.rows().len() as f64);
         }
 
         debug!(
@@ -637,6 +639,7 @@ impl BigQueryClient {
                     let is_retryable = is_retryable_bq_error(&err);
 
                     counter!(ETL_BQ_APPEND_BATCHES_ERRORS_TOTAL,
+                        "pipeline_id" => pipeline_id.to_string(),
                         "error_code" => error_code,
                         "retryable" => is_retryable.to_string()
                     )
@@ -645,6 +648,7 @@ impl BigQueryClient {
                     // Connection-level error before any batch processing.
                     if is_retryable && attempt < MAX_RETRY_ATTEMPTS - 1 {
                         counter!(ETL_BQ_BATCH_RETRIES_TOTAL,
+                            "pipeline_id" => pipeline_id.to_string(),
                             "error_code" => error_code,
                             "attempt" => (attempt + 1).to_string()
                         )
@@ -696,7 +700,7 @@ impl BigQueryClient {
                             error_count, "batch has row errors, failing immediately"
                         );
 
-                        counter!(ETL_BQ_APPEND_BATCHES_ROW_ERRORS_TOTAL)
+                        counter!(ETL_BQ_APPEND_BATCHES_ROW_ERRORS_TOTAL, "pipeline_id" => pipeline_id.to_string())
                             .increment(error_count as u64);
 
                         // Convert all row errors to EtlErrors.
@@ -709,6 +713,7 @@ impl BigQueryClient {
                         let is_retryable = is_retryable_bq_error(&error);
 
                         counter!(ETL_BQ_APPEND_BATCHES_ERRORS_TOTAL,
+                            "pipeline_id" => pipeline_id.to_string(),
                             "error_code" => error_code,
                             "retryable" => is_retryable.to_string()
                         )
@@ -723,6 +728,7 @@ impl BigQueryClient {
                             );
 
                             counter!(ETL_BQ_BATCH_RETRIES_TOTAL,
+                                "pipeline_id" => pipeline_id.to_string(),
                                 "error_code" => error_code,
                                 "attempt" => (attempt + 1).to_string()
                             )

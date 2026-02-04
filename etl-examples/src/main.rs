@@ -199,6 +199,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         &args.bq_args.bq_sa_key_file,
         None,
         1,
+        pipeline_config.id,
         store.clone(),
     )
     .await?;

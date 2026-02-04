@@ -3,7 +3,7 @@ use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::metrics::{ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_number};
+use etl::types::{Cell, Event, PipelineId, TableId, TableName, TableRow, generate_sequence_number};
 use etl::{bail, etl_error};
 
 #[cfg(feature = "egress")]
@@ -179,6 +179,7 @@ pub struct BigQueryDestination<S> {
     client: BigQueryClient,
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
+    pipeline_id: PipelineId,
     store: S,
     inner: Arc<Mutex<Inner>>,
 }
@@ -196,6 +197,7 @@ where
         client: BigQueryClient,
         dataset_id: BigQueryDatasetId,
         max_staleness_mins: Option<u16>,
+        pipeline_id: PipelineId,
         store: S,
     ) -> Self {
         register_metrics();
@@ -209,6 +211,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
         }
@@ -225,6 +228,7 @@ where
         sa_key: &str,
         max_staleness_mins: Option<u16>,
         connection_pool_size: usize,
+        pipeline_id: PipelineId,
         store: S,
     ) -> EtlResult<Self> {
         register_metrics();
@@ -240,6 +244,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -256,6 +261,7 @@ where
         sa_key: &str,
         max_staleness_mins: Option<u16>,
         connection_pool_size: usize,
+        pipeline_id: PipelineId,
         store: S,
     ) -> EtlResult<Self> {
         register_metrics();
@@ -270,6 +276,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -284,6 +291,7 @@ where
         dataset_id: BigQueryDatasetId,
         max_staleness_mins: Option<u16>,
         connection_pool_size: usize,
+        pipeline_id: PipelineId,
         store: S,
     ) -> EtlResult<Self> {
         register_metrics();
@@ -298,6 +306,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -308,6 +317,7 @@ where
     /// Initializes the BigQuery client with a flow authenticator using the provided secret and persistent file path.
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
     /// The `connection_pool_size` parameter controls the connection pool size.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new_with_flow_authenticator<Secret, Path>(
         project_id: String,
         dataset_id: BigQueryDatasetId,
@@ -315,6 +325,7 @@ where
         persistent_file_path: Path,
         max_staleness_mins: Option<u16>,
         connection_pool_size: usize,
+        pipeline_id: PipelineId,
         store: S,
     ) -> EtlResult<Self>
     where
@@ -340,6 +351,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
+            pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -549,8 +561,10 @@ where
 
         if !table_batches.is_empty() {
             #[allow(unused_variables)]
-            let (bytes_sent, bytes_received) =
-                self.client.append_table_batches(table_batches).await?;
+            let (bytes_sent, bytes_received) = self
+                .client
+                .append_table_batches(self.pipeline_id, table_batches)
+                .await?;
 
             #[cfg(feature = "egress")]
             log_processed_bytes(
@@ -669,8 +683,10 @@ where
 
                 if !table_batches.is_empty() {
                     #[allow(unused_variables)]
-                    let (bytes_sent, bytes_received) =
-                        self.client.append_table_batches(table_batches).await?;
+                    let (bytes_sent, bytes_received) = self
+                        .client
+                        .append_table_batches(self.pipeline_id, table_batches)
+                        .await?;
 
                     #[cfg(feature = "egress")]
                     log_processed_bytes(
