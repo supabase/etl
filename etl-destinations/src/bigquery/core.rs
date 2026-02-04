@@ -332,7 +332,6 @@ where
         Secret: AsRef<[u8]>,
         Path: Into<std::path::PathBuf>,
     {
-        // Register BigQuery-specific metrics on initialization.
         register_metrics();
 
         let client = BigQueryClient::new_with_flow_authenticator(

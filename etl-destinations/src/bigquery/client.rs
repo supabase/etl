@@ -21,8 +21,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::bigquery::encoding::BigQueryTableRow;
 use crate::bigquery::metrics::{
-    ETL_BQ_APPEND_BATCHES_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_ROW_ERRORS_TOTAL,
-    ETL_BQ_BATCH_RETRIES_TOTAL, ETL_BQ_BATCH_SIZE,
+    ETL_BQ_APPEND_BATCHES_BATCH_SIZE, ETL_BQ_APPEND_BATCHES_ERRORS_TOTAL,
+    ETL_BQ_APPEND_BATCHES_RETRIES_TOTAL, ETL_BQ_APPEND_BATCHES_ROW_ERRORS_TOTAL,
 };
 use metrics::{counter, histogram};
 
@@ -110,23 +110,49 @@ enum BatchProcessResult {
 
 /// Checks if a [`BQError`] represents a transient condition that should be retried.
 ///
-/// Returns `true` for errors that indicate temporary service unavailability, server
-/// restarts, quota exhaustion, or other transient failures where retrying may succeed.
+/// Determines if a [`BQError`] is retryable according to AIP-194 and BigQuery-specific guidance.
 ///
-/// Based on BigQuery Storage Write API documentation and Google AIP-194.
-/// See: https://github.com/googleapis/python-bigquery-storage/issues/593
+/// # AIP-194 Compliance
+///
+/// Per [AIP-194](https://google.aip.dev/194), only [`Code::Unavailable`] should be automatically
+/// retried for most gRPC services. Other status codes like [`Code::ResourceExhausted`],
+/// [`Code::Internal`], [`Code::DeadlineExceeded`], and [`Code::Cancelled`] are **not**
+/// automatically retried as they may indicate:
+/// - Resource limits that won't clear immediately (ResourceExhausted)
+/// - Application-set deadlines that must be honored (DeadlineExceeded)
+/// - User-initiated cancellations (Cancelled)
+/// - Unrecoverable system errors (Internal)
+///
+/// # BigQuery-Specific Exception
+///
+/// [`Code::Aborted`] with specific message patterns is retried despite AIP-194 guidance because
+/// the [BigQuery Storage Write API](https://cloud.google.com/bigquery/docs/write-api-best-practices)
+/// explicitly documents this as a transient error requiring reconnection. The server sends
+/// "Closing the stream because server is restarted" during maintenance, and clients are
+/// advised to reconnect. This is a BigQuery-specific behavior documented in production usage.
+///
+/// # Returns
+///
+/// Returns `true` only for [`BQError::TonicStatusError`] with:
+/// - [`Code::Unavailable`] (always)
+/// - [`Code::Aborted`] (only if message contains "server is restarted", "advised to reconnect",
+///   or "connection is draining")
+///
+/// All other errors return `false` and should be surfaced to the application.
 fn is_retryable_bq_error(error: &BQError) -> bool {
     match error {
         BQError::TonicStatusError(status) => match status.code() {
-            // Code::Unavailable (14) - Primary retryable code per Google AIP-194.
-            // Network hiccups, connection draining, service temporarily unavailable.
-            // Examples: "the connection is draining", "recvmsg: Connection reset by peer"
+            // Code::Unavailable (14) - The ONLY status code that should be automatically retried
+            // per AIP-194. Indicates temporary service unavailability, network hiccups, or
+            // connection issues that typically resolve quickly.
+            // Reference: https://google.aip.dev/194
             Code::Unavailable => true,
 
-            // Code::Aborted (10) - Server restarts, stream closed after inactivity (600s timeout).
-            // Only retry if message indicates server restart or reconnection needed.
-            // Example: "Closing the stream because server is restarted. This is expected
-            // and client is advised to reconnect."
+            // Code::Aborted (10) - EXCEPTION to AIP-194 for BigQuery-specific server restart
+            // pattern. BigQuery Storage Write API documentation explicitly states this error
+            // with "server is restarted" message is transient and clients should reconnect.
+            // Reference: https://cloud.google.com/bigquery/docs/write-api-best-practices
+            // See: https://github.com/googleapis/python-bigquery-storage/issues/315
             Code::Aborted => {
                 let message = status.message();
                 message.contains("server is restarted")
@@ -134,25 +160,12 @@ fn is_retryable_bq_error(error: &BQError) -> bool {
                     || message.contains("connection is draining")
             }
 
-            // Code::ResourceExhausted (8) - Quota exceeded, task overloaded.
-            // Examples: "Exceeds 'AppendRows throughput' quota",
-            // "Task is overloaded (memory-protection)", "Task is overloaded (cpu-protection)"
-            // Retry with exponential backoff allows quota to reset.
-            Code::ResourceExhausted => true,
-
-            // Code::Internal (13) - Internal server errors.
-            // Examples: "Received RST_STREAM with error code 2"
-            // While AIP-194 suggests surfacing these, BigQuery docs indicate they're retryable.
-            Code::Internal => true,
-
-            // Code::DeadlineExceeded (4) - Request timeout.
-            // Can retry with a fresh deadline.
-            Code::DeadlineExceeded => true,
-
-            // Code::Cancelled (1) - Operation cancelled.
-            // May be retryable in some contexts (e.g., server-initiated cancellation).
-            Code::Cancelled => true,
-
+            // The following codes are NOT retried per AIP-194:
+            // - Code::ResourceExhausted (8): Quota/rate limits that may not clear quickly
+            // - Code::Internal (13): Unrecoverable system errors that should be surfaced
+            // - Code::DeadlineExceeded (4): Application-set deadlines that must be honored
+            // - Code::Cancelled (1): User/application cancellations that must be honored
+            //
             // All other codes are non-retryable:
             // - InvalidArgument (3): Bad request, schema mismatch
             // - PermissionDenied (7): Authorization failure
@@ -592,7 +605,7 @@ impl BigQueryClient {
 
         // Record batch sizes
         for batch in &table_batches {
-            histogram!(ETL_BQ_BATCH_SIZE, "pipeline_id" => pipeline_id.to_string())
+            histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE, "pipeline_id" => pipeline_id.to_string())
                 .record(batch.rows().len() as f64);
         }
 
@@ -647,7 +660,7 @@ impl BigQueryClient {
 
                     // Connection-level error before any batch processing.
                     if is_retryable && attempt < MAX_RETRY_ATTEMPTS - 1 {
-                        counter!(ETL_BQ_BATCH_RETRIES_TOTAL,
+                        counter!(ETL_BQ_APPEND_BATCHES_RETRIES_TOTAL,
                             "pipeline_id" => pipeline_id.to_string(),
                             "error_code" => error_code,
                             "attempt" => (attempt + 1).to_string()
@@ -727,7 +740,7 @@ impl BigQueryClient {
                                 "batch has retryable request error, will retry"
                             );
 
-                            counter!(ETL_BQ_BATCH_RETRIES_TOTAL,
+                            counter!(ETL_BQ_APPEND_BATCHES_RETRIES_TOTAL,
                                 "pipeline_id" => pipeline_id.to_string(),
                                 "error_code" => error_code,
                                 "attempt" => (attempt + 1).to_string()

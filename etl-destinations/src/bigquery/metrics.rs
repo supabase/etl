@@ -5,8 +5,8 @@ use metrics::{Unit, describe_counter, describe_histogram};
 static REGISTER_METRICS: Once = Once::new();
 
 // Core metrics - only what's essential for debugging
-pub const ETL_BQ_BATCH_SIZE: &str = "etl_bq_batch_size";
-pub const ETL_BQ_BATCH_RETRIES_TOTAL: &str = "etl_bq_batch_retries_total";
+pub const ETL_BQ_APPEND_BATCHES_BATCH_SIZE: &str = "etl_bq_append_batches_batch_size";
+pub const ETL_BQ_APPEND_BATCHES_RETRIES_TOTAL: &str = "etl_bq_append_batches_retries_total";
 pub const ETL_BQ_APPEND_BATCHES_ERRORS_TOTAL: &str = "etl_bq_append_batches_errors";
 pub const ETL_BQ_APPEND_BATCHES_ROW_ERRORS_TOTAL: &str = "etl_bq_append_batches_row_errors";
 
@@ -17,13 +17,13 @@ pub const ETL_BQ_APPEND_BATCHES_ROW_ERRORS_TOTAL: &str = "etl_bq_append_batches_
 pub fn register_metrics() {
     REGISTER_METRICS.call_once(|| {
         describe_histogram!(
-            ETL_BQ_BATCH_SIZE,
+            ETL_BQ_APPEND_BATCHES_BATCH_SIZE,
             Unit::Count,
             "Distribution of batch sizes (number of rows per batch)"
         );
 
         describe_counter!(
-            ETL_BQ_BATCH_RETRIES_TOTAL,
+            ETL_BQ_APPEND_BATCHES_RETRIES_TOTAL,
             Unit::Count,
             "Total batch retries, labeled by error_code and attempt"
         );
