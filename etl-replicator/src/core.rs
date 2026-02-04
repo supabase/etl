@@ -65,6 +65,7 @@ pub async fn start_replicator_with_config(
                 service_account_key.expose_secret(),
                 *max_staleness_mins,
                 *connection_pool_size,
+                replicator_config.pipeline.id,
                 state_store.clone(),
             )
             .await?;

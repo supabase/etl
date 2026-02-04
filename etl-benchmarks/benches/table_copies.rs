@@ -378,6 +378,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
                 &sa_key_file,
                 args.bq_max_staleness_mins,
                 args.bq_connection_pool_size,
+                pipeline_config.id,
                 store.clone(),
             )
             .await?;

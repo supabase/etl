@@ -60,7 +60,9 @@ async fn table_copy_and_streaming_with_restart() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -193,7 +195,9 @@ async fn table_insert_update_delete() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -310,7 +314,9 @@ async fn table_subsequent_updates() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -403,7 +409,9 @@ async fn table_truncate_with_batching() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -544,7 +552,9 @@ async fn table_nullable_scalar_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub".to_string();
@@ -753,7 +763,9 @@ async fn table_nullable_array_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array".to_string();
@@ -988,7 +1000,9 @@ async fn table_non_nullable_scalar_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null".to_string();
@@ -1238,7 +1252,9 @@ async fn table_non_nullable_array_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null_array".to_string();
@@ -1522,7 +1538,9 @@ async fn table_array_with_null_values() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array_nulls".to_string();
@@ -1739,7 +1757,9 @@ async fn table_validation_out_of_bounds_values() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_validation".to_string();
