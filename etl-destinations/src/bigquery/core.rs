@@ -27,7 +27,6 @@ const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
 /// Replacement string for escaping underscores in Postgres names.
 const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 
-
 /// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
 ///
 /// Escapes underscores in schema and table names to prevent collisions when combining them.
@@ -493,7 +492,6 @@ where
         Ok(true)
     }
 
-
     /// Writes table rows with CDC metadata for non-event streaming operations.
     ///
     /// Adds an `Upsert` operation type to each row, splits them into optimal batches based on
@@ -538,10 +536,8 @@ where
         // Stream all the batches concurrently (retry logic is inside append_table_batches).
         if !table_batches.is_empty() {
             #[allow(unused_variables)]
-            let (bytes_sent, bytes_received) = self
-                .client
-                .append_table_batches(table_batches)
-                .await?;
+            let (bytes_sent, bytes_received) =
+                self.client.append_table_batches(table_batches).await?;
 
             #[cfg(feature = "egress")]
             log_processed_bytes(
@@ -642,10 +638,8 @@ where
 
                 if !table_batches.is_empty() {
                     #[allow(unused_variables)]
-                    let (bytes_sent, bytes_received) = self
-                        .client
-                        .append_table_batches(table_batches)
-                        .await?;
+                    let (bytes_sent, bytes_received) =
+                        self.client.append_table_batches(table_batches).await?;
 
                     #[cfg(feature = "egress")]
                     log_processed_bytes(

@@ -526,31 +526,31 @@ impl BigQueryClient {
             "streaming table batches concurrently"
         );
 
-        // Track batches to process and accumulated results.
-        let mut batches_to_process = table_batches;
+        // Two vectors for efficient batch retry tracking.
+        // We swap them each iteration to reuse allocations.
+        let mut current_batches = table_batches;
+        let mut retry_batches = Vec::new();
+
         let mut total_bytes_sent = 0;
         let mut total_bytes_received = 0;
 
         // Retry loop for transient errors.
         for attempt in 0..MAX_RETRY_ATTEMPTS {
-            if batches_to_process.is_empty() {
+            if current_batches.is_empty() {
                 break;
             }
 
             debug!(
                 attempt = attempt + 1,
-                batch_count = batches_to_process.len(),
+                batch_count = current_batches.len(),
                 "attempting to append table batches"
             );
-
-            // Clone batches for this attempt to allow retry.
-            let current_batches = batches_to_process.clone();
 
             // Attempt to send batches concurrently.
             let batch_results = match self
                 .client
                 .storage()
-                .append_table_batches_concurrent(current_batches, ETL_TRACE_ID)
+                .append_table_batches_concurrent(current_batches.clone(), ETL_TRACE_ID)
                 .await
             {
                 Ok(results) => results,
@@ -566,6 +566,7 @@ impl BigQueryClient {
                             "bigquery connection error, backing off before retry"
                         );
                         sleep(backoff).await;
+
                         continue;
                     }
 
@@ -574,12 +575,15 @@ impl BigQueryClient {
                 }
             };
 
+            // Clear retry vector and reuse allocation.
+            retry_batches.clear();
+
             // Process each batch result and separate into success/retry/fail.
-            let mut batches_for_retry = Vec::new();
+            // Reuse retry_batches vec (now empty) for collecting non-retryable errors initially.
             let mut non_retryable_errors = Vec::new();
 
             for batch_result in batch_results {
-                let original_index = batches_to_process[batch_result.batch_index].0;
+                let batch_index = batch_result.batch_index;
 
                 match process_single_batch_result(batch_result) {
                     BatchProcessResult::Success {
@@ -587,74 +591,65 @@ impl BigQueryClient {
                         bytes_received,
                     } => {
                         debug!(
-                            batch_index = original_index,
-                            bytes_sent,
-                            bytes_received,
-                            "batch processed successfully"
+                            batch_index,
+                            bytes_sent, bytes_received, "batch processed successfully"
                         );
+
                         total_bytes_sent += bytes_sent;
                         total_bytes_received += bytes_received;
                     }
                     BatchProcessResult::RowErrors { errors } => {
-                        // Row errors are treated as retryable - retry the whole batch.
+                        // Row errors are treated as retryable, retry the whole batch.
                         debug!(
-                            batch_index = original_index,
+                            batch_index,
                             error_count = errors.len(),
                             "batch has row errors, will retry"
                         );
-                        batches_for_retry.push((
-                            original_index,
-                            batches_to_process[batch_result.batch_index].1.clone(),
-                        ));
+
+                        retry_batches.push(current_batches[batch_index].clone());
                     }
                     BatchProcessResult::RequestError { error } => {
                         if is_retryable_bq_error(&error) {
-                            // Retryable request error - queue batch for retry.
+                            // Retryable request error, queue batch for retry.
                             debug!(
-                                batch_index = original_index,
+                                batch_index,
                                 error = %error,
                                 "batch has retryable request error, will retry"
                             );
-                            batches_for_retry.push((
-                                original_index,
-                                batches_to_process[batch_result.batch_index].1.clone(),
-                            ));
+
+                            retry_batches.push(current_batches[batch_index].clone());
                         } else {
-                            // Non-retryable request error - convert and accumulate.
+                            // Non-retryable request error, convert and accumulate.
                             non_retryable_errors.push(bq_error_to_etl_error(error));
                         }
                     }
                 }
             }
 
-            // If we have non-retryable errors, fail immediately.
+            // If we have non-retryable errors, fail immediately. The reason for this is that we are
+            // guaranteeing that all batches are flushed if we return success, thus if there is at
+            // least one non-retryable error, we just stop and error.
             if !non_retryable_errors.is_empty() {
                 return Err(non_retryable_errors.into());
             }
 
-            // Update batches to process for next retry attempt.
-            batches_to_process = batches_for_retry;
-
             // If no batches need retry, we're done.
-            if batches_to_process.is_empty() {
+            if retry_batches.is_empty() {
                 break;
             }
 
             // On final attempt, convert remaining errors and fail.
             if attempt == MAX_RETRY_ATTEMPTS - 1 {
-                let exhausted_errors: Vec<EtlError> = batches_to_process
-                    .iter()
-                    .map(|(original_index, _)| {
+                let exhausted_errors: Vec<EtlError> = (0..retry_batches.len())
+                    .map(|_| {
                         etl_error!(
-                            ErrorKind::DestinationThrottled,
+                            ErrorKind::DestinationRetryExhausted,
                             "BigQuery batch retry exhausted",
-                            format!(
-                                "batch {} failed after {} attempts",
-                                original_index, MAX_RETRY_ATTEMPTS
-                            )
+                            format!("batch failed after {} attempts", MAX_RETRY_ATTEMPTS)
                         )
                     })
                     .collect();
+
                 return Err(exhausted_errors.into());
             }
 
@@ -664,10 +659,13 @@ impl BigQueryClient {
                 attempt = attempt + 1,
                 max_attempts = MAX_RETRY_ATTEMPTS,
                 backoff_ms = backoff.as_millis(),
-                retry_batch_count = batches_to_process.len(),
+                retry_batch_count = retry_batches.len(),
                 "bigquery batches encountered transient errors, backing off before retry"
             );
             sleep(backoff).await;
+
+            // Swap vectors for next iteration - reuses allocations.
+            std::mem::swap(&mut current_batches, &mut retry_batches);
         }
 
         Ok((total_bytes_sent, total_bytes_received))
