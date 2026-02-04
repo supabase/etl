@@ -591,9 +591,8 @@ impl BigQueryClient {
     /// in a single batch, and it will be processed in order.
     ///
     /// Implements fine-grained retry logic that only retries batches that failed with
-    /// transient errors (e.g., [`Code::Unavailable`], [`Code::ResourceExhausted`], server restarts),
-    /// while preserving successful batch results. Non-retryable errors (permission denied, invalid
-    /// data, row errors) fail immediately.
+    /// transient errors, while preserving successful batch results. Non-retryable errors
+    /// (permission denied, invalid data, row errors) fail immediately.
     pub async fn append_table_batches(
         &self,
         pipeline_id: PipelineId,
