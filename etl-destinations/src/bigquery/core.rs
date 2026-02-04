@@ -1,6 +1,5 @@
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
-use etl::metrics::EVENT_TYPE_LABEL;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{Cell, Event, PipelineId, TableId, TableName, TableRow, generate_sequence_number};
@@ -9,7 +8,6 @@ use etl::{bail, etl_error};
 #[cfg(feature = "egress")]
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
-use metrics::histogram;
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
