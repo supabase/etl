@@ -13,6 +13,10 @@ pub enum MergerError {
     #[error("Arrow error: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
 
+    /// Error from Parquet operations.
+    #[error("Parquet error: {0}")]
+    Parquet(#[from] parquet::errors::ParquetError),
+
     /// Error from the ETL core library.
     #[error("ETL error: {0}")]
     Etl(#[from] etl::error::EtlError),

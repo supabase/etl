@@ -138,6 +138,8 @@ impl MirrorWriter {
             // Sort row positions (required by RoaringTreemap::append)
             row_positions.sort_unstable();
 
+            debug!(%data_file_path, positions = ?row_positions, "creating deletion vector");
+
             let descriptor = write_deletion_vector(
                 table.file_io(),
                 table.metadata().location(),

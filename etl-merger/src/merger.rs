@@ -2,6 +2,7 @@
 
 use etl::types::{ColumnSchema, TableRow};
 use etl_destinations::iceberg::IcebergClient;
+use iceberg::io::FileRead;
 use tracing::{debug, info};
 
 use crate::changelog_reader::{CdcOperation, ChangelogReader, arrow_value_to_cell};
@@ -130,7 +131,7 @@ impl Merger {
             return Ok(0);
         }
 
-        // Load and scan the mirror table
+        // Load the mirror table
         let table = client
             .load_table(
                 self.config.mirror_namespace.clone(),
@@ -138,50 +139,70 @@ impl Merger {
             )
             .await?;
 
-        let Some(current_snapshot) = table.metadata().current_snapshot_id() else {
+        let Some(current_snapshot) = table.metadata().current_snapshot() else {
             debug!("mirror table has no snapshot yet, index is empty");
             return Ok(0);
         };
 
-        use futures::StreamExt;
-
-        let mut stream = table
-            .scan()
-            .snapshot_id(current_snapshot)
-            .select_all()
-            .build()?
-            .to_arrow()
+        // Load the manifest list to get data file paths
+        let manifest_list = current_snapshot
+            .load_manifest_list(table.file_io(), table.metadata())
             .await?;
 
         let mut total_rows = 0;
-        let mut file_idx = 0;
 
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-            let pk_indices = self.index.pk_column_indices().to_vec();
+        // Process each manifest to get data files
+        for manifest_entry in manifest_list.entries() {
+            let manifest = manifest_entry.load_manifest(table.file_io()).await?;
+            let (manifest_entries, _) = manifest.into_parts();
 
-            // For each row, extract PK and create index entry
-            for row_idx in 0..batch.num_rows() {
-                let mut cells = Vec::with_capacity(batch.num_columns());
-                for col_idx in 0..batch.num_columns() {
-                    let cell = arrow_value_to_cell(batch.column(col_idx), row_idx);
-                    cells.push(cell);
+            for entry in manifest_entries {
+                // Only process data files (skip deletion vectors)
+                if entry.content_type() != iceberg::spec::DataContentType::Data {
+                    continue;
                 }
 
-                let pk = PrimaryKey::from_row(&cells, &pk_indices);
+                let data_file_path = entry.file_path().to_string();
 
-                // Create a placeholder location
-                // TODO: Track actual file paths when we have proper file tracking
-                let location = RowLocation::new(
-                    format!("data/existing-{}.parquet", file_idx),
-                    row_idx as u64,
-                    "initial".to_string(),
-                );
+                // Read the parquet file directly
+                let input_file = table.file_io().new_input(&data_file_path)?;
+                let file_reader = input_file.reader().await?;
+                let file_size = input_file.metadata().await?.size;
+                let bytes = file_reader.read(0..file_size).await?;
 
-                self.index.insert(pk, location);
-                total_rows += 1;
+                // Parse parquet file
+                let parquet_reader =
+                    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes)?
+                        .build()?;
+
+                let pk_indices = self.index.pk_column_indices().to_vec();
+                let mut row_idx: u64 = 0;
+
+                for batch_result in parquet_reader {
+                    let batch = batch_result?;
+
+                    for batch_row_idx in 0..batch.num_rows() {
+                        let mut cells = Vec::with_capacity(batch.num_columns());
+                        for col_idx in 0..batch.num_columns() {
+                            let cell = arrow_value_to_cell(batch.column(col_idx), batch_row_idx);
+                            cells.push(cell);
+                        }
+
+                        let pk = PrimaryKey::from_row(&cells, &pk_indices);
+
+                        // Use the actual data file path
+                        let location = RowLocation::new(
+                            data_file_path.clone(),
+                            row_idx,
+                            "initial".to_string(),
+                        );
+
+                        self.index.insert(pk, location);
+                        total_rows += 1;
+                        row_idx += 1;
+                    }
+                }
             }
-            file_idx += 1;
         }
 
         info!(rows = total_rows, "index built from mirror table");
