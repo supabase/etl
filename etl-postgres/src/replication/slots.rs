@@ -3,7 +3,7 @@ use sqlx::PgPool;
 use std::time::Duration;
 use thiserror::Error;
 use tokio_postgres::types::Oid;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Maximum length for a Postgres replication slot name in bytes.
 const MAX_SLOT_NAME_LENGTH: usize = 63;
@@ -221,6 +221,8 @@ pub async fn delete_pipeline_replication_slots(
                 if attempt == MAX_RETRIES - 1 {
                     return Err(err);
                 }
+
+                debug!(%pipeline_id, "waiting for backoff before retrying to drop replication slot(s)");
 
                 // Exponential backoff: 100ms, 200ms, 400ms
                 let backoff_ms = INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
