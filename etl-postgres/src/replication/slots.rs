@@ -1,9 +1,9 @@
-use std::time::Duration;
+use crate::types::TableId;
 use sqlx::PgPool;
+use std::time::Duration;
 use thiserror::Error;
 use tokio_postgres::types::Oid;
-
-use crate::types::TableId;
+use tracing::warn;
 
 /// Maximum length for a Postgres replication slot name in bytes.
 const MAX_SLOT_NAME_LENGTH: usize = 63;
@@ -185,10 +185,13 @@ pub async fn delete_pipeline_replication_slots(
             where r.slot_name = any($1) and r.active = true and r.active_pid is not null;
             "#,
         );
-        let _ = sqlx::query(&terminate_query)
+        let result = sqlx::query(&terminate_query)
             .bind(&slot_names)
             .execute(pool)
             .await;
+        if let Err(err) = result {
+            warn!(%pipeline_id, %err, "could not terminate backend(s) using replication slot(s) that have to be deleted");
+        }
 
         // Brief delay to allow walsender processes to terminate
         if attempt == 0 {
@@ -204,11 +207,16 @@ pub async fn delete_pipeline_replication_slots(
             where r.slot_name = any($1);
             "#,
         );
-        let result = sqlx::query(&drop_query).bind(&slot_names).execute(pool).await;
+        let result = sqlx::query(&drop_query)
+            .bind(&slot_names)
+            .execute(pool)
+            .await;
 
         match result {
             Ok(_) => return Ok(()),
             Err(err) => {
+                warn!(%pipeline_id, %err, "could not drop replication slot(s) for pipeline");
+
                 // If this is the last attempt, return the error
                 if attempt == MAX_RETRIES - 1 {
                     return Err(err);
