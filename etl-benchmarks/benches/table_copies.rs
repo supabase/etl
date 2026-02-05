@@ -125,9 +125,9 @@ enum Commands {
         /// BigQuery maximum staleness in minutes (optional)
         #[arg(long)]
         bq_max_staleness_mins: Option<u16>,
-        /// BigQuery maximum concurrent streams (optional)
+        /// BigQuery connection pool size (optional)
         #[arg(long, default_value = "32")]
-        bq_max_concurrent_streams: usize,
+        bq_connection_pool_size: usize,
     },
     /// Prepare the benchmark environment by cleaning up replication slots
     Prepare {
@@ -185,7 +185,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bq_dataset_id,
             bq_sa_key_file,
             bq_max_staleness_mins,
-            bq_max_concurrent_streams,
+            bq_connection_pool_size,
         } => {
             start_pipeline(RunArgs {
                 host,
@@ -205,7 +205,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 bq_dataset_id,
                 bq_sa_key_file,
                 bq_max_staleness_mins,
-                bq_max_concurrent_streams,
+                bq_connection_pool_size,
             })
             .await
         }
@@ -249,7 +249,7 @@ struct RunArgs {
     bq_dataset_id: Option<String>,
     bq_sa_key_file: Option<String>,
     bq_max_staleness_mins: Option<u16>,
-    bq_max_concurrent_streams: usize,
+    bq_connection_pool_size: usize,
 }
 
 #[derive(Debug)]
@@ -379,7 +379,8 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
                 dataset_id,
                 &sa_key_file,
                 args.bq_max_staleness_mins,
-                args.bq_max_concurrent_streams,
+                args.bq_connection_pool_size,
+                pipeline_config.id,
                 store.clone(),
             )
             .await?;

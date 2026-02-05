@@ -16,11 +16,12 @@ use crate::conversions::table_row::parse_table_row_from_postgres_copy_bytes;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 use crate::metrics::{
-    ETL_BYTES_PROCESSED_TOTAL, ETL_STATUS_UPDATES_SKIPPED_TOTAL, ETL_STATUS_UPDATES_TOTAL,
-    EVENT_TYPE_LABEL, FORCED_LABEL, PIPELINE_ID_LABEL, STATUS_UPDATE_TYPE_LABEL,
+    ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, ETL_STATUS_UPDATES_SKIPPED_TOTAL,
+    ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, PIPELINE_ID_LABEL,
+    STATUS_UPDATE_TYPE_LABEL,
 };
 use crate::types::{PipelineId, TableRow};
-use metrics::counter;
+use metrics::{counter, histogram};
 
 /// The amount of milliseconds between two consecutive status updates in case no forced update
 /// is requested.
@@ -76,6 +77,13 @@ impl<'a> Stream for TableCopyStream<'a> {
                     EVENT_TYPE_LABEL => "copy"
                 )
                 .increment(row.len() as u64);
+
+                histogram!(
+                    ETL_ROW_SIZE_BYTES,
+                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
+                    EVENT_TYPE_LABEL => "copy"
+                )
+                .record(row.len() as f64);
 
                 // CONVERSION PHASE: Transform raw bytes into structured TableRow
                 // This is where most errors occur due to data format or type issues

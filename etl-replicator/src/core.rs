@@ -57,14 +57,15 @@ pub async fn start_replicator_with_config(
             dataset_id,
             service_account_key,
             max_staleness_mins,
-            max_concurrent_streams,
+            connection_pool_size,
         } => {
             let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
                 dataset_id.clone(),
                 service_account_key.expose_secret(),
                 *max_staleness_mins,
-                *max_concurrent_streams,
+                *connection_pool_size,
+                replicator_config.pipeline.id,
                 state_store.clone(),
             )
             .await?;
@@ -170,13 +171,13 @@ fn log_destination_config(config: &DestinationConfig) {
             dataset_id,
             service_account_key: _,
             max_staleness_mins,
-            max_concurrent_streams,
+            connection_pool_size,
         } => {
             debug!(
                 project_id,
                 dataset_id,
                 max_staleness_mins,
-                max_concurrent_streams,
+                connection_pool_size,
                 "using bigquery destination config"
             )
         }

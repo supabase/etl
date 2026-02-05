@@ -1,8 +1,9 @@
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
-use etl::types::{Cell, ColumnSchema, TableRow, Type, is_array_type};
+use etl::types::{Cell, ColumnSchema, PipelineId, TableRow, Type, is_array_type};
+use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
-use gcp_bigquery_client::storage::ColumnMode;
+use gcp_bigquery_client::storage::{BatchAppendResult, ColumnMode, StorageApiConfig};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
     Client,
@@ -11,20 +12,46 @@ use gcp_bigquery_client::{
     storage::{ColumnType, FieldDescriptor, StreamName, TableBatch, TableDescriptor},
 };
 use prost::Message;
+use rand::Rng;
 use std::fmt;
+use std::time::Duration;
+use tokio::time::sleep;
 use tonic::Code;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 use crate::bigquery::encoding::BigQueryTableRow;
+use crate::bigquery::metrics::{
+    ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_RETRIES_TOTAL,
+    ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_SIZE,
+};
+use metrics::{counter, histogram};
 
 /// Trace identifier for ETL operations in BigQuery client.
 const ETL_TRACE_ID: &str = "ETL BigQueryClient";
+
+/// Multiplier for calculating max inflight requests from pool size.
+///
+/// The maximum number of inflight requests is `connection_pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION`.
+const MAX_INFLIGHT_REQUESTS_PER_CONNECTION: usize = 100;
+
+/// Maximum safe value for inflight requests to prevent resource exhaustion.
+///
+/// This upper bound ensures reasonable memory usage and prevents overflow when computing
+/// max inflight requests from connection pool size.
+const MAX_SAFE_INFLIGHT_REQUESTS: usize = 100_000;
 
 /// Special column name for Change Data Capture operations in BigQuery.
 const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 
 /// Special column name for Change Data Capture sequence ordering in BigQuery.
 const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
+
+/// Maximum number of retry attempts for transient BigQuery errors.
+const MAX_RETRY_ATTEMPTS: u32 = 10;
+/// Initial backoff delay in milliseconds for exponential backoff.
+const INITIAL_BACKOFF_MS: u64 = 500;
+/// Maximum backoff delay in milliseconds to cap exponential growth.
+const MAX_BACKOFF_MS: u64 = 60_000;
 
 /// BigQuery project identifier.
 pub type BigQueryProjectId = String;
@@ -56,6 +83,186 @@ impl fmt::Display for BigQueryOperationType {
     }
 }
 
+/// Computes the maximum number of inflight requests for the BigQuery Storage Write API.
+///
+/// Uses checked arithmetic to safely multiply the connection pool size by the per-connection
+/// limit, clamping the result to [`MAX_SAFE_INFLIGHT_REQUESTS`] to prevent overflow and
+/// resource exhaustion.
+fn compute_max_inflight_requests(connection_pool_size: usize) -> usize {
+    connection_pool_size
+        .checked_mul(MAX_INFLIGHT_REQUESTS_PER_CONNECTION)
+        .unwrap_or(MAX_SAFE_INFLIGHT_REQUESTS)
+        .min(MAX_SAFE_INFLIGHT_REQUESTS)
+}
+
+/// Result of processing a single batch, used to determine retry strategy.
+enum BatchProcessResult {
+    /// Batch succeeded with byte metrics.
+    Success {
+        bytes_sent: usize,
+        bytes_received: usize,
+    },
+    /// Batch had row-level errors which should trigger a retry.
+    RowErrors { errors: Vec<RowError> },
+    /// Batch had a request-level error.
+    RequestError { error: BQError },
+}
+
+/// Checks if a [`BQError`] represents a transient condition that should be retried.
+///
+/// Determines if a [`BQError`] is retryable according to AIP-194 and BigQuery-specific guidance.
+///
+/// # AIP-194 Compliance
+///
+/// Per [AIP-194](https://google.aip.dev/194), only [`Code::Unavailable`] should be automatically
+/// retried for most gRPC services. Other status codes like [`Code::ResourceExhausted`],
+/// [`Code::Internal`], [`Code::DeadlineExceeded`], and [`Code::Cancelled`] are **not**
+/// automatically retried as they may indicate:
+/// - Resource limits that won't clear immediately (ResourceExhausted)
+/// - Application-set deadlines that must be honored (DeadlineExceeded)
+/// - User-initiated cancellations (Cancelled)
+/// - Unrecoverable system errors (Internal)
+///
+/// # BigQuery-Specific Exception
+///
+/// [`Code::Aborted`] with specific message patterns is retried despite AIP-194 guidance because
+/// the [BigQuery Storage Write API](https://cloud.google.com/bigquery/docs/write-api-best-practices)
+/// explicitly documents this as a transient error requiring reconnection. The server sends
+/// "Closing the stream because server is restarted" during maintenance, and clients are
+/// advised to reconnect. This is a BigQuery-specific behavior documented in production usage.
+///
+/// # Returns
+///
+/// Returns `true` only for [`BQError::TonicStatusError`] with:
+/// - [`Code::Unavailable`] (always)
+/// - [`Code::Aborted`] (only if message contains "server is restarted", "advised to reconnect",
+///   or "connection is draining")
+///
+/// All other errors return `false` and should be surfaced to the application.
+fn is_retryable_bq_error(error: &BQError) -> bool {
+    match error {
+        BQError::TonicStatusError(status) => match status.code() {
+            // Code::Unavailable (14) - The ONLY status code that should be automatically retried
+            // per AIP-194. Indicates temporary service unavailability, network hiccups, or
+            // connection issues that typically resolve quickly.
+            // Reference: https://google.aip.dev/194
+            Code::Unavailable => true,
+
+            // Code::Aborted (10) - EXCEPTION to AIP-194 for BigQuery-specific server restart
+            // pattern. BigQuery Storage Write API documentation explicitly states this error
+            // with "server is restarted" message is transient and clients should reconnect.
+            // Reference: https://cloud.google.com/bigquery/docs/write-api-best-practices
+            // See: https://github.com/googleapis/python-bigquery-storage/issues/315
+            Code::Aborted => {
+                let message = status.message();
+                message.contains("server is restarted")
+                    || message.contains("advised to reconnect")
+                    || message.contains("connection is draining")
+            }
+
+            // The following codes are NOT retried per AIP-194:
+            // - Code::ResourceExhausted (8): Quota/rate limits that may not clear quickly
+            // - Code::Internal (13): Unrecoverable system errors that should be surfaced
+            // - Code::DeadlineExceeded (4): Application-set deadlines that must be honored
+            // - Code::Cancelled (1): User/application cancellations that must be honored
+            //
+            // All other codes are non-retryable:
+            // - InvalidArgument (3): Bad request, schema mismatch
+            // - PermissionDenied (7): Authorization failure
+            // - Unauthenticated (16): Missing/invalid credentials
+            // - NotFound (5): Resource doesn't exist
+            // - AlreadyExists (6): Conflict
+            // - FailedPrecondition (9): System state issue
+            // - OutOfRange (11): Invalid offset
+            // - Unimplemented (12): Operation not supported
+            // - DataLoss (15): Data corruption
+            _ => false,
+        },
+        // Other BQError variants are not retryable.
+        _ => false,
+    }
+}
+
+/// Processes a single batch result and determines success or failure mode.
+///
+/// Row errors are permanent failures (bad data, schema mismatch) and fail immediately.
+/// Request errors are surfaced for retry decision by the caller.
+fn process_single_batch_append_result(
+    batch_append_result: BatchAppendResult,
+) -> BatchProcessResult {
+    let bytes_sent = batch_append_result.bytes_sent;
+    let mut total_bytes_received = 0;
+    let mut row_errors = Vec::new();
+
+    for response in batch_append_result.responses {
+        match response {
+            Ok(response) => {
+                total_bytes_received += response.encoded_len();
+
+                // Row-level errors are permanent failures (bad data, schema mismatch, etc).
+                if !response.row_errors.is_empty() {
+                    row_errors.extend(response.row_errors);
+                }
+            }
+            Err(status) => {
+                // Request-level error.
+                return BatchProcessResult::RequestError {
+                    error: BQError::from(status),
+                };
+            }
+        }
+    }
+
+    if !row_errors.is_empty() {
+        BatchProcessResult::RowErrors { errors: row_errors }
+    } else {
+        BatchProcessResult::Success {
+            bytes_sent,
+            bytes_received: total_bytes_received,
+        }
+    }
+}
+
+/// Calculates exponential backoff delay with full jitter.
+///
+/// Uses the "full jitter" approach: random value between 0 and min(max_backoff, base * 2^attempt).
+/// This provides better spread than additive jitter, especially at higher attempts, helping
+/// prevent thundering herd when many clients retry simultaneously.
+fn calculate_backoff(attempt: u32) -> Duration {
+    let exponential = INITIAL_BACKOFF_MS
+        .saturating_mul(1u64 << attempt.min(10))
+        .min(MAX_BACKOFF_MS);
+    let jitter = rand::rng().random_range(0..=exponential);
+
+    Duration::from_millis(jitter)
+}
+
+/// Extracts the gRPC status code as a string from a [`BQError`] for metrics labeling.
+fn error_code_label(error: &BQError) -> &'static str {
+    match error {
+        BQError::TonicStatusError(status) => match status.code() {
+            Code::Ok => "ok",
+            Code::Cancelled => "cancelled",
+            Code::Unknown => "unknown",
+            Code::InvalidArgument => "invalid_argument",
+            Code::DeadlineExceeded => "deadline_exceeded",
+            Code::NotFound => "not_found",
+            Code::AlreadyExists => "already_exists",
+            Code::PermissionDenied => "permission_denied",
+            Code::ResourceExhausted => "resource_exhausted",
+            Code::FailedPrecondition => "failed_precondition",
+            Code::Aborted => "aborted",
+            Code::OutOfRange => "out_of_range",
+            Code::Unimplemented => "unimplemented",
+            Code::Internal => "internal",
+            Code::Unavailable => "unavailable",
+            Code::DataLoss => "data_loss",
+            Code::Unauthenticated => "unauthenticated",
+        },
+        _ => "other",
+    }
+}
+
 /// Client for interacting with Google BigQuery.
 ///
 /// Provides methods for table management, data insertion, and query execution
@@ -70,11 +277,21 @@ impl BigQueryClient {
     /// Creates a new [`BigQueryClient`] from a service account key file.
     ///
     /// Authenticates with BigQuery using the service account key at the specified file path.
+    /// Configures the Storage Write API with the given pool size.
     pub async fn new_with_key_path(
         project_id: BigQueryProjectId,
-        sa_key_path: &str,
+        sa_key_file: &str,
+        connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
-        let client = Client::from_service_account_key_file(sa_key_path)
+        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
+        let storage_config = StorageApiConfig {
+            connection_pool_size,
+            max_inflight_requests,
+        };
+
+        let client = ClientBuilder::new()
+            .with_storage_config(storage_config)
+            .build_from_service_account_key_file(sa_key_file)
             .await
             .map_err(bq_error_to_etl_error)?;
 
@@ -84,14 +301,24 @@ impl BigQueryClient {
     /// Creates a new [`BigQueryClient`] from a service account key JSON string.
     ///
     /// Parses and uses the provided service account key to authenticate with BigQuery.
+    /// Configures the Storage Write API with the given pool size.
     pub async fn new_with_key(
         project_id: BigQueryProjectId,
         sa_key: &str,
+        connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
+        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
+        let storage_config = StorageApiConfig {
+            connection_pool_size,
+            max_inflight_requests,
+        };
+
         let sa_key = parse_service_account_key(sa_key)
             .map_err(BQError::from)
             .map_err(bq_error_to_etl_error)?;
-        let client = Client::from_service_account_key(sa_key, false)
+        let client = ClientBuilder::new()
+            .with_storage_config(storage_config)
+            .build_from_service_account_key(sa_key, false)
             .await
             .map_err(bq_error_to_etl_error)?;
 
@@ -101,9 +328,21 @@ impl BigQueryClient {
     /// Creates a new [`BigQueryClient`] using Application Default Credentials.
     ///
     /// Authenticates with BigQuery using the environment's default credentials.
+    /// Configures the Storage Write API with the given pool size.
     /// Returns an error if credentials are missing or invalid.
-    pub async fn new_with_adc(project_id: BigQueryProjectId) -> EtlResult<BigQueryClient> {
-        let client = Client::from_application_default_credentials()
+    pub async fn new_with_adc(
+        project_id: BigQueryProjectId,
+        connection_pool_size: usize,
+    ) -> EtlResult<BigQueryClient> {
+        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
+        let storage_config = StorageApiConfig {
+            connection_pool_size,
+            max_inflight_requests,
+        };
+
+        let client = ClientBuilder::new()
+            .with_storage_config(storage_config)
+            .build_from_application_default_credentials()
             .await
             .map_err(bq_error_to_etl_error)?;
 
@@ -113,12 +352,22 @@ impl BigQueryClient {
     /// Creates a new [`BigQueryClient`] using OAuth2 installed flow authentication.
     ///
     /// Authenticates with BigQuery using the OAuth2 installed flow.
+    /// Configures the Storage Write API with the given pool size.
     pub async fn new_with_flow_authenticator<S: AsRef<[u8]>, P: Into<std::path::PathBuf>>(
         project_id: BigQueryProjectId,
         secret: S,
-        persistant_file_path: P,
+        persistent_file_path: P,
+        connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
-        let client = Client::from_installed_flow_authenticator(secret, persistant_file_path)
+        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
+        let storage_config = StorageApiConfig {
+            connection_pool_size,
+            max_inflight_requests,
+        };
+
+        let client = ClientBuilder::new()
+            .with_storage_config(storage_config)
+            .build_from_installed_flow_authenticator(secret, persistent_file_path)
             .await
             .map_err(bq_error_to_etl_error)?;
 
@@ -330,85 +579,223 @@ impl BigQueryClient {
         }
     }
 
-    /// Appends table batches to BigQuery using the concurrent Storage Write API.
+    /// Appends table batches to BigQuery using the concurrent Storage Write API with retry logic.
     ///
-    /// Accepts pre-constructed TableBatch objects wrapped in Arc and processes them concurrently
+    /// Accepts pre-constructed TableBatch objects and processes them concurrently
     /// with controlled parallelism. This allows streaming to multiple different tables efficiently
-    /// in a single call. The Arc wrapping enables efficient retry operations without cloning data.
+    /// in a single call.
     ///
     /// If ordering is not required, you may split a table's data into multiple batches,
     /// which can be processed concurrently.
     /// If ordering guarantees are needed, all data for a given table must be included
-    /// in a single batch.
-    pub async fn append_table_batches<I>(
+    /// in a single batch, and it will be processed in order.
+    ///
+    /// Implements fine-grained retry logic that only retries batches that failed with
+    /// transient errors, while preserving successful batch results. Non-retryable errors
+    /// (permission denied, invalid data, row errors) fail immediately.
+    pub async fn append_table_batches(
         &self,
-        table_batches: I,
-        max_concurrent_streams: usize,
-    ) -> EtlResult<(usize, usize)>
-    where
-        I: IntoIterator<Item = TableBatch<BigQueryTableRow>>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        let table_batches = table_batches.into_iter();
-        if table_batches.len() == 0 {
+        pipeline_id: PipelineId,
+        table_batches: Vec<TableBatch<BigQueryTableRow>>,
+    ) -> EtlResult<(usize, usize)> {
+        if table_batches.is_empty() {
             return Ok((0, 0));
+        }
+
+        // Record batch sizes
+        for batch in &table_batches {
+            histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE, "pipeline_id" => pipeline_id.to_string())
+                .record(batch.rows().len() as f64);
         }
 
         debug!(
             batch_count = table_batches.len(),
-            %max_concurrent_streams,
             "streaming table batches concurrently"
         );
 
-        // Use the new concurrent append_table_batches method
-        let batch_results = self
-            .client
-            .storage()
-            .append_table_batches_concurrent(table_batches, max_concurrent_streams, ETL_TRACE_ID)
-            .await
-            .map_err(bq_error_to_etl_error)?;
+        // Two vectors for efficient batch retry tracking.
+        // We swap them each iteration to reuse allocations.
+        let mut current_batches = table_batches;
+        // Track batches with their last error for better error reporting on retry exhaustion.
+        let mut retry_batches: Vec<(TableBatch<BigQueryTableRow>, BQError)> =
+            Vec::with_capacity(current_batches.len());
 
-        // We use the rows' encoded length to measure the egress metric. This does not
-        // count some bytes sent as overhead during the gRPC API calls. Ideally we
-        // would want to count the bytes leaving the TCP connection but we do not have
-        // that low level access, hence will have to settle for something accessible
-        // in the application.
         let mut total_bytes_sent = 0;
         let mut total_bytes_received = 0;
 
-        // Process results and accumulate all errors.
-        let mut batches_responses_errors = Vec::new();
-        for batch_result in batch_results {
-            for response in batch_result.responses {
-                match response {
-                    Ok(response) => {
+        // Reusable error accumulator across iterations.
+        let mut non_retryable_errors = Vec::new();
+
+        // Retry loop for transient errors.
+        for attempt in 0..MAX_RETRY_ATTEMPTS {
+            if current_batches.is_empty() {
+                break;
+            }
+
+            debug!(
+                attempt = attempt + 1,
+                batch_count = current_batches.len(),
+                "attempting to append table batches"
+            );
+
+            // Attempt to send batches concurrently.
+            let batch_append_results = match self
+                .client
+                .storage()
+                .append_table_batches_concurrent(current_batches.clone(), ETL_TRACE_ID)
+                .await
+            {
+                Ok(results) => results,
+                Err(err) => {
+                    let error_code = error_code_label(&err);
+                    let is_retryable = is_retryable_bq_error(&err);
+
+                    counter!(ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
+                        "pipeline_id" => pipeline_id.to_string(),
+                        "error_code" => error_code,
+                        "retryable" => is_retryable.to_string()
+                    )
+                    .increment(1);
+
+                    // Connection-level error before any batch processing.
+                    if is_retryable && attempt < MAX_RETRY_ATTEMPTS - 1 {
+                        counter!(ETL_BQ_APPEND_BATCHES_BATCH_RETRIES_TOTAL,
+                            "pipeline_id" => pipeline_id.to_string(),
+                            "error_code" => error_code,
+                            "attempt" => (attempt + 1).to_string()
+                        )
+                        .increment(1);
+
+                        let backoff = calculate_backoff(attempt);
+                        warn!(
+                            attempt = attempt + 1,
+                            max_attempts = MAX_RETRY_ATTEMPTS,
+                            backoff_ms = backoff.as_millis(),
+                            error = %err,
+                            "bigquery connection error, backing off before retry"
+                        );
+                        sleep(backoff).await;
+
+                        continue;
+                    }
+
+                    // Non-retryable or final attempt - convert and fail.
+                    return Err(bq_error_to_etl_error(err));
+                }
+            };
+
+            // Clear vectors and reuse allocations.
+            retry_batches.clear();
+            non_retryable_errors.clear();
+
+            for batch_append_result in batch_append_results {
+                let batch_index = batch_append_result.batch_index;
+
+                match process_single_batch_append_result(batch_append_result) {
+                    BatchProcessResult::Success {
+                        bytes_sent,
+                        bytes_received,
+                    } => {
                         debug!(
-                            batch_index = batch_result.batch_index,
-                            ?response,
-                            "append rows response received"
+                            batch_index,
+                            bytes_sent, bytes_received, "batch processed successfully"
                         );
 
-                        total_bytes_received += response.encoded_len();
+                        total_bytes_sent += bytes_sent;
+                        total_bytes_received += bytes_received;
+                    }
+                    BatchProcessResult::RowErrors { errors } => {
+                        // Row errors are permanent (bad data, schema mismatch, etc).
+                        let error_count = errors.len();
+                        error!(
+                            batch_index,
+                            error_count, "batch has row errors, failing immediately"
+                        );
 
-                        for row_error in response.row_errors {
-                            let row_error = row_error_to_etl_error(row_error);
-                            batches_responses_errors.push(row_error);
+                        counter!(ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL, "pipeline_id" => pipeline_id.to_string())
+                            .increment(error_count as u64);
+
+                        // Convert all row errors to EtlErrors.
+                        for row_error in errors {
+                            non_retryable_errors.push(row_error_to_etl_error(row_error));
                         }
                     }
-                    Err(status) => {
-                        batches_responses_errors.push(bq_error_to_etl_error(status.into()));
+                    BatchProcessResult::RequestError { error } => {
+                        let error_code = error_code_label(&error);
+                        let is_retryable = is_retryable_bq_error(&error);
+
+                        counter!(ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
+                            "pipeline_id" => pipeline_id.to_string(),
+                            "error_code" => error_code,
+                            "retryable" => is_retryable.to_string()
+                        )
+                        .increment(1);
+
+                        if is_retryable {
+                            // Retryable request error, queue batch for retry.
+                            warn!(
+                                batch_index,
+                                error = %error,
+                                "batch has retryable request error, will retry"
+                            );
+
+                            counter!(ETL_BQ_APPEND_BATCHES_BATCH_RETRIES_TOTAL,
+                                "pipeline_id" => pipeline_id.to_string(),
+                                "error_code" => error_code,
+                                "attempt" => (attempt + 1).to_string()
+                            )
+                            .increment(1);
+
+                            retry_batches.push((current_batches[batch_index].clone(), error));
+                        } else {
+                            // Non-retryable request error, convert and accumulate.
+                            non_retryable_errors.push(bq_error_to_etl_error(error));
+                        }
                     }
                 }
             }
 
-            total_bytes_sent += batch_result.bytes_sent;
+            // If we have non-retryable errors, fail immediately. The reason for this is that we are
+            // guaranteeing that all batches are flushed if we return success, thus if there is at
+            // least one non-retryable error, we just stop and error.
+            if !non_retryable_errors.is_empty() {
+                return Err(non_retryable_errors.into());
+            }
+
+            // If no batches need retry, we're done.
+            if retry_batches.is_empty() {
+                break;
+            }
+
+            // On final attempt, convert batch errors and fail since we can't do anything about it
+            // anymore.
+            if attempt == MAX_RETRY_ATTEMPTS - 1 {
+                let errors: Vec<EtlError> = retry_batches
+                    .into_iter()
+                    .map(|(_, bq_error)| bq_error_to_etl_error(bq_error))
+                    .collect();
+
+                return Err(errors.into());
+            }
+
+            // Backoff before retry.
+            let backoff = calculate_backoff(attempt);
+            warn!(
+                attempt = attempt + 1,
+                max_attempts = MAX_RETRY_ATTEMPTS,
+                backoff_ms = backoff.as_millis(),
+                retry_batch_count = retry_batches.len(),
+                "bigquery batches encountered transient errors, backing off before retry"
+            );
+            sleep(backoff).await;
+
+            // Move failed batches to current_batches for next iteration.
+            // Extract batches from retry_batches (dropping the error tracking).
+            current_batches.clear();
+            current_batches.extend(retry_batches.drain(..).map(|(batch, _)| batch));
         }
 
-        if batches_responses_errors.is_empty() {
-            return Ok((total_bytes_sent, total_bytes_received));
-        }
-
-        Err(batches_responses_errors.into())
+        Ok((total_bytes_sent, total_bytes_received))
     }
 
     /// Creates a TableBatch for a specific table with validated rows.

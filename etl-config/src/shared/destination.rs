@@ -1,8 +1,8 @@
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
-fn default_max_concurrent_streams() -> usize {
-    DestinationConfig::DEFAULT_MAX_CONCURRENT_STREAMS
+fn default_connection_pool_size() -> usize {
+    DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
 }
 
 /// Configuration for supported ETL data destinations.
@@ -34,18 +34,15 @@ pub enum DestinationConfig {
         /// If not set, the default staleness behavior is used. See
         /// <https://cloud.google.com/bigquery/docs/change-data-capture#create-max-staleness>.
         max_staleness_mins: Option<u16>,
-        /// Maximum number of concurrent streams for BigQuery append operations.
+        /// Size of the BigQuery Storage Write API connection pool.
         ///
-        /// Defines the upper limit of concurrent streams used for a **single** append
-        /// request to BigQuery.
+        /// Controls the number of concurrent connections maintained in the pool
+        /// for writing to BigQuery. The maximum number of inflight requests is
+        /// calculated as `connection_pool_size * 100`.
         ///
-        /// This does not limit the total number of streams across the entire system.
-        /// The actual number of streams in use at any given time depends on:
-        /// - the number of tables being replicated,
-        /// - the volume of events processed by the ETL,
-        /// - and the configured batch size.
-        #[serde(default = "default_max_concurrent_streams")]
-        max_concurrent_streams: usize,
+        /// A higher connection pool size allows more parallel writes but consumes more resources.
+        #[serde(default = "default_connection_pool_size")]
+        connection_pool_size: usize,
     },
     Iceberg {
         #[serde(flatten)]
@@ -54,8 +51,8 @@ pub enum DestinationConfig {
 }
 
 impl DestinationConfig {
-    /// Default maximum number of concurrent streams for BigQuery destinations.
-    pub const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 2;
+    /// Default connection pool size for BigQuery destinations.
+    pub const DEFAULT_CONNECTION_POOL_SIZE: usize = 4;
 }
 
 /// Configuration for the iceberg destination with two variants
@@ -192,18 +189,15 @@ pub enum DestinationConfigWithoutSecrets {
         /// <https://cloud.google.com/bigquery/docs/change-data-capture#create-max-staleness>.
         #[serde(skip_serializing_if = "Option::is_none")]
         max_staleness_mins: Option<u16>,
-        /// Maximum number of concurrent streams for BigQuery append operations.
+        /// Size of the BigQuery Storage Write API connection pool.
         ///
-        /// Defines the upper limit of concurrent streams used for a **single** append
-        /// request to BigQuery.
+        /// Controls the number of concurrent connections maintained in the pool
+        /// for writing to BigQuery. The maximum number of inflight requests is
+        /// calculated as `connection_pool_size * 100`.
         ///
-        /// This does not limit the total number of streams across the entire system.
-        /// The actual number of streams in use at any given time depends on:
-        /// - the number of tables being replicated,
-        /// - the volume of events processed by the ETL,
-        /// - and the configured batch size.
-        #[serde(default = "default_max_concurrent_streams")]
-        max_concurrent_streams: usize,
+        /// A higher connection pool size allows more parallel writes but consumes more resources.
+        #[serde(default = "default_connection_pool_size")]
+        connection_pool_size: usize,
     },
     Iceberg {
         #[serde(flatten)]
@@ -220,12 +214,12 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 dataset_id,
                 service_account_key: _,
                 max_staleness_mins,
-                max_concurrent_streams,
+                connection_pool_size,
             } => DestinationConfigWithoutSecrets::BigQuery {
                 project_id,
                 dataset_id,
                 max_staleness_mins,
-                max_concurrent_streams,
+                connection_pool_size,
             },
             DestinationConfig::Iceberg { config } => DestinationConfigWithoutSecrets::Iceberg {
                 config: config.into(),
