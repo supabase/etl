@@ -1,3 +1,4 @@
+use std::time::Duration;
 use sqlx::PgPool;
 use thiserror::Error;
 use tokio_postgres::types::Oid;
@@ -146,6 +147,9 @@ impl TryFrom<EtlReplicationSlot> for String {
 /// This function deletes both the apply worker slot and all table sync worker slots
 /// for the tables associated with the pipeline.
 ///
+/// This function forcefully terminates active walsender processes and drops slots even if they
+/// are active. It retries up to 3 times with exponential backoff to handle transient failures.
+///
 /// If the slot name can't be computed, this function will silently skip the deletion of the slot.
 pub async fn delete_pipeline_replication_slots(
     pool: &PgPool,
@@ -169,15 +173,53 @@ pub async fn delete_pipeline_replication_slots(
         };
     }
 
-    // Delete only active slots
-    let query = String::from(
-        r#"
-        select pg_drop_replication_slot(r.slot_name)
-        from pg_replication_slots r
-        where r.slot_name = any($1) and r.active = false;
-        "#,
-    );
-    sqlx::query(&query).bind(slot_names).execute(pool).await?;
+    const MAX_RETRIES: u32 = 3;
+    const INITIAL_BACKOFF_MS: u64 = 100;
+
+    for attempt in 0..MAX_RETRIES {
+        // Phase 1: Terminate active walsender processes for these slots
+        let terminate_query = String::from(
+            r#"
+            select pg_terminate_backend(r.active_pid)
+            from pg_replication_slots r
+            where r.slot_name = any($1) and r.active = true and r.active_pid is not null;
+            "#,
+        );
+        let _ = sqlx::query(&terminate_query)
+            .bind(&slot_names)
+            .execute(pool)
+            .await;
+
+        // Brief delay to allow walsender processes to terminate
+        if attempt == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Phase 2: Drop all replication slots (both active and inactive)
+        // Note: pg_drop_replication_slot will signal walsenders to terminate if still active
+        let drop_query = String::from(
+            r#"
+            select pg_drop_replication_slot(r.slot_name)
+            from pg_replication_slots r
+            where r.slot_name = any($1);
+            "#,
+        );
+        let result = sqlx::query(&drop_query).bind(&slot_names).execute(pool).await;
+
+        match result {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                // If this is the last attempt, return the error
+                if attempt == MAX_RETRIES - 1 {
+                    return Err(err);
+                }
+
+                // Exponential backoff: 100ms, 200ms, 400ms
+                let backoff_ms = INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            }
+        }
+    }
 
     Ok(())
 }
