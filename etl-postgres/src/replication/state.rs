@@ -176,21 +176,18 @@ pub async fn update_replication_state_raw<'c, E>(
 where
     E: PgExecutor<'c>,
 {
-    // Get the current row's id (if any) and update in one operation using a CTE
+    // Mark the old row as not current and insert the new one in a single CTE.
+    // The INSERT references mark_old to ensure the UPDATE completes first.
     sqlx::query(
         r#"
-        with current_row as (
-            select id from etl.replication_state
-            where pipeline_id = $1 and table_id = $2 and is_current = true
-        ),
-        mark_old as (
+        with mark_old as (
             update etl.replication_state
             set is_current = false, updated_at = now()
-            where id = (select id from current_row)
+            where pipeline_id = $1 and table_id = $2 and is_current = true
             returning id
         )
         insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
-        values ($1, $2, $3, $4, (select id from current_row), true)
+        values ($1, $2, $3, $4, (select id from mark_old), true)
         "#,
     )
     .bind(pipeline_id)
