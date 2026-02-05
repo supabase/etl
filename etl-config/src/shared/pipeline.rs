@@ -35,8 +35,6 @@ pub enum InvalidatedSlotBehavior {
     Recreate,
 }
 
-/// c copy should be performed.Selection rules for tables participating in replication.
-///
 /// Controls which tables are eligible for initial table copy and streaming.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
