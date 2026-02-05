@@ -218,7 +218,7 @@ mod tests {
             max_table_sync_workers: 4,
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             log_level: None,
-            invalidated_slot_behavior: InvalidatedSlotBehavior::Error
+            invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -301,7 +301,7 @@ mod tests {
             max_table_sync_workers: 2,
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             log_level: None,
-            invalidated_slot_behavior: InvalidatedSlotBehavior::Error
+            invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
         };
 
         let partial = PartialApiPipelineConfig {
