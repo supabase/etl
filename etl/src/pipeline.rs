@@ -17,6 +17,7 @@ use crate::types::PipelineId;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::types::TableId;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -354,13 +355,30 @@ where
         // Detect and purge tables that have been removed from the publication.
         //
         // We must not delete the destination table, only the internal state.
+        // We also delete the table sync slot if it exists.
         let publication_set: HashSet<TableId> = publication_table_ids.iter().copied().collect();
         for (table_id, _) in table_replication_states {
             if !publication_set.contains(&table_id) {
                 info!(
                     table_id = table_id.0,
-                    "table removed from publication, purging stored state"
+                    "table removed from publication, purging stored state and slot"
                 );
+
+                // Delete the table sync slot if it exists.
+                if let Ok(slot_name) =
+                    EtlReplicationSlot::for_table_sync_worker(self.config.id, table_id).try_into()
+                {
+                    let slot_name: String = slot_name;
+                    if let Err(e) = replication_client.delete_slot(&slot_name).await {
+                        // Log but don't fail since the slot might not exist.
+                        info!(
+                            table_id = table_id.0,
+                            slot_name,
+                            error = %e,
+                            "failed to delete table sync slot (may not exist)"
+                        );
+                    }
+                }
 
                 self.store.cleanup_table_state(table_id).await?;
             }

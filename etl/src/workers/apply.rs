@@ -1,10 +1,10 @@
-use etl_config::shared::PipelineConfig;
+use etl_config::shared::{InvalidatedSlotBehavior, PipelineConfig};
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
-use tracing::{Instrument, info};
+use tracing::{Instrument, info, warn};
 
 use crate::bail;
 use crate::concurrency::shutdown::ShutdownRx;
@@ -12,8 +12,8 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 use crate::replication::apply::{ApplyLoop, ApplyWorkerContext, WorkerContext};
-use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient};
-use crate::state::table::TableReplicationPhaseType;
+use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState};
+use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
@@ -126,8 +126,13 @@ where
             publication_name = self.config.publication_name
         );
         let apply_worker = async move {
-            let start_lsn =
-                get_start_lsn(self.pipeline_id, &self.replication_client, &self.store).await?;
+            let start_lsn = get_start_lsn(
+                self.pipeline_id,
+                &self.replication_client,
+                &self.store,
+                &self.config.invalidated_slot_behavior,
+            )
+            .await?;
 
             let worker_context = WorkerContext::Apply(ApplyWorkerContext {
                 pipeline_id: self.pipeline_id,
@@ -171,6 +176,11 @@ where
 /// replication slot. The slot serves as a persistent marker in Postgres's WAL (Write-Ahead Log)
 /// that tracks the apply worker's progress and prevents WAL deletion of unreplicated data.
 ///
+/// When an existing slot is found, this function checks if it's been invalidated. If so, it handles
+/// the situation according to the configured [`InvalidatedSlotBehavior`]:
+/// - [`InvalidatedSlotBehavior::Error`]: Returns an error requiring manual intervention
+/// - [`InvalidatedSlotBehavior::Recreate`]: Deletes the slot, resets all tables to Init, and creates a new slot
+///
 /// When creating a new slot, this function validates that all tables are in the Init state.
 /// If any table is not in Init state when creating a new slot, it indicates that data was
 /// synchronized based on a different apply worker lineage, which would break replication
@@ -179,12 +189,29 @@ async fn get_start_lsn<S: StateStore>(
     pipeline_id: PipelineId,
     replication_client: &PgReplicationClient,
     store: &S,
+    invalidated_slot_behavior: &InvalidatedSlotBehavior,
 ) -> EtlResult<PgLsn> {
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
 
     // We try to get or create the slot. Both operations will return an LSN that we can use to start
     // streaming events.
     let slot = replication_client.get_or_create_slot(&slot_name).await?;
+
+    // When we get an existing slot, check if it's been invalidated
+    if let GetOrCreateSlotResult::GetSlot(_) = &slot {
+        let slot_state = replication_client.get_slot_state(&slot_name).await?;
+
+        if slot_state == SlotState::Invalidated {
+            return handle_invalidated_slot(
+                pipeline_id,
+                replication_client,
+                store,
+                &slot_name,
+                invalidated_slot_behavior,
+            )
+            .await;
+        }
+    }
 
     // When creating a new apply worker slot, all tables must be in the `Init` state. If any table
     // is not in Init state, it means the table was synchronized based on another apply worker
@@ -201,6 +228,73 @@ async fn get_start_lsn<S: StateStore>(
 
     // We return the LSN from which we will start streaming events.
     Ok(slot.get_start_lsn())
+}
+
+/// Handles the case when the apply worker slot is found to be invalidated.
+///
+/// Depending on the configured behavior:
+/// - [`InvalidatedSlotBehavior::Error`]: Returns an error with details about the invalidation
+/// - [`InvalidatedSlotBehavior::Recreate`]: Deletes the slot, resets all table states to Init,
+///   and creates a new slot, returning its consistent point LSN
+async fn handle_invalidated_slot<S: StateStore>(
+    pipeline_id: PipelineId,
+    replication_client: &PgReplicationClient,
+    store: &S,
+    slot_name: &str,
+    behavior: &InvalidatedSlotBehavior,
+) -> EtlResult<PgLsn> {
+    match behavior {
+        InvalidatedSlotBehavior::Error => {
+            bail!(
+                ErrorKind::ReplicationSlotInvalidated,
+                "Replication slot has been invalidated",
+                format!(
+                    "The replication slot '{}' for pipeline {} has been invalidated. \
+                    This typically happens when the slot falls too far behind and PostgreSQL \
+                    removes the required WAL segments. To recover, delete the slot, reset all \
+                    table states, and start/restart the pipeline.",
+                    slot_name, pipeline_id
+                )
+            );
+        }
+        InvalidatedSlotBehavior::Recreate => {
+            warn!(
+                slot_name,
+                pipeline_id,
+                "Replication slot is invalidated, resetting all table states and recreating slot"
+            );
+
+            // First, reset all table states to Init. This must happen before deleting the slot
+            // to avoid a state where slots are absent but tables are not in Init state.
+            // The table sync workers will delete their own slots when they restart from Init.
+            let table_states = store.get_table_replication_states().await?;
+            let updates: Vec<_> = table_states
+                .keys()
+                .map(|table_id| (*table_id, TableReplicationPhase::Init))
+                .collect();
+            let reset_count = updates.len();
+
+            store.update_table_replication_states(updates).await?;
+            info!(
+                reset_count,
+                "Reset table replication states to Init for full resync"
+            );
+
+            // Now delete the invalidated slot
+            replication_client.delete_slot(slot_name).await?;
+
+            // Create a new slot
+            let create_result = replication_client.create_slot(slot_name).await?;
+
+            info!(
+                slot_name,
+                consistent_point = %create_result.consistent_point,
+                "Created new replication slot after invalidation recovery"
+            );
+
+            Ok(create_result.consistent_point)
+        }
+    }
 }
 
 /// Validates that all tables are in the Init state.
