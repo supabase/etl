@@ -799,8 +799,21 @@ async fn test_get_slot_state_returns_error_for_nonexistent_slot() {
     );
 }
 
+/// Tests that `get_slot_state` returns `Invalidated` for a slot with `wal_status = 'lost'`.
+///
+/// # Running This Test
+///
+/// This test modifies cluster-wide PostgreSQL settings (`max_slot_wal_keep_size`) to force
+/// slot invalidation. It must be run independently when no other tests are running to avoid
+/// invalidating slots from other parallel tests.
+///
+/// Run all exclusive tests with:
+/// ```sh
+/// cargo test --all-features -- --ignored exclusive_ --test-threads=1
+/// ```
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_slot_state_returns_invalidated_for_lost_slot() {
+#[ignore = "modifies cluster-wide PG settings; run independently with: cargo test -- --ignored exclusive_ --test-threads=1"]
+async fn exclusive_get_slot_state_returns_invalidated_for_lost_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 

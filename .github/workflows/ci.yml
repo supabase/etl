@@ -116,6 +116,13 @@ jobs:
             --no-fail-fast \
             --features iceberg
 
+      - name: Run Exclusive Tests (slot invalidation)
+        run: |
+          cargo test \
+            --workspace \
+            --all-features \
+            -- --ignored exclusive_ --test-threads=1
+
   test-full:
     name: Tests (Full)
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -185,6 +192,13 @@ jobs:
       - name: Run Doctests
         run: |
           cargo test --doc --workspace --all-features --no-fail-fast
+
+      - name: Run Exclusive Tests (slot invalidation)
+        run: |
+          cargo test \
+            --workspace \
+            --all-features \
+            -- --ignored exclusive_ --test-threads=1
 
       - name: Upload Coverage to Coveralls
         uses: coverallsapp/github-action@v2
