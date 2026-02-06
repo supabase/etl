@@ -1,5 +1,6 @@
 use etl_config::shared::{InvalidatedSlotBehavior, PipelineConfig};
 use etl_postgres::replication::slots::EtlReplicationSlot;
+use metrics::counter;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
@@ -11,6 +12,7 @@ use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
+use crate::metrics::{ETL_SLOT_INVALIDATIONS_TOTAL, PIPELINE_ID_LABEL};
 use crate::replication::apply::{ApplyLoop, ApplyWorkerContext, WorkerContext};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState};
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
@@ -243,6 +245,12 @@ async fn handle_invalidated_slot<S: StateStore>(
     slot_name: &str,
     behavior: &InvalidatedSlotBehavior,
 ) -> EtlResult<PgLsn> {
+    counter!(
+        ETL_SLOT_INVALIDATIONS_TOTAL,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+    )
+    .increment(1);
+
     match behavior {
         InvalidatedSlotBehavior::Error => {
             bail!(
@@ -261,7 +269,7 @@ async fn handle_invalidated_slot<S: StateStore>(
             warn!(
                 slot_name,
                 pipeline_id,
-                "Replication slot is invalidated, resetting all table states and recreating slot"
+                "replication slot is invalidated, resetting all table states and recreating slot"
             );
 
             // First, reset all table states to Init. This must happen before deleting the slot
@@ -277,7 +285,7 @@ async fn handle_invalidated_slot<S: StateStore>(
             store.update_table_replication_states(updates).await?;
             info!(
                 reset_count,
-                "Reset table replication states to Init for full resync"
+                "reset table replication states to init for full resync"
             );
 
             // Now delete the invalidated slot
@@ -289,7 +297,7 @@ async fn handle_invalidated_slot<S: StateStore>(
             info!(
                 slot_name,
                 consistent_point = %create_result.consistent_point,
-                "Created new replication slot after invalidation recovery"
+                "created new replication slot after invalidation recovery"
             );
 
             Ok(create_result.consistent_point)
