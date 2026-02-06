@@ -2,9 +2,7 @@ use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
 use etl::types::{Cell, ColumnSchema, PipelineId, TableRow, Type, is_array_type};
 use gcp_bigquery_client::client_builder::ClientBuilder;
-use gcp_bigquery_client::google::cloud::bigquery::storage::v1::{
-    RowError, StorageError, storage_error::StorageErrorCode,
-};
+use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{BatchAppendResult, ColumnMode, StorageApiConfig};
 use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
@@ -128,43 +126,6 @@ fn calculate_backoff(attempt: u32) -> Duration {
     Duration::from_millis(jitter)
 }
 
-/// Extracts the [`StorageErrorCode`] from a tonic [`Status`] error if present.
-///
-/// BigQuery Storage Write API errors include a [`StorageError`] in the error details
-/// which contains a [`StorageErrorCode`] that provides more specific error information.
-///
-/// Per [tonic documentation](https://docs.rs/tonic/latest/tonic/struct.Status.html),
-/// `details()` returns raw bytes from the grpc-status-details-bin header.
-fn extract_storage_error_code(status: &tonic::Status) -> Option<StorageErrorCode> {
-    // Try to decode StorageError from the error details bytes.
-    if let Ok(storage_error) = StorageError::decode(status.details()) {
-        // StorageErrorCode is an i32 in the protobuf.
-        return StorageErrorCode::try_from(storage_error.code).ok();
-    }
-
-    None
-}
-
-/// Checks if a [`Code::FailedPrecondition`] error with a specific [`StorageErrorCode`] is retriable.
-///
-/// Per [BigQuery Storage Write API documentation](https://github.com/googleapis/googleapis/blob/master/google/cloud/bigquery/storage/v1/storage.proto),
-/// not all FAILED_PRECONDITION errors are retriable. This function inspects the
-/// [`StorageErrorCode`] to determine retryability.
-fn is_retryable_failed_precondition(status: &tonic::Status) -> bool {
-    match extract_storage_error_code(status) {
-        Some(code) => matches!(
-            code,
-            StorageErrorCode::OffsetAlreadyExists
-                | StorageErrorCode::OffsetOutOfRange
-                | StorageErrorCode::CmekEncryptionError
-                | StorageErrorCode::KmsServiceError
-        ),
-        // If we can't extract the StorageErrorCode, be conservative and don't retry
-        // to avoid masking bugs (e.g., finalized streams, schema mismatches)
-        None => false,
-    }
-}
-
 /// Checks if a [`BQError`] represents a transient condition that should be retried.
 ///
 /// Implements retry logic based on Google's official BigQuery Storage Write API guidance
@@ -194,11 +155,6 @@ fn is_retryable_bq_error(error: &BQError) -> bool {
             // Retriable with backoff: rate limits and quota exhaustion
             Code::ResourceExhausted => true,
 
-            // BigQuery-specific: FAILED_PRECONDITION requires inspecting StorageErrorCode
-            // to determine retryability. Only specific error codes are retriable
-            // (CMEK_ENCRYPTION_ERROR, KMS_SERVICE_ERROR).
-            Code::FailedPrecondition => is_retryable_failed_precondition(status),
-
             // Transport error that never reached the server
             Code::Unknown => {
                 let message = status.message().to_lowercase();
@@ -210,6 +166,7 @@ fn is_retryable_bq_error(error: &BQError) -> bool {
             Code::NotFound => false,
             Code::AlreadyExists => false,
             Code::PermissionDenied => false,
+            Code::FailedPrecondition => false,
             Code::Unimplemented => false,
             Code::Unauthenticated => false,
             Code::DataLoss => false,
@@ -352,11 +309,9 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
             // Google's Storage Write API guidance, though may need longer backoff periods.
             Code::ResourceExhausted => (ErrorKind::DestinationError, "BigQuery resource exhausted"),
 
-            // Code::FailedPrecondition (9) - Various precondition failures.
-            // Not all FAILED_PRECONDITION errors are retriable. Only specific StorageErrorCode
-            // values are retriable (CMEK_ENCRYPTION_ERROR, KMS_SERVICE_ERROR). Most indicate
-            // permanent failures like STREAM_FINALIZED, INVALID_STREAM_STATE, SCHEMA_MISMATCH_EXTRA_FIELDS.
-            // The is_retryable_bq_error function inspects StorageErrorCode to determine retryability.
+            // Code::FailedPrecondition (9) - Precondition failures.
+            // Indicates issues like STREAM_FINALIZED, INVALID_STREAM_STATE, or SCHEMA_MISMATCH.
+            // Requires fixing the underlying issue before retrying. Never retry automatically.
             Code::FailedPrecondition => {
                 (ErrorKind::DestinationError, "BigQuery precondition failed")
             }
@@ -1673,59 +1628,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_retryable_bq_error_failed_precondition_without_details() {
-        // FAILED_PRECONDITION without StorageError details should NOT be retried
-        // (conservative approach to avoid masking bugs)
-        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::failed_precondition("stream state transition")
-        )));
-    }
-
-    #[test]
-    fn test_is_retryable_bq_error_failed_precondition_with_retriable_code() {
-        // Create a StorageError with KMS_SERVICE_ERROR (retriable)
-        let storage_error = StorageError {
-            code: StorageErrorCode::KmsServiceError as i32,
-            entity: "test_entity".to_string(),
-            error_message: "KMS service error".to_string(),
-        };
-
-        let mut details = Vec::new();
-        storage_error.encode(&mut details).unwrap();
-
-        let status = Status::with_details(
-            Code::FailedPrecondition,
-            "precondition failed",
-            details.into(),
-        );
-
-        // Should be retriable because KMS_SERVICE_ERROR is transient
-        assert!(is_retryable_bq_error(&BQError::TonicStatusError(status)));
-    }
-
-    #[test]
-    fn test_is_retryable_bq_error_failed_precondition_with_non_retriable_code() {
-        // Create a StorageError with STREAM_FINALIZED (non-retriable)
-        let storage_error = StorageError {
-            code: StorageErrorCode::StreamFinalized as i32,
-            entity: "test_entity".to_string(),
-            error_message: "Stream is finalized".to_string(),
-        };
-
-        let mut details = Vec::new();
-        storage_error.encode(&mut details).unwrap();
-
-        let status = Status::with_details(
-            Code::FailedPrecondition,
-            "precondition failed",
-            details.into(),
-        );
-
-        // Should NOT be retriable because STREAM_FINALIZED is permanent
-        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(status)));
-    }
-
-    #[test]
     fn test_is_retryable_bq_error_transport_errors() {
         // Test transport-level errors via Code::Unknown with transport-related messages
         assert!(is_retryable_bq_error(&BQError::TonicStatusError(
@@ -1760,6 +1662,9 @@ mod tests {
             Status::permission_denied("access denied")
         )));
         assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::failed_precondition("stream finalized")
+        )));
+        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
             Status::unauthenticated("invalid credentials")
         )));
         assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
@@ -1779,30 +1684,5 @@ mod tests {
         assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
             Status::unknown("some other error")
         )));
-    }
-
-    #[test]
-    fn test_extract_storage_error_code_with_valid_details() {
-        // Create a valid StorageError
-        let storage_error = StorageError {
-            code: StorageErrorCode::StreamFinalized as i32,
-            entity: "test_stream".to_string(),
-            error_message: "Stream is finalized".to_string(),
-        };
-
-        let mut details = Vec::new();
-        storage_error.encode(&mut details).unwrap();
-
-        let status = Status::with_details(
-            Code::FailedPrecondition,
-            "precondition failed",
-            details.into(),
-        );
-
-        // Should extract the StorageErrorCode correctly
-        assert_eq!(
-            extract_storage_error_code(&status),
-            Some(StorageErrorCode::StreamFinalized)
-        );
     }
 }
