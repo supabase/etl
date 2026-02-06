@@ -58,7 +58,7 @@ ETL is a Rust framework by [Supabase](https://supabase.com) for building high‑
   - Row-level filtering with `WHERE` clauses
   - `FOR ALL TABLES IN SCHEMA` syntax
 
-For detailed configuration instructions, see the [Configure Postgres documentation](https://supabase.github.io/etl/how-to/configure-postgres/).
+For detailed configuration instructions, see the [Configure Postgres documentation](https://supabase.github.io/etl/guides/configure-postgres/).
 
 ## Get Started
 
