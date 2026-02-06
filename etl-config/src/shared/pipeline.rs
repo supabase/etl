@@ -28,9 +28,9 @@ pub enum InvalidatedSlotBehavior {
     /// 1. Reset all table replication states to `Init`
     /// 2. Delete all existing replication slots for the pipeline
     /// 3. Create a new replication slot
-    /// 4. Perform a full table sync for all tables
+    /// 4. Run table sync for all tables, respecting [`TableSyncCopyConfig`] rules
     ///
-    /// This option allows the pipeline to restart replication from scratch and automatically recover.
+    /// This option allows the pipeline to restart replication and automatically recover.
     Recreate,
 }
 

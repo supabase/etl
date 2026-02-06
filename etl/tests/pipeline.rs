@@ -154,18 +154,6 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     assert_eq!(slot_state, None);
 }
 
-/// Tests that the pipeline fails when a slot is invalidated and error behavior is configured.
-///
-/// # Running This Test
-///
-/// This test modifies cluster-wide PostgreSQL settings (`max_slot_wal_keep_size`) to force
-/// slot invalidation. It must be run independently when no other tests are running to avoid
-/// invalidating slots from other parallel tests.
-///
-/// Run all exclusive tests with:
-/// ```sh
-/// cargo test --all-features -- --ignored exclusive_ --test-threads=1
-/// ```
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "modifies cluster-wide PG settings; run independently with: cargo test -- --ignored exclusive_ --test-threads=1"]
 async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
@@ -235,18 +223,6 @@ async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
     assert!(err.kinds().contains(&ErrorKind::ReplicationSlotInvalidated));
 }
 
-/// Tests that the pipeline recovers when a slot is invalidated and recreate behavior is configured.
-///
-/// # Running This Test
-///
-/// This test modifies cluster-wide PostgreSQL settings (`max_slot_wal_keep_size`) to force
-/// slot invalidation. It must be run independently when no other tests are running to avoid
-/// invalidating slots from other parallel tests.
-///
-/// Run all exclusive tests with:
-/// ```sh
-/// cargo test --all-features -- --ignored exclusive_ --test-threads=1
-/// ```
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "modifies cluster-wide PG settings; run independently with: cargo test -- --ignored exclusive_ --test-threads=1"]
 async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavior() {

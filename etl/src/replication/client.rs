@@ -381,6 +381,7 @@ impl PgReplicationClient {
     /// Returns an error if the slot doesn't exist or if there are any issues with the deletion.
     pub async fn delete_slot(&self, slot_name: &str) -> EtlResult<()> {
         info!(slot_name, "deleting replication slot");
+
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let query = format!(
             r#"DROP_REPLICATION_SLOT {} WAIT;"#,
@@ -416,6 +417,18 @@ impl PgReplicationClient {
 
                 Err(err.into())
             }
+        }
+    }
+
+    /// Deletes a replication slot if it exists.
+    ///
+    /// This method wraps [`Self::delete_slot`] and swallows
+    /// [`ErrorKind::ReplicationSlotNotFound`], while propagating all other errors.
+    pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
+        match self.delete_slot(slot_name).await {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => Ok(()),
+            Err(err) => Err(err),
         }
     }
 

@@ -223,7 +223,7 @@ async fn get_start_lsn<S: StateStore>(
     {
         // Delete the slot before failing, otherwise the system will restart and skip validation
         // since the slot will already exist.
-        replication_client.delete_slot(&slot_name).await?;
+        replication_client.delete_slot_if_exists(&slot_name).await?;
 
         return Err(err);
     }
@@ -285,13 +285,13 @@ async fn handle_invalidated_slot<S: StateStore>(
             store.update_table_replication_states(updates).await?;
             info!(
                 reset_count,
-                "reset table replication states to init for full resync"
+                "reset table replication states to init for resync"
             );
 
-            // Now delete the invalidated slot
-            replication_client.delete_slot(slot_name).await?;
+            // Now delete the invalidated slot.
+            replication_client.delete_slot_if_exists(slot_name).await?;
 
-            // Create a new slot
+            // Create a new slot.
             let create_result = replication_client.create_slot(slot_name).await?;
 
             info!(

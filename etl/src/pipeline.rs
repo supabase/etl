@@ -365,20 +365,10 @@ where
                 );
 
                 // Delete the table sync slot if it exists.
-                if let Ok(slot_name) =
-                    EtlReplicationSlot::for_table_sync_worker(self.config.id, table_id).try_into()
-                {
-                    let slot_name: String = slot_name;
-                    if let Err(e) = replication_client.delete_slot(&slot_name).await {
-                        // Log but don't fail since the slot might not exist.
-                        info!(
-                            table_id = table_id.0,
-                            slot_name,
-                            error = %e,
-                            "failed to delete table sync slot (may not exist)"
-                        );
-                    }
-                }
+                let slot_name: String =
+                    EtlReplicationSlot::for_table_sync_worker(self.config.id, table_id)
+                        .try_into()?;
+                replication_client.delete_slot_if_exists(&slot_name).await?;
 
                 self.store.cleanup_table_state(table_id).await?;
             }

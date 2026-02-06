@@ -650,7 +650,7 @@ where
                     .try_into()?;
             let result = tokio::time::timeout(
                 MAX_DELETE_SLOT_WAIT,
-                replication_client.delete_slot(&slot_name),
+                replication_client.delete_slot_if_exists(&slot_name),
             )
             .await;
             if result.is_err() {

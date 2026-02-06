@@ -176,7 +176,24 @@ jobs:
           sudo apt-get install libpq-dev -y
           ./etl-api/scripts/run_migrations.sh
 
+      - name: Run Unit and Integration Tests
+        if: matrix.postgres_version != 18
+        run: |
+          cargo test \
+            --workspace \
+            --all-features \
+            --no-fail-fast
+
+      - name: Run Exclusive Tests (Slot Invalidation)
+        if: matrix.postgres_version != 18
+        run: |
+          cargo test \
+            --workspace \
+            --all-features \
+            -- --ignored exclusive_ --test-threads=1
+
       - name: Install cargo-llvm-cov
+        if: matrix.postgres_version == 18
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Set up BigQuery Credentials
@@ -190,6 +207,7 @@ jobs:
           cargo test --doc --workspace --all-features --no-fail-fast
 
       - name: Run Unit and Integration Tests with Coverage
+        if: matrix.postgres_version == 18
         run: |
           cargo llvm-cov test \
             --workspace --no-fail-fast \
@@ -197,6 +215,7 @@ jobs:
             --no-report
 
       - name: Run Exclusive Tests with Coverage (Slot Invalidation)
+        if: matrix.postgres_version == 18
         run: |
           cargo llvm-cov test \
             --workspace \
@@ -205,10 +224,12 @@ jobs:
             -- --ignored exclusive_ --test-threads=1
 
       - name: Merge Coverage Data
+        if: matrix.postgres_version == 18
         run: |
           cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload Coverage to Coveralls
+        if: matrix.postgres_version == 18
         uses: coverallsapp/github-action@v2
         with:
           fail-on-error: false
