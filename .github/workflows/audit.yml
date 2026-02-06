@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@cargo-deny
+        uses: taiki-e/install-action@v2
 
       - name: Scan for Vulnerabilities
         run: cargo deny check advisories
