@@ -1718,7 +1718,7 @@ mod tests {
         storage_error.encode(&mut details).unwrap();
 
         let status = Status::with_details(
-            tonic::Code::FailedPrecondition,
+            Code::FailedPrecondition,
             "precondition failed",
             details.into(),
         );
