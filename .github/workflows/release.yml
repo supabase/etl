@@ -76,13 +76,13 @@ jobs:
     steps:
       - name: Checkout merge commit (PR merge)
         if: github.event_name == 'pull_request'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
 
       - name: Checkout main (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Create and Push Tag
         shell: bash
