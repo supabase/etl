@@ -251,8 +251,6 @@ fn error_code_label(error: &BQError) -> &'static str {
 ///
 /// Maps BigQuery error types to ETL error kinds for consistent error handling.
 fn bq_error_to_etl_error(err: BQError) -> EtlError {
-    use BQError;
-
     let (kind, description) = match &err {
         // Authentication related errors
         BQError::InvalidServiceAccountKey(_) => (
@@ -470,7 +468,7 @@ enum BatchProcessResult {
         bytes_sent: usize,
         bytes_received: usize,
     },
-    /// Batch had row-level errors which should trigger a retry.
+    /// Batch had row-level errors.
     RowErrors { errors: Vec<RowError> },
     /// Batch had a request-level error.
     RequestError { error: BQError },
