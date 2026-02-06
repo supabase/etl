@@ -267,6 +267,14 @@ async fn pipeline_recovers_when_slot_invalidated_with_recreate_behavior() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
+    // Validate that we have users data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_copied_rows = table_rows
+        .get(&database_schema.users_schema().id)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    assert_eq!(users_table_copied_rows, 5);
+
     // Wait for the slot to become inactive.
     let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
         .try_into()
@@ -314,6 +322,14 @@ async fn pipeline_recovers_when_slot_invalidated_with_recreate_behavior() {
     pipeline.start().await.unwrap();
 
     table_ready_notify.notified().await;
+
+    // Validate that we have users data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_copied_rows = table_rows
+        .get(&database_schema.users_schema().id)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    assert_eq!(users_table_copied_rows, 5);
 
     // Verify the slot was recreated and is active.
     let slot_state = database

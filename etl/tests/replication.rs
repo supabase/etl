@@ -763,8 +763,6 @@ async fn test_start_logical_replication() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_slot_state_returns_valid_for_healthy_slot() {
-    use etl::replication::client::SlotState;
-
     init_test_tracing();
     let database = spawn_source_database().await;
 
