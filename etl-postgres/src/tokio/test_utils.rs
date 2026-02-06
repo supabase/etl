@@ -535,43 +535,35 @@ impl<G: GenericClient> PgDatabase<G> {
         self.client.as_ref().unwrap().execute(sql, &[]).await
     }
 
-    /// Attempts to invalidate a replication slot by exceeding the WAL retention limit.
+    /// Invalidates a replication slot by exceeding the WAL retention limit.
     ///
     /// This method temporarily sets `max_slot_wal_keep_size` to a small value (64kB),
-    /// generates enough WAL to exceed this limit, and forces a checkpoint to trigger
-    /// slot invalidation. The configuration is reset and temporary tables are cleaned
-    /// up regardless of whether invalidation succeeds.
+    /// generates WAL until the slot becomes invalidated, and forces checkpoints to trigger
+    /// WAL cleanup. The configuration is reset and temporary tables are cleaned up
+    /// after invalidation succeeds.
     ///
-    /// Returns `true` if the slot was successfully invalidated (wal_status = 'lost'),
-    /// `false` otherwise. Invalidation may fail due to:
-    /// - Insufficient privileges (requires superuser)
-    /// - PostgreSQL version < 13 (no wal_status support)
-    /// - Database configuration preventing invalidation
-    pub async fn try_invalidate_slot(&self, slot_name: &str) -> bool {
+    /// # Panics
+    ///
+    /// Panics if the ALTER SYSTEM command fails (requires superuser privileges).
+    pub async fn invalidate_slot(&self, slot_name: &str) {
         let client = self.client.as_ref().unwrap();
 
-        // Try to set max_slot_wal_keep_size very low - this requires superuser privileges
-        if client
+        // Try to set max_slot_wal_keep_size very low, this requires superuser privileges.
+        if let Err(e) = client
             .execute("ALTER SYSTEM SET max_slot_wal_keep_size = '64kB'", &[])
             .await
-            .is_err()
         {
-            return false;
+            panic!("invalidate_slot: ALTER SYSTEM failed (requires superuser privileges): {e}");
         }
 
-        if client
-            .execute("SELECT pg_reload_conf()", &[])
-            .await
-            .is_err()
-        {
+        if let Err(e) = client.execute("SELECT pg_reload_conf()", &[]).await {
             let _ = client
                 .execute("ALTER SYSTEM RESET max_slot_wal_keep_size", &[])
                 .await;
-
-            return false;
+            panic!("invalidate_slot: pg_reload_conf failed: {e}");
         }
 
-        // Create a temp table to generate WAL
+        // Create a temp table to generate WAL.
         let _ = client
             .execute(
                 "CREATE TABLE IF NOT EXISTS _etl_wal_generator (id serial primary key, data text)",
@@ -579,41 +571,55 @@ impl<G: GenericClient> PgDatabase<G> {
             )
             .await;
 
-        // Generate a lot of WAL to exceed the 64kB limit
-        for _ in 0..50 {
+        // Helper closure to reset config and clean up.
+        let cleanup = || async {
             let _ = client
-                .execute(
-                    "INSERT INTO _etl_wal_generator (data) SELECT repeat('x', 10000) FROM generate_series(1, 100)",
-                    &[],
-                )
+                .execute("DROP TABLE IF EXISTS _etl_wal_generator", &[])
                 .await;
+            let _ = client
+                .execute("ALTER SYSTEM RESET max_slot_wal_keep_size", &[])
+                .await;
+            let _ = client.execute("SELECT pg_reload_conf()", &[]).await;
+        };
+
+        let mut iteration = 0;
+
+        // Loop until the slot is invalidated.
+        loop {
+            // Generate WAL.
+            for _ in 0..20 {
+                let _ = client
+                    .execute(
+                        "INSERT INTO _etl_wal_generator (data) SELECT repeat('x', 10000) FROM generate_series(1, 100)",
+                        &[],
+                    )
+                    .await;
+            }
+
+            // Force checkpoint to trigger WAL cleanup.
+            let _ = client.execute("CHECKPOINT", &[]).await;
+
+            iteration += 1;
+
+            // Check if slot is invalidated.
+            if let Ok(Some(_)) = client
+                .query_opt(
+                    "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1 AND wal_status = 'lost'",
+                    &[&slot_name],
+                )
+                .await
+            {
+                info!(
+                    slot_name,
+                    iteration, "slot invalidated successfully"
+                );
+                break;
+            }
         }
 
-        // Force checkpoint to trigger WAL cleanup
-        let _ = client.execute("CHECKPOINT", &[]).await;
-
-        // Give the system time to invalidate the slot
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        // Check if the slot is now invalidated
-        let result = client
-            .query_opt(
-                "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1 AND wal_status = 'lost'",
-                &[&slot_name],
-            )
-            .await;
-
-        // Clean up
-        let _ = client
-            .execute("DROP TABLE IF EXISTS _etl_wal_generator", &[])
-            .await;
-        let _ = client
-            .execute("ALTER SYSTEM RESET max_slot_wal_keep_size", &[])
-            .await;
-        let _ = client.execute("SELECT pg_reload_conf()", &[]).await;
-
-        // Return whether we managed to invalidate the slot
-        matches!(result, Ok(Some(_)))
+        // IMPORTANT: Reset config BEFORE returning to avoid invalidating new slots
+        // when the pipeline restarts and creates table sync slots.
+        cleanup().await;
     }
 }
 

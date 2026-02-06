@@ -821,15 +821,7 @@ async fn test_get_slot_state_returns_invalidated_for_lost_slot() {
     );
 
     // Try to invalidate the slot using the database helper
-    let slot_invalidated = database.try_invalidate_slot(&slot_name).await;
-
-    if !slot_invalidated {
-        // If we couldn't invalidate the slot, skip the test
-        eprintln!(
-            "Skipping test: Could not invalidate slot (requires superuser privileges and PG 13+)"
-        );
-        return;
-    }
+    database.invalidate_slot(&slot_name).await;
 
     // Verify the slot state is now Invalidated
     let slot_state = client.get_slot_state(&slot_name).await.unwrap();

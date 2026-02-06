@@ -114,7 +114,7 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
         .get_replication_slot_state(&apply_slot_name)
         .await
         .unwrap();
-    assert_eq!(slot_state, Some(ReplicationSlotState::Inactive),);
+    assert_eq!(slot_state, Some(ReplicationSlotState::Inactive));
 
     // Delete the apply worker slot to simulate slot loss.
     database
@@ -127,7 +127,7 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
         .get_replication_slot_state(&apply_slot_name)
         .await
         .unwrap();
-    assert_eq!(slot_state, None,);
+    assert_eq!(slot_state, None);
 
     // Restart the pipeline, it should fail because tables are not in Init state.
     let mut pipeline = create_pipeline(
@@ -198,16 +198,8 @@ async fn pipeline_fails_when_slot_invalidated_with_error_behavior() {
     // Wait for the slot to become inactive.
     database.wait_for_slot_inactive(&apply_slot_name).await;
 
-    // Try to invalidate the slot.
-    let slot_invalidated = database.try_invalidate_slot(&apply_slot_name).await;
-    if !slot_invalidated {
-        // If we couldn't invalidate the slot (e.g., due to permissions or PG version),
-        // skip the test with a message.
-        eprintln!(
-            "Skipping test: Could not invalidate slot (requires superuser privileges and PG 13+)"
-        );
-        return;
-    }
+    // Invalidate the slot.
+    database.invalidate_slot(&apply_slot_name).await;
 
     // Restart the pipeline, it should fail because the slot is invalidated
     // and error behavior is configured.
@@ -227,7 +219,7 @@ async fn pipeline_fails_when_slot_invalidated_with_error_behavior() {
     let wait_result = pipeline.shutdown_and_wait().await;
     assert!(wait_result.is_err());
     let err = wait_result.unwrap_err();
-    assert!(err.kinds().contains(&ErrorKind::ReplicationSlotInvalidated),);
+    assert!(err.kinds().contains(&ErrorKind::ReplicationSlotInvalidated));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -285,22 +277,15 @@ async fn pipeline_recovers_when_slot_invalidated_with_recreate_behavior() {
     // Wait for the slot to become inactive.
     database.wait_for_slot_inactive(&apply_slot_name).await;
 
-    // Try to invalidate the slot.
-    let slot_invalidated = database.try_invalidate_slot(&apply_slot_name).await;
-    if !slot_invalidated {
-        // If we couldn't invalidate the slot, skip the test.
-        eprintln!(
-            "Skipping test: Could not invalidate slot (requires superuser privileges and PG 13+)"
-        );
-        return;
-    }
+    // Invalidate the slot.
+    database.invalidate_slot(&apply_slot_name).await;
 
     // Verify the slot is invalidated.
     let slot_state = database
         .get_replication_slot_state(&apply_slot_name)
         .await
         .unwrap();
-    assert_eq!(slot_state, Some(ReplicationSlotState::Invalidated),);
+    assert_eq!(slot_state, Some(ReplicationSlotState::Invalidated));
 
     // Restart the pipeline using the same store, this simulates a real restart
     // where state persists. The pipeline should detect the invalidated slot,
@@ -317,7 +302,7 @@ async fn pipeline_recovers_when_slot_invalidated_with_recreate_behavior() {
 
     // Set up notification for when the table becomes Ready again (after resync).
     let table_ready_notify = store
-        .notify_on_table_state_type(
+        .notify_on_future_table_state_type(
             database_schema.users_schema().id,
             TableReplicationPhaseType::Ready,
         )
