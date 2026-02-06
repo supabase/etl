@@ -80,6 +80,11 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     let pipeline_id: PipelineId = random();
+
+    let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
+        .try_into()
+        .unwrap();
+
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -103,9 +108,6 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify that the replication slot for the apply worker exists and is inactive.
-    let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
-        .try_into()
-        .unwrap();
     database.wait_for_slot_inactive(&apply_slot_name).await;
 
     let slot_state = database
@@ -164,6 +166,10 @@ async fn pipeline_fails_when_slot_invalidated_with_error_behavior() {
 
     let pipeline_id: PipelineId = random();
 
+    let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
+        .try_into()
+        .unwrap();
+
     // Create pipeline with default Error behavior for invalidated slots.
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
@@ -190,9 +196,6 @@ async fn pipeline_fails_when_slot_invalidated_with_error_behavior() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Wait for the slot to become inactive.
-    let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
-        .try_into()
-        .unwrap();
     database.wait_for_slot_inactive(&apply_slot_name).await;
 
     // Try to invalidate the slot.
@@ -242,6 +245,10 @@ async fn pipeline_recovers_when_slot_invalidated_with_recreate_behavior() {
 
     let pipeline_id: PipelineId = random();
 
+    let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
+        .try_into()
+        .unwrap();
+
     // Create pipeline with Recreate behavior for invalidated slots.
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
@@ -276,9 +283,6 @@ async fn pipeline_recovers_when_slot_invalidated_with_recreate_behavior() {
     assert_eq!(users_table_copied_rows, 5);
 
     // Wait for the slot to become inactive.
-    let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
-        .try_into()
-        .unwrap();
     database.wait_for_slot_inactive(&apply_slot_name).await;
 
     // Try to invalidate the slot.
@@ -336,11 +340,7 @@ async fn pipeline_recovers_when_slot_invalidated_with_recreate_behavior() {
         .get_replication_slot_state(&apply_slot_name)
         .await
         .unwrap();
-    assert_eq!(
-        slot_state,
-        Some(ReplicationSlotState::Active),
-        "Slot should be active after recreation"
-    );
+    assert_eq!(slot_state, Some(ReplicationSlotState::Active),);
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
