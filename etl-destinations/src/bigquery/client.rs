@@ -60,29 +60,6 @@ pub type BigQueryDatasetId = String;
 /// BigQuery table identifier.
 pub type BigQueryTableId = String;
 
-/// Change Data Capture operation types for BigQuery streaming.
-#[derive(Debug)]
-pub enum BigQueryOperationType {
-    Upsert,
-    Delete,
-}
-
-impl BigQueryOperationType {
-    /// Converts the operation type into a [`Cell`] for streaming.
-    pub fn into_cell(self) -> Cell {
-        Cell::String(self.to_string())
-    }
-}
-
-impl fmt::Display for BigQueryOperationType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            BigQueryOperationType::Upsert => write!(f, "UPSERT"),
-            BigQueryOperationType::Delete => write!(f, "DELETE"),
-        }
-    }
-}
-
 /// Computes the maximum number of inflight requests for the BigQuery Storage Write API.
 ///
 /// Uses checked arithmetic to safely multiply the connection pool size by the per-connection
@@ -93,94 +70,6 @@ fn compute_max_inflight_requests(connection_pool_size: usize) -> usize {
         .checked_mul(MAX_INFLIGHT_REQUESTS_PER_CONNECTION)
         .unwrap_or(MAX_SAFE_INFLIGHT_REQUESTS)
         .min(MAX_SAFE_INFLIGHT_REQUESTS)
-}
-
-/// Result of processing a single batch, used to determine retry strategy.
-enum BatchProcessResult {
-    /// Batch succeeded with byte metrics.
-    Success {
-        bytes_sent: usize,
-        bytes_received: usize,
-    },
-    /// Batch had row-level errors which should trigger a retry.
-    RowErrors { errors: Vec<RowError> },
-    /// Batch had a request-level error.
-    RequestError { error: BQError },
-}
-
-/// Checks if a [`BQError`] represents a transient condition that should be retried.
-///
-/// Determines if a [`BQError`] is retryable according to AIP-194 and BigQuery-specific guidance.
-///
-/// # AIP-194 Compliance
-///
-/// Per [AIP-194](https://google.aip.dev/194), only [`Code::Unavailable`] should be automatically
-/// retried for most gRPC services. Other status codes like [`Code::ResourceExhausted`],
-/// [`Code::Internal`], [`Code::DeadlineExceeded`], and [`Code::Cancelled`] are **not**
-/// automatically retried as they may indicate:
-/// - Resource limits that won't clear immediately (ResourceExhausted)
-/// - Application-set deadlines that must be honored (DeadlineExceeded)
-/// - User-initiated cancellations (Cancelled)
-/// - Unrecoverable system errors (Internal)
-///
-/// # BigQuery-Specific Exception
-///
-/// [`Code::Aborted`] with specific message patterns is retried despite AIP-194 guidance because
-/// the [BigQuery Storage Write API](https://cloud.google.com/bigquery/docs/write-api-best-practices)
-/// explicitly documents this as a transient error requiring reconnection. The server sends
-/// "Closing the stream because server is restarted" during maintenance, and clients are
-/// advised to reconnect. This is a BigQuery-specific behavior documented in production usage.
-///
-/// # Returns
-///
-/// Returns `true` only for [`BQError::TonicStatusError`] with:
-/// - [`Code::Unavailable`] (always)
-/// - [`Code::Aborted`] (only if message contains "server is restarted", "advised to reconnect",
-///   or "connection is draining")
-///
-/// All other errors return `false` and should be surfaced to the application.
-fn is_retryable_bq_error(error: &BQError) -> bool {
-    match error {
-        BQError::TonicStatusError(status) => match status.code() {
-            // Code::Unavailable (14) - The ONLY status code that should be automatically retried
-            // per AIP-194. Indicates temporary service unavailability, network hiccups, or
-            // connection issues that typically resolve quickly.
-            // Reference: https://google.aip.dev/194
-            Code::Unavailable => true,
-
-            // Code::Aborted (10) - EXCEPTION to AIP-194 for BigQuery-specific server restart
-            // pattern. BigQuery Storage Write API documentation explicitly states this error
-            // with "server is restarted" message is transient and clients should reconnect.
-            // Reference: https://cloud.google.com/bigquery/docs/write-api-best-practices
-            // See: https://github.com/googleapis/python-bigquery-storage/issues/315
-            Code::Aborted => {
-                let message = status.message();
-                message.contains("server is restarted")
-                    || message.contains("advised to reconnect")
-                    || message.contains("connection is draining")
-            }
-
-            // The following codes are NOT retried per AIP-194:
-            // - Code::ResourceExhausted (8): Quota/rate limits that may not clear quickly
-            // - Code::Internal (13): Unrecoverable system errors that should be surfaced
-            // - Code::DeadlineExceeded (4): Application-set deadlines that must be honored
-            // - Code::Cancelled (1): User/application cancellations that must be honored
-            //
-            // All other codes are non-retryable:
-            // - InvalidArgument (3): Bad request, schema mismatch
-            // - PermissionDenied (7): Authorization failure
-            // - Unauthenticated (16): Missing/invalid credentials
-            // - NotFound (5): Resource doesn't exist
-            // - AlreadyExists (6): Conflict
-            // - FailedPrecondition (9): System state issue
-            // - OutOfRange (11): Invalid offset
-            // - Unimplemented (12): Operation not supported
-            // - DataLoss (15): Data corruption
-            _ => false,
-        },
-        // Other BQError variants are not retryable.
-        _ => false,
-    }
 }
 
 /// Processes a single batch result and determines success or failure mode.
@@ -237,6 +126,58 @@ fn calculate_backoff(attempt: u32) -> Duration {
     Duration::from_millis(jitter)
 }
 
+/// Checks if a [`BQError`] represents a transient condition that should be retried.
+///
+/// Implements retry logic based on Google's official BigQuery Storage Write API guidance
+/// and production experience with the API. This deviates from the general AIP-194 guidance
+/// to match BigQuery-specific behavior.
+fn is_retryable_bq_error(error: &BQError) -> bool {
+    match error {
+        // Transport-level errors are always retriable (network failures, connection drops, etc.)
+        BQError::TonicTransportError(_) => true,
+
+        BQError::TonicStatusError(status) => match status.code() {
+            // Immediately retriable: canonical "service unavailable" code
+            Code::Unavailable => true,
+
+            // Immediately retriable: transient internal server errors (GOAWAY, backend issues)
+            Code::Internal => true,
+
+            // Immediately retriable: concurrency conflicts and server-initiated aborts
+            Code::Aborted => true,
+
+            // Immediately retriable: server-cancelled operations (not client-cancelled)
+            Code::Cancelled => true,
+
+            // Immediately retriable: deadline exceeded (safe with offset-based deduplication)
+            Code::DeadlineExceeded => true,
+
+            // Retriable with backoff: rate limits and quota exhaustion
+            Code::ResourceExhausted => true,
+
+            // Transport error that never reached the server
+            Code::Unknown => {
+                let message = status.message().to_lowercase();
+                message.contains("transport") || message.contains("connection")
+            }
+
+            // Non-retriable errors
+            Code::InvalidArgument => false,
+            Code::NotFound => false,
+            Code::AlreadyExists => false,
+            Code::PermissionDenied => false,
+            Code::FailedPrecondition => false,
+            Code::Unimplemented => false,
+            Code::Unauthenticated => false,
+            Code::DataLoss => false,
+            Code::OutOfRange => false,
+            Code::Ok => false,
+        },
+        // Other BQError variants are not retriable
+        _ => false,
+    }
+}
+
 /// Extracts the gRPC status code as a string from a [`BQError`] for metrics labeling.
 fn error_code_label(error: &BQError) -> &'static str {
     match error {
@@ -261,6 +202,231 @@ fn error_code_label(error: &BQError) -> &'static str {
         },
         _ => "other",
     }
+}
+
+/// Converts BigQuery errors to ETL errors with appropriate classification.
+///
+/// Maps BigQuery error types to ETL error kinds for consistent error handling.
+fn bq_error_to_etl_error(err: BQError) -> EtlError {
+    let (kind, description) = match &err {
+        // Authentication related errors
+        BQError::InvalidServiceAccountKey(_) => (
+            ErrorKind::AuthenticationError,
+            "Invalid BigQuery service account key",
+        ),
+        BQError::InvalidServiceAccountAuthenticator(_) => (
+            ErrorKind::AuthenticationError,
+            "Invalid BigQuery service account authenticator",
+        ),
+        BQError::InvalidInstalledFlowAuthenticator(_) => (
+            ErrorKind::AuthenticationError,
+            "Invalid BigQuery installed flow authenticator",
+        ),
+        BQError::InvalidApplicationDefaultCredentialsAuthenticator(_) => (
+            ErrorKind::AuthenticationError,
+            "Invalid BigQuery application default credentials",
+        ),
+        BQError::InvalidAuthorizedUserAuthenticator(_) => (
+            ErrorKind::AuthenticationError,
+            "Invalid BigQuery authorized user authenticator",
+        ),
+        BQError::AuthError(_) => (
+            ErrorKind::AuthenticationError,
+            "BigQuery authentication error",
+        ),
+        BQError::YupAuthError(_) => (
+            ErrorKind::AuthenticationError,
+            "BigQuery OAuth authentication error",
+        ),
+        BQError::NoToken => (
+            ErrorKind::AuthenticationError,
+            "BigQuery authentication token missing",
+        ),
+
+        // Network and transport errors
+        BQError::RequestError(_) => (ErrorKind::DestinationIoError, "BigQuery request failed"),
+        BQError::TonicTransportError(_) => {
+            (ErrorKind::DestinationIoError, "BigQuery transport error")
+        }
+
+        // Query and data errors
+        BQError::ResponseError { .. } => {
+            (ErrorKind::DestinationQueryFailed, "BigQuery response error")
+        }
+        BQError::NoDataAvailable => (
+            ErrorKind::InvalidState,
+            "BigQuery result set positioning error",
+        ),
+        BQError::InvalidColumnIndex { .. } => {
+            (ErrorKind::InvalidData, "BigQuery invalid column index")
+        }
+        BQError::InvalidColumnName { .. } => {
+            (ErrorKind::InvalidData, "BigQuery invalid column name")
+        }
+        BQError::InvalidColumnType { .. } => {
+            (ErrorKind::ConversionError, "BigQuery column type mismatch")
+        }
+
+        // Serialization errors
+        BQError::SerializationError(_) => (
+            ErrorKind::SerializationError,
+            "BigQuery JSON serialization error",
+        ),
+
+        // gRPC errors
+        BQError::TonicInvalidMetadataValueError(_) => {
+            (ErrorKind::InvalidData, "BigQuery invalid metadata value")
+        }
+        BQError::TonicStatusError(status) => match status.code() {
+            // Code::Unavailable (14) - Canonical "service unavailable" code.
+            // Indicates transient conditions like network issues, server overload, or intentional
+            // throttling. BigQuery returns this with messages like "Task is overloaded".
+            // Retriable per Google's Storage Write API guidance.
+            Code::Unavailable => (ErrorKind::DestinationError, "BigQuery unavailable"),
+
+            // Code::Internal (13) - Internal server errors.
+            // In BigQuery context, often manifests as transient backend issues, GOAWAY frames,
+            // or temporary processing failures. Retriable per BigQuery backend team guidance.
+            Code::Internal => (ErrorKind::DestinationError, "BigQuery internal error"),
+
+            // Code::Aborted (10) - Concurrency conflicts or server-initiated aborts.
+            // For Storage Write API, includes sequencer failures and stream aborts due to
+            // transient conditions. Retriable per BigQuery backend team guidance.
+            Code::Aborted => (ErrorKind::DestinationError, "BigQuery operation aborted"),
+
+            // Code::Cancelled (1) - Server-cancelled operations.
+            // In streaming context, server may cancel in-flight appends due to internal
+            // reshuffling. Retriable per BigQuery backend team guidance.
+            Code::Cancelled => (ErrorKind::DestinationError, "BigQuery operation cancelled"),
+
+            // Code::DeadlineExceeded (4) - Operation timeout.
+            // Request may or may not have completed server-side. Safe to retry with offset-based
+            // deduplication in Storage Write API. Retriable per Google's guidance.
+            Code::DeadlineExceeded => (ErrorKind::DestinationError, "BigQuery deadline exceeded"),
+
+            // Code::ResourceExhausted (8) - Quota or rate limit exhaustion.
+            // Requires exponential backoff to allow server capacity recovery. Retriable per
+            // Google's Storage Write API guidance, though may need longer backoff periods.
+            Code::ResourceExhausted => (ErrorKind::DestinationError, "BigQuery resource exhausted"),
+
+            // Code::FailedPrecondition (9) - Precondition failures.
+            // Indicates issues like STREAM_FINALIZED, INVALID_STREAM_STATE, or SCHEMA_MISMATCH.
+            // Requires fixing the underlying issue before retrying. Never retry automatically.
+            Code::FailedPrecondition => {
+                (ErrorKind::DestinationError, "BigQuery precondition failed")
+            }
+
+            // Code::Unknown (2) - Transport-level errors.
+            // When message contains "transport" or "connection", indicates errors that never
+            // reached the server (TCP resets, HTTP/2 GOAWAY). Retriable as per transport error
+            // guidance.
+            Code::Unknown => (ErrorKind::DestinationError, "BigQuery unknown error"),
+
+            // Code::PermissionDenied (7) - Authorization failure.
+            // Requires IAM permission changes. Never retry.
+            Code::PermissionDenied => (ErrorKind::DestinationError, "BigQuery permission denied"),
+
+            // Code::Unauthenticated (16) - Authentication failure.
+            // Requires credential refresh or configuration fix. Never retry.
+            Code::Unauthenticated => (
+                ErrorKind::DestinationError,
+                "BigQuery authentication failed",
+            ),
+
+            // Code::InvalidArgument (3) - Malformed request or invalid data.
+            // Client bug that requires code changes. Never retry.
+            Code::InvalidArgument => (ErrorKind::DestinationError, "BigQuery invalid argument"),
+
+            // Code::NotFound (5) - Resource doesn't exist.
+            // Requires creating the resource (table, dataset, stream) first. Never retry.
+            Code::NotFound => (ErrorKind::DestinationError, "BigQuery entity not found"),
+
+            // Code::AlreadyExists (6) - Entity conflict during creation.
+            // For streaming with offsets, may indicate row was already written. Never retry.
+            Code::AlreadyExists => (
+                ErrorKind::DestinationError,
+                "BigQuery entity already exists",
+            ),
+
+            // Code::OutOfRange (11) - Invalid offset for streaming.
+            // Offset beyond current stream end. Requires application-level recovery. Never retry.
+            Code::OutOfRange => (ErrorKind::DestinationError, "BigQuery offset out of range"),
+
+            // Code::Unimplemented (12) - Operation not available.
+            // Feature not supported by BigQuery. Never retry.
+            Code::Unimplemented => (
+                ErrorKind::DestinationError,
+                "BigQuery operation not supported",
+            ),
+
+            // Code::DataLoss (15) - Unrecoverable data corruption.
+            // Severe error requiring manual intervention. Never retry.
+            Code::DataLoss => (ErrorKind::DestinationError, "BigQuery data loss"),
+
+            // Code::Ok (0) - Should never be an error
+            Code::Ok => (ErrorKind::DestinationError, "BigQuery unexpected ok status"),
+        },
+
+        // Concurrency and task errors
+        BQError::SemaphorePermitError(_) => (
+            ErrorKind::DestinationError,
+            "BigQuery semaphore permit error",
+        ),
+        BQError::TokioTaskError(_) => {
+            (ErrorKind::DestinationError, "BigQuery task execution error")
+        }
+        BQError::ConnectionPoolError(_) => (
+            ErrorKind::DestinationError,
+            "BigQuery connection pool error",
+        ),
+    };
+
+    etl_error!(kind, description, err.to_string())
+}
+
+/// Converts BigQuery row errors to ETL destination errors.
+fn row_error_to_etl_error(err: RowError) -> EtlError {
+    etl_error!(
+        ErrorKind::DestinationError,
+        "BigQuery row error",
+        format!("{err:?}")
+    )
+}
+
+/// Change Data Capture operation types for BigQuery streaming.
+#[derive(Debug)]
+pub enum BigQueryOperationType {
+    Upsert,
+    Delete,
+}
+
+impl BigQueryOperationType {
+    /// Converts the operation type into a [`Cell`] for streaming.
+    pub fn into_cell(self) -> Cell {
+        Cell::String(self.to_string())
+    }
+}
+
+impl fmt::Display for BigQueryOperationType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            BigQueryOperationType::Upsert => write!(f, "UPSERT"),
+            BigQueryOperationType::Delete => write!(f, "DELETE"),
+        }
+    }
+}
+
+/// Result of processing a single batch, used to determine retry strategy.
+enum BatchProcessResult {
+    /// Batch succeeded with byte metrics.
+    Success {
+        bytes_sent: usize,
+        bytes_received: usize,
+    },
+    /// Batch had row-level errors.
+    RowErrors { errors: Vec<RowError> },
+    /// Batch had a request-level error.
+    RequestError { error: BQError },
 }
 
 /// Client for interacting with Google BigQuery.
@@ -1086,213 +1252,10 @@ impl fmt::Debug for BigQueryClient {
     }
 }
 
-/// Converts BigQuery errors to ETL errors with appropriate classification.
-///
-/// Maps BigQuery error types to ETL error kinds for consistent error handling.
-fn bq_error_to_etl_error(err: BQError) -> EtlError {
-    use BQError;
-
-    let (kind, description) = match &err {
-        // Authentication related errors
-        BQError::InvalidServiceAccountKey(_) => (
-            ErrorKind::AuthenticationError,
-            "Invalid BigQuery service account key",
-        ),
-        BQError::InvalidServiceAccountAuthenticator(_) => (
-            ErrorKind::AuthenticationError,
-            "Invalid BigQuery service account authenticator",
-        ),
-        BQError::InvalidInstalledFlowAuthenticator(_) => (
-            ErrorKind::AuthenticationError,
-            "Invalid BigQuery installed flow authenticator",
-        ),
-        BQError::InvalidApplicationDefaultCredentialsAuthenticator(_) => (
-            ErrorKind::AuthenticationError,
-            "Invalid BigQuery application default credentials",
-        ),
-        BQError::InvalidAuthorizedUserAuthenticator(_) => (
-            ErrorKind::AuthenticationError,
-            "Invalid BigQuery authorized user authenticator",
-        ),
-        BQError::AuthError(_) => (
-            ErrorKind::AuthenticationError,
-            "BigQuery authentication error",
-        ),
-        BQError::YupAuthError(_) => (
-            ErrorKind::AuthenticationError,
-            "BigQuery OAuth authentication error",
-        ),
-        BQError::NoToken => (
-            ErrorKind::AuthenticationError,
-            "BigQuery authentication token missing",
-        ),
-
-        // Network and transport errors
-        BQError::RequestError(_) => (ErrorKind::DestinationIoError, "BigQuery request failed"),
-        BQError::TonicTransportError(_) => {
-            (ErrorKind::DestinationIoError, "BigQuery transport error")
-        }
-
-        // Query and data errors
-        BQError::ResponseError { .. } => {
-            (ErrorKind::DestinationQueryFailed, "BigQuery response error")
-        }
-        BQError::NoDataAvailable => (
-            ErrorKind::InvalidState,
-            "BigQuery result set positioning error",
-        ),
-        BQError::InvalidColumnIndex { .. } => {
-            (ErrorKind::InvalidData, "BigQuery invalid column index")
-        }
-        BQError::InvalidColumnName { .. } => {
-            (ErrorKind::InvalidData, "BigQuery invalid column name")
-        }
-        BQError::InvalidColumnType { .. } => {
-            (ErrorKind::ConversionError, "BigQuery column type mismatch")
-        }
-
-        // Serialization errors
-        BQError::SerializationError(_) => (
-            ErrorKind::SerializationError,
-            "BigQuery JSON serialization error",
-        ),
-
-        // gRPC errors
-        BQError::TonicInvalidMetadataValueError(_) => {
-            (ErrorKind::InvalidData, "BigQuery invalid metadata value")
-        }
-        BQError::TonicStatusError(status) => match status.code() {
-            // Code::Unavailable (14) - "The service is currently unavailable."
-            // This is the primary retryable code per Google AIP-194. It indicates transient
-            // conditions like network hiccups or intentional throttling. BigQuery returns this
-            // with messages like "Task is overloaded (cpu-protection)" or "(memory-protection)"
-            // when the service is temporarily overwhelmed. Safe to retry with exponential backoff.
-            Code::Unavailable => (ErrorKind::DestinationThrottled, "BigQuery unavailable"),
-
-            // Code::ResourceExhausted (8) - "Some resource has been exhausted."
-            // Per Google AIP-194: "This code may be a signal that quota is exhausted. Retries
-            // therefore may not be expected to work for several hours; meanwhile the retries
-            // may have billing implications." We do NOT retry this to avoid wasting resources
-            // on quota exhaustion that won't recover quickly.
-            Code::ResourceExhausted => (ErrorKind::DestinationError, "BigQuery resource exhausted"),
-
-            // Code::PermissionDenied (7) - "The caller does not have permission."
-            // Authorization failure. The request will never succeed without configuration
-            // changes (e.g., granting IAM permissions). Never retry.
-            Code::PermissionDenied => (ErrorKind::DestinationError, "BigQuery permission denied"),
-
-            // Code::Unauthenticated (16) - "Missing or invalid authentication credentials."
-            // Authentication failure. Requires credential refresh or configuration fix.
-            // Never retry automatically.
-            Code::Unauthenticated => (
-                ErrorKind::DestinationError,
-                "BigQuery authentication failed",
-            ),
-
-            // Code::InvalidArgument (3) - "Client specified an invalid argument."
-            // Malformed request or invalid data. This is a client bug that won't be fixed
-            // by retrying. Never retry.
-            Code::InvalidArgument => (ErrorKind::DestinationError, "BigQuery invalid argument"),
-
-            // Code::NotFound (5) - "Some requested entity was not found."
-            // The resource (table, dataset, stream) doesn't exist. Requires creating the
-            // resource first. Never retry.
-            Code::NotFound => (
-                ErrorKind::DestinationTableMissing,
-                "BigQuery entity not found",
-            ),
-
-            // Code::AlreadyExists (6) - "The entity already exists."
-            // Conflict during creation. For streaming with offsets, this may indicate the
-            // row was already written (safe to ignore). Never retry.
-            Code::AlreadyExists => (
-                ErrorKind::DestinationTableAlreadyExists,
-                "BigQuery entity already exists",
-            ),
-
-            // Code::FailedPrecondition (9) - "System is not in required state."
-            // The operation can't proceed due to system state (e.g., non-empty table for
-            // certain operations). Requires explicit state change before retrying.
-            // Per gRPC spec: "Use FAILED_PRECONDITION if the client should not retry until
-            // the system state has been explicitly fixed." Never retry automatically.
-            Code::FailedPrecondition => {
-                (ErrorKind::DestinationError, "BigQuery precondition failed")
-            }
-
-            // Code::OutOfRange (11) - "Operation attempted past the valid range."
-            // For streaming, this typically means the specified offset is beyond the current
-            // end of the stream, indicating a previous write failed. Requires application-level
-            // recovery (retry from last successful write). Never retry at this level.
-            Code::OutOfRange => (ErrorKind::DestinationError, "BigQuery offset out of range"),
-
-            // Code::Aborted (10) - "The operation was aborted."
-            // Typically due to concurrency issues (sequencer check failure, transaction abort).
-            // Per gRPC spec: "Use ABORTED if the client should retry at a higher level."
-            // This means retry the entire transaction, not just this request. We don't retry
-            // here; the caller should handle transaction-level retry if needed.
-            Code::Aborted => (ErrorKind::DestinationError, "BigQuery operation aborted"),
-
-            // Code::Internal (13) - "Internal server error."
-            // Per Google AIP-194: "This error must be surfaced to the application immediately;
-            // it usually means a bug should be filed against the system." While BigQuery docs
-            // suggest these can be retried, AIP-194 recommends surfacing them. The underlying
-            // client library may already retry these internally before surfacing to us.
-            Code::Internal => (ErrorKind::DestinationError, "BigQuery internal error"),
-
-            // Code::DeadlineExceeded (4) - "Deadline expired before operation could complete."
-            // Per Google AIP-194: "An application can set a deadline, which must be honored."
-            // Retrying could violate the application's timeout expectations. The caller should
-            // decide whether to retry with a new deadline.
-            Code::DeadlineExceeded => (ErrorKind::DestinationError, "BigQuery deadline exceeded"),
-
-            // Code::Cancelled (1) - "The operation was cancelled."
-            // Typically client-initiated cancellation. Never retry.
-            Code::Cancelled => (ErrorKind::DestinationError, "BigQuery operation cancelled"),
-
-            // Code::Unimplemented (12) - "Operation not implemented or supported."
-            // The requested operation is not available. Never retry.
-            Code::Unimplemented => (
-                ErrorKind::DestinationError,
-                "BigQuery operation not supported",
-            ),
-
-            // Code::DataLoss (15) - "Unrecoverable data loss or corruption."
-            // Severe error indicating data corruption. Never retry.
-            Code::DataLoss => (ErrorKind::DestinationError, "BigQuery data loss"),
-
-            // Catch-all for unexpected codes.
-            _ => (ErrorKind::DestinationError, "BigQuery gRPC error"),
-        },
-
-        // Concurrency and task errors
-        BQError::SemaphorePermitError(_) => (
-            ErrorKind::DestinationError,
-            "BigQuery semaphore permit error",
-        ),
-        BQError::TokioTaskError(_) => {
-            (ErrorKind::DestinationError, "BigQuery task execution error")
-        }
-        BQError::ConnectionPoolError(_) => (
-            ErrorKind::DestinationError,
-            "BigQuery connection pool error",
-        ),
-    };
-
-    etl_error!(kind, description, err.to_string())
-}
-
-/// Converts BigQuery row errors to ETL destination errors.
-fn row_error_to_etl_error(err: RowError) -> EtlError {
-    etl_error!(
-        ErrorKind::DestinationError,
-        "BigQuery row error",
-        format!("{err:?}")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tonic::Status;
 
     #[test]
     fn test_postgres_to_bigquery_type_basic_types() {
@@ -1634,5 +1597,92 @@ mod tests {
 
         let expected_query = "create or replace table `test-project.test_dataset.test_table` (`id` int64 not null, primary key (`id`) not enforced) options (max_staleness = interval 15 minute)";
         assert_eq!(query, expected_query);
+    }
+
+    #[test]
+    fn test_is_retryable_bq_error_immediately_retriable_codes() {
+        // Test immediately retriable codes per BigQuery Storage Write API guidance
+        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::unavailable("service unavailable")
+        )));
+        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::internal("internal error")
+        )));
+        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::aborted("operation aborted")
+        )));
+        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::cancelled("operation cancelled")
+        )));
+        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::deadline_exceeded("deadline exceeded")
+        )));
+    }
+
+    #[test]
+    fn test_is_retryable_bq_error_resource_exhausted() {
+        // Test retriable with exponential backoff
+        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::resource_exhausted("quota exceeded")
+        )));
+    }
+
+    #[test]
+    fn test_is_retryable_bq_error_transport_errors() {
+        // Test transport-level errors via Code::Unknown with transport-related messages
+        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::unknown("transport error")
+        )));
+        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::unknown("connection reset")
+        )));
+        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::unknown("Connection refused")
+        )));
+
+        // Note: BQError::TonicTransportError is also retriable but we cannot easily construct
+        // a test instance since tonic::transport::Error::from_source is private.
+        // The actual retry logic handles this case in production via the match arm:
+        // BQError::TonicTransportError(_) => true
+    }
+
+    #[test]
+    fn test_is_retryable_bq_error_non_retriable_codes() {
+        // Test non-retriable codes
+        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::invalid_argument("bad request")
+        )));
+        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::not_found("table not found")
+        )));
+        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::already_exists("table exists")
+        )));
+        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::permission_denied("access denied")
+        )));
+        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::failed_precondition("stream finalized")
+        )));
+        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::unauthenticated("invalid credentials")
+        )));
+        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::unimplemented("not supported")
+        )));
+        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::data_loss("data corruption")
+        )));
+        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::out_of_range("invalid offset")
+        )));
+    }
+
+    #[test]
+    fn test_is_retryable_bq_error_unknown_without_transport() {
+        // Test that Code::Unknown without transport-related message is not retriable
+        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::unknown("some other error")
+        )));
     }
 }
