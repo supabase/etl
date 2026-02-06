@@ -176,6 +176,12 @@ jobs:
           sudo apt-get install libpq-dev -y
           ./etl-api/scripts/run_migrations.sh
 
+      - name: Set up BigQuery Credentials
+        run: |
+          printf '%s' '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' > /tmp/bigquery-sa-key.json
+          echo "TESTS_BIGQUERY_PROJECT_ID=${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}" >> $GITHUB_ENV
+          echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json" >> $GITHUB_ENV
+
       - name: Run Unit and Integration Tests
         if: matrix.postgres_version != 18
         run: |
@@ -195,12 +201,6 @@ jobs:
       - name: Install cargo-llvm-cov
         if: matrix.postgres_version == 18
         uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: Set up BigQuery Credentials
-        run: |
-          printf '%s' '${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}' > /tmp/bigquery-sa-key.json
-          echo "TESTS_BIGQUERY_PROJECT_ID=${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}" >> $GITHUB_ENV
-          echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json" >> $GITHUB_ENV
 
       - name: Run Doctests
         run: |
