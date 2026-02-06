@@ -15,6 +15,7 @@ pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
 pub const ETL_ROW_SIZE_BYTES: &str = "etl_row_size_bytes";
+pub const ETL_SLOT_INVALIDATIONS_TOTAL: &str = "etl_slot_invalidations_total";
 
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
@@ -102,6 +103,12 @@ pub(crate) fn register_metrics() {
             ETL_ROW_SIZE_BYTES,
             Unit::Bytes,
             "Distribution of individual row sizes in bytes, labeled by event_type"
+        );
+
+        describe_counter!(
+            ETL_SLOT_INVALIDATIONS_TOTAL,
+            Unit::Count,
+            "Total number of times a replication slot was found invalidated on pipeline start, labeled by pipeline_id"
         );
     });
 }

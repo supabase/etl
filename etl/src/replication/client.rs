@@ -64,6 +64,21 @@ pub struct GetSlotResult {
     pub confirmed_flush_lsn: PgLsn,
 }
 
+/// The current state of a replication slot.
+///
+/// Represents whether a slot is valid and can be used for replication, or has been
+/// invalidated by PostgreSQL (e.g., due to exceeding `max_slot_wal_keep_size`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotState {
+    /// The slot is valid and can be used for replication.
+    Valid,
+    /// The slot has been invalidated and cannot be used for replication.
+    ///
+    /// This typically occurs when the slot falls too far behind the current WAL position
+    /// and PostgreSQL removes the required WAL segments.
+    Invalidated,
+}
+
 /// Result type for operations that either get an existing slot or create a new one.
 ///
 /// This enum distinguishes between whether a slot was newly created or already existed,
@@ -264,6 +279,43 @@ impl PgReplicationClient {
         self.create_slot_internal(slot_name, false).await
     }
 
+    /// Gets the state of a replication slot by name.
+    ///
+    /// Queries the `pg_replication_slots` system catalog to determine if the slot exists
+    /// and whether it's valid or invalidated. A slot is considered invalidated when its
+    /// `wal_status` is 'lost', indicating that required WAL segments have been removed.
+    ///
+    /// Returns an error if the slot doesn't exist.
+    pub async fn get_slot_state(&self, slot_name: &str) -> EtlResult<SlotState> {
+        let query = format!(
+            r#"select wal_status from pg_replication_slots where slot_name = {};"#,
+            quote_literal(slot_name)
+        );
+
+        let results = self.client.simple_query(&query).await?;
+        for result in results {
+            if let SimpleQueryMessage::Row(row) = result {
+                // wal_status can be: 'reserved', 'extended', 'unreserved', or 'lost'
+                // A slot is invalidated when wal_status is 'lost'
+                let wal_status: Option<String> = row.try_get("wal_status")?.map(String::from);
+
+                return match wal_status.as_deref() {
+                    Some("lost") => Ok(SlotState::Invalidated),
+                    Some(_) => Ok(SlotState::Valid),
+                    // If wal_status is NULL, assume the slot is valid
+                    // (this can happen on very old PostgreSQL versions)
+                    None => Ok(SlotState::Valid),
+                };
+            }
+        }
+
+        bail!(
+            ErrorKind::ReplicationSlotNotFound,
+            "Replication slot not found",
+            format!("Replication slot '{}' not found in database", slot_name)
+        );
+    }
+
     /// Gets the slot by `slot_name`.
     ///
     /// Returns an error in case of failure or missing slot.
@@ -329,6 +381,7 @@ impl PgReplicationClient {
     /// Returns an error if the slot doesn't exist or if there are any issues with the deletion.
     pub async fn delete_slot(&self, slot_name: &str) -> EtlResult<()> {
         info!(slot_name, "deleting replication slot");
+
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let query = format!(
             r#"DROP_REPLICATION_SLOT {} WAIT;"#,
@@ -364,6 +417,18 @@ impl PgReplicationClient {
 
                 Err(err.into())
             }
+        }
+    }
+
+    /// Deletes a replication slot if it exists.
+    ///
+    /// This method wraps [`Self::delete_slot`] and swallows
+    /// [`ErrorKind::ReplicationSlotNotFound`], while propagating all other errors.
+    pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
+        match self.delete_slot(slot_name).await {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => Ok(()),
+            Err(err) => Err(err),
         }
     }
 

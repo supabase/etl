@@ -26,5 +26,8 @@ FullApiPipelineConfig {
     table_sync_copy: Some(
         IncludeAllTables,
     ),
+    invalidated_slot_behavior: Some(
+        Error,
+    ),
     log_level: None,
 }

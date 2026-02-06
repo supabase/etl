@@ -7,7 +7,8 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{
-    create_pipeline, create_pipeline_with_batch_config, create_pipeline_with_table_sync_copy_config,
+    PipelineBuilder, create_pipeline, create_pipeline_with_batch_config,
+    create_pipeline_with_table_sync_copy_config,
 };
 use etl::test_utils::table::assert_table_schema;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
@@ -17,10 +18,10 @@ use etl::test_utils::test_schema::{
     insert_mock_data, insert_orders_data, insert_users_data, setup_test_database_schema,
 };
 use etl::types::{Event, EventType, InsertEvent, PipelineId, Type};
-use etl_config::shared::{BatchConfig, TableSyncCopyConfig};
+use etl_config::shared::{BatchConfig, InvalidatedSlotBehavior, TableSyncCopyConfig};
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
+use etl_postgres::tokio::test_utils::{ReplicationSlotState, TableModification, id_column_schema};
 use etl_postgres::types::{ColumnSchema, TableId};
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
@@ -79,6 +80,11 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
     let pipeline_id: PipelineId = random();
+
+    let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
+        .try_into()
+        .unwrap();
+
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -101,24 +107,14 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify that the replication slot for the apply worker exists.
-    let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
-        .try_into()
-        .unwrap();
-    let slot_exists = database
-        .replication_slot_exists(&apply_slot_name)
-        .await
-        .unwrap();
-    assert!(slot_exists, "Apply slot should exist after pipeline start");
+    // Verify that the replication slot for the apply worker exists and is inactive.
+    database.wait_for_slot_inactive(&apply_slot_name).await;
 
-    // Wait for Postgres to mark the slot as inactive before dropping it.
-    while database
-        .replication_slot_is_active(&apply_slot_name)
+    let slot_state = database
+        .get_replication_slot_state(&apply_slot_name)
         .await
-        .unwrap()
-    {
-        sleep(Duration::from_millis(100)).await;
-    }
+        .unwrap();
+    assert_eq!(slot_state, Some(ReplicationSlotState::Inactive));
 
     // Delete the apply worker slot to simulate slot loss.
     database
@@ -127,13 +123,13 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
         ))
         .await
         .unwrap();
-    let slot_exists = !database
-        .replication_slot_exists(&apply_slot_name)
+    let slot_state = database
+        .get_replication_slot_state(&apply_slot_name)
         .await
         .unwrap();
-    assert!(slot_exists, "Apply slot should not exist after deletion");
+    assert_eq!(slot_state, None);
 
-    // Restart the pipeline - it should fail because tables are not in Init state.
+    // Restart the pipeline, it should fail because tables are not in Init state.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -142,29 +138,198 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
         destination.clone(),
     );
 
-    // The pipeline starts successfully (the actual work happens in a spawned task).
     pipeline.start().await.unwrap();
 
     // The error surfaces when we wait for the pipeline to complete.
-    let wait_result = pipeline.wait().await;
-    assert!(wait_result.is_err(), "Pipeline wait should fail");
-
+    let wait_result = pipeline.shutdown_and_wait().await;
+    assert!(wait_result.is_err());
     let err = wait_result.unwrap_err();
-    assert!(
-        err.kinds().contains(&ErrorKind::InvalidState),
-        "Error should be InvalidState, got: {:?}",
-        err.kinds()
-    );
+    assert!(err.kinds().contains(&ErrorKind::InvalidState));
 
     // Verify that the slot was cleaned up (deleted) after the validation failure.
-    let slot_exists = !database
-        .replication_slot_exists(&apply_slot_name)
+    let slot_state = database
+        .get_replication_slot_state(&apply_slot_name)
         .await
         .unwrap();
-    assert!(
-        slot_exists,
-        "Apply slot should be deleted after validation failure"
-    );
+    assert_eq!(slot_state, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "modifies cluster-wide PG settings; run independently with: cargo test -- --ignored exclusive_ --test-threads=1"]
+async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+
+    let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
+        .try_into()
+        .unwrap();
+
+    // Create pipeline with default Error behavior for invalidated slots.
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_invalidated_slot_behavior(InvalidatedSlotBehavior::Error)
+    .build();
+
+    // Wait for the table to be ready.
+    let table_ready_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Wait for the slot to become inactive.
+    database.wait_for_slot_inactive(&apply_slot_name).await;
+
+    // Invalidate the slot.
+    database.invalidate_slot(&apply_slot_name).await;
+
+    // Restart the pipeline, it should fail because the slot is invalidated
+    // and error behavior is configured.
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_invalidated_slot_behavior(InvalidatedSlotBehavior::Error)
+    .build();
+
+    pipeline.start().await.unwrap();
+
+    // The error surfaces when we wait for the pipeline to complete
+    let wait_result = pipeline.shutdown_and_wait().await;
+    assert!(wait_result.is_err());
+    let err = wait_result.unwrap_err();
+    assert!(err.kinds().contains(&ErrorKind::ReplicationSlotInvalidated));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "modifies cluster-wide PG settings; run independently with: cargo test -- --ignored exclusive_ --test-threads=1"]
+async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavior() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+
+    // Insert some initial data.
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=5).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    let pipeline_id: PipelineId = random();
+
+    let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
+        .try_into()
+        .unwrap();
+
+    // Create pipeline with Recreate behavior for invalidated slots.
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_invalidated_slot_behavior(InvalidatedSlotBehavior::Recreate)
+    .build();
+
+    // Wait for the table to be ready.
+    let table_ready_notify = store
+        .notify_on_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Validate that we have users data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_copied_rows = table_rows
+        .get(&database_schema.users_schema().id)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    assert_eq!(users_table_copied_rows, 5);
+
+    // Wait for the slot to become inactive.
+    database.wait_for_slot_inactive(&apply_slot_name).await;
+
+    // Invalidate the slot.
+    database.invalidate_slot(&apply_slot_name).await;
+
+    // Verify the slot is invalidated.
+    let slot_state = database
+        .get_replication_slot_state(&apply_slot_name)
+        .await
+        .unwrap();
+    assert_eq!(slot_state, Some(ReplicationSlotState::Invalidated));
+
+    // Restart the pipeline using the same store, this simulates a real restart
+    // where state persists. The pipeline should detect the invalidated slot,
+    // recreate it, and reset all table states to Init.
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_invalidated_slot_behavior(InvalidatedSlotBehavior::Recreate)
+    .build();
+
+    // Set up notification for when the table becomes Ready again (after resync).
+    let table_ready_notify = store
+        .notify_on_future_table_state_type(
+            database_schema.users_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready_notify.notified().await;
+
+    // Validate that we have users data.
+    let table_rows = destination.get_table_rows().await;
+    let users_table_copied_rows = table_rows
+        .get(&database_schema.users_schema().id)
+        .map(|r| r.len())
+        .unwrap_or(0);
+    assert_eq!(users_table_copied_rows, 5);
+
+    // Verify the slot was recreated and is active.
+    let slot_state = database
+        .get_replication_slot_state(&apply_slot_name)
+        .await
+        .unwrap();
+    assert_eq!(slot_state, Some(ReplicationSlotState::Active));
+
+    pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -402,6 +567,20 @@ async fn publication_changes_are_correctly_handled() {
     assert!(states.contains_key(&table_1_id));
     assert!(!states.contains_key(&table_2_id));
     assert!(states.contains_key(&table_3_id));
+
+    // Assert that the table sync slot for table_2 is also deleted.
+    let table_2_slot_name: String =
+        EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_2_id)
+            .try_into()
+            .unwrap();
+    let slot_state = database
+        .get_replication_slot_state(&table_2_slot_name)
+        .await
+        .unwrap();
+    assert_eq!(
+        slot_state, None,
+        "Table sync slot for removed table should be deleted"
+    );
 
     // The destination should have the 2 events of the first table, the 1 event of the removed table
     // and the 1 event of the new table.
@@ -724,17 +903,19 @@ async fn table_copy_replicates_existing_data() {
         EtlReplicationSlot::for_table_sync_worker(pipeline_id, database_schema.orders_schema().id)
             .try_into()
             .unwrap();
-    assert!(
-        !database
-            .replication_slot_exists(&users_replication_slot)
+    assert_eq!(
+        database
+            .get_replication_slot_state(&users_replication_slot)
             .await
-            .unwrap()
+            .unwrap(),
+        None
     );
-    assert!(
-        !database
-            .replication_slot_exists(&orders_replication_slot)
+    assert_eq!(
+        database
+            .get_replication_slot_state(&orders_replication_slot)
             .await
-            .unwrap()
+            .unwrap(),
+        None
     );
 }
 
@@ -892,17 +1073,19 @@ async fn table_copy_and_sync_streams_new_data() {
         EtlReplicationSlot::for_table_sync_worker(pipeline_id, database_schema.orders_schema().id)
             .try_into()
             .unwrap();
-    assert!(
-        !database
-            .replication_slot_exists(&users_replication_slot)
+    assert_eq!(
+        database
+            .get_replication_slot_state(&users_replication_slot)
             .await
-            .unwrap()
+            .unwrap(),
+        None
     );
-    assert!(
-        !database
-            .replication_slot_exists(&orders_replication_slot)
+    assert_eq!(
+        database
+            .get_replication_slot_state(&orders_replication_slot)
             .await
-            .unwrap()
+            .unwrap(),
+        None
     );
 }
 

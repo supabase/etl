@@ -34,13 +34,25 @@ pub trait StateStore {
     /// the persistent store, so no need to ever load the state again.
     fn load_table_replication_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
 
+    /// Updates multiple table replication states atomically in both the cache and
+    /// the persistent store.
+    ///
+    /// All state updates are applied as a single atomic operation. If any update fails,
+    /// the entire operation is rolled back.
+    fn update_table_replication_states(
+        &self,
+        updates: Vec<(TableId, TableReplicationPhase)>,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
+
     /// Updates the table replicate state for a table with `table_id` in both the cache and
     /// the persistent store.
     fn update_table_replication_state(
         &self,
         table_id: TableId,
         state: TableReplicationPhase,
-    ) -> impl Future<Output = EtlResult<()>> + Send;
+    ) -> impl Future<Output = EtlResult<()>> + Send {
+        self.update_table_replication_states(vec![(table_id, state)])
+    }
 
     /// Rolls back to the previous replication state.
     fn rollback_table_replication_state(

@@ -117,7 +117,8 @@ impl NotifyingStore {
             .collect()
     }
 
-    /// Registers a notification that fires when a table reaches a specific state type.
+    /// Registers a notification that fires when a table reaches a specific state type or if the
+    /// table already has that specific state type.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
     /// expected state is not reached. This prevents tests from hanging indefinitely.
@@ -132,11 +133,26 @@ impl NotifyingStore {
             .table_state_type_conditions
             .push((table_id, expected_state, notify.clone()));
 
-        // Checking conditions here as well because it is possible that the state
-        // the conditions are checking for is already reached by the time
-        // this method is called, in which case this notification will not ever
-        // fire if conditions are not checked here.
         inner.check_conditions().await;
+
+        TimedNotify::new(notify)
+    }
+
+    /// Registers a notification that fires when a table reaches a specific state type from when
+    /// this method was called.
+    ///
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// expected state is not reached. This prevents tests from hanging indefinitely.
+    pub async fn notify_on_future_table_state_type(
+        &self,
+        table_id: TableId,
+        expected_state: TableReplicationPhaseType,
+    ) -> TimedNotify {
+        let notify = Arc::new(Notify::new());
+        let mut inner = self.inner.write().await;
+        inner
+            .table_state_type_conditions
+            .push((table_id, expected_state, notify.clone()));
 
         TimedNotify::new(notify)
     }
@@ -219,23 +235,25 @@ impl StateStore for NotifyingStore {
         Ok(table_replication_states_len)
     }
 
-    async fn update_table_replication_state(
+    async fn update_table_replication_states(
         &self,
-        table_id: TableId,
-        state: TableReplicationPhase,
+        updates: Vec<(TableId, TableReplicationPhase)>,
     ) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
 
-        // Store the current state in history before updating
-        if let Some(current_state) = inner.table_replication_states.get(&table_id).cloned() {
-            inner
-                .table_state_history
-                .entry(table_id)
-                .or_insert_with(Vec::new)
-                .push(current_state);
+        for (table_id, state) in updates {
+            // Store the current state in history before updating
+            if let Some(current_state) = inner.table_replication_states.get(&table_id).cloned() {
+                inner
+                    .table_state_history
+                    .entry(table_id)
+                    .or_insert_with(Vec::new)
+                    .push(current_state);
+            }
+
+            inner.table_replication_states.insert(table_id, state);
         }
 
-        inner.table_replication_states.insert(table_id, state);
         inner.check_conditions().await;
         inner
             .dispatch_method_notification(StateStoreMethod::StoreTableReplicationState)

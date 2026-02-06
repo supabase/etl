@@ -6,8 +6,34 @@ use crate::shared::{
     PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError, batch::BatchConfig,
 };
 
-/// c copy should be performed.Selection rules for tables participating in replication.
+/// Behavior when the main replication slot is found to be invalidated.
 ///
+/// A replication slot can become invalidated when it falls too far behind the current
+/// WAL position (e.g., when `max_slot_wal_keep_size` is exceeded) or when PostgreSQL
+/// explicitly invalidates it. This enum controls how the pipeline responds to such situations.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum InvalidatedSlotBehavior {
+    /// Prevents pipeline startup when the slot is invalidated.
+    ///
+    /// The pipeline will fail with an error indicating that the slot needs to be
+    /// manually addressed before replication can continue. This is the safest option
+    /// as it requires explicit operator intervention.
+    #[default]
+    Error,
+    /// Automatically recreates the slot and restarts replication from scratch.
+    ///
+    /// When an invalidated slot is detected, the pipeline will:
+    /// 1. Reset all table replication states to `Init`
+    /// 2. Delete all existing replication slots for the pipeline
+    /// 3. Create a new replication slot
+    /// 4. Run table sync for all tables, respecting [`TableSyncCopyConfig`] rules
+    ///
+    /// This option allows the pipeline to restart replication and automatically recover.
+    Recreate,
+}
+
 /// Controls which tables are eligible for initial table copy and streaming.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -78,6 +104,9 @@ pub struct PipelineConfig {
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
+    /// Behavior when the main replication slot is found to be invalidated.
+    #[serde(default)]
+    pub invalidated_slot_behavior: InvalidatedSlotBehavior,
 }
 
 impl PipelineConfig {
@@ -156,6 +185,9 @@ pub struct PipelineConfigWithoutSecrets {
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
+    /// Behavior when the main replication slot is found to be invalidated.
+    #[serde(default)]
+    pub invalidated_slot_behavior: InvalidatedSlotBehavior,
 }
 
 impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
@@ -169,6 +201,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
             max_table_sync_workers: value.max_table_sync_workers,
             table_sync_copy: value.table_sync_copy,
+            invalidated_slot_behavior: value.invalidated_slot_behavior,
         }
     }
 }

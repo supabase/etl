@@ -137,12 +137,7 @@ where
             //
             // We try to delete the slot also during `Init` because we support state rollback and a
             // slot might be there from the previous run.
-            if let Err(err) = replication_client.delete_slot(&slot_name).await {
-                // If the slot is not found, we are safe to continue, for any other error, we bail.
-                if err.kind() != ErrorKind::ReplicationSlotNotFound {
-                    return Err(err);
-                }
-            }
+            replication_client.delete_slot_if_exists(&slot_name).await?;
 
             // We must truncate the destination table before starting a copy to avoid data inconsistencies.
             // Example scenario:

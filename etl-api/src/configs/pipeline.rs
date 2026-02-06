@@ -1,4 +1,6 @@
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig};
+use etl_config::shared::{
+    BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -46,6 +48,8 @@ pub struct FullApiPipelineConfig {
     pub max_table_sync_workers: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_sync_copy: Option<TableSyncCopyConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalidated_slot_behavior: Option<InvalidatedSlotBehavior>,
     pub log_level: Option<LogLevel>,
 }
 
@@ -61,6 +65,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
             table_error_retry_max_attempts: Some(value.table_error_retry_max_attempts),
             max_table_sync_workers: Some(value.max_table_sync_workers),
             table_sync_copy: Some(value.table_sync_copy),
+            invalidated_slot_behavior: Some(value.invalidated_slot_behavior),
             log_level: value.log_level,
         }
     }
@@ -90,6 +95,8 @@ pub struct PartialApiPipelineConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_sync_copy: Option<TableSyncCopyConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalidated_slot_behavior: Option<InvalidatedSlotBehavior>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub log_level: Option<LogLevel>,
 }
 
@@ -106,6 +113,8 @@ pub struct StoredPipelineConfig {
     pub max_table_sync_workers: u16,
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
+    #[serde(default)]
+    pub invalidated_slot_behavior: InvalidatedSlotBehavior,
     pub log_level: Option<LogLevel>,
 }
 
@@ -124,6 +133,7 @@ impl StoredPipelineConfig {
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,
             max_table_sync_workers: self.max_table_sync_workers,
             table_sync_copy: self.table_sync_copy,
+            invalidated_slot_behavior: self.invalidated_slot_behavior,
         }
     }
 
@@ -155,6 +165,10 @@ impl StoredPipelineConfig {
 
         if let Some(value) = partial.table_sync_copy {
             self.table_sync_copy = value;
+        }
+
+        if let Some(value) = partial.invalidated_slot_behavior {
+            self.invalidated_slot_behavior = value;
         }
 
         self.log_level = partial.log_level
@@ -189,6 +203,7 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
                 .max_table_sync_workers
                 .unwrap_or(PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS),
             table_sync_copy: value.table_sync_copy.unwrap_or_default(),
+            invalidated_slot_behavior: value.invalidated_slot_behavior.unwrap_or_default(),
             log_level: value.log_level,
         }
     }
@@ -212,6 +227,7 @@ mod tests {
             max_table_sync_workers: 4,
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             log_level: None,
+            invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -242,6 +258,7 @@ mod tests {
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
             table_sync_copy: None,
+            invalidated_slot_behavior: None,
             log_level: Some(LogLevel::Debug),
         };
 
@@ -260,6 +277,7 @@ mod tests {
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
             table_sync_copy: None,
+            invalidated_slot_behavior: None,
             log_level: None,
         };
 
@@ -279,6 +297,10 @@ mod tests {
             stored.max_table_sync_workers,
             PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
         );
+        assert_eq!(
+            stored.invalidated_slot_behavior,
+            InvalidatedSlotBehavior::Error
+        );
     }
 
     #[test]
@@ -294,6 +316,7 @@ mod tests {
             max_table_sync_workers: 2,
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             log_level: None,
+            invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
         };
 
         let partial = PartialApiPipelineConfig {
@@ -306,6 +329,7 @@ mod tests {
             table_error_retry_max_attempts: Some(9),
             max_table_sync_workers: None,
             table_sync_copy: Some(TableSyncCopyConfig::SkipAllTables),
+            invalidated_slot_behavior: Some(InvalidatedSlotBehavior::Recreate),
             log_level: None,
         };
 
@@ -318,5 +342,9 @@ mod tests {
         assert_eq!(stored.table_error_retry_max_attempts, 9);
         assert_eq!(stored.max_table_sync_workers, 2);
         assert_eq!(stored.table_sync_copy, TableSyncCopyConfig::SkipAllTables);
+        assert_eq!(
+            stored.invalidated_slot_behavior,
+            InvalidatedSlotBehavior::Recreate
+        );
     }
 }
