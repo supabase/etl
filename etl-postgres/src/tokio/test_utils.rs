@@ -1,6 +1,6 @@
-use std::num::NonZeroI32;
-
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use std::num::NonZeroI32;
+use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio_postgres::types::{FromSql, ToSql, Type};
 use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
@@ -30,6 +30,20 @@ pub enum TableModification<'a> {
     ReplicaIdentity {
         value: &'a str,
     },
+}
+
+/// State of a PostgreSQL replication slot.
+///
+/// Represents the combined existence, activity, and validity state of a replication slot
+/// as queried from `pg_replication_slots`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicationSlotState {
+    /// Slot exists and is currently active (being used by a replication connection).
+    Active,
+    /// Slot exists, is inactive, and is valid for replication.
+    Inactive,
+    /// Slot exists but has been invalidated (wal_status = 'lost').
+    Invalidated,
 }
 
 /// Postgres database wrapper for testing operations.
@@ -465,43 +479,55 @@ impl<G: GenericClient> PgDatabase<G> {
         Ok(())
     }
 
-    /// Checks whether a Postgres replication slot exists.
+    /// Gets the state of a replication slot.
     ///
-    /// Queries the `pg_replication_slots` system catalog to determine
-    /// if a replication slot with the given name exists.
-    pub async fn replication_slot_exists(
+    /// Queries the `pg_replication_slots` system catalog to determine the slot's
+    /// existence, activity, and validity status in a single call.
+    ///
+    /// Returns `None` if the slot does not exist, otherwise returns the slot state.
+    pub async fn get_replication_slot_state(
         &self,
         slot_name: &str,
-    ) -> Result<bool, tokio_postgres::Error> {
-        let query = "select exists(select 1 from pg_replication_slots where slot_name = $1)";
+    ) -> Result<Option<ReplicationSlotState>, tokio_postgres::Error> {
+        let query = "select active, wal_status from pg_replication_slots where slot_name = $1";
         let row = self
             .client
             .as_ref()
             .unwrap()
-            .query_one(query, &[&slot_name])
+            .query_opt(query, &[&slot_name])
             .await?;
 
-        Ok(row.get(0))
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let active: bool = row.get(0);
+        if active {
+            return Ok(Some(ReplicationSlotState::Active));
+        }
+
+        // wal_status can be: 'reserved', 'extended', 'unreserved', or 'lost'
+        // A slot is invalidated when wal_status is 'lost'
+        let wal_status: Option<&str> = row.get(1);
+        if wal_status == Some("lost") {
+            Ok(Some(ReplicationSlotState::Invalidated))
+        } else {
+            Ok(Some(ReplicationSlotState::Inactive))
+        }
     }
 
-    /// Checks whether a Postgres replication slot is active.
+    /// Waits for a replication slot to become inactive.
     ///
-    /// Queries the `pg_replication_slots` system catalog to determine
-    /// if a replication slot with the given name is currently active.
-    /// Returns `false` if the slot does not exist.
-    pub async fn replication_slot_is_active(
-        &self,
-        slot_name: &str,
-    ) -> Result<bool, tokio_postgres::Error> {
-        let query = "select coalesce((select active from pg_replication_slots where slot_name = $1), false)";
-        let row = self
-            .client
-            .as_ref()
-            .unwrap()
-            .query_one(query, &[&slot_name])
-            .await?;
-
-        Ok(row.get(0))
+    /// Polls the slot status every 100ms until it becomes inactive, invalidated,
+    /// or no longer exists. This is useful in tests after shutting down a pipeline
+    /// to ensure the slot is released before performing operations on it.
+    pub async fn wait_for_slot_inactive(&self, slot_name: &str) {
+        while matches!(
+            self.get_replication_slot_state(slot_name).await,
+            Ok(Some(ReplicationSlotState::Active))
+        ) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Executes arbitrary SQL on the database.
@@ -521,14 +547,7 @@ impl<G: GenericClient> PgDatabase<G> {
     /// - Insufficient privileges (requires superuser)
     /// - PostgreSQL version < 13 (no wal_status support)
     /// - Database configuration preventing invalidation
-    ///
-    /// # Arguments
-    ///
-    /// * `slot_name` - The name of the replication slot to invalidate.
     pub async fn try_invalidate_slot(&self, slot_name: &str) -> bool {
-        use std::time::Duration;
-        use tokio::time::sleep;
-
         let client = self.client.as_ref().unwrap();
 
         // Try to set max_slot_wal_keep_size very low - this requires superuser privileges
@@ -548,6 +567,7 @@ impl<G: GenericClient> PgDatabase<G> {
             let _ = client
                 .execute("ALTER SYSTEM RESET max_slot_wal_keep_size", &[])
                 .await;
+
             return false;
         }
 
@@ -573,7 +593,7 @@ impl<G: GenericClient> PgDatabase<G> {
         let _ = client.execute("CHECKPOINT", &[]).await;
 
         // Give the system time to invalidate the slot
-        sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Check if the slot is now invalidated
         let result = client

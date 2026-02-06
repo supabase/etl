@@ -251,8 +251,8 @@ async fn handle_invalidated_slot<S: StateStore>(
                 format!(
                     "The replication slot '{}' for pipeline {} has been invalidated. \
                     This typically happens when the slot falls too far behind and PostgreSQL \
-                    removes the required WAL segments. To recover, delete the slot, reset all \
-                    table states, and start/restart the pipeline.",
+                    removes the required WAL segments. To recover, delete the apply replication slot, \
+                    reset all table states, and start/restart the pipeline.",
                     slot_name, pipeline_id
                 )
             );

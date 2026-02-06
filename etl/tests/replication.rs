@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use etl::error::ErrorKind;
-use etl::replication::client::PgReplicationClient;
+use etl::replication::client::{PgReplicationClient, SlotState};
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::test_slot_name;
 use etl::test_utils::table::assert_table_schema;
@@ -803,8 +803,6 @@ async fn test_get_slot_state_returns_error_for_nonexistent_slot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_slot_state_returns_invalidated_for_lost_slot() {
-    use etl::replication::client::SlotState;
-
     init_test_tracing();
     let database = spawn_source_database().await;
 
