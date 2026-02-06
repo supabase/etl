@@ -1,8 +1,6 @@
 use super::connect_to_source_database_from_api;
 use crate::configs::encryption::EncryptionKey;
-use crate::configs::pipeline::{
-    FullApiPipelineConfig, PartialApiPipelineConfig, StoredPipelineConfig,
-};
+use crate::configs::pipeline::{FullApiPipelineConfig, StoredPipelineConfig};
 use crate::configs::serde::{
     DbDeserializationError, DbSerializationError, deserialize_from_value, serialize,
 };
@@ -322,61 +320,6 @@ where
     }
 
     Ok(pipelines)
-}
-
-pub async fn update_pipeline_config(
-    txn: &mut PgTransaction<'_>,
-    tenant_id: &str,
-    pipeline_id: i64,
-    config: PartialApiPipelineConfig,
-) -> Result<Option<StoredPipelineConfig>, PipelinesDbError> {
-    // We use `select ... for update` to lock the pipeline row being updated
-    // to avoid concurrent requests clobbering data from each other
-    let record = sqlx::query!(
-        r#"
-        select p.id,
-            p.config
-        from app.pipelines p
-        where p.tenant_id = $1 and p.id = $2
-        for update
-        "#,
-        tenant_id,
-        pipeline_id,
-    )
-    .fetch_optional(txn.deref_mut())
-    .await?;
-
-    match record {
-        Some(record) => {
-            let mut config_in_db = deserialize_from_value::<StoredPipelineConfig>(record.config)?;
-            config_in_db.merge(config);
-
-            let updated_config = serialize(config_in_db)?;
-
-            let record = sqlx::query!(
-                r#"
-                update app.pipelines
-                set config = $1, updated_at = now()
-                where tenant_id = $2 and id = $3
-                returning config
-                "#,
-                updated_config,
-                tenant_id,
-                pipeline_id
-            )
-            .fetch_optional(txn.deref_mut())
-            .await?;
-
-            match record {
-                Some(record) => {
-                    let config = deserialize_from_value::<StoredPipelineConfig>(record.config)?;
-                    Ok(Some(config))
-                }
-                None => Ok(None),
-            }
-        }
-        None => Ok(None),
-    }
 }
 
 pub async fn read_pipeline_components(
