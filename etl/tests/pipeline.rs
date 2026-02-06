@@ -340,7 +340,7 @@ async fn pipeline_recovers_when_slot_invalidated_with_recreate_behavior() {
         .get_replication_slot_state(&apply_slot_name)
         .await
         .unwrap();
-    assert_eq!(slot_state, Some(ReplicationSlotState::Active),);
+    assert_eq!(slot_state, Some(ReplicationSlotState::Active));
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
