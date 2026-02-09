@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
 use tokio::task::AbortHandle;
-use tracing::{Instrument, debug, error, info, warn};
+use tracing::{Instrument, debug, error, info};
 
 use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
@@ -25,14 +25,6 @@ use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::pool::{TableSyncWorkerId, TableSyncWorkerPool};
-
-/// Maximum time to wait for the slot deletion call to complete.
-///
-/// The reason for setting a timer on deletion is that we wait for the slot to become unused before
-/// deleting it. We want to avoid an infinite wait in case the slot fails to be released,
-/// as this could result in a connection being held indefinitely, potentially stalling the processing
-/// of new tables.
-const MAX_DELETE_SLOT_WAIT: Duration = Duration::from_secs(30);
 
 /// Internal state of [`TableSyncWorkerState`].
 #[derive(Debug)]
@@ -648,18 +640,7 @@ where
             let slot_name: String =
                 EtlReplicationSlot::for_table_sync_worker(self.pipeline_id, self.table_id)
                     .try_into()?;
-            let result = tokio::time::timeout(
-                MAX_DELETE_SLOT_WAIT,
-                replication_client.delete_slot_if_exists(&slot_name),
-            )
-            .await;
-            if result.is_err() {
-                warn!(
-                    table_id = self.table_id.0,
-                    %slot_name,
-                    "failed to delete the replication slot of the table sync worker due to timeout",
-                );
-            }
+            replication_client.delete_slot_if_exists(&slot_name).await?;
         }
 
         // This explicit drop is not strictly necessary but is added to make it extra clear

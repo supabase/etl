@@ -14,6 +14,7 @@ use rustls::pki_types::{CertificateDer, pem::PemObject};
 use std::fmt;
 use std::num::NonZeroI32;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
@@ -22,6 +23,12 @@ use tokio_postgres::{
     config::ReplicationMode, types::PgLsn,
 };
 use tracing::{Instrument, error, info, warn};
+
+/// Maximum time to wait for a replication slot deletion to complete.
+///
+/// Slot deletion uses `WAIT`, which can block until the slot is no longer in use.
+/// This timeout ensures calls are bounded and cannot wait forever.
+const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Spawns a background task to monitor a Postgres connection until it terminates.
 fn spawn_postgres_connection<T>(connection: Connection<Socket, T::Stream>)
@@ -380,6 +387,19 @@ impl PgReplicationClient {
     ///
     /// Returns an error if the slot doesn't exist or if there are any issues with the deletion.
     pub async fn delete_slot(&self, slot_name: &str) -> EtlResult<()> {
+        self.delete_slot_internal(slot_name, true).await
+    }
+
+    /// Deletes a replication slot with the specified name if it exists.
+    ///
+    /// This method returns [`Ok(())`] when the slot is missing and propagates any other
+    /// error from [`PgReplicationClient::delete_slot`].
+    pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
+        self.delete_slot_internal(slot_name, false).await
+    }
+
+    /// Deletes a replication slot, optionally failing when the slot does not exist.
+    async fn delete_slot_internal(&self, slot_name: &str, fail_if_missing: bool) -> EtlResult<()> {
         info!(slot_name, "deleting replication slot");
 
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
@@ -388,7 +408,30 @@ impl PgReplicationClient {
             quote_identifier(slot_name)
         );
 
-        match self.client.simple_query(&query).await {
+        let delete_result =
+            match tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    error!(
+                        slot_name,
+                        timeout_secs = DELETE_SLOT_TIMEOUT.as_secs(),
+                        "timed out while deleting replication slot"
+                    );
+
+                    bail!(
+                        ErrorKind::ReplicationSlotDeletionTimeout,
+                        "Replication slot deletion timed out",
+                        format!(
+                            "Timed out after {:?} while deleting replication slot '{}'",
+                            DELETE_SLOT_TIMEOUT, slot_name
+                        ),
+                        source: err
+                    );
+                }
+            };
+
+        match delete_result {
             Ok(_) => {
                 info!(slot_name, "deleted replication slot");
 
@@ -398,37 +441,31 @@ impl PgReplicationClient {
                 if let Some(code) = err.code()
                     && *code == SqlState::UNDEFINED_OBJECT
                 {
-                    warn!(
-                        slot_name,
-                        "attempted to delete non-existent replication slot"
-                    );
+                    if fail_if_missing {
+                        warn!(
+                            slot_name,
+                            "attempted to delete non-existent replication slot"
+                        );
 
-                    bail!(
-                        ErrorKind::ReplicationSlotNotFound,
-                        "Replication slot not found",
-                        format!(
-                            "Replication slot '{}' not found in database while attempting its deletion",
-                            slot_name
-                        )
-                    );
+                        bail!(
+                            ErrorKind::ReplicationSlotNotFound,
+                            "Replication slot not found",
+                            format!(
+                                "Replication slot '{}' not found in database while attempting its deletion",
+                                slot_name
+                            )
+                        );
+                    }
+
+                    info!(slot_name, "replication slot not found, skipping deletion");
+
+                    return Ok(());
                 }
 
                 error!(slot_name, error = %err, "failed to delete replication slot");
 
                 Err(err.into())
             }
-        }
-    }
-
-    /// Deletes a replication slot if it exists.
-    ///
-    /// This method wraps [`Self::delete_slot`] and swallows
-    /// [`ErrorKind::ReplicationSlotNotFound`], while propagating all other errors.
-    pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
-        match self.delete_slot(slot_name).await {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => Ok(()),
-            Err(err) => Err(err),
         }
     }
 

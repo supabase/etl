@@ -272,32 +272,33 @@ async fn handle_invalidated_slot<S: StateStore>(
                 "replication slot is invalidated, resetting all table states and recreating slot"
             );
 
-            // First, reset all table states to Init. This must happen before deleting the slot
-            // to avoid a state where slots are absent but tables are not in Init state.
-            // The table sync workers will delete their own slots when they restart from Init.
-            let table_states = store.get_table_replication_states().await?;
-            let updates: Vec<_> = table_states
+            // We update all tables to Init to reset their state, but no slots are deleted for table
+            // sync workers since the deletion will be handled by the worker itself when starting up
+            // again.
+            let table_states_updates: Vec<_> = store
+                .get_table_replication_states()
+                .await?
                 .keys()
                 .map(|table_id| (*table_id, TableReplicationPhase::Init))
                 .collect();
-            let reset_count = updates.len();
+            let reset_count = table_states_updates.len();
+            store
+                .update_table_replication_states(table_states_updates)
+                .await?;
 
-            store.update_table_replication_states(updates).await?;
             info!(
                 reset_count,
                 "reset table replication states to init for resync"
             );
 
-            // Now delete the invalidated slot.
+            // We delete and recreate the main apply worker slot.
             replication_client.delete_slot_if_exists(slot_name).await?;
-
-            // Create a new slot.
             let create_result = replication_client.create_slot(slot_name).await?;
 
             info!(
                 slot_name,
                 consistent_point = %create_result.consistent_point,
-                "created new replication slot after invalidation recovery"
+                "created new apply worker replication slot after invalidation recovery"
             );
 
             Ok(create_result.consistent_point)
