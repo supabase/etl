@@ -1,8 +1,9 @@
 use etl::error::EtlError;
 use etl_config::Environment;
 use secrecy::ExposeSecret;
-use sentry::protocol::{Event, Exception, Stacktrace};
+use sentry::protocol::{Event, Exception, Stacktrace, Value};
 use sentry::types::Uuid;
+use serde_json::json;
 use std::backtrace::BacktraceStatus;
 use std::sync::Arc;
 use tracing::info;
@@ -59,24 +60,29 @@ pub fn capture_error(err: &ReplicatorError) -> Uuid {
 
 /// Converts a [`ReplicatorError`] into a Sentry [`Event`].
 fn event_from_replicator_error(err: &ReplicatorError) -> Event<'static> {
+    let mut event = Event {
+        level: sentry::Level::Error,
+        ..Default::default()
+    };
     let mut exceptions = Vec::new();
 
     match err {
         ReplicatorError::Etl(etl_err) => {
             collect_etl_exceptions(etl_err, &mut exceptions);
-        }
-        _ => {
-            let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
-            while let Some(error) = current {
-                exceptions.push(Exception {
-                    ty: type_name_from_debug(error),
-                    value: Some(error.to_string()),
-                    ..Default::default()
-                });
-                current = error.source();
+
+            if etl_err.errors().is_some() {
+                let leaf_count = count_leaf_errors(etl_err);
+                event.extra.insert(
+                    "etl_error_leaf_count".to_string(),
+                    Value::from(leaf_count as u64),
+                );
+                event.extra.insert(
+                    "etl_error_tree".to_string(),
+                    etl_error_tree_to_serde_value(etl_err),
+                );
             }
-            exceptions.reverse();
         }
+        _ => collect_standard_exception_chain(err, &mut exceptions),
     }
 
     if let Some(stacktrace) = find_and_parse_stacktrace(err)
@@ -85,25 +91,96 @@ fn event_from_replicator_error(err: &ReplicatorError) -> Event<'static> {
         exception.stacktrace = Some(stacktrace);
     }
 
-    Event {
-        exception: exceptions.into(),
-        level: sentry::Level::Error,
+    event.exception = exceptions.into();
+    event
+}
+
+/// Recursively collects leaf ETL errors as sentry exceptions.
+fn collect_etl_exceptions(error: &EtlError, exceptions: &mut Vec<Exception>) {
+    if let Some(children) = error.errors() {
+        for child in children {
+            collect_etl_exceptions(child, exceptions);
+        }
+        return;
+    }
+
+    exceptions.push(Exception {
+        ty: format!("{:?}", error.kind()),
+        value: Some(format_etl_sentry_value(error)),
         ..Default::default()
+    });
+
+    let mut source = std::error::Error::source(error);
+    while let Some(current) = source {
+        exceptions.push(Exception {
+            ty: type_name_from_debug(current),
+            value: Some(current.to_string()),
+            ..Default::default()
+        });
+        source = current.source();
     }
 }
 
-/// Recursively collects Sentry exceptions from an [`EtlError`].
-fn collect_etl_exceptions(error: &EtlError, exceptions: &mut Vec<Exception>) {
-    if let Some(errors) = error.errors() {
-        for error in errors {
-            collect_etl_exceptions(error, exceptions);
-        }
-    } else {
+/// Collects a standard source chain into sentry exceptions.
+fn collect_standard_exception_chain(
+    root: &(dyn std::error::Error + 'static),
+    exceptions: &mut Vec<Exception>,
+) {
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(root);
+    while let Some(error) = current {
         exceptions.push(Exception {
-            ty: format!("{:?}", error.kind()),
+            ty: type_name_from_debug(error),
             value: Some(error.to_string()),
             ..Default::default()
         });
+        current = error.source();
+    }
+
+    // We reverse because Sentry will show as top-level the last element of the list, and since we
+    // want the first error in the source chain to be on top, we have to reverse everything.
+    exceptions.reverse();
+}
+
+/// Formats a single ETL error for sentry aggregation.
+///
+/// The type is carried in the exception `ty`; this value contains only
+/// `description` or `description: detail`.
+fn format_etl_sentry_value(error: &EtlError) -> String {
+    let description = error.description().unwrap_or("etl error");
+    match error.detail() {
+        Some(detail) if !detail.trim().is_empty() => {
+            format!(
+                "{description}: {}",
+                detail.lines().collect::<Vec<_>>().join(" ")
+            )
+        }
+        _ => description.to_string(),
+    }
+}
+
+/// Counts total leaf errors contained in an ETL error tree.
+fn count_leaf_errors(error: &EtlError) -> usize {
+    if let Some(children) = error.errors() {
+        children.iter().map(count_leaf_errors).sum()
+    } else {
+        1
+    }
+}
+
+/// Converts an ETL error tree into a serde value which will be used as metadata for sentry.
+fn etl_error_tree_to_serde_value(error: &EtlError) -> Value {
+    if let Some(children) = error.errors() {
+        Value::from(json!({
+            "type": "Many",
+            "message": format!("{error}"),
+            "total_leaf_errors": count_leaf_errors(error),
+            "children": children.iter().map(etl_error_tree_to_serde_value).collect::<Vec<_>>(),
+        }))
+    } else {
+        Value::from(json!({
+            "type": format!("{:?}", error.kind()),
+            "message": format_etl_sentry_value(error),
+        }))
     }
 }
 

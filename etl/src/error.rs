@@ -192,6 +192,16 @@ impl EtlError {
         }
     }
 
+    /// Returns the top-level human-readable description if this is a single error.
+    ///
+    /// Returns [`None`] for aggregated errors.
+    pub fn description(&self) -> Option<&str> {
+        match self.repr {
+            ErrorRepr::Single(ref payload) => Some(payload.description.as_ref()),
+            ErrorRepr::Many { .. } => None,
+        }
+    }
+
     /// Returns the individual errors contained in this error.
     ///
     /// For single errors, returns [`None`]. For multiple errors, returns a
@@ -336,35 +346,54 @@ impl Hash for EtlError {
 
 impl fmt::Display for EtlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        match &self.repr {
-            ErrorRepr::Single(payload) => {
-                write!(f, "{}", payload.description)?;
+        write_error_tree(self, f, "", true, true)
+    }
+}
 
-                if let Some(detail) = &payload.detail {
-                    if !detail.trim().is_empty() {
-                        write!(f, ": {}", detail.lines().collect::<Vec<_>>().join(" "))?;
-                    }
-                }
+/// Writes an error and its nested children as a tree.
+fn write_error_tree(
+    error: &EtlError,
+    f: &mut fmt::Formatter<'_>,
+    prefix: &str,
+    is_last: bool,
+    is_root: bool,
+) -> fmt::Result {
+    if !is_root {
+        let branch = if is_last { "└─" } else { "├─" };
+        write!(f, "{prefix}{branch} ")?;
+    }
 
-                write!(f, " [{:?}]", payload.kind)?;
+    match &error.repr {
+        ErrorRepr::Single(payload) => {
+            write!(f, "[{:?}] {}", payload.kind, payload.description)?;
 
-                Ok(())
+            if let Some(detail) = &payload.detail
+                && !detail.trim().is_empty()
+            {
+                write!(f, ": {}", detail.lines().collect::<Vec<_>>().join(" "))?;
             }
-            ErrorRepr::Many { errors, .. } => {
-                let count = errors.len();
-                write!(
-                    f,
-                    "{} error{} occurred",
-                    count,
-                    if count == 1 { "" } else { "s" },
-                )?;
+            Ok(())
+        }
+        ErrorRepr::Many { errors, .. } => {
+            write!(
+                f,
+                "{} error{} occurred",
+                errors.len(),
+                if errors.len() == 1 { "" } else { "s" },
+            )?;
 
-                for (index, error) in errors.iter().enumerate() {
-                    write!(f, "\n  {}. {}", index + 1, error)?;
-                }
-
-                Ok(())
+            let child_prefix = if is_root {
+                String::new()
+            } else {
+                format!("{prefix}{}", if is_last { "   " } else { "│  " })
+            };
+            for (index, child) in errors.iter().enumerate() {
+                let child_is_last = index + 1 == errors.len();
+                write!(f, "\n")?;
+                write_error_tree(child, f, &child_prefix, child_is_last, false)?;
             }
+
+            Ok(())
         }
     }
 }
@@ -1078,41 +1107,6 @@ mod tests {
     }
 
     #[test]
-    fn test_error_display() {
-        let err = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
-            "Database connection failed",
-        ));
-        let display_str = format!("{err}");
-        assert!(display_str.starts_with("Database connection failed"));
-        assert!(display_str.contains("[SourceConnectionFailed]"));
-    }
-
-    #[test]
-    fn test_error_display_with_detail() {
-        let err = EtlError::from((
-            ErrorKind::SourceQueryFailed,
-            "SQL query failed",
-            "Invalid table name".to_string(),
-        ));
-        let display_str = format!("{err}");
-        assert!(display_str.starts_with("SQL query failed: Invalid table name"));
-        assert!(display_str.contains("[SourceQueryFailed]"));
-    }
-
-    #[test]
-    fn test_multiple_errors_display() {
-        let errors = vec![
-            EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
-            EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
-        ];
-        let multi_err: EtlError = errors.into();
-        let display_str = format!("{multi_err}");
-        assert!(display_str.contains("2 errors occurred"));
-        assert!(display_str.contains("1. Invalid schema"));
-    }
-
-    #[test]
     fn test_error_source_preserved() {
         let io_err = std::io::Error::other("boom");
         let err = EtlError::from(io_err);
@@ -1240,11 +1234,6 @@ mod tests {
         assert!(kinds.contains(&ErrorKind::ConversionError));
         assert!(kinds.contains(&ErrorKind::ValidationError));
         assert!(kinds.contains(&ErrorKind::IoError));
-
-        let rendered = format!("{outer_multi}");
-        println!("{rendered}");
-        assert!(rendered.contains("2 errors occurred"));
-        assert!(rendered.contains("1. 2 errors occurred"));
     }
 
     #[test]

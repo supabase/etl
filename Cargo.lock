@@ -1753,7 +1753,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
- "thiserror 2.0.17",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "tokio",

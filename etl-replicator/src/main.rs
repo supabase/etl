@@ -42,6 +42,7 @@ use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
 use secrecy::ExposeSecret;
+use std::process::ExitCode;
 use std::sync::Once;
 use tracing::{error, info, warn};
 
@@ -80,7 +81,18 @@ fn install_crypto_provider() {
 /// Loads configuration, initializes tracing and Sentry, starts the async runtime,
 /// and launches the replicator pipeline. Handles all errors and ensures proper
 /// service initialization sequence.
-fn main() -> ReplicatorResult<()> {
+fn main() -> ExitCode {
+    match try_main() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("{}", err.render_report());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Runs the replicator service and propagates typed errors.
+fn try_main() -> ReplicatorResult<()> {
     // Install rustls crypto provider before any TLS operations
     install_crypto_provider();
 
@@ -159,16 +171,16 @@ async fn async_main(replicator_config: ReplicatorConfig) -> ReplicatorResult<()>
         // Send an error notification if a client is available.
         if let Some(client) = notification_client {
             let error_message = format!("{err}");
-            match err.as_etl_error() {
-                Some(etl_err) => {
+            match &err {
+                ReplicatorError::Etl(etl_err) => {
                     client.notify_error(error_message.clone(), etl_err).await;
                 }
-                None => {
+                _ => {
                     client
                         .notify_error(error_message.clone(), error_message)
                         .await;
                 }
-            };
+            }
         }
 
         return Err(err);
