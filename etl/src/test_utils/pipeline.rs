@@ -145,10 +145,6 @@ where
     }
 
     /// Sets the behavior when the main replication slot is found to be invalidated.
-    ///
-    /// # Arguments
-    ///
-    /// * `behavior` - How to handle invalidated slots (Error or Recreate)
     pub fn with_invalidated_slot_behavior(mut self, behavior: InvalidatedSlotBehavior) -> Self {
         self.invalidated_slot_behavior = behavior;
         self
