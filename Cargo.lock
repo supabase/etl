@@ -1740,7 +1740,6 @@ dependencies = [
 name = "etl-replicator"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "configcat",
  "etl",
  "etl-config",
@@ -1754,6 +1753,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "thiserror 2.0.17",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "tokio",
