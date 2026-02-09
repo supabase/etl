@@ -68,18 +68,19 @@ fn event_from_replicator_error(err: &ReplicatorError) -> Event<'static> {
 
     match err {
         ReplicatorError::Etl(etl_err) => {
-            collect_etl_exceptions(etl_err, &mut exceptions);
-
             if etl_err.errors().is_some() {
                 let leaf_count = count_leaf_errors(etl_err);
-                event.extra.insert(
-                    "etl_error_leaf_count".to_string(),
-                    Value::from(leaf_count as u64),
-                );
+                exceptions.push(Exception {
+                    ty: "Many".to_string(),
+                    value: Some(format!("{leaf_count} errors occurred")),
+                    ..Default::default()
+                });
                 event.extra.insert(
                     "etl_error_tree".to_string(),
                     etl_error_tree_to_serde_value(etl_err),
                 );
+            } else {
+                collect_single_etl_exception_chain(etl_err, &mut exceptions);
             }
         }
         _ => collect_standard_exception_chain(err, &mut exceptions),
@@ -95,15 +96,8 @@ fn event_from_replicator_error(err: &ReplicatorError) -> Event<'static> {
     event
 }
 
-/// Recursively collects leaf ETL errors as sentry exceptions.
-fn collect_etl_exceptions(error: &EtlError, exceptions: &mut Vec<Exception>) {
-    if let Some(children) = error.errors() {
-        for child in children {
-            collect_etl_exceptions(child, exceptions);
-        }
-        return;
-    }
-
+/// Collects a single ETL error and its source chain into sentry exceptions.
+fn collect_single_etl_exception_chain(error: &EtlError, exceptions: &mut Vec<Exception>) {
     exceptions.push(Exception {
         ty: format!("{:?}", error.kind()),
         value: Some(format_etl_sentry_value(error)),
@@ -170,17 +164,16 @@ fn count_leaf_errors(error: &EtlError) -> usize {
 /// Converts an ETL error tree into a serde value which will be used as metadata for sentry.
 fn etl_error_tree_to_serde_value(error: &EtlError) -> Value {
     if let Some(children) = error.errors() {
-        Value::from(json!({
+        json!({
             "type": "Many",
-            "message": format!("{error}"),
-            "total_leaf_errors": count_leaf_errors(error),
             "children": children.iter().map(etl_error_tree_to_serde_value).collect::<Vec<_>>(),
-        }))
+        })
     } else {
-        Value::from(json!({
+        json!({
             "type": format!("{:?}", error.kind()),
-            "message": format_etl_sentry_value(error),
-        }))
+            "description": error.description(),
+            "detail": error.detail(),
+        })
     }
 }
 

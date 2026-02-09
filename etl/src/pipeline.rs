@@ -3,9 +3,10 @@
 //! Contains the main [`Pipeline`] struct that coordinates Postgres logical replication
 //! with destination systems. Manages worker lifecycles, shutdown coordination, and error handling.
 
+use crate::bail;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
 use crate::replication::client::PgReplicationClient;
 use crate::state::table::TableReplicationPhase;
@@ -15,7 +16,6 @@ use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
-use crate::{bail, etl_error};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::types::TableId;
@@ -123,45 +123,6 @@ where
         // We create the first connection to Postgres.
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
-
-        // return Err(EtlError::from((
-        //     ErrorKind::SourceQueryFailed,
-        //     "query failed",
-        //     "users table missing".to_string(),
-        // )));
-        let branch_a: EtlError = vec![
-            EtlError::from((
-                ErrorKind::SourceQueryFailed,
-                "query failed",
-                "users table missing".to_string(),
-            )),
-            EtlError::from((ErrorKind::ValidationError, "invalid schema")),
-        ]
-        .into();
-
-        let leaf_many: EtlError = vec![
-            EtlError::from((ErrorKind::IoError, "socket timeout")),
-            EtlError::from((ErrorKind::DestinationQueryFailed, "insert failed")),
-        ]
-        .into();
-
-        let branch_b: EtlError = vec![
-            EtlError::from((ErrorKind::ConversionError, "type cast failed")),
-            leaf_many,
-        ]
-        .into();
-
-        let err = vec![
-            branch_a,
-            branch_b,
-            EtlError::from((
-                ErrorKind::SourceConnectionFailed,
-                "cannot connect to source",
-            )),
-        ]
-        .into();
-
-        return Err(err);
 
         // We load the table mappings and schemas from the store to have them cached for quick
         // access.

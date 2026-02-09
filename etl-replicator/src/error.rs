@@ -78,7 +78,7 @@ impl ReplicatorError {
         let mut out = String::new();
         out.push_str("replicator failed\n");
         out.push_str(&format!("category: {}\n", self.category()));
-        out.push_str(&format!("error: {}\n", self));
+        out.push_str(&format!("error: {self}\n"));
 
         if !matches!(self, ReplicatorError::Etl(err) if err.errors().is_some()) {
             let mut source = Error::source(self);
