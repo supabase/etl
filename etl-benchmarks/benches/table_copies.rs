@@ -7,7 +7,8 @@ use etl::test_utils::notifying_store::NotifyingStore;
 use etl::types::{Event, TableRow};
 use etl_config::Environment;
 use etl_config::shared::{
-    BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig, TlsConfig,
+    BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
+    TlsConfig,
 };
 use etl_destinations::bigquery::BigQueryDestination;
 use etl_postgres::types::TableId;
@@ -353,6 +354,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.max_table_sync_workers,
         table_sync_copy: TableSyncCopyConfig::default(),
+        invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
     };
 
     // Create the appropriate destination based on the argument

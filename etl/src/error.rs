@@ -141,6 +141,8 @@ pub enum ErrorKind {
     ReplicationSlotNotFound,
     ReplicationSlotAlreadyExists,
     ReplicationSlotNotCreated,
+    ReplicationSlotInvalidated,
+    ReplicationSlotDeletionTimeout,
     SourceSnapshotTooOld,
     SourceDatabaseInRecovery,
     SourceDatabaseShutdown,
