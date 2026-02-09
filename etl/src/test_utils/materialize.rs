@@ -30,9 +30,9 @@ where
         // Filter by table_id if specified
         if let Some(target_table_id) = table_id {
             let event_table_id = match &event {
-                Event::Insert(insert_event) => insert_event.table_id,
-                Event::Update(update_event) => update_event.table_id,
-                Event::Delete(delete_event) => delete_event.table_id,
+                Event::Insert(insert_event) => insert_event.replicated_table_schema.id(),
+                Event::Update(update_event) => update_event.replicated_table_schema.id(),
+                Event::Delete(delete_event) => delete_event.replicated_table_schema.id(),
                 _ => continue, // Skip other event types
             };
 

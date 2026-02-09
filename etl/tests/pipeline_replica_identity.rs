@@ -122,7 +122,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let memory_destination = MemoryDestination::new();
+    let memory_destination = MemoryDestination::new(store.clone());
     let destination = TestDestinationWrapper::wrap(memory_destination);
 
     let publication_name = "test_pub_toast".to_string();
@@ -254,7 +254,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let memory_destination = MemoryDestination::new();
+    let memory_destination = MemoryDestination::new(store.clone());
     let destination = TestDestinationWrapper::wrap(memory_destination);
 
     let publication_name = "test_pub_toast".to_string();
@@ -377,7 +377,7 @@ async fn update_toast_values_with_default_replica_identity() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let memory_destination = MemoryDestination::new();
+    let memory_destination = MemoryDestination::new(store.clone());
     let destination = TestDestinationWrapper::wrap(memory_destination);
 
     let publication_name = "test_pub_toast".to_string();
@@ -510,7 +510,7 @@ async fn update_non_toast_values_with_none_replica_identity() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let memory_destination = MemoryDestination::new();
+    let memory_destination = MemoryDestination::new(store.clone());
     let destination = TestDestinationWrapper::wrap(memory_destination);
 
     let publication_name = "test_pub_toast".to_string();
@@ -656,7 +656,7 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let memory_destination = MemoryDestination::new();
+    let memory_destination = MemoryDestination::new(store.clone());
     let destination = TestDestinationWrapper::wrap(memory_destination);
 
     let publication_name = "test_pub_toast".to_string();

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_postgres::types::PgLsn;
-use tracing::{Instrument, info, warn};
+use tracing::{Instrument, error, info, warn};
 
 use crate::bail;
 use crate::concurrency::shutdown::ShutdownRx;
@@ -15,6 +15,7 @@ use crate::etl_error;
 use crate::metrics::{ETL_SLOT_INVALIDATIONS_TOTAL, PIPELINE_ID_LABEL};
 use crate::replication::apply::{ApplyLoop, ApplyWorkerContext, WorkerContext};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState};
+use crate::replication::masks::ReplicationMasks;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
@@ -75,6 +76,7 @@ pub struct ApplyWorker<S, D> {
     pool: Arc<TableSyncWorkerPool>,
     store: S,
     destination: D,
+    replication_masks: ReplicationMasks,
     shutdown_rx: ShutdownRx,
     table_sync_worker_permits: Arc<Semaphore>,
 }
@@ -93,6 +95,7 @@ impl<S, D> ApplyWorker<S, D> {
         pool: Arc<TableSyncWorkerPool>,
         store: S,
         destination: D,
+        replication_masks: ReplicationMasks,
         shutdown_rx: ShutdownRx,
         table_sync_worker_permits: Arc<Semaphore>,
     ) -> Self {
@@ -103,6 +106,7 @@ impl<S, D> ApplyWorker<S, D> {
             pool,
             store,
             destination,
+            replication_masks,
             shutdown_rx,
             table_sync_worker_permits,
         }
@@ -142,25 +146,35 @@ where
                 pool: self.pool,
                 store: self.store.clone(),
                 destination: self.destination.clone(),
+                replication_masks: self.replication_masks.clone(),
                 shutdown_rx: self.shutdown_rx.clone(),
                 table_sync_worker_permits: self.table_sync_worker_permits,
             });
 
-            ApplyLoop::start(
+            let result = ApplyLoop::start(
                 self.pipeline_id,
                 start_lsn,
                 self.config,
                 self.replication_client,
                 self.store,
                 self.destination,
+                self.replication_masks,
                 worker_context,
                 self.shutdown_rx,
             )
-            .await?;
+            .await;
 
-            info!("apply worker completed successfully");
-
-            Ok(())
+            match result {
+                Ok(_) => {
+                    info!("apply worker completed successfully");
+                    Ok(())
+                }
+                Err(err) => {
+                    // We log the error here, this way it's logged even if the worker is not awaited.
+                    error!(error = %err, "apply worker failed");
+                    Err(err)
+                }
+            }
         }
         .instrument(apply_worker_span.or_current());
 

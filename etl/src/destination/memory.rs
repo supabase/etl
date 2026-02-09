@@ -5,7 +5,9 @@ use tracing::info;
 
 use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::types::{Event, TableId, TableRow};
+use crate::state::destination_metadata::DestinationTableMetadata;
+use crate::store::state::StateStore;
+use crate::types::{Event, ReplicatedTableSchema, TableId, TableRow};
 
 #[derive(Debug)]
 struct Inner {
@@ -18,17 +20,25 @@ struct Inner {
 /// [`MemoryDestination`] stores all replicated data in memory, making it ideal for
 /// testing ETL pipelines, debugging replication behavior, and development workflows.
 /// All data is held in memory and will be lost when the process terminates.
-#[derive(Debug, Clone)]
-pub struct MemoryDestination {
+///
+/// Like real destinations (BigQuery, Iceberg), this destination tracks table metadata
+/// (snapshot IDs and replication masks) in a state store to support features like
+/// table truncation during state resets.
+#[derive(Clone)]
+pub struct MemoryDestination<S> {
     inner: Arc<Mutex<Inner>>,
+    store: S,
 }
 
-impl MemoryDestination {
-    /// Creates a new empty memory destination.
+impl<S> MemoryDestination<S>
+where
+    S: StateStore + Clone + Send + Sync,
+{
+    /// Creates a new memory destination with a state store.
     ///
-    /// The destination starts with no stored data and will accumulate
-    /// events and table rows as the pipeline processes replication data.
-    pub fn new() -> Self {
+    /// The state store is used to track table metadata (snapshot IDs and replication masks),
+    /// mirroring the behavior of real destinations like BigQuery and Iceberg.
+    pub fn new(store: S) -> Self {
         let inner = Inner {
             events: Vec::new(),
             table_rows: HashMap::new(),
@@ -36,6 +46,7 @@ impl MemoryDestination {
 
         Self {
             inner: Arc::new(Mutex::new(inner)),
+            store,
         }
     }
 
@@ -70,36 +81,35 @@ impl MemoryDestination {
     }
 }
 
-impl Default for MemoryDestination {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Destination for MemoryDestination {
+impl<S> Destination for MemoryDestination<S>
+where
+    S: StateStore + Clone + Send + Sync,
+{
     fn name() -> &'static str {
         "memory"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
         // For truncation, we simulate removing all table rows for a specific table and also the events
         // of that table.
         let mut inner = self.inner.lock().await;
 
-        info!(table_id = table_id.0, "truncating table");
+        let table_id = replicated_table_schema.id();
+        info!(%table_id, "truncating table");
 
         inner.table_rows.remove(&table_id);
         inner.events.retain_mut(|event| {
             let has_table_id = event.has_table_id(&table_id);
-            if let Event::Truncate(event) = event
+            if let Event::Truncate(truncate_event) = event
                 && has_table_id
             {
-                let Some(index) = event.rel_ids.iter().position(|&id| table_id.0 == id) else {
-                    return true;
-                };
-
-                event.rel_ids.remove(index);
-                if event.rel_ids.is_empty() {
+                truncate_event
+                    .truncated_tables
+                    .retain(|s| s.id() != table_id);
+                if truncate_event.truncated_tables.is_empty() {
                     return false;
                 }
 
@@ -114,16 +124,32 @@ impl Destination for MemoryDestination {
 
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
+        let table_id = replicated_table_schema.id();
 
-        info!(
-            table_id = table_id.0,
-            row_count = table_rows.len(),
-            "writing table rows"
-        );
+        // Store destination metadata on first write, like real destinations (BigQuery, Iceberg) do.
+        let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
+        if existing_metadata.is_none() {
+            let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
+            let replication_mask = replicated_table_schema.replication_mask().clone();
+            let table_id_inner = table_id.into_inner();
+            let destination_table_id = format!("memory_{table_id_inner}");
+
+            let metadata = DestinationTableMetadata::new_applied(
+                destination_table_id,
+                snapshot_id,
+                replication_mask,
+            );
+
+            self.store
+                .store_destination_table_metadata(table_id, metadata)
+                .await?;
+        }
+
+        let mut inner = self.inner.lock().await;
+        info!(%table_id, row_count = table_rows.len(), "writing table rows");
         inner.table_rows.insert(table_id, table_rows);
 
         Ok(())
