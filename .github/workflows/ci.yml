@@ -120,7 +120,7 @@ jobs:
             --no-fail-fast \
             --features iceberg
 
-      - name: Run Exclusive Tests (Slot Invalidation)
+      - name: Run Exclusive Tests Sequentially
         run: |
           cargo test \
             --workspace \
@@ -190,7 +190,7 @@ jobs:
             --all-features \
             --no-fail-fast
 
-      - name: Run Exclusive Tests (Slot Invalidation)
+      - name: Run Exclusive Tests Sequentially
         if: matrix.postgres_version != 18
         run: |
           cargo test \
