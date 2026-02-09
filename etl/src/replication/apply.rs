@@ -36,6 +36,7 @@ use crate::conversions::event::{
 };
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
     ETL_EVENTS_PROCESSED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
@@ -51,7 +52,6 @@ use crate::types::{Event, PipelineId, RelationEvent};
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 use crate::{bail, etl_error};
-use crate::failpoints::{etl_fail_point_active, SEND_STATUS_UPDATE_FP};
 
 /// Type of worker driving the apply loop.
 #[derive(Debug, Copy, Clone)]
