@@ -214,7 +214,7 @@ jobs:
             --all-features \
             --no-report
 
-      - name: Run Exclusive Tests with Coverage (Slot Invalidation)
+      - name: Run Exclusive Tests Sequentially with Coverage
         if: matrix.postgres_version == 18
         run: |
           cargo llvm-cov test \
