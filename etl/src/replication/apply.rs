@@ -51,6 +51,7 @@ use crate::types::{Event, PipelineId, RelationEvent};
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 use crate::{bail, etl_error};
+use crate::failpoints::{etl_fail_point_active, SEND_STATUS_UPDATE_FP};
 
 /// Type of worker driving the apply loop.
 #[derive(Debug, Copy, Clone)]
@@ -529,6 +530,21 @@ where
             if let ShutdownState::WaitingForPrimaryKeepAlive { acked_flush_lsn } =
                 self.state.shutdown_state
             {
+                // If we are not sending status updates, we want to avoid waiting for a keep alive and
+                // instead immediately exit.
+                //
+                // The rationale for doing this is that if we test a pipeline that has no status updates,
+                // we don't want to wait for a routine keep alive when shutting down, since it might not arrive
+                // in time. On the other hand, if we were to have status updates, we would send one with a
+                // `reply_request=1` causing the shutdown procedure to complete nearly instantly because
+                // Postgres will immediately send back a keepalive as response.
+                #[cfg(feature = "failpoints")]
+                if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
+                    warn!("not waiting for primary keep alive on shutdown due to active failpoint");
+
+                    return Ok(pending_result.unwrap_or(ApplyLoopResult::Paused));
+                }
+
                 let message = events_stream.next().await;
                 if self.try_complete_shutdown(message, acked_flush_lsn)? {
                     // Return the pending result if one was stored, otherwise default to Paused.
