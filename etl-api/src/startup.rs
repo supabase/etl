@@ -50,8 +50,7 @@ use crate::{
             ValidatePipelineResponse, create_pipeline, delete_pipeline,
             get_pipeline_replication_status, get_pipeline_status, get_pipeline_version,
             read_all_pipelines, read_pipeline, rollback_tables, start_pipeline, stop_all_pipelines,
-            stop_pipeline, update_pipeline, update_pipeline_config, update_pipeline_version,
-            validate_pipeline,
+            stop_pipeline, update_pipeline, update_pipeline_version, validate_pipeline,
         },
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
@@ -395,7 +394,6 @@ pub async fn run(
                     .service(get_pipeline_replication_status)
                     .service(rollback_tables)
                     .service(update_pipeline_version)
-                    .service(update_pipeline_config)
                     // tables
                     .service(read_table_names)
                     // publications

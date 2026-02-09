@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroI32;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
@@ -23,6 +24,12 @@ use tokio_postgres::{
     config::ReplicationMode, types::PgLsn,
 };
 use tracing::{Instrument, error, info, warn};
+
+/// Maximum time to wait for a replication slot deletion to complete.
+///
+/// Slot deletion uses `WAIT`, which can block until the slot is no longer in use.
+/// This timeout ensures calls are bounded and cannot wait forever.
+const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Spawns a background task to monitor a Postgres connection until it terminates.
 fn spawn_postgres_connection<T>(connection: Connection<Socket, T::Stream>)
@@ -63,6 +70,21 @@ pub struct CreateSlotResult {
 pub struct GetSlotResult {
     /// The LSN up to which changes have been confirmed as processed by ETL.
     pub confirmed_flush_lsn: PgLsn,
+}
+
+/// The current state of a replication slot.
+///
+/// Represents whether a slot is valid and can be used for replication, or has been
+/// invalidated by PostgreSQL (e.g., due to exceeding `max_slot_wal_keep_size`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotState {
+    /// The slot is valid and can be used for replication.
+    Valid,
+    /// The slot has been invalidated and cannot be used for replication.
+    ///
+    /// This typically occurs when the slot falls too far behind the current WAL position
+    /// and PostgreSQL removes the required WAL segments.
+    Invalidated,
 }
 
 /// Result type for operations that either get an existing slot or create a new one.
@@ -265,6 +287,43 @@ impl PgReplicationClient {
         self.create_slot_internal(slot_name, false).await
     }
 
+    /// Gets the state of a replication slot by name.
+    ///
+    /// Queries the `pg_replication_slots` system catalog to determine if the slot exists
+    /// and whether it's valid or invalidated. A slot is considered invalidated when its
+    /// `wal_status` is 'lost', indicating that required WAL segments have been removed.
+    ///
+    /// Returns an error if the slot doesn't exist.
+    pub async fn get_slot_state(&self, slot_name: &str) -> EtlResult<SlotState> {
+        let query = format!(
+            r#"select wal_status from pg_replication_slots where slot_name = {};"#,
+            quote_literal(slot_name)
+        );
+
+        let results = self.client.simple_query(&query).await?;
+        for result in results {
+            if let SimpleQueryMessage::Row(row) = result {
+                // wal_status can be: 'reserved', 'extended', 'unreserved', or 'lost'
+                // A slot is invalidated when wal_status is 'lost'
+                let wal_status: Option<String> = row.try_get("wal_status")?.map(String::from);
+
+                return match wal_status.as_deref() {
+                    Some("lost") => Ok(SlotState::Invalidated),
+                    Some(_) => Ok(SlotState::Valid),
+                    // If wal_status is NULL, assume the slot is valid
+                    // (this can happen on very old PostgreSQL versions)
+                    None => Ok(SlotState::Valid),
+                };
+            }
+        }
+
+        bail!(
+            ErrorKind::ReplicationSlotNotFound,
+            "Replication slot not found",
+            format!("Replication slot '{}' not found in database", slot_name)
+        );
+    }
+
     /// Gets the slot by `slot_name`.
     ///
     /// Returns an error in case of failure or missing slot.
@@ -329,14 +388,51 @@ impl PgReplicationClient {
     ///
     /// Returns an error if the slot doesn't exist or if there are any issues with the deletion.
     pub async fn delete_slot(&self, slot_name: &str) -> EtlResult<()> {
+        self.delete_slot_internal(slot_name, true).await
+    }
+
+    /// Deletes a replication slot with the specified name if it exists.
+    ///
+    /// This method returns [`Ok(())`] when the slot is missing and propagates any other
+    /// error from [`PgReplicationClient::delete_slot`].
+    pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
+        self.delete_slot_internal(slot_name, false).await
+    }
+
+    /// Deletes a replication slot, optionally failing when the slot does not exist.
+    async fn delete_slot_internal(&self, slot_name: &str, fail_if_missing: bool) -> EtlResult<()> {
         info!(slot_name, "deleting replication slot");
+
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let query = format!(
             r#"DROP_REPLICATION_SLOT {} WAIT;"#,
             quote_identifier(slot_name)
         );
 
-        match self.client.simple_query(&query).await {
+        let delete_result =
+            match tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    error!(
+                        slot_name,
+                        timeout_secs = DELETE_SLOT_TIMEOUT.as_secs(),
+                        "timed out while deleting replication slot"
+                    );
+
+                    bail!(
+                        ErrorKind::ReplicationSlotDeletionTimeout,
+                        "Replication slot deletion timed out",
+                        format!(
+                            "Timed out after {:?} while deleting replication slot '{}'",
+                            DELETE_SLOT_TIMEOUT, slot_name
+                        ),
+                        source: err
+                    );
+                }
+            };
+
+        match delete_result {
             Ok(_) => {
                 info!(slot_name, "deleted replication slot");
 
@@ -346,19 +442,25 @@ impl PgReplicationClient {
                 if let Some(code) = err.code()
                     && *code == SqlState::UNDEFINED_OBJECT
                 {
-                    warn!(
-                        slot_name,
-                        "attempted to delete non-existent replication slot"
-                    );
+                    if fail_if_missing {
+                        warn!(
+                            slot_name,
+                            "attempted to delete non-existent replication slot"
+                        );
 
-                    bail!(
-                        ErrorKind::ReplicationSlotNotFound,
-                        "Replication slot not found",
-                        format!(
-                            "Replication slot '{}' not found in database while attempting its deletion",
-                            slot_name
-                        )
-                    );
+                        bail!(
+                            ErrorKind::ReplicationSlotNotFound,
+                            "Replication slot not found",
+                            format!(
+                                "Replication slot '{}' not found in database while attempting its deletion",
+                                slot_name
+                            )
+                        );
+                    }
+
+                    info!(slot_name, "replication slot not found, skipping deletion");
+
+                    return Ok(());
                 }
 
                 error!(slot_name, error = %err, "failed to delete replication slot");

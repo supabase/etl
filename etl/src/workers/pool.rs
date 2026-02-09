@@ -80,11 +80,14 @@ impl TableSyncWorkerPool {
         let mut workers = self.workers.write().await;
 
         // Check if a worker already exists and is still running.
-        if let Some(handle) = workers.get(&table_id) {
-            if !handle.is_finished() {
-                warn!(%table_id, "worker already exists in pool and is still running");
-                return;
-            }
+        if let Some(handle) = workers.get(&table_id)
+            && !handle.is_finished()
+        {
+            warn!(
+                table_id = table_id.0,
+                "worker already exists in pool and is still running"
+            );
+            return;
         }
 
         // Generate a unique run ID for this worker.
@@ -117,7 +120,7 @@ impl TableSyncWorkerPool {
             return None;
         }
 
-        debug!(%table_id, "retrieved active worker state");
+        debug!(table_id = table_id.0, "retrieved active worker state");
 
         Some(handle.state())
     }
@@ -154,10 +157,10 @@ impl TableSyncWorkerPool {
                     // workers to be read while waiting for all to complete.
                     {
                         let mut workers = self.workers.write().await;
-                        if let Some(handle) = workers.get(&worker_id.table_id) {
-                            if handle.worker_id() == worker_id {
-                                workers.remove(&worker_id.table_id);
-                            }
+                        if let Some(handle) = workers.get(&worker_id.table_id)
+                            && handle.worker_id() == worker_id
+                        {
+                            workers.remove(&worker_id.table_id);
                         }
                     }
 

@@ -1062,8 +1062,9 @@ mod tests {
     use super::*;
 
     use etl_config::shared::{
-        BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
-        ReplicatorConfigWithoutSecrets, TableSyncCopyConfig, TlsConfig,
+        BatchConfig, DestinationConfig, InvalidatedSlotBehavior, PgConnectionConfig,
+        PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets, TableSyncCopyConfig,
+        TlsConfig,
     };
     use insta::assert_json_snapshot;
 
@@ -1144,7 +1145,7 @@ mod tests {
                 dataset_id: "dataset-id".to_string(),
                 service_account_key: "sa-key".into(),
                 max_staleness_mins: None,
-                max_concurrent_streams: 4,
+                connection_pool_size: 4,
             },
             pipeline: PipelineConfig {
                 id: 42,
@@ -1166,6 +1167,7 @@ mod tests {
                 table_error_retry_max_attempts: 3,
                 max_table_sync_workers: 4,
                 table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
+                invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
             },
             sentry: None,
             supabase: None,

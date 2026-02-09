@@ -90,23 +90,24 @@ impl StateStore for MemoryStore {
         Ok(inner.table_replication_states.len())
     }
 
-    async fn update_table_replication_state(
+    async fn update_table_replication_states(
         &self,
-        table_id: TableId,
-        state: TableReplicationPhase,
+        updates: Vec<(TableId, TableReplicationPhase)>,
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        // Store the current state in history before updating
-        if let Some(current_state) = inner.table_replication_states.get(&table_id).cloned() {
-            inner
-                .table_state_history
-                .entry(table_id)
-                .or_insert_with(Vec::new)
-                .push(current_state);
-        }
+        for (table_id, state) in updates {
+            // Store the current state in history before updating
+            if let Some(current_state) = inner.table_replication_states.get(&table_id).cloned() {
+                inner
+                    .table_state_history
+                    .entry(table_id)
+                    .or_insert_with(Vec::new)
+                    .push(current_state);
+            }
 
-        inner.table_replication_states.insert(table_id, state);
+            inner.table_replication_states.insert(table_id, state);
+        }
 
         Ok(())
     }

@@ -19,11 +19,12 @@ use crate::types::PipelineId;
 use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
 use crate::workers::pool::TableSyncWorkerPool;
 use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::types::TableId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Internal state tracking for pipeline lifecycle.
 ///
@@ -283,7 +284,8 @@ where
     /// initialized to [`TableReplicationPhase::Init`].
     ///
     /// Also detects tables for which we have stored state but are no longer
-    /// part of the publication, and deletes their stored state (replication
+    /// part of the publication, performs a best-effort cleanup of their table
+    /// sync replication slots, and deletes their stored state (replication
     /// state, table mappings, and table schemas) without touching the actual
     /// destination tables.
     async fn initialize_table_states(
@@ -320,6 +322,12 @@ where
             "publication tables loaded"
         );
 
+        // We notify the user that if there are no tables in the publication, the system will start but
+        // the pipeline will be hanging idle forever.
+        if publication_table_ids.is_empty() {
+            warn!(publication_name = %self.config.publication_name, "the publication has no tables, the pipeline will not receive any data");
+        }
+
         // Validate that the publication is configured correctly for partitioned tables.
         //
         // When `publish_via_partition_root = false`, logical replication messages contain
@@ -355,6 +363,7 @@ where
             }
         }
 
+        // We load the current replication states.
         self.store.load_table_replication_states().await?;
         let table_replication_states = self.store.get_table_replication_states().await?;
 
@@ -369,16 +378,25 @@ where
 
         // Detect and purge tables that have been removed from the publication.
         //
-        // We must not delete the destination table, only the internal state.
+        // The purging doesn't delete any data in the destination, it just removes internal state for
+        // that table.
         let publication_set: HashSet<TableId> = publication_table_ids.iter().copied().collect();
         for (table_id, _) in table_replication_states {
             if !publication_set.contains(&table_id) {
                 info!(
-                    %table_id,
-                    "table removed from publication, purging stored state"
+                    table_id = table_id.0,
+                    "table removed from publication, purging stored state and slot"
                 );
 
+                // We clean up all table state before removing the slot, so that we don't incur in the
+                // case where we have a slot tied to an invalid state.
                 self.store.cleanup_table_state(table_id).await?;
+
+                // We try to delete the replication slot.
+                let slot_name: String =
+                    EtlReplicationSlot::for_table_sync_worker(self.config.id, table_id)
+                        .try_into()?;
+                replication_client.delete_slot_if_exists(&slot_name).await?;
             }
         }
 

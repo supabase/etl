@@ -9,7 +9,9 @@ use crate::test_utils::database::{spawn_source_database, test_table_name};
 use crate::test_utils::notifying_store::NotifyingStore;
 use crate::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use crate::types::PipelineId;
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig};
+use etl_config::shared::{
+    BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
+};
 use etl_postgres::tokio::test_utils::PgDatabase;
 use etl_postgres::types::{TableId, TableName};
 use rand::random;
@@ -60,6 +62,8 @@ pub struct PipelineBuilder<S, D> {
     max_table_sync_workers: u16,
     /// Table sync copy configuration. Uses default if not specified.
     table_sync_copy: Option<TableSyncCopyConfig>,
+    /// Behavior when the main replication slot is found to be invalidated.
+    invalidated_slot_behavior: InvalidatedSlotBehavior,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -102,6 +106,7 @@ where
             table_error_retry_max_attempts: 2,
             max_table_sync_workers: 1,
             table_sync_copy: None,
+            invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
         }
     }
 
@@ -147,6 +152,12 @@ where
         self
     }
 
+    /// Sets the behavior when the main replication slot is found to be invalidated.
+    pub fn with_invalidated_slot_behavior(mut self, behavior: InvalidatedSlotBehavior) -> Self {
+        self.invalidated_slot_behavior = behavior;
+        self
+    }
+
     /// Builds and returns the configured pipeline.
     ///
     /// This method consumes the builder and creates a `Pipeline` instance with
@@ -165,6 +176,7 @@ where
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,
             max_table_sync_workers: self.max_table_sync_workers,
             table_sync_copy: self.table_sync_copy.unwrap_or_default(),
+            invalidated_slot_behavior: self.invalidated_slot_behavior,
         };
 
         Pipeline::new(config, self.store, self.destination)

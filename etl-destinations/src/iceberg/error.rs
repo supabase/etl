@@ -71,6 +71,10 @@ pub(crate) fn arrow_error_to_etl_error(err: ArrowError) -> EtlError {
         ArrowError::RunEndIndexOverflowError => {
             (ErrorKind::InvalidData, "Arrow run end index overflow")
         }
+        ArrowError::AvroError(_) => (ErrorKind::InvalidData, "Arrow Avro error"),
+        ArrowError::OffsetOverflowError(_) => {
+            (ErrorKind::InvalidData, "Arrow offset overflow error")
+        }
     };
 
     etl_error!(kind, description, err.to_string())

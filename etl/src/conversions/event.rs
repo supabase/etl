@@ -3,7 +3,7 @@ use etl_postgres::types::{
     ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
     convert_type_oid_to_type,
 };
-use metrics::counter;
+use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -12,7 +12,9 @@ use tokio_postgres::types::PgLsn;
 
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::metrics::{ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL, PIPELINE_ID_LABEL};
+use crate::metrics::{
+    ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL, PIPELINE_ID_LABEL,
+};
 use crate::types::{
     BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, PipelineId, TableRow, TruncateEvent,
     UpdateEvent,
@@ -188,12 +190,21 @@ pub fn parse_event_from_insert_message(
     pipeline_id: PipelineId,
 ) -> EtlResult<InsertEvent> {
     let tuple_data = insert_body.tuple().tuple_data();
+    let row_size_bytes = calculate_tuple_bytes(tuple_data);
+
     counter!(
         ETL_BYTES_PROCESSED_TOTAL,
         PIPELINE_ID_LABEL => pipeline_id.to_string(),
         EVENT_TYPE_LABEL => "insert"
     )
-    .increment(calculate_tuple_bytes(tuple_data));
+    .increment(row_size_bytes);
+
+    histogram!(
+        ETL_ROW_SIZE_BYTES,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        EVENT_TYPE_LABEL => "insert"
+    )
+    .record(row_size_bytes as f64);
 
     let table_row = convert_tuple_to_row(
         replicated_table_schema.column_schemas(),
@@ -240,6 +251,13 @@ pub fn parse_event_from_update_message(
         EVENT_TYPE_LABEL => "update"
     )
     .increment(total_bytes);
+
+    histogram!(
+        ETL_ROW_SIZE_BYTES,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        EVENT_TYPE_LABEL => "update"
+    )
+    .record(total_bytes as f64);
 
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
@@ -289,12 +307,21 @@ pub fn parse_event_from_delete_message(
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
 
     if let Some(identity) = &old_tuple {
+        let row_size_bytes = calculate_tuple_bytes(identity.tuple_data());
+
         counter!(
             ETL_BYTES_PROCESSED_TOTAL,
             PIPELINE_ID_LABEL => pipeline_id.to_string(),
             EVENT_TYPE_LABEL => "delete"
         )
-        .increment(calculate_tuple_bytes(identity.tuple_data()));
+        .increment(row_size_bytes);
+
+        histogram!(
+            ETL_ROW_SIZE_BYTES,
+            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+            EVENT_TYPE_LABEL => "delete"
+        )
+        .record(row_size_bytes as f64);
     }
 
     let old_table_row = match old_tuple {

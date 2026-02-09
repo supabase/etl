@@ -77,7 +77,7 @@ bash "${SCRIPT_DIR}/run_migrations.sh"
 
 # Seed default replicator image (idempotent).
 echo "🖼️ Seeding default replicator image..."
-DEFAULT_REPLICATOR_IMAGE="${REPLICATOR_IMAGE:-ramsup/etl-replicator:latest}"
+DEFAULT_REPLICATOR_IMAGE="${REPLICATOR_IMAGE:-public.ecr.aws/supabase/etl-replicator:latest}"
 psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "select app.update_default_image('${DEFAULT_REPLICATOR_IMAGE}');"
 
 # Ensure OrbStack Kubernetes context is available

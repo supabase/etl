@@ -71,7 +71,7 @@ where
     S: StateStore + SchemaStore + Clone + Send + 'static,
     D: Destination + Clone + Send + 'static,
 {
-    info!(%table_id, "starting initial table sync");
+    info!(table_id = table_id.0, "starting initial table sync");
 
     // We are safe to keep the lock only for this section, since we know that the state will be changed by the
     // apply worker only if `SyncWait` is set, which is not the case if we arrive here, so we are
@@ -88,7 +88,7 @@ where
                 | TableReplicationPhaseType::Ready
                 | TableReplicationPhaseType::Errored
         ) {
-            warn!(%table_id, %phase_type, "initial table sync not required");
+            warn!(table_id = table_id.0, %phase_type, "initial table sync not required");
 
             return Ok(TableSyncResult::SyncNotRequired);
         }
@@ -101,7 +101,7 @@ where
                 | TableReplicationPhaseType::DataSync
                 | TableReplicationPhaseType::FinishedCopy
         ) {
-            warn!(%table_id, %phase_type, "invalid replication phase for table sync");
+            warn!(table_id = table_id.0, %phase_type, "invalid replication phase for table sync");
 
             bail!(
                 ErrorKind::InvalidState,
@@ -139,12 +139,7 @@ where
             //
             // We try to delete the slot also during `Init` because we support state rollback and a
             // slot might be there from the previous run.
-            if let Err(err) = replication_client.delete_slot(&slot_name).await {
-                // If the slot is not found, we are safe to continue, for any other error, we bail.
-                if err.kind() != ErrorKind::ReplicationSlotNotFound {
-                    return Err(err);
-                }
-            }
+            replication_client.delete_slot_if_exists(&slot_name).await?;
 
             // We must truncate the destination table before starting a copy to avoid data inconsistencies.
             //
@@ -182,7 +177,7 @@ where
             }
 
             // We are ready to start copying table data, and we update the state accordingly.
-            info!(%table_id, "starting data copy");
+            info!(table_id = table_id.0, "starting data copy");
             {
                 let mut inner = table_sync_worker_state.lock().await;
                 inner
@@ -281,7 +276,7 @@ where
                 );
                 pin!(table_copy_stream);
 
-                info!(%table_id, "starting table copy stream");
+                info!(table_id = table_id.0, "starting table copy stream");
 
                 // We start consuming the table stream. If any error occurs, we will bail the entire copy since
                 // we want to be fully consistent.
@@ -327,7 +322,10 @@ where
                             // If we received a shutdown in the middle of a table copy, we bail knowing
                             // that the system can automatically recover if a table copy has failed in
                             // the middle of processing.
-                            info!(%table_id, "shutting down table sync during copy");
+                            info!(
+                                table_id = table_id.0,
+                                "shutting down table sync during copy"
+                            );
 
                             return Ok(TableSyncResult::SyncStopped);
                         }
@@ -356,7 +354,10 @@ where
             )
             .record(table_copy_duration);
 
-            info!(%table_id, total_rows_copied, "completed table copy");
+            info!(
+                table_id = table_id.0,
+                total_rows_copied, "completed table copy"
+            );
 
             // We mark that we finished the copy of the table schema and data.
             {
@@ -370,7 +371,7 @@ where
         }
         TableReplicationPhaseType::FinishedCopy => {
             let slot = replication_client.get_slot(&slot_name).await?;
-            info!(%table_id, confirmed_flush_lsn = %slot.confirmed_flush_lsn, "resuming table sync");
+            info!(table_id = table_id.0, confirmed_flush_lsn = %slot.confirmed_flush_lsn, "resuming table sync");
 
             slot.confirmed_flush_lsn
         }
@@ -395,12 +396,18 @@ where
     // If we are told to shut down while waiting for a phase change, we will signal this to
     // the caller.
     if result.should_shutdown() {
-        info!(%table_id, "shutting down table sync while waiting for catchup");
+        info!(
+            table_id = table_id.0,
+            "shutting down table sync while waiting for catchup"
+        );
 
         return Ok(TableSyncResult::SyncStopped);
     }
 
-    info!(%table_id, "table sync completed, starting streaming");
+    info!(
+        table_id = table_id.0,
+        "table sync completed, starting streaming"
+    );
 
     Ok(TableSyncResult::SyncCompleted { start_lsn })
 }

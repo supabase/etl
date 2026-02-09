@@ -105,8 +105,6 @@ pub enum ErrorKind {
     DestinationTableAlreadyExists,
     DestinationNamespaceMissing,
     DestinationTableMissing,
-    DestinationSchemaMismatch,
-    DestinationThrottled,
 
     // Data & Transformation Errors
     ConversionError,
@@ -143,6 +141,8 @@ pub enum ErrorKind {
     ReplicationSlotNotFound,
     ReplicationSlotAlreadyExists,
     ReplicationSlotNotCreated,
+    ReplicationSlotInvalidated,
+    ReplicationSlotDeletionTimeout,
     SourceSnapshotTooOld,
     SourceDatabaseInRecovery,
     SourceDatabaseShutdown,

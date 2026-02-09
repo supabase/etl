@@ -59,7 +59,7 @@ fn create_bigquery_config(
         dataset_id: dataset_id.to_string(),
         service_account_key: SerializableSecretString::from(sa_key.to_string()),
         max_staleness_mins: None,
-        max_concurrent_streams: None,
+        connection_pool_size: None,
     }
 }
 
@@ -72,6 +72,7 @@ fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
         table_error_retry_delay_ms: None,
         table_error_retry_max_attempts: None,
         table_sync_copy: None,
+        invalidated_slot_behavior: None,
     }
 }
 

@@ -138,6 +138,11 @@ impl NotifyingStore {
             .collect()
     }
 
+    /// Registers a notification that fires when a table reaches a specific state type or if the
+    /// table already has that specific state type.
+    ///
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// expected state is not reached. This prevents tests from hanging indefinitely.
     pub async fn notify_on_table_state_type(
         &self,
         table_id: TableId,
@@ -154,6 +159,11 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
+    /// Registers a notification that fires when a table reaches a specific state type from when
+    /// this method was called.
+    ///
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// expected state is not reached. This prevents tests from hanging indefinitely.
     pub async fn notify_on_future_table_state_type(
         &self,
         table_id: TableId,
@@ -168,6 +178,10 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
+    /// Registers a notification that fires when a table state matches a custom condition.
+    ///
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// condition is not met. This prevents tests from hanging indefinitely.
     pub async fn notify_on_table_state<F>(&self, table_id: TableId, condition: F) -> TimedNotify
     where
         F: Fn(&TableReplicationPhase) -> bool + Send + Sync + 'static,
@@ -241,23 +255,25 @@ impl StateStore for NotifyingStore {
         Ok(table_replication_states_len)
     }
 
-    async fn update_table_replication_state(
+    async fn update_table_replication_states(
         &self,
-        table_id: TableId,
-        state: TableReplicationPhase,
+        updates: Vec<(TableId, TableReplicationPhase)>,
     ) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
 
-        // Store the current state in history before updating
-        if let Some(current_state) = inner.table_replication_states.get(&table_id).cloned() {
-            inner
-                .table_replication_states_history
-                .entry(table_id)
-                .or_insert_with(Vec::new)
-                .push(current_state);
+        for (table_id, state) in updates {
+            // Store the current state in history before updating
+            if let Some(current_state) = inner.table_replication_states.get(&table_id).cloned() {
+                inner
+                    .table_replication_states_history
+                    .entry(table_id)
+                    .or_insert_with(Vec::new)
+                    .push(current_state);
+            }
+
+            inner.table_replication_states.insert(table_id, state);
         }
 
-        inner.table_replication_states.insert(table_id, state);
         inner.check_conditions().await;
         inner
             .dispatch_method_notification(StateStoreMethod::StoreTableReplicationState)

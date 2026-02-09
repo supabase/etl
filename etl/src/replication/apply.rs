@@ -35,7 +35,7 @@ use crate::conversions::event::{
     parse_event_from_update_message, parse_replicated_column_names,
 };
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
     ETL_EVENTS_PROCESSED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
@@ -151,6 +151,32 @@ impl ApplyLoopAction {
             },
             Self::Complete => Self::Complete,
         }
+    }
+}
+
+/// Represents the shutdown state of the apply loop.
+///
+/// Tracks the progress of a graceful shutdown, ensuring that PostgreSQL acknowledges
+/// our flush position before we terminate to prevent data duplication on restart.
+#[derive(Debug, Clone)]
+pub enum ShutdownState {
+    /// No shutdown requested, normal operation.
+    NoShutdown,
+    /// Shutdown requested but deferred because we're mid-transaction.
+    /// Once the transaction commits, we'll send a status update and wait for acknowledgement.
+    Deferred,
+    /// Shutdown in progress, waiting for PostgreSQL to acknowledge our flush position.
+    /// The loop will only process keepalive messages until one arrives with `wal_end >= acked_flush_lsn`.
+    WaitingForPrimaryKeepAlive {
+        /// The LSN we sent in the status update that PostgreSQL should acknowledge.
+        acked_flush_lsn: PgLsn,
+    },
+}
+
+impl ShutdownState {
+    /// Returns `true` if a shutdown has been requested (either deferred or waiting).
+    pub fn is_shutdown_requested(&self) -> bool {
+        !matches!(self, Self::NoShutdown)
     }
 }
 
@@ -297,8 +323,8 @@ struct ApplyLoopState {
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
     current_tx_events: u64,
-    /// Boolean representing whether the shutdown was requested but could not be processed.
-    shutdown_deferred: bool,
+    /// The current shutdown state tracking graceful shutdown progress.
+    shutdown_state: ShutdownState,
     /// The deadline by which the current batch must be flushed.
     batch_flush_deadline: Option<Instant>,
     /// The maximum duration to wait before forcibly flushing a batch.
@@ -324,7 +350,7 @@ impl ApplyLoopState {
             events_batch: Vec::with_capacity(max_batch_size),
             current_tx_begin_ts: None,
             current_tx_events: 0,
-            shutdown_deferred: false,
+            shutdown_state: ShutdownState::NoShutdown,
             batch_flush_deadline: None,
             max_batch_fill_duration,
             current_schema_snapshot_id,
@@ -493,95 +519,278 @@ where
         let events_stream = EventsStream::wrap(logical_replication_stream, self.pipeline_id);
         pin!(events_stream);
 
+        // If the loop produces a result while waiting for shutdown acknowledgement,
+        // we store it here and return it once the keepalive is received.
+        let mut pending_result: Option<ApplyLoopResult> = None;
+
         loop {
+            // If waiting for shutdown acknowledgement, the loop is now just waiting for the keep alive
+            // message before shutting off.
+            if let ShutdownState::WaitingForPrimaryKeepAlive { acked_flush_lsn } =
+                self.state.shutdown_state
+            {
+                let message = events_stream.next().await;
+                if self.try_complete_shutdown(message, acked_flush_lsn)? {
+                    // Return the pending result if one was stored, otherwise default to Paused.
+                    return Ok(pending_result.unwrap_or(ApplyLoopResult::Paused));
+                }
+
+                continue;
+            }
+
             tokio::select! {
                 biased;
 
                 // PRIORITY 1: Handle shutdown signals.
+                // Shutdown takes highest priority to ensure graceful termination. When received,
+                // we either defer (if mid-transaction) or initiate graceful shutdown by sending
+                // a status update and waiting for PostgreSQL acknowledgement.
                 _ = self.shutdown_rx.changed() => {
-                    let worker_type = self.worker_context.worker_type();
-
-                    if self.state.shutdown_deferred {
-                        info!(
-                            %worker_type,
-                            "shutdown signal received but already deferred, continuing until transaction completes",
-                        );
-                        continue;
-                    }
-
-                    if !self.state.handling_transaction() {
-                        info!(
-                            %worker_type,
-                            "shutdown signal received outside transaction, pausing apply loop",
-                        );
-                        return Ok(ApplyLoopResult::Paused);
-                    }
-
-                    info!(
-                        %worker_type,
-                        "shutdown signal received during transaction, deferring until transaction boundary",
-                    );
-                    self.state.shutdown_deferred = true;
+                    self.handle_shutdown_signal(events_stream.as_mut()).await?;
                 }
 
                 // PRIORITY 2: Handle batch flush timer expiry.
-                _ = async {
-                    match self.state.batch_flush_deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
-                        None => std::future::pending().await,
-                    }
-                } => {
+                // Ensures batches don't wait indefinitely when message rate is low. The timer
+                // is started when the first event enters the batch and reset after each flush.
+                _ = Self::wait_for_batch_deadline(&self.state) => {
                     info!(
                         worker_type = %self.worker_context.worker_type(),
                         batch_size = self.state.events_batch.len(),
                         "batch flush deadline reached, flushing batch",
                     );
 
-                    let action = self.flush_batch().await?;
-
+                    let action = self.flush_batch(events_stream.as_mut()).await?;
                     if let Some(result) = action.to_result() {
-                        return Ok(result);
+                        // If we're waiting for shutdown acknowledgement, store the result and continue.
+                        if matches!(self.state.shutdown_state, ShutdownState::WaitingForPrimaryKeepAlive { .. }) {
+                            pending_result = Some(result);
+                        } else {
+                            return Ok(result);
+                        }
                     }
                 }
 
-                // PRIORITY 3: Process incoming replication messages from Postgres.
+                // PRIORITY 3: Process incoming replication messages from PostgreSQL.
+                // This is the main work of the apply loop - receiving WAL events and converting
+                // them to destination writes. Has lowest priority so shutdown and flush timer
+                // are always handled promptly.
                 message = events_stream.next() => {
-                    let Some(message) = message else {
-                        let worker_type = self.worker_context.worker_type();
-                        if replication_client.is_closed() {
-                            warn!(
-                                %worker_type,
-                                "replication stream ended: PostgreSQL connection closed",
-                            );
-                            bail!(
-                                ErrorKind::SourceConnectionFailed,
-                                "PostgreSQL connection has been closed during the apply loop"
-                            )
-                        } else {
-                            warn!(
-                                %worker_type,
-                                "replication stream ended unexpectedly",
-                            );
-                            bail!(
-                                ErrorKind::SourceConnectionFailed,
-                                "Replication stream ended unexpectedly during the apply loop"
-                            )
-                        }
-                    };
-
                     let action = self
-                        .handle_replication_message_and_flush(events_stream.as_mut(), message?)
+                        .handle_stream_message(
+                            events_stream.as_mut(),
+                            message,
+                            &replication_client,
+                        )
                         .await?;
 
-                    if !self.state.events_batch.is_empty() {
-                        self.state.start_batch_timer_if_needed();
-                    }
-
                     if let Some(result) = action.to_result() {
-                        return Ok(result);
+                        // If we're waiting for shutdown acknowledgement, store the result and continue.
+                        if matches!(self.state.shutdown_state, ShutdownState::WaitingForPrimaryKeepAlive { .. }) {
+                            pending_result = Some(result);
+                        } else {
+                            return Ok(result);
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /// Waits for the batch flush deadline if one is set.
+    async fn wait_for_batch_deadline(state: &ApplyLoopState) {
+        match state.batch_flush_deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Checks if a message completes the pending shutdown.
+    ///
+    /// Returns `true` if the message is a keepalive with `wal_end >= acked_flush_lsn`,
+    /// `false` if still waiting for the right keepalive.
+    fn try_complete_shutdown(
+        &self,
+        message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
+        acked_flush_lsn: PgLsn,
+    ) -> EtlResult<bool> {
+        let worker_type = self.worker_context.worker_type();
+
+        let Some(message) = message else {
+            warn!(
+                %worker_type,
+                "replication stream ended while waiting for keepalive acknowledgement",
+            );
+
+            bail!(
+                ErrorKind::SourceConnectionFailed,
+                "Replication stream ended while waiting for keepalive acknowledgement"
+            )
+        };
+
+        match message? {
+            ReplicationMessage::PrimaryKeepAlive(keepalive) => {
+                let wal_end = PgLsn::from(keepalive.wal_end());
+
+                if wal_end >= acked_flush_lsn {
+                    info!(
+                        %worker_type,
+                        %wal_end,
+                        %acked_flush_lsn,
+                        "received keepalive acknowledgement, safe to shutdown",
+                    );
+                    return Ok(true);
+                }
+
+                // This shouldn't happen in practice because if we did process up to LSN `x` it means
+                // next keep alive messages from that must be at least `x`.
+                debug!(
+                    %worker_type,
+                    %wal_end,
+                    %acked_flush_lsn,
+                    "received keepalive but wal_end < acked_flush_lsn, continuing to wait",
+                );
+            }
+            _ => {
+                // Ignore non-keepalive messages while waiting for shutdown acknowledgement.
+                // These events will be replayed on restart from the confirmed LSN.
+                debug!(
+                    %worker_type,
+                    "ignoring non-keepalive message while waiting for shutdown acknowledgement",
+                );
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Handles a shutdown signal by transitioning to the appropriate shutdown state.
+    ///
+    /// If outside a transaction, sends a status update and transitions to [`ShutdownState::WaitingForPrimaryKeepAlive`].
+    /// If inside a transaction, defers shutdown until the transaction boundary.
+    ///
+    /// The goal of the shutdown procedure is to reduce duplicates on restart as much as possible
+    /// by ensuring the replication slot's confirmed LSN reflects the latest flushed data.
+    ///
+    /// Note: the shutdown system is best-effort. Graceful shutdown may not complete if we are
+    /// blocked on non-interruptible code or if keepalive messages never arrive from the server.
+    /// It is the responsibility of the caller to forcefully kill the process if shutdown does
+    /// not complete within an acceptable timeframe.
+    async fn handle_shutdown_signal(
+        &mut self,
+        mut events_stream: Pin<&mut EventsStream>,
+    ) -> EtlResult<()> {
+        let worker_type = self.worker_context.worker_type();
+
+        // If the shutdown was already requested, we silently skip it.
+        if self.state.shutdown_state.is_shutdown_requested() {
+            info!(
+                %worker_type,
+                shutdown_state = ?self.state.shutdown_state,
+                "shutdown signal received but already in shutdown state, continuing",
+            );
+
+            return Ok(());
+        }
+
+        // If we are processing a transaction, or if the batch has pending data, we defer shutdown
+        // until we hit a transaction boundary (e.g. a commit message). When that is encountered,
+        // the batch will be force flushed and graceful shutdown will begin.
+        if self.state.handling_transaction() || !self.state.events_batch.is_empty() {
+            info!(
+                %worker_type,
+                "shutdown signal received during transaction/non-empty batch, deferring until transaction boundary",
+            );
+            self.state.shutdown_state = ShutdownState::Deferred;
+
+            return Ok(());
+        }
+
+        info!(
+            %worker_type,
+            "shutdown signal received outside transaction, sending status update and waiting for acknowledgement",
+        );
+
+        // In all other cases we just initiate the graceful shutdown.
+        self.initiate_graceful_shutdown(events_stream.as_mut())
+            .await
+    }
+
+    /// Initiates graceful shutdown by sending a status update and transitioning to
+    /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
+    async fn initiate_graceful_shutdown(
+        &mut self,
+        events_stream: Pin<&mut EventsStream>,
+    ) -> EtlResult<()> {
+        // Use effective flush LSN to report last received LSN when idle, since
+        // last flush LSN only advances during actual flushes.
+        let flush_lsn = self.state.effective_flush_lsn();
+        events_stream
+            .send_status_update(
+                self.state.last_received_lsn(),
+                flush_lsn,
+                true,
+                StatusUpdateType::ShutdownFlush,
+            )
+            .await?;
+
+        self.state.shutdown_state = ShutdownState::WaitingForPrimaryKeepAlive {
+            acked_flush_lsn: flush_lsn,
+        };
+
+        Ok(())
+    }
+
+    /// Handles a message from the replication stream.
+    ///
+    /// Processes the message, manages batch timing, and handles deferred shutdown
+    /// at transaction boundaries.
+    async fn handle_stream_message(
+        &mut self,
+        mut events_stream: Pin<&mut EventsStream>,
+        message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
+        replication_client: &PgReplicationClient,
+    ) -> EtlResult<ApplyLoopAction> {
+        // If there is no message anymore, it means that the connection has been closed or had some
+        // issues, we must handle this case.
+        let Some(message) = message else {
+            return Err(self.build_stream_ended_error(replication_client));
+        };
+
+        let action = self
+            .handle_replication_message_and_flush(events_stream.as_mut(), message?)
+            .await?;
+
+        if !self.state.events_batch.is_empty() {
+            self.state.start_batch_timer_if_needed();
+        }
+
+        Ok(action)
+    }
+
+    /// Creates an error for when the replication stream ends unexpectedly.
+    fn build_stream_ended_error(&self, replication_client: &PgReplicationClient) -> EtlError {
+        let worker_type = self.worker_context.worker_type();
+
+        if replication_client.is_closed() {
+            warn!(
+                %worker_type,
+                "replication stream ended: PostgreSQL connection closed",
+            );
+
+            etl_error!(
+                ErrorKind::SourceConnectionFailed,
+                "PostgreSQL connection has been closed during the apply loop"
+            )
+        } else {
+            warn!(
+                %worker_type,
+                "replication stream ended unexpectedly",
+            );
+
+            etl_error!(
+                ErrorKind::SourceConnectionFailed,
+                "Replication stream ended unexpectedly during the apply loop"
+            )
         }
     }
 
@@ -621,7 +830,7 @@ where
                 "flushing batch",
             );
 
-            let flush_batch_action = self.flush_batch().await?;
+            let flush_batch_action = self.flush_batch(events_stream.as_mut()).await?;
             action = action.merge(flush_batch_action);
         }
 
@@ -632,11 +841,32 @@ where
     }
 
     /// Flushes the current batch of events to the destination.
-    async fn flush_batch(&mut self) -> EtlResult<ApplyLoopAction> {
+    ///
+    /// If we are in deferred shutdown and the batch ended with a commit (i.e., we're no longer
+    /// mid-transaction), this will initiate graceful shutdown.
+    async fn flush_batch(
+        &mut self,
+        events_stream: Pin<&mut EventsStream>,
+    ) -> EtlResult<ApplyLoopAction> {
         self.state.reset_batch_deadline();
 
         self.send_batch_to_destination().await?;
-        self.process_syncing_tables_after_batch_flush().await
+        let action = self.process_syncing_tables_after_batch_flush().await?;
+
+        // If we're in deferred shutdown and the batch ended with a commit (i.e., we're no longer
+        // mid-transaction), initiate graceful shutdown now.
+        if matches!(self.state.shutdown_state, ShutdownState::Deferred)
+            && !self.state.handling_transaction()
+        {
+            info!(
+                worker_type = %self.worker_context.worker_type(),
+                "deferred shutdown: batch flush completed transaction, initiating graceful shutdown",
+            );
+
+            self.initiate_graceful_shutdown(events_stream).await?;
+        }
+
+        Ok(action)
     }
 
     /// Sends the current batch of events to the destination and updates metrics.
@@ -937,9 +1167,11 @@ where
             .process_syncing_tables_after_commit_event(end_lsn)
             .await?;
 
-        // If the shutdown was deferred, we want to pause the loop since now we have reached the end
-        // of a transaction, which is the best point where we can consistently and gracefully stop.
-        if self.state.shutdown_deferred {
+        // If shutdown was deferred (see [`ShutdownState::Deferred`]), we merge
+        // [`ApplyLoopAction::Pause`] so the apply loop pauses after this commit. This allows
+        // [`Self::flush_batch`] to perform the status update and wait for PostgreSQL
+        // acknowledgement before shutting down.
+        if matches!(self.state.shutdown_state, ShutdownState::Deferred) {
             action = action.merge(ApplyLoopAction::Pause);
         }
 
@@ -1413,7 +1645,7 @@ mod apply_worker {
 
             debug!(
                 worker_type = %WorkerType::Apply,
-                %table_id,
+                table_id = table_id.0,
                 ?phase,
                 %current_lsn,
                 "checking table with active worker after commit",
@@ -1428,7 +1660,7 @@ mod apply_worker {
 
                     info!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         %current_lsn,
                         %snapshot_lsn,
                         %catchup_lsn,
@@ -1444,7 +1676,7 @@ mod apply_worker {
 
                     info!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         %catchup_lsn,
                         "table sync worker entered catchup phase, apply worker blocking until table sync worker reaches sync_done",
                     );
@@ -1468,7 +1700,7 @@ mod apply_worker {
                             if final_phase.as_type().is_errored() {
                                 info!(
                                     worker_type = %WorkerType::Apply,
-                                    %table_id,
+                                    table_id = table_id.0,
                                     ?final_phase,
                                     "apply worker unblocked: table sync worker errored, skipping table",
                                 );
@@ -1477,7 +1709,7 @@ mod apply_worker {
 
                             info!(
                                 worker_type = %WorkerType::Apply,
-                                %table_id,
+                                table_id = table_id.0,
                                 ?final_phase,
                                 "apply worker unblocked: table sync worker reached sync_done",
                             );
@@ -1485,7 +1717,7 @@ mod apply_worker {
                         ShutdownResult::Shutdown(_) => {
                             info!(
                                 worker_type = %WorkerType::Apply,
-                                %table_id,
+                                table_id = table_id.0,
                                 "apply worker unblocked: shutdown signal received while waiting for table sync worker",
                             );
                             return Ok(ApplyLoopAction::Pause);
@@ -1495,7 +1727,7 @@ mod apply_worker {
                 TableReplicationPhase::SyncDone { lsn } => {
                     debug!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         sync_done_lsn = %lsn,
                         "table in sync_done state, will transition to ready after batch flush",
                     );
@@ -1503,7 +1735,7 @@ mod apply_worker {
                 _ => {
                     debug!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         ?phase,
                         "no action needed for current phase after commit",
                     );
@@ -1512,7 +1744,7 @@ mod apply_worker {
         } else {
             debug!(
                 worker_type = %WorkerType::Apply,
-                %table_id,
+                table_id = table_id.0,
                 ?table_replication_phase,
                 "checking table without active worker after commit",
             );
@@ -1522,13 +1754,13 @@ mod apply_worker {
                 TableReplicationPhase::SyncDone { lsn } => {
                     debug!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         sync_done_lsn = %lsn,
                         "table in sync_done state, will transition to ready after batch flush",
                     );
                 }
                 _ => {
-                    debug!(worker_type = %WorkerType::Apply, %table_id, ?table_replication_phase, "spawning new table sync worker");
+                    debug!(worker_type = %WorkerType::Apply, table_id = table_id.0, ?table_replication_phase, "spawning new table sync worker");
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
                     if let Err(err) =
@@ -1536,7 +1768,7 @@ mod apply_worker {
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             error = %err,
                             "failed to start table sync worker",
                         );
@@ -1600,7 +1832,7 @@ mod apply_worker {
 
             debug!(
                 worker_type = %WorkerType::Apply,
-                %table_id,
+                table_id = table_id.0,
                 ?phase,
                 %current_lsn,
                 "checking table with active worker after batch flush",
@@ -1610,7 +1842,7 @@ mod apply_worker {
                 if current_lsn >= sync_done_lsn {
                     info!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         %sync_done_lsn,
                         %current_lsn,
                         "transitioning sync_done -> ready",
@@ -1622,7 +1854,7 @@ mod apply_worker {
                 } else {
                     debug!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         %sync_done_lsn,
                         %current_lsn,
                         "table not yet ready, current lsn below sync done lsn",
@@ -1632,7 +1864,7 @@ mod apply_worker {
         } else {
             debug!(
                 worker_type = %WorkerType::Apply,
-                %table_id,
+                table_id = table_id.0,
                 ?table_replication_phase,
                 "checking table without active worker after batch flush",
             );
@@ -1642,7 +1874,7 @@ mod apply_worker {
                     if current_lsn >= sync_done_lsn {
                         info!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             %sync_done_lsn,
                             %current_lsn,
                             "transitioning sync_done -> ready",
@@ -1654,7 +1886,7 @@ mod apply_worker {
                     } else {
                         debug!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             %sync_done_lsn,
                             %current_lsn,
                             "table not yet ready, current lsn below sync done lsn",
@@ -1662,7 +1894,7 @@ mod apply_worker {
                     }
                 }
                 _ => {
-                    debug!(worker_type = %WorkerType::Apply, %table_id, ?table_replication_phase, "spawning new table sync worker");
+                    debug!(worker_type = %WorkerType::Apply, table_id = table_id.0, ?table_replication_phase, "spawning new table sync worker");
 
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
@@ -1671,7 +1903,7 @@ mod apply_worker {
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             error = %err,
                             "failed to start table sync worker",
                         );
@@ -1738,7 +1970,7 @@ mod apply_worker {
 
             debug!(
                 worker_type = %WorkerType::Apply,
-                %table_id,
+                table_id = table_id.0,
                 ?phase,
                 %current_lsn,
                 "checking table with active worker when idle",
@@ -1753,7 +1985,7 @@ mod apply_worker {
 
                     info!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         %current_lsn,
                         %snapshot_lsn,
                         %catchup_lsn,
@@ -1769,7 +2001,7 @@ mod apply_worker {
 
                     info!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         %catchup_lsn,
                         "table sync worker entered catchup phase, apply worker blocking until table sync worker reaches sync_done",
                     );
@@ -1793,7 +2025,7 @@ mod apply_worker {
                             if final_phase.as_type().is_errored() {
                                 info!(
                                     worker_type = %WorkerType::Apply,
-                                    %table_id,
+                                    table_id = table_id.0,
                                     ?final_phase,
                                     "apply worker unblocked: table sync worker errored, skipping table",
                                 );
@@ -1803,7 +2035,7 @@ mod apply_worker {
 
                             info!(
                                 worker_type = %WorkerType::Apply,
-                                %table_id,
+                                table_id = table_id.0,
                                 ?final_phase,
                                 "apply worker unblocked: table sync worker reached sync_done",
                             );
@@ -1811,7 +2043,7 @@ mod apply_worker {
                         ShutdownResult::Shutdown(_) => {
                             info!(
                                 worker_type = %WorkerType::Apply,
-                                %table_id,
+                                table_id = table_id.0,
                                 "apply worker unblocked: shutdown signal received while waiting for table sync worker",
                             );
 
@@ -1823,7 +2055,7 @@ mod apply_worker {
                     if current_lsn >= sync_done_lsn {
                         info!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             %sync_done_lsn,
                             %current_lsn,
                             "transitioning sync_done -> ready",
@@ -1835,7 +2067,7 @@ mod apply_worker {
                     } else {
                         debug!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             %sync_done_lsn,
                             %current_lsn,
                             "table not yet ready, current lsn below sync done lsn",
@@ -1845,7 +2077,7 @@ mod apply_worker {
                 _ => {
                     debug!(
                         worker_type = %WorkerType::Apply,
-                        %table_id,
+                        table_id = table_id.0,
                         ?phase,
                         "no action needed for current phase when idle",
                     );
@@ -1854,7 +2086,7 @@ mod apply_worker {
         } else {
             debug!(
                 worker_type = %WorkerType::Apply,
-                %table_id,
+                table_id = table_id.0,
                 ?table_replication_phase,
                 "checking table without active worker when idle",
             );
@@ -1864,7 +2096,7 @@ mod apply_worker {
                     if current_lsn >= sync_done_lsn {
                         info!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             %sync_done_lsn,
                             %current_lsn,
                             "transitioning sync_done -> ready",
@@ -1876,7 +2108,7 @@ mod apply_worker {
                     }
                 }
                 _ => {
-                    debug!(worker_type = %WorkerType::Apply, %table_id, ?table_replication_phase, "spawning new table sync worker");
+                    debug!(worker_type = %WorkerType::Apply, table_id = table_id.0, ?table_replication_phase, "spawning new table sync worker");
 
                     // Start a new worker for this table.
                     let table_sync_worker = build_table_sync_worker(ctx, table_id);
@@ -1885,7 +2117,7 @@ mod apply_worker {
                     {
                         error!(
                             worker_type = %WorkerType::Apply,
-                            %table_id,
+                            table_id = table_id.0,
                             error = %err,
                             "failed to start table sync worker",
                         );
@@ -1906,7 +2138,7 @@ mod apply_worker {
         S: Clone,
         D: Clone,
     {
-        info!(%table_id, "creating table sync worker");
+        info!(table_id = table_id.0, "creating table sync worker");
 
         TableSyncWorker::new(
             ctx.pipeline_id,

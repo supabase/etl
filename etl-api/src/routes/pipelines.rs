@@ -16,7 +16,7 @@ use thiserror::Error;
 use utoipa::ToSchema;
 
 use crate::configs::encryption::EncryptionKey;
-use crate::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
+use crate::configs::pipeline::FullApiPipelineConfig;
 use crate::db;
 use crate::db::connect_to_source_database_from_api;
 use crate::db::destinations::{DestinationsDbError, destination_exists};
@@ -230,17 +230,6 @@ pub struct UpdatePipelineRequest {
     #[schema(example = 1, required = true)]
     pub destination_id: i64,
     #[schema(required = true)]
-    pub config: FullApiPipelineConfig,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UpdatePipelineConfigRequest {
-    #[schema(required = true)]
-    pub config: PartialApiPipelineConfig,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UpdatePipelineConfigResponse {
     pub config: FullApiPipelineConfig,
 }
 
@@ -1362,53 +1351,6 @@ pub async fn update_pipeline_version(
     txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
-}
-
-#[utoipa::path(
-    summary = "Update pipeline config",
-    description = "Updates the pipeline's configuration while preserving its running state.",
-    context_path = "/v1",
-    request_body = UpdatePipelineConfigRequest,
-    params(
-        ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
-        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
-    ),
-    responses(
-        (status = 200, description = "Pipeline configuration updated successfully", body = UpdatePipelineConfigResponse),
-        (status = 400, description = "Bad request or pipeline not running", body = ErrorMessage),
-        (status = 404, description = "Pipeline not found", body = ErrorMessage),
-        (status = 500, description = "Internal server error", body = ErrorMessage)
-    ),
-    tag = "Pipelines"
-)]
-#[post("/pipelines/{pipeline_id}/update-config")]
-pub async fn update_pipeline_config(
-    req: HttpRequest,
-    pool: Data<PgPool>,
-    pipeline_id: Path<i64>,
-    update_request: Json<UpdatePipelineConfigRequest>,
-) -> Result<impl Responder, PipelineError> {
-    let tenant_id = extract_tenant_id(&req)?;
-    let pipeline_id = pipeline_id.into_inner();
-    let update_request = update_request.into_inner();
-    let mut txn = pool.begin().await?;
-
-    let config = db::pipelines::update_pipeline_config(
-        &mut txn,
-        tenant_id,
-        pipeline_id,
-        update_request.config,
-    )
-    .await?
-    .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
-
-    txn.commit().await?;
-
-    let response = UpdatePipelineConfigResponse {
-        config: config.into(),
-    };
-
-    Ok(Json(response))
 }
 
 #[utoipa::path(

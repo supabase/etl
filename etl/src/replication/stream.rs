@@ -20,11 +20,12 @@ use crate::etl_error;
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::metrics::{
-    ETL_BYTES_PROCESSED_TOTAL, ETL_STATUS_UPDATES_SKIPPED_TOTAL, ETL_STATUS_UPDATES_TOTAL,
-    EVENT_TYPE_LABEL, FORCED_LABEL, PIPELINE_ID_LABEL, STATUS_UPDATE_TYPE_LABEL,
+    ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, ETL_STATUS_UPDATES_SKIPPED_TOTAL,
+    ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, PIPELINE_ID_LABEL,
+    STATUS_UPDATE_TYPE_LABEL,
 };
 use crate::types::{PipelineId, TableRow};
-use metrics::counter;
+use metrics::{counter, histogram};
 
 /// The amount of milliseconds between two consecutive status updates in case no forced update
 /// is requested.
@@ -80,6 +81,13 @@ where
                 )
                 .increment(row.len() as u64);
 
+                histogram!(
+                    ETL_ROW_SIZE_BYTES,
+                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
+                    EVENT_TYPE_LABEL => "copy"
+                )
+                .record(row.len() as f64);
+
                 // CONVERSION PHASE: Transform raw bytes into structured TableRow
                 // This is where most errors occur due to data format or type issues
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.clone()) {
@@ -108,8 +116,10 @@ where
 /// The status update type when sending a status update message back to Postgres.
 #[derive(Debug)]
 pub enum StatusUpdateType {
-    /// Represents an update requested by Postgres.
+    /// Represents an update in response to a keep alive from Postgres.
     KeepAlive,
+    /// Represents an update before shutdown that requires acknowledgement from Postgres.
+    ShutdownFlush,
 }
 
 impl StatusUpdateType {
@@ -117,6 +127,7 @@ impl StatusUpdateType {
     fn request_reply(&self) -> bool {
         match self {
             Self::KeepAlive => false,
+            Self::ShutdownFlush => true,
         }
     }
 }
@@ -125,6 +136,7 @@ impl Display for StatusUpdateType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::KeepAlive => write!(f, "keep_alive"),
+            Self::ShutdownFlush => write!(f, "shutdown_flush"),
         }
     }
 }

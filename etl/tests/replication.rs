@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use etl::error::ErrorKind;
-use etl::replication::client::PgReplicationClient;
+use etl::replication::client::{PgReplicationClient, SlotState};
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::test_slot_name;
 use etl::test_utils::schema::assert_table_schema_columns;
@@ -162,6 +162,37 @@ async fn test_delete_nonexistent_slot() {
     // Attempt to delete a slot that doesn't exist
     let result = client.delete_slot(&slot_name).await;
     assert!(matches!(result, Err(ref err) if err.kind() == ErrorKind::ReplicationSlotNotFound));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_slot_if_exists_deletes_existing_slot() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let slot_name = test_slot_name("delete_if_exists_slot");
+    client.create_slot(&slot_name).await.unwrap();
+
+    client.delete_slot_if_exists(&slot_name).await.unwrap();
+
+    let result = client.get_slot(&slot_name).await;
+    assert!(matches!(result, Err(ref err) if err.kind() == ErrorKind::ReplicationSlotNotFound));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_slot_if_exists_on_nonexistent_slot() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let slot_name = test_slot_name("delete_if_exists_nonexistent_slot");
+    client.delete_slot_if_exists(&slot_name).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -913,4 +944,76 @@ async fn test_start_logical_replication() {
         .unwrap();
     let counts = count_stream_components(stream, |counts| counts.insert_count == 10).await;
     assert_eq!(counts.insert_count, 10);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_slot_state_returns_valid_for_healthy_slot() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    // Create a slot
+    let slot_name = test_slot_name("healthy_slot");
+    client.create_slot(&slot_name).await.unwrap();
+
+    // Check the slot state - it should be valid
+    let slot_state = client.get_slot_state(&slot_name).await.unwrap();
+    assert_eq!(slot_state, SlotState::Valid);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_slot_state_returns_error_for_nonexistent_slot() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    // Try to get state for a slot that doesn't exist
+    let slot_name = test_slot_name("nonexistent_slot");
+    let result = client.get_slot_state(&slot_name).await;
+
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().kind(),
+        ErrorKind::ReplicationSlotNotFound
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "modifies cluster-wide PG settings; run independently with: cargo test -- --ignored exclusive_ --test-threads=1"]
+async fn exclusive_get_slot_state_returns_invalidated_for_lost_slot() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    // Create a slot
+    let slot_name = test_slot_name("invalidated_slot");
+    client.create_slot(&slot_name).await.unwrap();
+
+    // Verify the slot is initially valid
+    let slot_state = client.get_slot_state(&slot_name).await.unwrap();
+    assert_eq!(
+        slot_state,
+        SlotState::Valid,
+        "Slot should be valid initially"
+    );
+
+    // Try to invalidate the slot using the database helper
+    database.invalidate_slot(&slot_name).await;
+
+    // Verify the slot state is now Invalidated
+    let slot_state = client.get_slot_state(&slot_name).await.unwrap();
+    assert_eq!(
+        slot_state,
+        SlotState::Invalidated,
+        "Slot should be invalidated after exceeding WAL limit"
+    );
 }

@@ -11,8 +11,8 @@ use etl_api::routes::destinations_pipelines::{
 };
 use etl_api::routes::images::{CreateImageRequest, UpdateImageRequest};
 use etl_api::routes::pipelines::{
-    CreatePipelineRequest, RollbackTablesRequest, UpdatePipelineConfigRequest,
-    UpdatePipelineRequest, UpdatePipelineVersionRequest,
+    CreatePipelineRequest, RollbackTablesRequest, UpdatePipelineRequest,
+    UpdatePipelineVersionRequest,
 };
 use etl_api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
 use etl_api::routes::tenants::{
@@ -422,23 +422,6 @@ impl TestApp {
     ) -> reqwest::Response {
         self.post_authenticated(format!(
             "{}/v1/pipelines/{pipeline_id}/version",
-            &self.address
-        ))
-        .header("tenant_id", tenant_id)
-        .json(update_request)
-        .send()
-        .await
-        .expect("Failed to execute request.")
-    }
-
-    pub async fn update_pipeline_config(
-        &self,
-        tenant_id: &str,
-        pipeline_id: i64,
-        update_request: &UpdatePipelineConfigRequest,
-    ) -> reqwest::Response {
-        self.post_authenticated(format!(
-            "{}/v1/pipelines/{pipeline_id}/update-config",
             &self.address
         ))
         .header("tenant_id", tenant_id)
