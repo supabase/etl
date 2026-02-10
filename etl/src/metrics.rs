@@ -10,6 +10,7 @@ pub const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_duration_sec
 pub const ETL_TRANSACTIONS_TOTAL: &str = "etl_transactions_total";
 pub const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
+pub const ETL_TABLE_COPY_ROWS: &str = "etl_table_copy_rows";
 pub const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
 pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
@@ -78,6 +79,12 @@ pub(crate) fn register_metrics() {
             ETL_TABLE_COPY_DURATION_SECONDS,
             Unit::Seconds,
             "Duration in seconds to complete initial table copy from DataSync to FinishedCopy phase"
+        );
+
+        describe_histogram!(
+            ETL_TABLE_COPY_ROWS,
+            Unit::Count,
+            "Number of rows copied per table copy partition, labeled by pipeline_id, destination, and partitioning"
         );
 
         describe_counter!(

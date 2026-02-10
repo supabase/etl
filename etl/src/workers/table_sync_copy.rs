@@ -17,7 +17,8 @@ use crate::etl_error;
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC, etl_fail_point};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-    ETL_EVENTS_PROCESSED_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+    ETL_EVENTS_PROCESSED_TOTAL, ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL,
+    PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::{
     CtidPartition, PgReplicationChildTransaction, PgReplicationTransaction,
@@ -128,6 +129,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
                     ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
                     WORKER_TYPE_LABEL => "table_sync",
                     ACTION_LABEL => "table_copy",
+                    PARTITIONING_LABEL => "false",
                     PIPELINE_ID_LABEL => pipeline_id.to_string(),
                     DESTINATION_LABEL => D::name(),
                 )
@@ -145,6 +147,14 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
             }
         }
     }
+
+    histogram!(
+        ETL_TABLE_COPY_ROWS,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        DESTINATION_LABEL => D::name(),
+        PARTITIONING_LABEL => "false",
+    )
+    .record(total_rows as f64);
 
     info!(
         table_id = table_id.0,
@@ -355,6 +365,7 @@ where
                     ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
                     WORKER_TYPE_LABEL => "table_sync",
                     ACTION_LABEL => "table_copy",
+                    PARTITIONING_LABEL => "true",
                     PIPELINE_ID_LABEL => pipeline_id.to_string(),
                     DESTINATION_LABEL => D::name(),
                 )
@@ -374,6 +385,14 @@ where
     }
 
     child_transaction.commit().await?;
+
+    histogram!(
+        ETL_TABLE_COPY_ROWS,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        DESTINATION_LABEL => D::name(),
+        PARTITIONING_LABEL => "true",
+    )
+    .record(rows_copied as f64);
 
     info!(
         table_id = table_id.0,
