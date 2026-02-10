@@ -70,21 +70,13 @@ pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
         ),
         ErrorKind::UnsupportedValueInDestination => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
-            Some("Update the value in the Postgres table."),
-        ),
-        ErrorKind::ConfigError => ErrorHandlingPolicy::new(
-            RetryDirective::Manual,
-            Some("Update the application or service configuration settings."),
+            Some("Update the value in the Postgres table to make sure it's compatible."),
         ),
         ErrorKind::SourceConfigurationLimitExceeded => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some(
                 "Verify the configured limits for Postgres, for example, the maximum number of replication slots.",
             ),
-        ),
-        ErrorKind::ReplicationSlotAlreadyExists => ErrorHandlingPolicy::new(
-            RetryDirective::Manual,
-            Some("Remove the existing replication slot from the Postgres database."),
         ),
         ErrorKind::ReplicationSlotNotCreated => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
@@ -115,7 +107,7 @@ pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
         _ => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some(
-                "There is no explicit solution for this error, if the issue persists after rollback, please contact support.",
+                "There is no single prescribed solution for this error. The issue may still be recoverable with manual intervention based on the specific context. If it persists after rollback and targeted fixes, please contact support.",
             ),
         ),
     }
