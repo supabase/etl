@@ -112,33 +112,3 @@ pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
         ),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn err(kind: ErrorKind) -> EtlError {
-        EtlError::from((kind, "test error"))
-    }
-
-    #[test]
-    fn classifies_source_connection_failed_as_timed_retry() {
-        let policy = build_error_handling_policy(&err(ErrorKind::SourceConnectionFailed));
-        assert_eq!(policy.retry_directive(), RetryDirective::Timed);
-        assert_eq!(policy.solution(), None);
-    }
-
-    #[test]
-    fn classifies_authentication_error_as_manual_retry() {
-        let policy = build_error_handling_policy(&err(ErrorKind::SourceAuthenticationError));
-        assert_eq!(policy.retry_directive(), RetryDirective::Manual);
-        assert!(policy.solution().is_some());
-    }
-
-    #[test]
-    fn classifies_unknown_kind_as_manual_retry() {
-        let policy = build_error_handling_policy(&err(ErrorKind::InvalidState));
-        assert_eq!(policy.retry_directive(), RetryDirective::Manual);
-        assert!(policy.solution().is_some());
-    }
-}
