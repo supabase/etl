@@ -116,8 +116,10 @@ where
 {
     /// Handles apply worker errors using policy-based retry and backoff.
     ///
-    /// Returns `Ok(true)` if execution should retry, `Ok(false)` if shutdown was requested while
-    /// waiting to retry, or `Err` when the failure should be propagated.
+    /// Returns `Ok(true)` if shutdown was requested while waiting to retry, `Ok(false)` if
+    /// execution should continue retrying, or `Err` when the failure should be propagated.
+    /// Errors that happen while handling the original failure are propagated by design and
+    /// are never retried here.
     async fn handle_apply_worker_error(
         pipeline_id: PipelineId,
         config: &PipelineConfig,
@@ -125,6 +127,8 @@ where
         retry_attempts: &mut u32,
         err: EtlError,
     ) -> EtlResult<bool> {
+        error!(error = %err, "apply worker failed");
+
         let policy = build_error_handling_policy(&err);
         counter!(
             ETL_WORKER_ERRORS_TOTAL,
@@ -163,9 +167,9 @@ where
         tokio::select! {
             _ = shutdown_rx.changed() => {
                 info!("shutting down apply worker while waiting to retry");
-                Ok(false)
+                Ok(true)
             }
-            _ = tokio::time::sleep(sleep_duration) => Ok(true)
+            _ = tokio::time::sleep(sleep_duration) => Ok(false)
         }
     }
 
@@ -223,7 +227,7 @@ where
             match result {
                 Ok(()) => return Ok(()),
                 Err(err) => {
-                    let should_retry = Self::handle_apply_worker_error(
+                    let should_shutdown = Self::handle_apply_worker_error(
                         pipeline_id,
                         config.as_ref(),
                         &mut shutdown_rx,
@@ -232,7 +236,7 @@ where
                     )
                     .await?;
 
-                    if !should_retry {
+                    if should_shutdown {
                         return Ok(());
                     }
                 }
