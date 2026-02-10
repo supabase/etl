@@ -443,15 +443,12 @@ where
         let pool = self.pool.clone();
         let store = self.store.clone();
         let config = self.config.clone();
-
-        // Clone all the fields we need for retries.
         let pipeline_id = self.pipeline_id;
         let destination = self.destination.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let run_permit = self.run_permit.clone();
 
         loop {
-            // Recreate the worker for each attempt.
             let worker = TableSyncWorker {
                 pipeline_id,
                 config: config.clone(),
@@ -464,7 +461,6 @@ where
             };
 
             let result = worker.run_table_sync_worker(state.clone()).await;
-
             match result {
                 Ok(_) => {
                     let mut state_guard = state.lock().await;

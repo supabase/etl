@@ -11,7 +11,7 @@ use tracing::{Instrument, error, info, warn};
 use crate::bail;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::metrics::{
     ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL,
@@ -76,7 +76,6 @@ impl ApplyWorkerHandle {
 pub struct ApplyWorker<S, D> {
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
-    replication_client: PgReplicationClient,
     pool: Arc<TableSyncWorkerPool>,
     store: S,
     destination: D,
@@ -87,14 +86,11 @@ pub struct ApplyWorker<S, D> {
 impl<S, D> ApplyWorker<S, D> {
     /// Creates a new apply worker with the given configuration and dependencies.
     ///
-    /// The worker will use the provided replication client to read the Postgres
-    /// replication stream and coordinate with the table sync worker pool for
-    /// initial synchronization operations.
-    #[expect(clippy::too_many_arguments)]
+    /// The worker creates a fresh replication connection for each run attempt and
+    /// coordinates with the table sync worker pool for initial synchronization operations.
     pub fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
-        replication_client: PgReplicationClient,
         pool: Arc<TableSyncWorkerPool>,
         store: S,
         destination: D,
@@ -104,7 +100,6 @@ impl<S, D> ApplyWorker<S, D> {
         Self {
             pipeline_id,
             config,
-            replication_client,
             pool,
             store,
             destination,
@@ -119,6 +114,61 @@ where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
+    /// Handles apply worker errors using policy-based retry and backoff.
+    ///
+    /// Returns `Ok(true)` if execution should retry, `Ok(false)` if shutdown was requested while
+    /// waiting to retry, or `Err` when the failure should be propagated.
+    async fn handle_apply_worker_error(
+        pipeline_id: PipelineId,
+        config: &PipelineConfig,
+        shutdown_rx: &mut ShutdownRx,
+        retry_attempts: &mut u32,
+        err: EtlError,
+    ) -> EtlResult<bool> {
+        let policy = build_error_handling_policy(&err);
+        counter!(
+            ETL_WORKER_ERRORS_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+            WORKER_TYPE_LABEL => "apply",
+            ERROR_TYPE_LABEL => policy.retry_directive().to_string(),
+        )
+        .increment(1);
+
+        // If the error is not retriable, we should just propagate it.
+        if !policy.should_retry() {
+            return Err(err);
+        }
+
+        // If we reached the max attempts, we propagate the last known error.
+        if *retry_attempts >= config.table_error_retry_max_attempts {
+            error!(
+                max_attempts = config.table_error_retry_max_attempts,
+                error = %err,
+                "apply worker timed retry limit reached, stopping worker",
+            );
+
+            return Err(err);
+        }
+
+        *retry_attempts = retry_attempts.saturating_add(1);
+        let sleep_duration = Duration::from_millis(config.table_error_retry_delay_ms);
+
+        info!(
+            retry_attempt = *retry_attempts,
+            max_attempts = config.table_error_retry_max_attempts,
+            sleep_duration = ?sleep_duration,
+            "retrying apply worker after timed-retriable error",
+        );
+
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                info!("shutting down apply worker while waiting to retry");
+                Ok(false)
+            }
+            _ = tokio::time::sleep(sleep_duration) => Ok(true)
+        }
+    }
+
     /// Spawns the apply worker and returns a handle for monitoring.
     ///
     /// This method initializes the apply worker by determining the starting LSN,
@@ -156,20 +206,12 @@ where
         let destination = self.destination.clone();
         let table_sync_worker_permits = self.table_sync_worker_permits.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
-
         let mut retry_attempts: u32 = 0;
-        let mut next_replication_client = Some(self.replication_client);
 
         loop {
-            let replication_client = match next_replication_client.take() {
-                Some(client) => client,
-                None => PgReplicationClient::connect(config.pg_connection.clone()).await?,
-            };
-
             let worker = ApplyWorker {
                 pipeline_id,
                 config: config.clone(),
-                replication_client,
                 pool: pool.clone(),
                 store: store.clone(),
                 destination: destination.clone(),
@@ -181,51 +223,18 @@ where
             match result {
                 Ok(()) => return Ok(()),
                 Err(err) => {
-                    let policy = build_error_handling_policy(&err);
-                    counter!(
-                        ETL_WORKER_ERRORS_TOTAL,
-                        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                        WORKER_TYPE_LABEL => "apply",
-                        ERROR_TYPE_LABEL => policy.retry_directive().to_string(),
+                    let should_retry = Self::handle_apply_worker_error(
+                        pipeline_id,
+                        config.as_ref(),
+                        &mut shutdown_rx,
+                        &mut retry_attempts,
+                        err,
                     )
-                    .increment(1);
+                    .await?;
 
-                    // If the error is not retriable, we should just propagate it.
-                    if !policy.should_retry() {
-                        return Err(err);
+                    if !should_retry {
+                        return Ok(());
                     }
-
-                    // If we reached the max attempts, we propagate the last known error.
-                    if retry_attempts >= config.table_error_retry_max_attempts {
-                        error!(
-                            max_attempts = config.table_error_retry_max_attempts,
-                            error = %err,
-                            "apply worker timed retry limit reached, stopping worker",
-                        );
-
-                        return Err(err);
-                    }
-
-                    retry_attempts = retry_attempts.saturating_add(1);
-                    let sleep_duration = Duration::from_millis(config.table_error_retry_delay_ms);
-
-                    info!(
-                        retry_attempt = retry_attempts,
-                        max_attempts = config.table_error_retry_max_attempts,
-                        sleep_duration = ?sleep_duration,
-                        "retrying apply worker after timed-retriable error",
-                    );
-
-                    tokio::select! {
-                        _ = shutdown_rx.changed() => {
-                            info!("shutting down apply worker while waiting to retry");
-
-                            return Ok(());
-                        }
-                        _ = tokio::time::sleep(sleep_duration) => {}
-                    }
-
-                    next_replication_client = None;
                 }
             }
         }
@@ -233,9 +242,12 @@ where
 
     /// Runs a single apply worker attempt.
     async fn run_apply_worker(self) -> EtlResult<()> {
+        let replication_client =
+            PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
+
         let start_lsn = get_start_lsn(
             self.pipeline_id,
-            &self.replication_client,
+            &replication_client,
             &self.store,
             &self.config.invalidated_slot_behavior,
         )
@@ -255,7 +267,7 @@ where
             self.pipeline_id,
             start_lsn,
             self.config,
-            self.replication_client,
+            replication_client,
             self.store,
             self.destination,
             worker_context,
