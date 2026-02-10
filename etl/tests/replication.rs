@@ -985,6 +985,7 @@ async fn test_table_copy_stream_with_ctid_partition() {
 
     // Export the snapshot so child connections can share it.
     let snapshot_id = transaction.export_snapshot().await.unwrap();
+    assert!(!snapshot_id.is_empty(), "snapshot id should not be empty");
 
     let mut total_rows: u64 = 0;
     for partition in &partitions {
@@ -1007,73 +1008,5 @@ async fn test_table_copy_stream_with_ctid_partition() {
     assert_eq!(
         total_rows, expected_rows as u64,
         "total rows across all partitions should match inserted rows"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_export_snapshot_returns_valid_snapshot() {
-    init_test_tracing();
-    let database = spawn_source_database().await;
-
-    let client = PgReplicationClient::connect(database.config.clone())
-        .await
-        .unwrap();
-
-    let table_id = database
-        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
-        .await
-        .unwrap();
-
-    let expected_rows: i64 = 10;
-    database
-        .insert_generate_series(test_table_name("table_1"), &["age"], 1, expected_rows, 1)
-        .await
-        .unwrap();
-
-    let (transaction, _) = client
-        .create_slot_with_transaction(&test_slot_name("my_slot"))
-        .await
-        .unwrap();
-
-    // Export the snapshot and verify it returns a non-empty id.
-    let snapshot_id = transaction.export_snapshot().await.unwrap();
-    assert!(!snapshot_id.is_empty(), "snapshot id should not be empty");
-
-    // Fork a child and pin it to the exported snapshot.
-    let child = transaction.fork_child().await.unwrap();
-    let child_tx = PgReplicationChildTransaction::new(child, &snapshot_id)
-        .await
-        .unwrap();
-
-    // Read data through the child to verify the snapshot is usable.
-    let column_schemas = &[ColumnSchema {
-        name: "age".to_string(),
-        typ: Type::INT4,
-        modifier: -1,
-        nullable: true,
-        primary: false,
-    }];
-
-    let stream = child_tx
-        .get_table_copy_stream_with_ctid_partition(
-            table_id,
-            column_schemas,
-            None,
-            // Use a wide ctid range that covers all rows.
-            &etl::replication::client::CtidPartition {
-                start_tid: "(0,0)".to_string(),
-                end_tid: "(4294967295,0)".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-
-    let rows = count_stream_rows(stream).await;
-    child_tx.commit().await.unwrap();
-    transaction.commit().await.unwrap();
-
-    assert_eq!(
-        rows, expected_rows as u64,
-        "child snapshot should see all rows from the parent transaction"
     );
 }
