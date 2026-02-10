@@ -119,7 +119,8 @@ pub enum ErrorKind {
 
     // Security & Authentication Errors
     EncryptionError,
-    AuthenticationError,
+    SourceAuthenticationError,
+    DestinationAuthenticationError,
     PermissionDenied,
 
     // State & Workflow Errors
@@ -555,7 +556,7 @@ impl From<tokio_postgres::Error> for EtlError {
 
                     // Authentication errors (28xxx)
                     SqlState::INVALID_AUTHORIZATION_SPECIFICATION | SqlState::INVALID_PASSWORD => (
-                        ErrorKind::AuthenticationError,
+                        ErrorKind::SourceAuthenticationError,
                         "PostgreSQL authentication failed",
                     ),
 

@@ -150,7 +150,6 @@ where
         let apply_worker = ApplyWorker::new(
             self.config.id,
             self.config.clone(),
-            replication_client,
             pool.clone(),
             self.store.clone(),
             self.destination.clone(),
