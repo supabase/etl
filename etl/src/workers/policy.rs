@@ -27,6 +27,11 @@ impl ErrorHandlingPolicy {
         }
     }
 
+    /// Returns `true` if this policy involves a retry.
+    pub fn should_retry(&self) -> bool {
+        self.retry_directive == RetryDirective::Timed
+    }
+
     /// Returns the retry directive for this policy.
     pub fn retry_directive(&self) -> RetryDirective {
         self.retry_directive

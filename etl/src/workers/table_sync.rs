@@ -491,9 +491,9 @@ where
 
                     let mut state_guard = state.lock().await;
 
-                    // If it's a timed retry, we want to see if we reached the maximum number of attempts
+                    // If we should retry this error, we want to see if we reached the maximum number of attempts
                     // before trying again. If we did, we switch to a manual retry policy.
-                    if let RetryPolicy::TimedRetry { .. } = retry_policy
+                    if policy.should_retry()
                         && state_guard.retry_attempts() >= config.table_error_retry_max_attempts
                     {
                         info!(

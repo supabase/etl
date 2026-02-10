@@ -180,8 +180,8 @@ where
                 Err(err) => {
                     let policy = build_error_handling_policy(&err);
 
-                    // If it's not a timed retry, we immediately fail.
-                    if policy.retry_directive() != RetryDirective::Timed {
+                    // If the error is not retriable, we should just propagate it.
+                    if !policy.should_retry() {
                         return Err(err);
                     }
 
