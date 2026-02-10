@@ -386,8 +386,8 @@ where
     ///
     /// Returns `Ok(true)` if shutdown was requested while waiting to retry, `Ok(false)` if
     /// execution should continue retrying, or `Err` when the failure should be propagated.
-    /// Errors that happen while handling the original failure are propagated by design and
-    /// are never retried here.
+    ///
+    /// Errors that happen while handling the worker error in this function are immediately propagated.
     async fn handle_table_sync_worker_error(
         pipeline_id: PipelineId,
         table_id: TableId,
@@ -436,8 +436,6 @@ where
 
             table_error = table_error.with_retry_policy(RetryPolicy::ManualRetry);
             retry_policy = table_error.retry_policy().clone();
-
-            state_guard.reset_retry_attempts();
         }
 
         // Update the state and store with the error. This way the user is notified about

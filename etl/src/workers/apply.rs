@@ -118,8 +118,8 @@ where
     ///
     /// Returns `Ok(true)` if shutdown was requested while waiting to retry, `Ok(false)` if
     /// execution should continue retrying, or `Err` when the failure should be propagated.
-    /// Errors that happen while handling the original failure are propagated by design and
-    /// are never retried here.
+    ///
+    /// Errors that happen while handling the worker error in this function are immediately propagated.
     async fn handle_apply_worker_error(
         pipeline_id: PipelineId,
         config: &PipelineConfig,
