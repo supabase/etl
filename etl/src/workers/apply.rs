@@ -14,7 +14,7 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 use crate::metrics::{
-    ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERROR, PIPELINE_ID_LABEL,
+    ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL,
     WORKER_TYPE_LABEL,
 };
 use crate::replication::apply::{ApplyLoop, ApplyWorkerContext, WorkerContext};
@@ -183,7 +183,7 @@ where
                 Err(err) => {
                     let policy = build_error_handling_policy(&err);
                     counter!(
-                        ETL_WORKER_ERROR,
+                        ETL_WORKER_ERRORS_TOTAL,
                         PIPELINE_ID_LABEL => pipeline_id.to_string(),
                         WORKER_TYPE_LABEL => "apply",
                         ERROR_TYPE_LABEL => policy.retry_directive().to_string(),

@@ -16,7 +16,7 @@ pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
 pub const ETL_ROW_SIZE_BYTES: &str = "etl_row_size_bytes";
 pub const ETL_SLOT_INVALIDATIONS_TOTAL: &str = "etl_slot_invalidations_total";
-pub const ETL_WORKER_ERROR: &str = "etl_worker_error";
+pub const ETL_WORKER_ERRORS_TOTAL: &str = "etl_worker_errors_total";
 
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
@@ -115,7 +115,7 @@ pub(crate) fn register_metrics() {
         );
 
         describe_counter!(
-            ETL_WORKER_ERROR,
+            ETL_WORKER_ERRORS_TOTAL,
             Unit::Count,
             "Total number of worker errors, labeled by pipeline_id, worker_type, and error_type"
         );
