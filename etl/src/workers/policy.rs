@@ -1,9 +1,3 @@
-//! Shared worker error handling policy classification.
-//!
-//! This module centralizes the mapping from [`EtlError`] to worker handling policies.
-//! Workers use these policies to decide whether an error should be retried automatically,
-//! require manual intervention, or fail immediately.
-
 use crate::error::{ErrorKind, EtlError};
 
 /// Retry behavior for a classified error.
@@ -58,31 +52,17 @@ pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
         }
 
         // Manual retry errors with explicit operator guidance.
-        ErrorKind::AuthenticationError => ErrorHandlingPolicy::new(
+        ErrorKind::SourceAuthenticationError => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
-            Some("Verify database credentials and authentication token validity."),
+            Some("Verify source database credentials and authentication token validity."),
+        ),
+        ErrorKind::DestinationAuthenticationError => ErrorHandlingPolicy::new(
+            RetryDirective::Manual,
+            Some("Verify destination credentials and authentication token validity."),
         ),
         ErrorKind::SourceSchemaError => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some("Update the Postgres database schema to resolve compatibility issues."),
-        ),
-        ErrorKind::ConfigError => ErrorHandlingPolicy::new(
-            RetryDirective::Manual,
-            Some("Update the application or service configuration settings."),
-        ),
-        ErrorKind::ReplicationSlotAlreadyExists => ErrorHandlingPolicy::new(
-            RetryDirective::Manual,
-            Some("Remove the existing replication slot from the Postgres database."),
-        ),
-        ErrorKind::ReplicationSlotNotCreated => ErrorHandlingPolicy::new(
-            RetryDirective::Manual,
-            Some("Verify the Postgres database allows creation of new replication slots."),
-        ),
-        ErrorKind::SourceConfigurationLimitExceeded => ErrorHandlingPolicy::new(
-            RetryDirective::Manual,
-            Some(
-                "Verify the configured limits for Postgres, for example, the maximum number of replication slots.",
-            ),
         ),
         ErrorKind::NullValuesNotSupportedInArrayInDestination => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
@@ -91,6 +71,24 @@ pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
         ErrorKind::UnsupportedValueInDestination => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some("Update the value in the Postgres table."),
+        ),
+        ErrorKind::ConfigError => ErrorHandlingPolicy::new(
+            RetryDirective::Manual,
+            Some("Update the application or service configuration settings."),
+        ),
+        ErrorKind::SourceConfigurationLimitExceeded => ErrorHandlingPolicy::new(
+            RetryDirective::Manual,
+            Some(
+                "Verify the configured limits for Postgres, for example, the maximum number of replication slots.",
+            ),
+        ),
+        ErrorKind::ReplicationSlotAlreadyExists => ErrorHandlingPolicy::new(
+            RetryDirective::Manual,
+            Some("Remove the existing replication slot from the Postgres database."),
+        ),
+        ErrorKind::ReplicationSlotNotCreated => ErrorHandlingPolicy::new(
+            RetryDirective::Manual,
+            Some("Verify the Postgres database allows creation of new replication slots."),
         ),
         ErrorKind::SourceSnapshotTooOld => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
@@ -140,7 +138,7 @@ mod tests {
 
     #[test]
     fn classifies_authentication_error_as_manual_retry() {
-        let policy = build_error_handling_policy(&err(ErrorKind::AuthenticationError));
+        let policy = build_error_handling_policy(&err(ErrorKind::SourceAuthenticationError));
         assert_eq!(policy.retry_directive(), RetryDirective::Manual);
         assert!(policy.solution().is_some());
     }

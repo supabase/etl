@@ -211,35 +211,35 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
     let (kind, description) = match &err {
         // Authentication related errors
         BQError::InvalidServiceAccountKey(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "Invalid BigQuery service account key",
         ),
         BQError::InvalidServiceAccountAuthenticator(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "Invalid BigQuery service account authenticator",
         ),
         BQError::InvalidInstalledFlowAuthenticator(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "Invalid BigQuery installed flow authenticator",
         ),
         BQError::InvalidApplicationDefaultCredentialsAuthenticator(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "Invalid BigQuery application default credentials",
         ),
         BQError::InvalidAuthorizedUserAuthenticator(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "Invalid BigQuery authorized user authenticator",
         ),
         BQError::AuthError(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "BigQuery authentication error",
         ),
         BQError::YupAuthError(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "BigQuery OAuth authentication error",
         ),
         BQError::NoToken => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "BigQuery authentication token missing",
         ),
 
