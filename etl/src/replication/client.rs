@@ -53,6 +53,7 @@ where
 }
 
 /// Internal snapshot action for `CREATE_REPLICATION_SLOT`.
+#[derive(Debug)]
 enum SnapshotAction {
     /// `USE_SNAPSHOT` - uses the snapshot in the current transaction.
     Use,
