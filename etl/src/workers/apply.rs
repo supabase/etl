@@ -13,14 +13,17 @@ use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
-use crate::metrics::{ETL_SLOT_INVALIDATIONS_TOTAL, PIPELINE_ID_LABEL};
+use crate::metrics::{
+    ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERROR, PIPELINE_ID_LABEL,
+    WORKER_TYPE_LABEL,
+};
 use crate::replication::apply::{ApplyLoop, ApplyWorkerContext, WorkerContext};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState};
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
-use crate::workers::policy::{RetryDirective, build_error_handling_policy};
+use crate::workers::policy::build_error_handling_policy;
 use crate::workers::pool::TableSyncWorkerPool;
 
 /// Handle for monitoring and controlling the apply worker.
@@ -179,6 +182,13 @@ where
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     let policy = build_error_handling_policy(&err);
+                    counter!(
+                        ETL_WORKER_ERROR,
+                        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                        WORKER_TYPE_LABEL => "apply",
+                        ERROR_TYPE_LABEL => policy.retry_directive().to_string(),
+                    )
+                    .increment(1);
 
                     // If the error is not retriable, we should just propagate it.
                     if !policy.should_retry() {

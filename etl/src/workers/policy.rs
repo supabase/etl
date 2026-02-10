@@ -1,4 +1,5 @@
 use crate::error::{ErrorKind, EtlError};
+use std::fmt::{Display, Formatter};
 
 /// Retry behavior for a classified error.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -9,6 +10,16 @@ pub enum RetryDirective {
     Manual,
     /// The operation should not be retried.
     NoRetry,
+}
+
+impl Display for RetryDirective {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RetryDirective::Timed => write!(f, "timed"),
+            RetryDirective::Manual => write!(f, "manual"),
+            RetryDirective::NoRetry => write!(f, "no_retry"),
+        }
+    }
 }
 
 /// Policy describing how an [`EtlError`] should be handled by workers.

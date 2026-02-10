@@ -16,6 +16,7 @@ pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
 pub const ETL_ROW_SIZE_BYTES: &str = "etl_row_size_bytes";
 pub const ETL_SLOT_INVALIDATIONS_TOTAL: &str = "etl_slot_invalidations_total";
+pub const ETL_WORKER_ERROR: &str = "etl_worker_error";
 
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
@@ -33,6 +34,8 @@ pub const EVENT_TYPE_LABEL: &str = "event_type";
 pub const FORCED_LABEL: &str = "forced";
 /// Label key for the status update type.
 pub const STATUS_UPDATE_TYPE_LABEL: &str = "status_update_type";
+/// Label key for worker error classification ("timed", "manual", "no_retry").
+pub const ERROR_TYPE_LABEL: &str = "error_type";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaranteed to register the
@@ -109,6 +112,12 @@ pub(crate) fn register_metrics() {
             ETL_SLOT_INVALIDATIONS_TOTAL,
             Unit::Count,
             "Total number of times a replication slot was found invalidated on pipeline start, labeled by pipeline_id"
+        );
+
+        describe_counter!(
+            ETL_WORKER_ERROR,
+            Unit::Count,
+            "Total number of worker errors, labeled by pipeline_id, worker_type, and error_type"
         );
     });
 }
