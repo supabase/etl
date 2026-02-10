@@ -14,7 +14,9 @@ use crate::bail;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
-use crate::metrics::{ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL};
+use crate::metrics::{
+    ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+};
 use crate::replication::apply::{
     ApplyLoop, ApplyLoopResult, TableSyncWorkerContext, WorkerContext,
 };
