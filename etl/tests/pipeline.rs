@@ -333,6 +333,70 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn table_copy_replicates_many_rows_with_parallel_connections() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+
+    // Create a table with a primary key and a value column.
+    let table_name = test_table_name("large_table");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+
+    // Create a publication for the table.
+    let publication_name = format!("pub_{}", random::<u32>());
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    // Insert 100k rows using generate_series.
+    let total_rows: i64 = 10;
+    let rows_affected = database
+        .insert_generate_series(table_name.clone(), &["value"], 1, total_rows, 1)
+        .await
+        .unwrap();
+    assert_eq!(rows_affected, total_rows as u64);
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // Create a pipeline with 4 parallel copy connections.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    )
+    .with_max_copy_connections_per_table(4)
+    .with_batch_config(BatchConfig {
+        max_size: 10_000,
+        max_fill_ms: 10_000,
+    })
+    .build();
+
+    // Wait for the table to be ready.
+    let table_ready_notify = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify that all 100k rows were copied.
+    let table_rows = destination.get_table_rows().await;
+    let copied_rows = table_rows.get(&table_id).map(|r| r.len()).unwrap_or(0);
+    assert_eq!(copied_rows, total_rows as usize);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn table_schema_copy_survives_pipeline_restarts() {
     init_test_tracing();
     let mut database = spawn_source_database().await;

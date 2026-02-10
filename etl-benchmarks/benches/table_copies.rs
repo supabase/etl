@@ -355,6 +355,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         max_table_sync_workers: args.max_table_sync_workers,
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
+        max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
     };
 
     // Create the appropriate destination based on the argument

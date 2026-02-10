@@ -56,6 +56,8 @@ pub struct PipelineBuilder<S, D> {
     table_sync_copy: Option<TableSyncCopyConfig>,
     /// Behavior when the main replication slot is found to be invalidated.
     invalidated_slot_behavior: InvalidatedSlotBehavior,
+    /// Maximum parallel connections per table during initial copy. Default: 1 (serial).
+    max_copy_connections_per_table: u16,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -99,6 +101,7 @@ where
             max_table_sync_workers: 1,
             table_sync_copy: None,
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
         }
     }
 
@@ -150,6 +153,12 @@ where
         self
     }
 
+    /// Sets the maximum number of parallel connections per table during initial copy.
+    pub fn with_max_copy_connections_per_table(mut self, connections: u16) -> Self {
+        self.max_copy_connections_per_table = connections;
+        self
+    }
+
     /// Builds and returns the configured pipeline.
     ///
     /// This method consumes the builder and creates a `Pipeline` instance with
@@ -169,6 +178,7 @@ where
             max_table_sync_workers: self.max_table_sync_workers,
             table_sync_copy: self.table_sync_copy.unwrap_or_default(),
             invalidated_slot_behavior: self.invalidated_slot_behavior,
+            max_copy_connections_per_table: self.max_copy_connections_per_table,
         };
 
         Pipeline::new(config, self.store, self.destination)

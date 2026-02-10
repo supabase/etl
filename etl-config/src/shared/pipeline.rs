@@ -111,6 +111,11 @@ pub struct PipelineConfig {
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
+    /// Maximum parallel connections per table during initial copy.
+    /// When 1 (default), the existing serial copy path is used.
+    /// When >1, ctid-based partitioning splits the table across N connections.
+    #[serde(default = "default_max_copy_connections_per_table")]
+    pub max_copy_connections_per_table: u16,
 }
 
 impl PipelineConfig {
@@ -122,6 +127,9 @@ impl PipelineConfig {
 
     /// Default maximum number of concurrent table sync workers.
     pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
+
+    /// Default maximum parallel connections per table during initial copy.
+    pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 4;
 
     /// Validates pipeline configuration settings.
     ///
@@ -143,6 +151,13 @@ impl PipelineConfig {
             });
         }
 
+        if self.max_copy_connections_per_table == 0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "max_copy_connections_per_table".to_string(),
+                constraint: "must be greater than 0".to_string(),
+            });
+        }
+
         Ok(())
     }
 }
@@ -157,6 +172,10 @@ fn default_table_error_retry_max_attempts() -> u32 {
 
 fn default_max_table_sync_workers() -> u16 {
     PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
+}
+
+fn default_max_copy_connections_per_table() -> u16 {
+    PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE
 }
 
 /// Same as [`PipelineConfig`] but without secrets. This type
@@ -196,6 +215,11 @@ pub struct PipelineConfigWithoutSecrets {
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
+    /// Maximum parallel connections per table during initial copy.
+    /// When 1 (default), the existing serial copy path is used.
+    /// When >1, ctid-based partitioning splits the table across N connections.
+    #[serde(default = "default_max_copy_connections_per_table")]
+    pub max_copy_connections_per_table: u16,
 }
 
 impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
@@ -210,6 +234,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             max_table_sync_workers: value.max_table_sync_workers,
             table_sync_copy: value.table_sync_copy,
             invalidated_slot_behavior: value.invalidated_slot_behavior,
+            max_copy_connections_per_table: value.max_copy_connections_per_table,
         }
     }
 }

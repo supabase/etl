@@ -1168,6 +1168,8 @@ mod tests {
                 max_table_sync_workers: 4,
                 table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
                 invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
+                max_copy_connections_per_table:
+                    PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
             },
             sentry: None,
             supabase: None,

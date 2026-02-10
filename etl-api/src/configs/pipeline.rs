@@ -134,6 +134,7 @@ impl StoredPipelineConfig {
             max_table_sync_workers: self.max_table_sync_workers,
             table_sync_copy: self.table_sync_copy,
             invalidated_slot_behavior: self.invalidated_slot_behavior,
+            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
         }
     }
 
