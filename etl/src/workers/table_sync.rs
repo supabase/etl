@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::types::TableId;
@@ -24,6 +24,7 @@ use crate::state::table::{
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
+use crate::workers::policy::{RetryDirective, build_error_handling_policy};
 use crate::workers::pool::{TableSyncWorkerId, TableSyncWorkerPool};
 
 /// Internal state of [`TableSyncWorkerState`].
@@ -31,7 +32,7 @@ use crate::workers::pool::{TableSyncWorkerId, TableSyncWorkerPool};
 pub struct TableSyncWorkerStateInner {
     /// Unique identifier for the table whose state this structure tracks.
     table_id: TableId,
-    /// Current replication phase - this is the authoritative in-memory state.
+    /// Current replication phase, this is the authoritative in-memory state.
     table_replication_phase: TableReplicationPhase,
     /// Notification mechanism for notifying state changes to waiting workers.
     phase_change: Arc<Notify>,
@@ -442,7 +443,7 @@ where
         // Clone all the fields we need for retries.
         let pipeline_id = self.pipeline_id;
         let destination = self.destination.clone();
-        let shutdown_rx = self.shutdown_rx.clone();
+        let mut shutdown_rx = self.shutdown_rx.clone();
         let run_permit = self.run_permit.clone();
 
         loop {
@@ -470,10 +471,23 @@ where
                 Err(err) => {
                     error!(table_id = table_id.0, error = %err, "table sync worker failed");
 
-                    // Convert error to table replication error to determine retry policy.
-                    let mut table_error =
-                        TableReplicationError::from_etl_error(&config, table_id, &err);
-                    let mut retry_policy = table_error.retry_policy().clone();
+                    // Build a retry policy from the shared classifier. The concrete retry timestamp is
+                    // computed in the worker from config so both table sync and apply worker use the
+                    // same retry timing settings.
+                    let policy = build_error_handling_policy(&err);
+                    let mut retry_policy = match policy.retry_directive() {
+                        RetryDirective::Timed => RetryPolicy::retry_in(
+                            ChronoDuration::milliseconds(config.table_error_retry_delay_ms as i64),
+                        ),
+                        RetryDirective::Manual => RetryPolicy::ManualRetry,
+                        RetryDirective::NoRetry => RetryPolicy::NoRetry,
+                    };
+                    let mut table_error = TableReplicationError::from_error_policy(
+                        table_id,
+                        &err,
+                        &policy,
+                        retry_policy.clone(),
+                    );
 
                     let mut state_guard = state.lock().await;
 
@@ -494,7 +508,8 @@ where
                         state_guard.reset_retry_attempts();
                     }
 
-                    // Update the state and store with the error.
+                    // Update the state and store with the error. This way the user is notified about
+                    // the current error state.
                     state_guard
                         .set_and_store(table_error.into(), &store)
                         .await?;
@@ -502,6 +517,8 @@ where
                     match retry_policy {
                         RetryPolicy::TimedRetry { next_retry } => {
                             let now = Utc::now();
+                            let mut should_retry = true;
+
                             if now < next_retry {
                                 let sleep_duration = (next_retry - now)
                                     .to_std()
@@ -513,9 +530,31 @@ where
                                     "retrying table sync worker",
                                 );
 
-                                tokio::time::sleep(sleep_duration).await;
+                                // We drop the state guard lock before sleeping to avoid stalling
+                                // the apply worker while the worker is waiting to retry.
+                                drop(state_guard);
+
+                                // Stop retrying immediately on shutdown instead of sleeping through it.
+                                tokio::select! {
+                                    _ = shutdown_rx.changed() => {
+                                        info!(table_id = table_id.0, "shutting down table sync worker while waiting to retry");
+                                        should_retry = false;
+                                    }
+                                    _ = tokio::time::sleep(sleep_duration) => {}
+                                }
+
+                                // We lock the state again after sleeping.
+                                state_guard = state.lock().await;
                             } else {
                                 info!(table_id = table_id.0, "retrying table sync worker");
+                            }
+
+                            // If we should not retry because we got a shutdown request during retry
+                            // we just want to immediately return.
+                            if !should_retry {
+                                state_guard.reset_retry_attempts();
+
+                                return Ok(());
                             }
 
                             // We mark that we attempted a retry.

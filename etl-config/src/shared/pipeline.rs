@@ -92,10 +92,14 @@ pub struct PipelineConfig {
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
-    /// Number of milliseconds between one retry and another when a table error occurs.
+    /// Number of milliseconds between one retry and another for timed worker retries.
+    ///
+    /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
-    /// Maximum number of automatic retry attempts before requiring manual intervention.
+    /// Maximum number of automatic timed retry attempts before failing the worker.
+    ///
+    /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
     /// Maximum number of table sync workers that can run at a time
@@ -173,10 +177,14 @@ pub struct PipelineConfigWithoutSecrets {
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
-    /// Number of milliseconds between one retry and another when a table error occurs.
+    /// Number of milliseconds between one retry and another for timed worker retries.
+    ///
+    /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
-    /// Maximum number of automatic retry attempts before requiring manual intervention.
+    /// Maximum number of automatic timed retry attempts before failing the worker.
+    ///
+    /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
     /// Maximum number of table sync workers that can run at a time
