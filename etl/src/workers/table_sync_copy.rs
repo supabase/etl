@@ -99,7 +99,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     let table_copy_stream = TimeoutBatchStream::wrap(table_copy_stream, batch_config, shutdown_rx);
     pin!(table_copy_stream);
 
-    info!(table_id = table_id.0, "starting table copy stream");
+    info!(table_id = table_id.0, "starting serial table copy");
 
     let mut total_rows: u64 = 0;
 
@@ -139,12 +139,17 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
             ShutdownResult::Shutdown(_) => {
                 info!(
                     table_id = table_id.0,
-                    "shutting down table sync during copy"
+                    total_rows, "shutting down serial table copy"
                 );
                 return Ok(TableCopyResult::Shutdown);
             }
         }
     }
+
+    info!(
+        table_id = table_id.0,
+        total_rows, "completed serial table copy"
+    );
 
     Ok(TableCopyResult::Completed { total_rows })
 }
@@ -166,6 +171,11 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     pipeline_id: PipelineId,
     destination: D,
 ) -> EtlResult<TableCopyResult> {
+    info!(
+        table_id = table_id.0,
+        max_copy_connections, "starting parallel table copy"
+    );
+
     // Plan ctid partitions on the main connection, which is already pinned to the
     // exported snapshot via SET TRANSACTION SNAPSHOT in create_slot_with_transaction.
     let partitions = transaction
@@ -174,6 +184,10 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 
     // If there are no partitions, we don't copy anything.
     if partitions.is_empty() {
+        info!(
+            table_id = table_id.0,
+            "table is empty, skipping parallel copy"
+        );
         return Ok(TableCopyResult::Completed { total_rows: 0 });
     }
 
@@ -187,6 +201,11 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     // import it via SET TRANSACTION SNAPSHOT. The main transaction must stay open for the
     // entire duration of the parallel copy to keep the snapshot valid.
     let snapshot_id = transaction.export_snapshot().await?;
+
+    info!(
+        table_id = table_id.0,
+        "exported snapshot for child connections"
+    );
 
     let mut join_set = JoinSet::new();
 
@@ -219,6 +238,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 
     let mut total_rows: u64 = 0;
 
+    // TODO: we might want to edit retries within the same partition if the copy fails. However, we
+    //  need to investigate the frequency.
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok(Ok(rows)) => {
@@ -228,7 +249,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 error!(
                     table_id = table_id.0,
                     error = %err,
-                    "parallel copy partition failed"
+                    "one or more parallel copy partitions failed"
                 );
                 join_set.abort_all();
 
@@ -238,13 +259,13 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 error!(
                     table_id = table_id.0,
                     error = %join_err,
-                    "parallel copy partition panicked"
+                    "one or more parallel copy partitions panicked"
                 );
                 join_set.abort_all();
 
                 return Err(etl_error!(
                     ErrorKind::TableSyncWorkerPanic,
-                    "One of the parallel copy partition tasks panicked, aborting all",
+                    "One or more parallel copy partition tasks panicked, aborting all",
                     join_err.to_string()
                 ));
             }
@@ -253,8 +274,17 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 
     // After all tasks complete, check if shutdown was requested.
     if shutdown_rx.has_changed().unwrap_or(false) {
+        info!(
+            table_id = table_id.0,
+            total_rows, "shutting down parallel table copy"
+        );
         return Ok(TableCopyResult::Shutdown);
     }
+
+    info!(
+        table_id = table_id.0,
+        total_rows, "completed parallel table copy"
+    );
 
     Ok(TableCopyResult::Completed { total_rows })
 }
@@ -278,6 +308,13 @@ async fn copy_partition<D>(
 where
     D: Destination + Clone + Send + 'static,
 {
+    info!(
+        table_id = table_id.0,
+        start_tid = %partition.start_tid,
+        end_tid = %partition.end_tid,
+        "starting partition copy"
+    );
+
     let copy_stream = child_transaction
         .get_table_copy_stream_with_ctid_partition(
             table_id,
@@ -322,6 +359,9 @@ where
                     DESTINATION_LABEL => D::name(),
                 )
                 .record(send_duration_seconds);
+
+                #[cfg(feature = "failpoints")]
+                etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC)?;
             }
             ShutdownResult::Shutdown(_) => {
                 info!(
@@ -334,6 +374,14 @@ where
     }
 
     child_transaction.commit().await?;
+
+    info!(
+        table_id = table_id.0,
+        rows_copied,
+        start_tid = %partition.start_tid,
+        end_tid = %partition.end_tid,
+        "completed partition copy"
+    );
 
     Ok(rows_copied)
 }

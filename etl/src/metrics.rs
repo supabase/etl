@@ -28,6 +28,8 @@ pub const ACTION_LABEL: &str = "action";
 pub const DESTINATION_LABEL: &str = "destination";
 /// Label key for pipeline id.
 pub const PIPELINE_ID_LABEL: &str = "pipeline_id";
+/// Label for to tag table copy metric if it was using partitioning.
+pub const PARTITIONING_LABEL: &str = "partitioning";
 /// Label key for event type (copy, insert, update, delete).
 pub const EVENT_TYPE_LABEL: &str = "event_type";
 /// Label key for whether the status update was forced.

@@ -353,7 +353,7 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
         .unwrap();
 
     // Insert 100k rows using generate_series.
-    let total_rows: i64 = 10;
+    let total_rows: i64 = 100000;
     let rows_affected = database
         .insert_generate_series(table_name.clone(), &["value"], 1, total_rows, 1)
         .await
@@ -372,7 +372,7 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
         store.clone(),
         destination.clone(),
     )
-    .with_max_copy_connections_per_table(4)
+    .with_max_copy_connections_per_table(100)
     .with_batch_config(BatchConfig {
         max_size: 10_000,
         max_fill_ms: 10_000,

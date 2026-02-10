@@ -217,11 +217,6 @@ impl PgReplicationTransaction {
     pub async fn commit(self) -> EtlResult<()> {
         self.client.commit_tx().await
     }
-
-    /// Rolls back the current transaction.
-    pub async fn rollback(self) -> EtlResult<()> {
-        self.client.rollback_tx().await
-    }
 }
 
 /// A transaction on a child connection pinned to an exported snapshot.
@@ -272,11 +267,6 @@ impl PgReplicationChildTransaction {
     /// Commits the current transaction.
     pub async fn commit(self) -> EtlResult<()> {
         self.client.client.commit_tx().await
-    }
-
-    /// Rolls back the current transaction.
-    pub async fn rollback(self) -> EtlResult<()> {
-        self.client.client.rollback_tx().await
     }
 }
 
@@ -884,13 +874,6 @@ impl PgReplicationClient {
         Ok(())
     }
 
-    /// Rolls back the current transaction.
-    async fn rollback_tx(&self) -> EtlResult<()> {
-        self.client.simple_query("rollback;").await?;
-
-        Ok(())
-    }
-
     /// Internal helper method to create a replication slot.
     ///
     /// The `snapshot_action` controls how the slot's snapshot is handled during creation.
@@ -1332,14 +1315,14 @@ impl PgReplicationClient {
     ) -> String {
         if let Some(row_filter) = row_filter {
             format!(
-                "copy (select {column_list} from {table_name} where ctid between {}::tid and {}::tid and ({}) to stdout with (format text);",
+                "copy (select {column_list} from {table_name} where ctid between {}::tid and {}::tid and ({})) to stdout with (format text);",
                 quote_literal(&partition.start_tid),
                 quote_literal(&partition.end_tid),
                 row_filter
             )
         } else {
             format!(
-                "copy (select {column_list} from {table_name} where ctid between {}::tid and {}::tid to stdout with (format text);",
+                "copy (select {column_list} from {table_name} where ctid between {}::tid and {}::tid) to stdout with (format text);",
                 quote_literal(&partition.start_tid),
                 quote_literal(&partition.end_tid),
             )
