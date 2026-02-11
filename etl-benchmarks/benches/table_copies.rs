@@ -107,6 +107,9 @@ enum Commands {
         /// Maximum number of table sync workers
         #[arg(long, default_value = "8")]
         max_table_sync_workers: u16,
+        /// Maximum number of parallel copy connections per table
+        #[arg(long, default_value = "1")]
+        max_copy_connections_per_table: u16,
         /// Table IDs to replicate (comma-separated)
         #[arg(long, value_delimiter = ',')]
         table_ids: Vec<u32>,
@@ -179,6 +182,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             batch_max_size,
             batch_max_fill_ms,
             max_table_sync_workers,
+            max_copy_connections_per_table,
             table_ids,
             destination,
             bq_project_id,
@@ -199,6 +203,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 batch_max_size,
                 batch_max_fill_ms,
                 max_table_sync_workers,
+                max_copy_connections_per_table,
                 table_ids,
                 destination,
                 bq_project_id,
@@ -243,6 +248,7 @@ struct RunArgs {
     batch_max_size: usize,
     batch_max_fill_ms: u64,
     max_table_sync_workers: u16,
+    max_copy_connections_per_table: u16,
     table_ids: Vec<u32>,
     destination: DestinationType,
     bq_project_id: Option<String>,
@@ -355,7 +361,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         max_table_sync_workers: args.max_table_sync_workers,
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
-        max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        max_copy_connections_per_table: args.max_copy_connections_per_table,
     };
 
     // Create the appropriate destination based on the argument

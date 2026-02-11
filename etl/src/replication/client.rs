@@ -1461,8 +1461,6 @@ impl PgReplicationClient {
              order by bucket;"
         );
 
-        warn!("partitions query {:?}", query);
-
         let results = self.client.simple_query(&query).await?;
         let mut partitions = Vec::new();
 
@@ -1490,8 +1488,6 @@ impl PgReplicationClient {
                 partitions.push(CtidPartition { start_tid, end_tid });
             }
         }
-
-        warn!("partitions computed {:?}", partitions);
 
         Ok(partitions)
     }
