@@ -205,6 +205,19 @@ impl PgReplicationTransaction {
             .await
     }
 
+    /// Checks whether the given table is a partitioned parent (`relkind = 'p'`).
+    pub async fn is_partitioned_table(&self, table_id: TableId) -> EtlResult<bool> {
+        self.client.is_partitioned_table(table_id).await
+    }
+
+    /// Returns the OIDs of all leaf partitions for a partitioned table.
+    ///
+    /// Walks `pg_inherits` recursively and returns only leaf nodes (`relkind = 'r'`).
+    /// For a non-partitioned table this returns an empty vec.
+    pub async fn get_leaf_partitions(&self, table_id: TableId) -> EtlResult<Vec<TableId>> {
+        self.client.get_leaf_partitions(table_id).await
+    }
+
     /// Creates a non-replication child connection that inherits this client's connection settings.
     ///
     /// The child does not set `ReplicationMode::Logical`, so it does not consume a
@@ -241,6 +254,22 @@ impl PgReplicationChildTransaction {
         client.client.set_tx_snapshot(snapshot_id).await?;
 
         Ok(Self { client })
+    }
+
+    /// Creates a COPY stream for reading all data from the specified table.
+    ///
+    /// Resolves the table name and row filter internally. Used for copying leaf
+    /// partitions of a partitioned table.
+    pub async fn get_table_copy_stream(
+        &self,
+        table_id: TableId,
+        column_schemas: &[ColumnSchema],
+        publication_name: Option<&str>,
+    ) -> EtlResult<CopyOutStream> {
+        self.client
+            .client
+            .get_table_copy_stream(table_id, column_schemas, publication_name)
+            .await
     }
 
     /// Creates a COPY stream for a ctid partition range of the specified table.
@@ -705,6 +734,34 @@ impl PgReplicationClient {
             "Publication not found",
             format!("Publication '{}' not found in database", publication)
         );
+    }
+
+    /// Checks whether a single table is a partitioned parent (`relkind = 'p'`).
+    async fn is_partitioned_table(&self, table_id: TableId) -> EtlResult<bool> {
+        self.has_partitioned_tables(&[table_id]).await
+    }
+
+    /// Returns the OIDs of all leaf partitions for a partitioned table.
+    ///
+    /// Uses `pg_partition_tree()` (available since PostgreSQL 12) to efficiently walk the
+    /// partition hierarchy and return only leaf nodes. For a non-partitioned table this
+    /// returns an empty vec.
+    async fn get_leaf_partitions(&self, table_id: TableId) -> EtlResult<Vec<TableId>> {
+        let query = format!(
+            "select relid::oid as oid from pg_partition_tree({table_id}::regclass) \
+             where isleaf and relid != {table_id}::regclass \
+             order by relid::oid;"
+        );
+
+        let mut leaves = Vec::new();
+        for msg in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let oid = Self::get_row_value::<TableId>(&row, "oid", "pg_class").await?;
+                leaves.push(oid);
+            }
+        }
+
+        Ok(leaves)
     }
 
     /// Checks if any of the provided table IDs are partitioned tables.

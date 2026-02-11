@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use etl_config::shared::BatchConfig;
@@ -5,6 +6,7 @@ use etl_postgres::types::{ColumnSchema, TableId, TableSchema};
 use futures::StreamExt;
 use metrics::{counter, histogram};
 use tokio::pin;
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{error, info};
 
@@ -35,11 +37,24 @@ pub enum TableCopyResult {
     Shutdown,
 }
 
+/// Describes which slice of a table a single parallel copy task should read.
+///
+/// For non-partitioned tables, the table is divided into ctid ranges via NTILE.
+/// For partitioned tables, each leaf partition becomes its own copy unit.
+#[derive(Debug)]
+enum CopyPartition {
+    /// A ctid range within a single (non-partitioned) table.
+    CtidRange(CtidPartition),
+    /// A leaf partition of a partitioned table, copied in its entirety.
+    LeafPartition { leaf_table_id: TableId },
+}
+
 /// Copies a table using the appropriate strategy based on the number of connections.
 ///
 /// When `max_copy_connections` is 1, performs a serial copy using the slot transaction's
 /// consistent snapshot. When greater than 1, performs a parallel copy using ctid-based
-/// partitioning across multiple child connections that share the same exported snapshot.
+/// partitioning (for regular tables) or per-leaf-partition parallelism (for partitioned
+/// tables) across multiple child connections that share the same exported snapshot.
 #[expect(clippy::too_many_arguments)]
 pub async fn table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction,
@@ -164,11 +179,11 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     Ok(TableCopyResult::Completed { total_rows })
 }
 
-/// Copies a table in parallel using ctid-based partitioning across multiple connections.
+/// Copies a table in parallel across multiple child connections.
 ///
-/// Exports the main connection's snapshot, plans partitions using NTILE, then spawns
-/// one child connection per partition to copy concurrently. All children read from the
-/// same consistent snapshot.
+/// For non-partitioned tables, uses ctid-based partitioning via NTILE.
+/// For partitioned tables, copies each leaf partition as a separate unit.
+/// A semaphore limits the number of concurrent copy tasks to `max_copy_connections`.
 #[expect(clippy::too_many_arguments)]
 async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction,
@@ -186,42 +201,67 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         max_copy_connections, "starting parallel table copy"
     );
 
-    // Plan ctid partitions on the main connection, which is already pinned to the
-    // exported snapshot via SET TRANSACTION SNAPSHOT in create_slot_with_transaction.
-    let partitions = transaction
-        .plan_ctid_partitions(table_id, publication_name, max_copy_connections)
-        .await?;
+    // Determine copy partitions: ctid ranges for regular tables, leaf partitions for
+    // partitioned tables. Ctid-based partitioning cannot be used with partitioned tables
+    // because each child partition has its own ctid space, which causes duplicate rows.
+    let is_partitioned = transaction.is_partitioned_table(table_id).await?;
+    let copy_partitions: Vec<CopyPartition> = if is_partitioned {
+        let leave_table_ids = transaction.get_leaf_partitions(table_id).await?;
 
-    // If there are no partitions, we don't copy anything.
-    if partitions.is_empty() {
+        info!(
+            table_id = table_id.0,
+            num_leaf_partitions = leave_table_ids.len(),
+            "using per-leaf-partition parallelism for partitioned table"
+        );
+
+        leave_table_ids
+            .into_iter()
+            .map(|leaf_table_id| CopyPartition::LeafPartition { leaf_table_id })
+            .collect()
+    } else {
+        let ctid_partitions = transaction
+            .plan_ctid_partitions(table_id, publication_name, max_copy_connections)
+            .await?;
+
+        info!(
+            table_id = table_id.0,
+            num_partitions = ctid_partitions.len(),
+            "using ctid-based parallelism"
+        );
+
+        ctid_partitions
+            .into_iter()
+            .map(CopyPartition::CtidRange)
+            .collect()
+    };
+
+    if copy_partitions.is_empty() {
         info!(
             table_id = table_id.0,
             "table is empty, skipping parallel copy"
         );
+
         return Ok(TableCopyResult::Completed { total_rows: 0 });
     }
-
-    info!(
-        table_id = table_id.0,
-        num_partitions = partitions.len(),
-        "planned ctid partitions for parallel copy"
-    );
 
     // Export the snapshot from the main connection's transaction so child connections can
     // import it via SET TRANSACTION SNAPSHOT. The main transaction must stay open for the
     // entire duration of the parallel copy to keep the snapshot valid.
     let snapshot_id = transaction.export_snapshot().await?;
 
-    info!(
-        table_id = table_id.0,
-        "exported snapshot for child connections"
-    );
-
+    let semaphore = Arc::new(Semaphore::new(max_copy_connections as usize));
     let mut join_set = JoinSet::new();
 
-    for partition in partitions {
-        // We create the child connection and then transaction, so that we can consistently perform
-        // operations.
+    for partition in copy_partitions {
+        // Acquire a concurrency slot and hold it until the copy is done.
+        let permit = semaphore.clone().acquire_owned().await.map_err(|err| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "Could not acquire semaphore while copying a table in parallel",
+                err.to_string()
+            )
+        })?;
+
         let child_replication_client = transaction.fork_child().await?;
         let child_transaction =
             PgReplicationChildTransaction::new(child_replication_client, &snapshot_id).await?;
@@ -232,18 +272,24 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         let shutdown_rx = shutdown_rx.clone();
         let destination = destination.clone();
 
-        let copy_partition_fut = copy_partition(
-            child_transaction,
-            table_id,
-            column_schemas,
-            publication_name,
-            partition,
-            batch_config,
-            shutdown_rx,
-            pipeline_id,
-            destination,
-        );
-        join_set.spawn(copy_partition_fut);
+        join_set.spawn(async move {
+            let result = copy_partition(
+                child_transaction,
+                table_id,
+                column_schemas,
+                publication_name,
+                partition,
+                batch_config,
+                shutdown_rx,
+                pipeline_id,
+                destination,
+            )
+            .await;
+
+            drop(permit);
+
+            result
+        });
     }
 
     let mut total_rows: u64 = 0;
@@ -288,6 +334,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             table_id = table_id.0,
             total_rows, "shutting down parallel table copy"
         );
+
         return Ok(TableCopyResult::Shutdown);
     }
 
@@ -299,17 +346,18 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     Ok(TableCopyResult::Completed { total_rows })
 }
 
-/// Copies a single ctid partition from the source table to the destination.
+/// Copies a single partition from the source table to the destination.
 ///
-/// The child transaction is already pinned to the exported snapshot. Streams rows
-/// within the partition's ctid range and feeds batches to the destination.
+/// The child transaction is already pinned to the exported snapshot. Depending on the
+/// [`CopyPartition`] variant, streams rows from either a ctid range or an entire leaf
+/// partition. All rows are written under the parent `table_id`.
 #[expect(clippy::too_many_arguments)]
 async fn copy_partition<D>(
     child_transaction: PgReplicationChildTransaction,
     table_id: TableId,
     column_schemas: Vec<ColumnSchema>,
     publication_name: Option<String>,
-    partition: CtidPartition,
+    partition: CopyPartition,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
@@ -318,21 +366,41 @@ async fn copy_partition<D>(
 where
     D: Destination + Clone + Send + 'static,
 {
-    info!(
-        table_id = table_id.0,
-        start_tid = %partition.start_tid,
-        end_tid = %partition.end_tid,
-        "starting partition copy"
-    );
+    match &partition {
+        CopyPartition::CtidRange(ctid) => {
+            info!(
+                table_id = table_id.0,
+                start_tid = %ctid.start_tid,
+                end_tid = %ctid.end_tid,
+                "starting ctid partition copy"
+            );
+        }
+        CopyPartition::LeafPartition { leaf_table_id } => {
+            info!(
+                table_id = table_id.0,
+                leaf_table_id = leaf_table_id.0,
+                "starting leaf partition copy"
+            );
+        }
+    }
 
-    let copy_stream = child_transaction
-        .get_table_copy_stream_with_ctid_partition(
-            table_id,
-            &column_schemas,
-            publication_name.as_deref(),
-            &partition,
-        )
-        .await?;
+    let copy_stream = match &partition {
+        CopyPartition::CtidRange(ctid) => {
+            child_transaction
+                .get_table_copy_stream_with_ctid_partition(
+                    table_id,
+                    &column_schemas,
+                    publication_name.as_deref(),
+                    ctid,
+                )
+                .await?
+        }
+        CopyPartition::LeafPartition { leaf_table_id } => {
+            child_transaction
+                .get_table_copy_stream(*leaf_table_id, &column_schemas, publication_name.as_deref())
+                .await?
+        }
+    };
 
     let table_copy_stream = TableCopyStream::wrap(copy_stream, &column_schemas, pipeline_id);
     let table_copy_stream = TimeoutBatchStream::wrap(table_copy_stream, batch_config, shutdown_rx);
@@ -394,13 +462,25 @@ where
     )
     .record(rows_copied as f64);
 
-    info!(
-        table_id = table_id.0,
-        rows_copied,
-        start_tid = %partition.start_tid,
-        end_tid = %partition.end_tid,
-        "completed partition copy"
-    );
+    match &partition {
+        CopyPartition::CtidRange(ctid) => {
+            info!(
+                table_id = table_id.0,
+                rows_copied,
+                start_tid = %ctid.start_tid,
+                end_tid = %ctid.end_tid,
+                "completed ctid partition copy"
+            );
+        }
+        CopyPartition::LeafPartition { leaf_table_id } => {
+            info!(
+                table_id = table_id.0,
+                leaf_table_id = leaf_table_id.0,
+                rows_copied,
+                "completed leaf partition copy"
+            );
+        }
+    }
 
     Ok(rows_copied)
 }
