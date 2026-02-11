@@ -231,14 +231,20 @@ impl PgReplicationTransaction {
     pub async fn commit(self) -> EtlResult<()> {
         self.client.commit_tx().await
     }
+
+    /// Rolls back the current transaction.
+    pub async fn rollback(self) -> EtlResult<()> {
+        self.client.rollback_tx().await
+    }
 }
 
 /// A transaction on a child connection pinned to an exported snapshot.
 ///
 /// Created via [`PgReplicationChildTransaction::new`], which begins a read-only
 /// repeatable-read transaction and sets it to the supplied snapshot. The child
-/// connection cannot query the catalog, so all table metadata (name, column list,
-/// row filter) must be resolved before construction and passed into the methods.
+/// connection shares the same snapshot as the parent, ensuring consistent reads
+/// across parallel operations. Catalog queries performed through this transaction
+/// see the same database state as the parent connection.
 #[derive(Debug)]
 pub struct PgReplicationChildTransaction {
     client: ChildPgReplicationClient,
@@ -297,6 +303,11 @@ impl PgReplicationChildTransaction {
     /// Commits the current transaction.
     pub async fn commit(self) -> EtlResult<()> {
         self.client.client.commit_tx().await
+    }
+
+    /// Rolls back the current transaction.
+    pub async fn rollback(self) -> EtlResult<()> {
+        self.client.client.rollback_tx().await
     }
 }
 
@@ -928,6 +939,13 @@ impl PgReplicationClient {
     /// Commits the current transaction.
     async fn commit_tx(&self) -> EtlResult<()> {
         self.client.simple_query("commit;").await?;
+
+        Ok(())
+    }
+
+    /// Rolls back the current transaction.
+    async fn rollback_tx(&self) -> EtlResult<()> {
+        self.client.simple_query("rollback;").await?;
 
         Ok(())
     }

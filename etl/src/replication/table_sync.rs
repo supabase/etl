@@ -222,6 +222,11 @@ where
                         total_rows_copied = total_rows as usize;
                     }
                     TableCopyResult::Shutdown => {
+                        // If during the copy, we were told to shutdown, we cleanly rollback even if
+                        // we didn't have any writes, so that we let Postgres clean up everything as
+                        // soon as possible.
+                        transaction.rollback().await?;
+
                         return Ok(TableSyncResult::SyncStopped);
                     }
                 }

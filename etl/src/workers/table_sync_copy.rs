@@ -158,6 +158,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
                     table_id = table_id.0,
                     total_rows, "shutting down serial table copy"
                 );
+
                 return Ok(TableCopyResult::Shutdown);
             }
         }
@@ -298,8 +299,20 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     //  need to investigate the frequency.
     while let Some(result) = join_set.join_next().await {
         match result {
-            Ok(Ok(rows)) => {
-                total_rows += rows;
+            Ok(Ok(result)) => {
+                // If all the copy was successful, we collect how many rows were copied but if at least
+                // one received the shutdown result, we shut everything down causing all progress to be
+                // lost.
+                match result {
+                    TableCopyResult::Completed {
+                        total_rows: partition_total_rows,
+                    } => {
+                        total_rows += partition_total_rows;
+                    }
+                    TableCopyResult::Shutdown => {
+                        return Ok(TableCopyResult::Shutdown);
+                    }
+                }
             }
             Ok(Err(err)) => {
                 error!(
@@ -328,16 +341,6 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         }
     }
 
-    // After all tasks complete, check if shutdown was requested.
-    if shutdown_rx.has_changed().unwrap_or(false) {
-        info!(
-            table_id = table_id.0,
-            total_rows, "shutting down parallel table copy"
-        );
-
-        return Ok(TableCopyResult::Shutdown);
-    }
-
     info!(
         table_id = table_id.0,
         total_rows, "completed parallel table copy"
@@ -362,7 +365,7 @@ async fn copy_partition<D>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
-) -> EtlResult<u64>
+) -> EtlResult<TableCopyResult>
 where
     D: Destination + Clone + Send + 'static,
 {
@@ -447,11 +450,19 @@ where
                     table_id = table_id.0,
                     rows_copied, "partition copy interrupted by shutdown"
                 );
-                break;
+
+                // If during the copy, we were told to shutdown, we cleanly rollback even if
+                // we didn't have any writes, so that we let Postgres clean up everything as
+                // soon as possible.
+                child_transaction.rollback().await?;
+
+                return Ok(TableCopyResult::Shutdown);
             }
         }
     }
 
+    // We commit the transaction for the same reason as the rollback, to let Postgres immediately free
+    // up things related to in-progress transactions.
     child_transaction.commit().await?;
 
     histogram!(
@@ -482,5 +493,7 @@ where
         }
     }
 
-    Ok(rows_copied)
+    Ok(TableCopyResult::Completed {
+        total_rows: rows_copied,
+    })
 }

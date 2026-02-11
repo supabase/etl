@@ -363,7 +363,7 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
 
-    // Create a pipeline with 4 parallel copy connections.
+    // Create a pipeline with many parallel copy connections.
     let pipeline_id: PipelineId = random();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
