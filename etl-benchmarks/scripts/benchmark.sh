@@ -12,12 +12,14 @@ set -eo pipefail
 # Environment Variables:
 #   Database Configuration:
 #     POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, POSTGRES_PORT, POSTGRES_HOST
-#   
+#
 #   Benchmark Configuration:
 #     HYPERFINE_RUNS, PUBLICATION_NAME, BATCH_MAX_SIZE, BATCH_MAX_FILL_MS, MAX_TABLE_SYNC_WORKERS
+#     MAX_COPY_CONNECTIONS_PER_TABLE - Number of parallel connections per table for copying (default: 1)
 #     DESTINATION (null or big-query)
 #     LOG_TARGET (terminal or file) - Where to send logs (default: terminal)
 #     DRY_RUN (true/false) - Show commands without executing them
+#     PREPARE_TPCC (true/false) - Automatically run prepare_tpcc.sh if tables don't exist (default: true)
 #   
 #   BigQuery Configuration (required when DESTINATION=big-query):
 #     BQ_PROJECT_ID - Google Cloud project ID
@@ -70,6 +72,7 @@ PUBLICATION_NAME="${PUBLICATION_NAME:=bench_pub}"
 BATCH_MAX_SIZE="${BATCH_MAX_SIZE:=1000000}"
 BATCH_MAX_FILL_MS="${BATCH_MAX_FILL_MS:=10000}"
 MAX_TABLE_SYNC_WORKERS="${MAX_TABLE_SYNC_WORKERS:=8}"
+MAX_COPY_CONNECTIONS_PER_TABLE="${MAX_COPY_CONNECTIONS_PER_TABLE:=1}"
 
 # Logging configuration
 LOG_TARGET="${LOG_TARGET:=terminal}"  # terminal or file
@@ -85,6 +88,9 @@ BQ_MAX_CONCURRENT_STREAMS="${BQ_MAX_CONCURRENT_STREAMS:=}"
 # Optional dry-run mode
 DRY_RUN="${DRY_RUN:=false}"
 
+# Optional skip automatic TPC-C preparation
+PREPARE_TPCC="${PREPARE_TPCC:=true}"
+
 echo "🏁 Running table copies benchmark with hyperfine..."
 echo "📊 Configuration:"
 echo "   Database: ${DB_NAME}@${DB_HOST}:${DB_PORT}"
@@ -94,6 +100,7 @@ echo "   Publication: ${PUBLICATION_NAME}"
 echo "   Batch size: ${BATCH_MAX_SIZE}"
 echo "   Batch fill time: ${BATCH_MAX_FILL_MS}ms"
 echo "   Workers: ${MAX_TABLE_SYNC_WORKERS}"
+echo "   Max copy connections per table: ${MAX_COPY_CONNECTIONS_PER_TABLE}"
 echo "   Log target: ${LOG_TARGET}"
 echo "   Destination: ${DESTINATION}"
 if [[ "${DESTINATION}" == "big-query" ]]; then
@@ -118,9 +125,30 @@ TPCC_TABLE_IDS=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}
 " 2>/dev/null || echo "")
 
 if [[ -z "${TPCC_TABLE_IDS}" ]]; then
-  echo "❌ Error: Could not retrieve table IDs from database. Make sure TPC-C tables exist."
-  echo "💡 Run './etl-benchmarks/scripts/prepare_tpcc.sh' first to create the tables."
-  exit 1
+  if [[ "${PREPARE_TPCC}" == "true" ]]; then
+    echo "⚠️  TPC-C tables not found. Running prepare_tpcc.sh automatically..."
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    "${SCRIPT_DIR}/prepare_tpcc.sh"
+
+    # Retry querying table IDs after preparation
+    echo "🔍 Querying table IDs from database (after preparation)..."
+    TPCC_TABLE_IDS=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}" -d "${DB_NAME}" -tAc "
+      select string_agg(oid::text, ',')
+      from pg_class
+      where relname in ('customer', 'district', 'item', 'new_order', 'order_line', 'orders', 'stock', 'warehouse')
+        and relkind = 'r';
+    " 2>/dev/null || echo "")
+
+    if [[ -z "${TPCC_TABLE_IDS}" ]]; then
+      echo "❌ Error: Could not retrieve table IDs even after running prepare_tpcc.sh"
+      exit 1
+    fi
+  else
+    echo "❌ Error: Could not retrieve table IDs from database. Make sure TPC-C tables exist."
+    echo "💡 Run './etl-benchmarks/scripts/prepare_tpcc.sh' first to create the tables."
+    echo "💡 Or set PREPARE_TPCC=true to run it automatically."
+    exit 1
+  fi
 fi
 
 echo "✅ Found table IDs: ${TPCC_TABLE_IDS}"
@@ -174,7 +202,7 @@ RUN_CMD="cargo bench --bench table_copies ${FEATURES_FLAG} -- --log-target ${LOG
 if [[ -n "${DB_PASSWORD}" && "${DB_PASSWORD}" != "" ]]; then
   RUN_CMD="${RUN_CMD} --password ${DB_PASSWORD}"
 fi
-RUN_CMD="${RUN_CMD} --publication-name ${PUBLICATION_NAME} --batch-max-size ${BATCH_MAX_SIZE} --batch-max-fill-ms ${BATCH_MAX_FILL_MS} --max-table-sync-workers ${MAX_TABLE_SYNC_WORKERS} --table-ids ${TPCC_TABLE_IDS}"
+RUN_CMD="${RUN_CMD} --publication-name ${PUBLICATION_NAME} --batch-max-size ${BATCH_MAX_SIZE} --batch-max-fill-ms ${BATCH_MAX_FILL_MS} --max-table-sync-workers ${MAX_TABLE_SYNC_WORKERS} --max-copy-connections-per-table ${MAX_COPY_CONNECTIONS_PER_TABLE} --table-ids ${TPCC_TABLE_IDS}"
 
 # Add destination-specific options
 RUN_CMD="${RUN_CMD} --destination ${DESTINATION}"
