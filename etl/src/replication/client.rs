@@ -1439,17 +1439,23 @@ impl PgReplicationClient {
     async fn plan_ctid_partitions(
         &self,
         table_id: TableId,
-        _publication_name: Option<&str>,
+        publication_name: Option<&str>,
         num_partitions: u16,
     ) -> EtlResult<Vec<CtidPartition>> {
         let table_name = self.get_table_name(table_id).await?;
         let table_name_quoted = table_name.as_quoted_identifier();
+        let row_filter = self.get_row_filter(table_id, publication_name).await?;
+
+        let where_clause = match row_filter {
+            Some(filter) => format!(" where ({filter})"),
+            None => String::new(),
+        };
 
         let query = format!(
             "select bucket, min(ctid) as start_tid, max(ctid) as end_tid \
              from ( \
                  select ntile({num_partitions}) over (order by ctid) as bucket, ctid \
-                 from {table_name_quoted} \
+                 from {table_name_quoted}{where_clause} \
              ) t \
              group by bucket \
              order by bucket;"

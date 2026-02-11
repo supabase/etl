@@ -45,7 +45,7 @@ pub struct PipelineBuilder<S, D> {
     store: S,
     destination: D,
     /// Batch configuration. Defaults to max_size=1, max_fill_ms=1000 if not specified.
-    batch: Option<BatchConfig>,
+    batch: BatchConfig,
     /// Delay in milliseconds before retrying a failed table operation. Default: 1000ms.
     table_error_retry_delay_ms: u64,
     /// Maximum number of retry attempts for table operations. Default: 2.
@@ -53,7 +53,7 @@ pub struct PipelineBuilder<S, D> {
     /// Maximum number of concurrent table sync workers. Default: 1.
     max_table_sync_workers: u16,
     /// Table sync copy configuration. Uses default if not specified.
-    table_sync_copy: Option<TableSyncCopyConfig>,
+    table_sync_copy: TableSyncCopyConfig,
     /// Behavior when the main replication slot is found to be invalidated.
     invalidated_slot_behavior: InvalidatedSlotBehavior,
     /// Maximum parallel connections per table during initial copy. Default: 1 (serial).
@@ -95,11 +95,14 @@ where
             publication_name,
             store,
             destination,
-            batch: None,
+            batch: BatchConfig {
+                max_size: 1,
+                max_fill_ms: 1000,
+            },
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 2,
             max_table_sync_workers: 1,
-            table_sync_copy: None,
+            table_sync_copy: TableSyncCopyConfig::default(),
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
             max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
         }
@@ -111,7 +114,7 @@ where
     ///
     /// * `batch` - Configuration controlling batch size and timing for processing events
     pub fn with_batch_config(mut self, batch: BatchConfig) -> Self {
-        self.batch = Some(batch);
+        self.batch = batch;
         self
     }
 
@@ -121,7 +124,7 @@ where
     ///
     /// * `table_sync_copy` - Configuration for how table syncs are performed
     pub fn with_table_sync_copy_config(mut self, table_sync_copy: TableSyncCopyConfig) -> Self {
-        self.table_sync_copy = Some(table_sync_copy);
+        self.table_sync_copy = table_sync_copy;
         self
     }
 
@@ -169,14 +172,11 @@ where
             id: self.pipeline_id,
             publication_name: self.publication_name,
             pg_connection: self.pg_connection_config,
-            batch: self.batch.unwrap_or(BatchConfig {
-                max_size: 1,
-                max_fill_ms: 1000,
-            }),
+            batch: self.batch,
             table_error_retry_delay_ms: self.table_error_retry_delay_ms,
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,
             max_table_sync_workers: self.max_table_sync_workers,
-            table_sync_copy: self.table_sync_copy.unwrap_or_default(),
+            table_sync_copy: self.table_sync_copy,
             invalidated_slot_behavior: self.invalidated_slot_behavior,
             max_copy_connections_per_table: self.max_copy_connections_per_table,
         };

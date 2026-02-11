@@ -375,7 +375,7 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
     .with_max_copy_connections_per_table(100)
     .with_batch_config(BatchConfig {
         max_size: 10_000,
-        max_fill_ms: 10_000,
+        max_fill_ms: 1000,
     })
     .build();
 
@@ -394,6 +394,83 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
     let table_rows = destination.get_table_rows().await;
     let copied_rows = table_rows.get(&table_id).map(|r| r.len()).unwrap_or(0);
     assert_eq!(copied_rows, total_rows as usize);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_with_row_filter_and_parallel_connections() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+
+    // Row filters in publications are only available from Postgres 15+.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for row filters");
+        return;
+    }
+
+    // Create a table with a primary key and an age column.
+    let table_name = test_table_name("filtered_table");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("age", "int4 not null")])
+        .await
+        .unwrap();
+
+    // Create a publication with a row filter (age >= 18).
+    let publication_name = format!("pub_{}", random::<u32>());
+    database
+        .run_sql(&format!(
+            "create publication {} for table {} where (age >= 18)",
+            publication_name,
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Insert 10000 rows: age 1..=10000.
+    let total_rows: i64 = 10000;
+    let rows_affected = database
+        .insert_generate_series(table_name.clone(), &["age"], 1, total_rows, 1)
+        .await
+        .unwrap();
+    assert_eq!(rows_affected, total_rows as u64);
+
+    // Only rows with age >= 18 should be replicated (18..=10000 = 9983 rows).
+    let expected_rows = (total_rows - 18 + 1) as usize;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+
+    // Create a pipeline with parallel copy connections.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    )
+    .with_max_copy_connections_per_table(100)
+    .with_batch_config(BatchConfig {
+        max_size: 10_000,
+        max_fill_ms: 1000,
+    })
+    .build();
+
+    // Wait for the table to be ready.
+    let table_ready_notify = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify that only rows matching the filter were copied.
+    let table_rows = destination.get_table_rows().await;
+    let copied_rows = table_rows.get(&table_id).map(|r| r.len()).unwrap_or(0);
+    assert_eq!(copied_rows, expected_rows);
 }
 
 #[tokio::test(flavor = "multi_thread")]
