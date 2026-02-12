@@ -5,6 +5,11 @@ set -eo pipefail
 #
 # This script runs the table copies benchmark using hyperfine with configurable destinations.
 #
+# How it works:
+# - Creates replication slots automatically when the benchmark starts
+# - Runs the table copy operation and measures performance
+# - Automatically cleans up replication slots after completion
+#
 # Supported destinations:
 # - null: Discards all data (fastest, default)
 # - big-query: Streams data to Google BigQuery
@@ -261,12 +266,6 @@ if [[ "${LOG_TARGET}" != "terminal" && "${LOG_TARGET}" != "file" ]]; then
   exit 1
 fi
 
-# Build the prepare command
-PREPARE_CMD="cargo bench --bench table_copies ${FEATURES_FLAG} -- --log-target ${LOG_TARGET} prepare --host ${DB_HOST} --port ${DB_PORT} --database ${DB_NAME} --username ${DB_USER}"
-if [[ -n "${DB_PASSWORD}" && "${DB_PASSWORD}" != "" ]]; then
-  PREPARE_CMD="${PREPARE_CMD} --password ${DB_PASSWORD}"
-fi
-
 # Build the run command
 RUN_CMD="cargo bench --bench table_copies ${FEATURES_FLAG} -- --log-target ${LOG_TARGET} run --host ${DB_HOST} --port ${DB_PORT} --database ${DB_NAME} --username ${DB_USER}"
 if [[ -n "${DB_PASSWORD}" && "${DB_PASSWORD}" != "" ]]; then
@@ -294,9 +293,8 @@ echo "🚀 Starting benchmark..."
 # Show commands in dry-run mode
 if [[ "${DRY_RUN}" == "true" ]]; then
   echo ""
-  echo "📝 Commands that would be executed:"
-  echo "   Prepare: ${PREPARE_CMD}"
-  echo "   Run:     ${RUN_CMD}"
+  echo "📝 Command that would be executed:"
+  echo "   ${RUN_CMD}"
   echo ""
   echo "ℹ️  This was a dry run. Set DRY_RUN=false to actually run the benchmark."
   exit 0
@@ -306,7 +304,6 @@ fi
 hyperfine \
   --runs "${RUNS}" \
   --show-output \
-  --prepare "${PREPARE_CMD}" \
   "${RUN_CMD}"
 
 echo "✨ Benchmark complete!"

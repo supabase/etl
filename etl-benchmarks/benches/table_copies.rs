@@ -136,27 +136,6 @@ enum Commands {
         #[arg(long)]
         expected_row_count: Option<u64>,
     },
-    /// Prepare the benchmark environment by cleaning up replication slots
-    Prepare {
-        /// Postgres host
-        #[arg(long, default_value = "localhost")]
-        host: String,
-        /// Postgres port
-        #[arg(long, default_value = "5432")]
-        port: u16,
-        /// Database name
-        #[arg(long, default_value = "bench")]
-        database: String,
-        /// Postgres username
-        #[arg(long, default_value = "postgres")]
-        username: String,
-        /// Postgres password (optional)
-        #[arg(long)]
-        password: Option<String>,
-        /// Enable TLS
-        #[arg(long, default_value = "false")]
-        tls_enabled: bool,
-    },
 }
 
 #[tokio::main]
@@ -220,24 +199,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             })
             .await
         }
-        Commands::Prepare {
-            host,
-            port,
-            database,
-            username,
-            password,
-            tls_enabled,
-        } => {
-            prepare_benchmark(PrepareArgs {
-                host,
-                port,
-                database,
-                username,
-                password,
-                tls_enabled,
-            })
-            .await
-        }
     }
 }
 
@@ -274,13 +235,6 @@ struct PrepareArgs {
     username: String,
     password: Option<String>,
     tls_enabled: bool,
-}
-
-async fn prepare_benchmark(_args: PrepareArgs) -> Result<(), Box<dyn Error>> {
-    // Prepare step is now a no-op since cleanup happens after each benchmark run.
-    // This function exists to maintain compatibility with the benchmark script.
-    info!("prepare step: no action needed (cleanup happens after benchmark)");
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

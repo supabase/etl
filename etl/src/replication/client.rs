@@ -614,9 +614,7 @@ impl PgReplicationClient {
             Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
                 info!(slot_name, "creating new replication slot");
 
-                let create_result = self
-                    .create_slot_internal(slot_name, SnapshotAction::NoExport)
-                    .await?;
+                let create_result = self.create_slot(slot_name).await?;
 
                 Ok(GetOrCreateSlotResult::CreateSlot(create_result))
             }
