@@ -196,7 +196,7 @@ where
             store.store_table_schema(table_schema.clone()).await?;
 
             let mut total_table_copy_rows = 0;
-            let mut total_table_copy_duration = 0.0;
+            let mut total_table_copy_duration_secs = 0.0;
 
             // We check if the table should be copied, or we can skip it.
             if config
@@ -222,7 +222,7 @@ where
                         total_duration_secs,
                     } => {
                         total_table_copy_rows = total_rows as usize;
-                        total_table_copy_duration = total_duration_secs;
+                        total_table_copy_duration_secs = total_duration_secs;
                     }
                     TableCopyResult::Shutdown => {
                         // If during the copy, we were told to shutdown, we cleanly rollback even if
@@ -256,11 +256,11 @@ where
                 PIPELINE_ID_LABEL => pipeline_id.to_string(),
                 PARTITIONING_LABEL => with_partitioning.to_string(),
             )
-            .record(total_table_copy_duration);
+            .record(total_table_copy_duration_secs);
 
             info!(
                 table_id = table_id.0,
-                total_table_copy_rows, total_table_copy_duration, "completed table copy"
+                total_table_copy_rows, total_table_copy_duration_secs, "completed table copy"
             );
 
             // We mark that we finished the copy of the table schema and data.
