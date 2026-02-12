@@ -120,13 +120,13 @@ impl GetOrCreateSlotResult {
 /// A ctid-based partition range for parallel copy.
 #[derive(Debug)]
 pub enum CtidPartition {
-    /// A range with an open lower bound and an inclusive upper bound.
+    /// A range with an open lower bound and an exclusive upper bound.
     ///
-    /// Matches rows where `ctid <= end_tid`.
+    /// Matches rows where `ctid < end_tid`.
     OpenStart { end_tid: String },
-    /// A range with inclusive lower and upper bounds.
+    /// A range with an inclusive lower bound and an exclusive upper bound.
     ///
-    /// Matches rows where `ctid between start_tid and end_tid`.
+    /// Matches rows where `ctid >= start_tid and ctid < end_tid`.
     Closed { start_tid: String, end_tid: String },
     /// A range with an inclusive lower bound and an open upper bound.
     ///
@@ -1395,11 +1395,11 @@ impl PgReplicationClient {
     ) -> String {
         let ctid_predicate = match partition {
             CtidPartition::OpenStart { end_tid } => {
-                format!("ctid <= {}::tid", quote_literal(end_tid))
+                format!("ctid < {}::tid", quote_literal(end_tid))
             }
             CtidPartition::Closed { start_tid, end_tid } => {
                 format!(
-                    "ctid between {}::tid and {}::tid",
+                    "ctid >= {}::tid and ctid < {}::tid",
                     quote_literal(start_tid),
                     quote_literal(end_tid),
                 )
@@ -1448,94 +1448,48 @@ impl PgReplicationClient {
         ))
     }
 
-    /// Computes balanced ctid partition ranges using page-based estimation.
+    /// Computes balanced ctid partition ranges using relation-size-based blocks.
     ///
     /// Returns one [`CtidPartition`] per partition, or an empty vec if the table has no rows.
     ///
-    /// This method divides the table into roughly equal physical ranges based on page
+    /// This method divides the table into roughly equal physical ranges based on block
     /// numbers to avoid a full table scan and sort.
     /// The approach:
-    /// 1. Queries `pg_class.relpages` to get the total number of 8KB pages
-    /// 2. Divides pages evenly across `num_partitions`
-    /// 3. Generates open-start, closed, and open-end ctid ranges
+    /// 1. Queries `pg_relation_size(table)` and divides by `current_setting('block_size')`
+    /// 2. Divides blocks evenly across `num_partitions`
+    /// 3. Generates half-open ctid ranges on block boundaries
     ///
-    /// The first partition has an open lower bound and the last partition has an
-    /// open upper bound to account for stale `relpages` estimates.
+    /// The final partition uses an open upper bound to include all blocks at or above its
+    /// lower boundary, which keeps coverage correct when the table grows after size sampling.
     ///
-    /// Note: `relpages` is not snapshot-isolated - it reflects current stats from
-    /// autovacuum/ANALYZE. For tables with row filters, this may create imbalanced
-    /// partitions since we can't efficiently estimate filtered row distribution.
+    /// The size calculation is not snapshot based, which is why we have open intervals since we want
+    /// to be sure to be able to capture all tuples and not miss anything.
     async fn plan_ctid_partitions(
         &self,
         table_id: TableId,
+        // TODO: remove once we figure out if we don't need it anymore.
         _publication_name: Option<&str>,
         num_partitions: u16,
     ) -> EtlResult<Vec<CtidPartition>> {
-        // Old NTILE-based algorithm with better partitioning but slow.
-        //
-        // let table_name = self.get_table_name(table_id).await?;
-        // let table_name_quoted = table_name.as_quoted_identifier();
-        // let row_filter = self.get_row_filter(table_id, publication_name).await?;
-        //
-        // let where_clause = match row_filter {
-        //     Some(filter) => format!(" where ({filter})"),
-        //     None => String::new(),
-        // };
-        //
-        // let query = format!(
-        //     "select bucket, min(ctid) as start_tid, max(ctid) as end_tid \
-        //      from ( \
-        //          select ntile({num_partitions}) over (order by ctid) as bucket, ctid \
-        //          from {table_name_quoted}{where_clause} \
-        //      ) t \
-        //      group by bucket \
-        //      order by bucket;"
-        // );
-        //
-        // let results = self.client.simple_query(&query).await?;
-        // let mut partitions = Vec::new();
-        //
-        // for msg in results {
-        //     if let SimpleQueryMessage::Row(row) = msg {
-        //         let start_tid = row
-        //             .try_get("start_tid")?
-        //             .ok_or_else(|| {
-        //                 etl_error!(
-        //                     ErrorKind::SourceSchemaError,
-        //                     "Missing start_tid in NTILE partition query"
-        //                 )
-        //             })?
-        //             .to_string();
-        //         let end_tid = row
-        //             .try_get("end_tid")?
-        //             .ok_or_else(|| {
-        //                 etl_error!(
-        //                     ErrorKind::SourceSchemaError,
-        //                     "Missing end_tid in NTILE partition query"
-        //                 )
-        //             })?
-        //             .to_string();
-        //
-        //         partitions.push(CtidPartition { start_tid, end_tid });
-        //     }
-        // }
-        //
-        // Ok(partitions)
+        if num_partitions == 0 {
+            return Err(etl_error!(
+                ErrorKind::ConfigError,
+                "Number of ctid partitions must be greater than zero"
+            ));
+        }
 
-        // Fetch table statistics: total pages and estimated rows
-        // Note: relpages/reltuples are stale until ANALYZE runs, so they may be 0/-1 for new tables
-        let stats_query = format!(
-            "select relpages, reltuples::bigint as reltuples from pg_class where oid = {table_id}"
+        // We query how many blocks the table has at this point in time. Note that this query doesn't
+        // use MVCC, so it's a real-time snapshot.
+        let size_query = format!(
+            "select \
+                 pg_relation_size({table_id}::regclass)::bigint / current_setting('block_size')::bigint as table_blocks"
         );
-        let stats_results = self.client.simple_query(&stats_query).await?;
-
-        let (mut relpages, reltuples) = stats_results
+        let size_results = self.client.simple_query(&size_query).await?;
+        let table_blocks: i64 = size_results
             .iter()
             .find_map(|msg| {
                 if let SimpleQueryMessage::Row(row) = msg {
-                    let pages: i64 = row.try_get("relpages").ok()??.parse().ok()?;
-                    let tuples: i64 = row.try_get("reltuples").ok()??.parse().ok()?;
-                    Some((pages, tuples))
+                    row.try_get("table_blocks").ok()??.parse().ok()
                 } else {
                     None
                 }
@@ -1543,59 +1497,43 @@ impl PgReplicationClient {
             .ok_or_else(|| {
                 etl_error!(
                     ErrorKind::SourceSchemaError,
-                    "Could not retrieve table statistics for partition planning",
+                    "Could not retrieve table block count for partition planning",
                     format!("table_id: {table_id}")
                 )
             })?;
 
-        // If stats are stale (relpages=0 or reltuples=-1), get actual page count using pg_relation_size
-        if relpages <= 0 || reltuples < 0 {
-            let size_query =
-                format!("select pg_relation_size({table_id})::bigint / 8192 as actual_pages");
-            let size_results = self.client.simple_query(&size_query).await?;
-
-            relpages = size_results
-                .iter()
-                .find_map(|msg| {
-                    if let SimpleQueryMessage::Row(row) = msg {
-                        row.try_get("actual_pages").ok()??.parse().ok()
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-        }
-
-        // If table is truly empty, return empty vec
-        if relpages == 0 {
+        if table_blocks == 0 {
             return Ok(vec![]);
         }
 
-        // Calculate pages per partition (integer division, final partition may span the remainder)
-        let pages_per_partition = (relpages as f64 / num_partitions as f64).ceil() as i64;
+        let requested_partitions = i64::from(num_partitions);
+        let effective_partitions = requested_partitions.min(table_blocks);
+        // We perform ceil-division with the classic formula to avoid having undersized partitions.
+        let blocks_per_partition = (table_blocks + effective_partitions - 1) / effective_partitions;
 
-        let mut partitions = Vec::new();
+        let mut partitions = Vec::with_capacity(effective_partitions as usize);
+        for i in 0..effective_partitions {
+            let start_block = i * blocks_per_partition;
+            // We use the next block as exclusive delimiter for the query to avoid possible issues
+            // in the way we determine boundaries.
+            let end_block_exclusive = ((i + 1) * blocks_per_partition).min(table_blocks);
 
-        for i in 0..num_partitions {
-            let start_page = i as i64 * pages_per_partition;
-            let end_page = ((i as i64 + 1) * pages_per_partition).min(relpages) - 1;
-
-            let partition = if num_partitions == 1 {
+            let partition = if effective_partitions == 1 {
                 CtidPartition::OpenEnd {
                     start_tid: "(0,1)".to_string(),
                 }
             } else if i == 0 {
                 CtidPartition::OpenStart {
-                    end_tid: format!("({end_page},65535)"),
+                    end_tid: format!("({end_block_exclusive},1)"),
                 }
-            } else if i == num_partitions - 1 {
+            } else if i == effective_partitions - 1 {
                 CtidPartition::OpenEnd {
-                    start_tid: format!("({start_page},1)"),
+                    start_tid: format!("({start_block},1)"),
                 }
             } else {
                 CtidPartition::Closed {
-                    start_tid: format!("({start_page},1)"),
-                    end_tid: format!("({end_page},65535)"),
+                    start_tid: format!("({start_block},1)"),
+                    end_tid: format!("({end_block_exclusive},1)"),
                 }
             };
 
@@ -1603,10 +1541,10 @@ impl PgReplicationClient {
         }
 
         warn!(
-            "partitions planned using page-based ranges: {} partitions for {} pages ({} estimated rows)",
+            "partitions planned using block-based ranges: {} partitions (requested {}), {} blocks",
             partitions.len(),
-            relpages,
-            reltuples
+            requested_partitions,
+            table_blocks,
         );
         warn!("partitions computed {:?}", partitions);
 

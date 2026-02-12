@@ -896,15 +896,30 @@ async fn test_plan_ctid_partitions_returns_correct_partitions() {
         .await
         .unwrap();
 
-    assert_eq!(partitions.len(), 4, "expected 4 partitions");
-    assert!(matches!(
-        partitions.first(),
-        Some(CtidPartition::OpenStart { .. })
-    ));
-    assert!(matches!(
-        partitions.last(),
-        Some(CtidPartition::OpenEnd { .. })
-    ));
+    assert!(
+        !partitions.is_empty(),
+        "expected at least one partition for non-empty table"
+    );
+    assert!(
+        partitions.len() <= 4,
+        "planner should not exceed requested partitions"
+    );
+
+    if partitions.len() == 1 {
+        assert!(matches!(
+            partitions.first(),
+            Some(CtidPartition::OpenEnd { .. })
+        ));
+    } else {
+        assert!(matches!(
+            partitions.first(),
+            Some(CtidPartition::OpenStart { .. })
+        ));
+        assert!(matches!(
+            partitions.last(),
+            Some(CtidPartition::OpenEnd { .. })
+        ));
+    }
 
     for partition in &partitions {
         match partition {
@@ -1005,7 +1020,14 @@ async fn test_table_copy_stream_with_ctid_partition() {
         .plan_ctid_partitions(table_id, None, 4)
         .await
         .unwrap();
-    assert_eq!(partitions.len(), 4);
+    assert!(
+        !partitions.is_empty(),
+        "expected at least one partition for non-empty table"
+    );
+    assert!(
+        partitions.len() <= 4,
+        "planner should not exceed requested partitions"
+    );
 
     // Export the snapshot so child connections can share it.
     let snapshot_id = transaction.export_snapshot().await.unwrap();
