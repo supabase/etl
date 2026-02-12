@@ -195,7 +195,7 @@ where
             // pipeline is restarted, since it's outside the lifecycle of the pipeline.
             store.store_table_schema(table_schema.clone()).await?;
 
-            let mut total_rows_copied = 0;
+            let mut total_table_copy_rows = 0;
             let mut total_table_copy_duration = 0.0;
 
             // We check if the table should be copied, or we can skip it.
@@ -219,10 +219,10 @@ where
                 match result {
                     TableCopyResult::Completed {
                         total_rows,
-                        total_duration_secs: duration_secs,
+                        total_duration_secs,
                     } => {
-                        total_rows_copied = total_rows as usize;
-                        total_table_copy_duration = duration_secs;
+                        total_table_copy_rows = total_rows as usize;
+                        total_table_copy_duration = total_duration_secs;
                     }
                     TableCopyResult::Shutdown => {
                         // If during the copy, we were told to shutdown, we cleanly rollback even if
@@ -241,7 +241,7 @@ where
 
             // If no table rows were written, we call the method nonetheless with no rows, to kickstart
             // table creation.
-            if total_rows_copied == 0 {
+            if total_table_copy_rows == 0 {
                 destination.write_table_rows(table_id, vec![]).await?;
                 info!(
                     table_id = table_id.0,
@@ -260,7 +260,7 @@ where
 
             info!(
                 table_id = table_id.0,
-                total_rows_copied, total_table_copy_duration, "completed table copy"
+                total_table_copy_rows, total_table_copy_duration, "completed table copy"
             );
 
             // We mark that we finished the copy of the table schema and data.
