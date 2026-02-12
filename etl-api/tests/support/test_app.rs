@@ -3,7 +3,9 @@
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use aws_lc_rs::rand::fill;
 use base64::prelude::*;
-use etl_api::config::{ApiConfig, ApplicationSettings, EncryptionKey as ConfigEncryptionKey};
+use etl_api::config::{
+    ApiConfig, ApplicationSettings, EncryptionKey as ConfigEncryptionKey, SourceConfig,
+};
 use etl_api::k8s::{K8sClient, TrustedRootCertsCache};
 use etl_api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
 use etl_api::routes::destinations_pipelines::{
@@ -546,8 +548,10 @@ pub async fn spawn_test_app_with_trusted_username(
         sentry: None,
         supabase_api_url: None,
         configcat_sdk_key: None,
-        source_tls_enabled: false,
-        trusted_source_username,
+        source: SourceConfig {
+            tls_enabled: false,
+            trusted_username: trusted_source_username,
+        },
     };
 
     let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient);

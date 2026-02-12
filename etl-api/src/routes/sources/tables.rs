@@ -113,7 +113,7 @@ pub async fn read_table_names(
         .ok_or(TableError::SourceNotFound(source_id))?;
 
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))

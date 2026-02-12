@@ -145,15 +145,15 @@ pub async fn create_source(
     let source = source.into_inner();
 
     // Validate username if configured.
-    if api_config.trusted_source_username.is_some() {
+    if api_config.source.trusted_username.is_some() {
         let tls_config = trusted_root_certs_cache
-            .get_tls_config(api_config.source_tls_enabled)
+            .get_tls_config(api_config.source.tls_enabled)
             .await?;
         let stored_config: StoredSourceConfig = source.config.clone().into();
         let source_config = stored_config.into_connection_config(tls_config);
         let source_pool = connect_to_source_database_from_api(&source_config).await?;
 
-        validate_trusted_username(&source_pool, &api_config.trusted_source_username).await?;
+        validate_trusted_username(&source_pool, &api_config.source.trusted_username).await?;
     }
 
     let id = db::sources::create_source(
@@ -237,15 +237,15 @@ pub async fn update_source(
     let source = source.into_inner();
 
     // Validate username if configured.
-    if api_config.trusted_source_username.is_some() {
+    if api_config.source.trusted_username.is_some() {
         let tls_config = trusted_root_certs_cache
-            .get_tls_config(api_config.source_tls_enabled)
+            .get_tls_config(api_config.source.tls_enabled)
             .await?;
         let stored_config: StoredSourceConfig = source.config.clone().into();
         let source_config = stored_config.into_connection_config(tls_config);
         let source_pool = connect_to_source_database_from_api(&source_config).await?;
 
-        validate_trusted_username(&source_pool, &api_config.trusted_source_username).await?;
+        validate_trusted_username(&source_pool, &api_config.source.trusted_username).await?;
     }
 
     db::sources::update_source(
