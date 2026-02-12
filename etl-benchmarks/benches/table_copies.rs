@@ -15,8 +15,9 @@ use etl_postgres::types::TableId;
 use etl_telemetry::tracing::init_tracing;
 use sqlx::postgres::PgPool;
 use std::error::Error;
-use std::sync::Once;
-use tracing::info;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Once};
+use tracing::{error, info};
 
 /// Ensures crypto provider is only initialized once.
 static INIT_CRYPTO: Once = Once::new();
@@ -131,6 +132,9 @@ enum Commands {
         /// BigQuery connection pool size (optional)
         #[arg(long, default_value = "32")]
         bq_connection_pool_size: usize,
+        /// Expected total row count for validation (optional)
+        #[arg(long)]
+        expected_row_count: Option<u64>,
     },
     /// Prepare the benchmark environment by cleaning up replication slots
     Prepare {
@@ -190,6 +194,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bq_sa_key_file,
             bq_max_staleness_mins,
             bq_connection_pool_size,
+            expected_row_count,
         } => {
             start_pipeline(RunArgs {
                 host,
@@ -211,6 +216,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 bq_sa_key_file,
                 bq_max_staleness_mins,
                 bq_connection_pool_size,
+                expected_row_count,
             })
             .await
         }
@@ -256,6 +262,7 @@ struct RunArgs {
     bq_sa_key_file: Option<String>,
     bq_max_staleness_mins: Option<u16>,
     bq_connection_pool_size: usize,
+    expected_row_count: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -366,7 +373,9 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
 
     // Create the appropriate destination based on the argument
     let destination = match args.destination {
-        DestinationType::Null => BenchDestination::Null(NullDestination),
+        DestinationType::Null => BenchDestination::Null(NullDestination {
+            row_count: Arc::new(AtomicU64::new(0)),
+        }),
 
         DestinationType::BigQuery => {
             install_crypto_provider();
@@ -407,7 +416,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         table_copied_notifications.push(table_copied);
     }
 
-    let mut pipeline = Pipeline::new(pipeline_config, store, destination);
+    let mut pipeline = Pipeline::new(pipeline_config, store, destination.clone());
     info!("starting pipeline");
     pipeline.start().await?;
 
@@ -424,17 +433,53 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     pipeline.shutdown_and_wait().await?;
     info!("etl pipeline benchmark completed");
 
+    // Validate row count if expected count was provided
+    if let Some(expected) = args.expected_row_count {
+        if let Some(actual) = destination.get_row_count() {
+            info!(
+                expected_rows = expected,
+                actual_rows = actual,
+                "validating row count"
+            );
+
+            if actual == expected {
+                info!("Row count validation passed: {} rows replicated", actual);
+            } else {
+                error!(
+                    "Row count validation FAILED: expected {} rows, got {} rows (diff: {})",
+                    expected,
+                    actual,
+                    (actual as i64) - (expected as i64)
+                );
+                return Err("Row count validation failed".into());
+            }
+        } else {
+            info!("Row count validation skipped: destination doesn't support in-memory counting");
+        }
+    }
+
     Ok(())
 }
 
 #[derive(Clone)]
-struct NullDestination;
+struct NullDestination {
+    row_count: Arc<AtomicU64>,
+}
 
 #[expect(clippy::large_enum_variant)]
 #[derive(Clone)]
 enum BenchDestination {
     Null(NullDestination),
     BigQuery(BigQueryDestination<NotifyingStore>),
+}
+
+impl BenchDestination {
+    fn get_row_count(&self) -> Option<u64> {
+        match self {
+            BenchDestination::Null(dest) => Some(dest.row_count.load(Ordering::Relaxed)),
+            BenchDestination::BigQuery(_) => None, // BigQuery doesn't track in-memory
+        }
+    }
 }
 
 impl Destination for BenchDestination {
@@ -480,8 +525,11 @@ impl Destination for NullDestination {
     async fn write_table_rows(
         &self,
         _table_id: TableId,
-        _table_rows: Vec<TableRow>,
+        table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
+        self.row_count
+            .fetch_add(table_rows.len() as u64, Ordering::Relaxed);
+
         Ok(())
     }
 

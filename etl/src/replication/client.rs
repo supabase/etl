@@ -117,13 +117,21 @@ impl GetOrCreateSlotResult {
     }
 }
 
-/// A ctid-based partition range for parallel copy, derived from the NTILE planner.
+/// A ctid-based partition range for parallel copy.
 #[derive(Debug)]
-pub struct CtidPartition {
-    /// Inclusive start tid, e.g. `"(0,1)"`.
-    pub start_tid: String,
-    /// Inclusive end tid, e.g. `"(42,5)"`.
-    pub end_tid: String,
+pub enum CtidPartition {
+    /// A range with an open lower bound and an inclusive upper bound.
+    ///
+    /// Matches rows where `ctid <= end_tid`.
+    OpenStart { end_tid: String },
+    /// A range with inclusive lower and upper bounds.
+    ///
+    /// Matches rows where `ctid between start_tid and end_tid`.
+    Closed { start_tid: String, end_tid: String },
+    /// A range with an inclusive lower bound and an open upper bound.
+    ///
+    /// Matches rows where `ctid >= start_tid`.
+    OpenEnd { start_tid: String },
 }
 
 /// Result of building publication filter SQL components.
@@ -191,9 +199,9 @@ impl PgReplicationTransaction {
         self.client.export_snapshot().await
     }
 
-    /// Computes balanced ctid partition ranges using NTILE over actual row ctids.
+    /// Computes balanced ctid partition ranges using page-based estimation.
     ///
-    /// Returns one [`CtidPartition`] per bucket, or an empty vec if the table has no rows.
+    /// Returns one [`CtidPartition`] per partition, or an empty vec if the table has no rows.
     pub async fn plan_ctid_partitions(
         &self,
         table_id: TableId,
@@ -218,13 +226,9 @@ impl PgReplicationTransaction {
         self.client.get_leaf_partitions(table_id).await
     }
 
-    /// Creates a non-replication child connection that inherits this client's connection settings.
-    ///
-    /// The child does not set `ReplicationMode::Logical`, so it does not consume a
-    /// `max_wal_senders` slot. It holds a clone of the parent to ensure the main connection
-    /// stays alive while any child exists.
-    pub async fn fork_child(&self) -> EtlResult<ChildPgReplicationClient> {
-        self.client.fork_child().await
+    /// Returns the inner connection without consuming the transaction.
+    pub fn client(&self) -> PgReplicationClient {
+        self.client.clone()
     }
 
     /// Commits the current transaction.
@@ -475,7 +479,7 @@ impl PgReplicationClient {
     /// The child does not set `ReplicationMode::Logical`, so it does not consume a
     /// `max_wal_senders` slot. It holds a clone of the parent to ensure the main connection
     /// stays alive while any child exists.
-    async fn fork_child(&self) -> EtlResult<ChildPgReplicationClient> {
+    pub async fn fork_child(&self) -> EtlResult<ChildPgReplicationClient> {
         match self.pg_connection_config.tls.enabled {
             true => self.connect_child_tls().await,
             false => self.connect_child_no_tls().await,
@@ -1389,18 +1393,29 @@ impl PgReplicationClient {
         row_filter: Option<&str>,
         partition: &CtidPartition,
     ) -> String {
+        let ctid_predicate = match partition {
+            CtidPartition::OpenStart { end_tid } => {
+                format!("ctid <= {}::tid", quote_literal(end_tid))
+            }
+            CtidPartition::Closed { start_tid, end_tid } => {
+                format!(
+                    "ctid between {}::tid and {}::tid",
+                    quote_literal(start_tid),
+                    quote_literal(end_tid),
+                )
+            }
+            CtidPartition::OpenEnd { start_tid } => {
+                format!("ctid >= {}::tid", quote_literal(start_tid))
+            }
+        };
+
         if let Some(row_filter) = row_filter {
             format!(
-                "copy (select {column_list} from {table_name} where ctid between {}::tid and {}::tid and ({})) to stdout with (format text);",
-                quote_literal(&partition.start_tid),
-                quote_literal(&partition.end_tid),
-                row_filter
+                "copy (select {column_list} from {table_name} where {ctid_predicate} and ({row_filter})) to stdout with (format text);",
             )
         } else {
             format!(
-                "copy (select {column_list} from {table_name} where ctid between {}::tid and {}::tid) to stdout with (format text);",
-                quote_literal(&partition.start_tid),
-                quote_literal(&partition.end_tid),
+                "copy (select {column_list} from {table_name} where {ctid_predicate}) to stdout with (format text);",
             )
         }
     }
@@ -1433,61 +1448,168 @@ impl PgReplicationClient {
         ))
     }
 
-    /// Computes balanced ctid partition ranges using NTILE over actual row ctids.
+    /// Computes balanced ctid partition ranges using page-based estimation.
     ///
-    /// Returns one [`CtidPartition`] per bucket, or an empty vec if the table has no rows.
+    /// Returns one [`CtidPartition`] per partition, or an empty vec if the table has no rows.
+    ///
+    /// This method divides the table into roughly equal physical ranges based on page
+    /// numbers to avoid a full table scan and sort.
+    /// The approach:
+    /// 1. Queries `pg_class.relpages` to get the total number of 8KB pages
+    /// 2. Divides pages evenly across `num_partitions`
+    /// 3. Generates open-start, closed, and open-end ctid ranges
+    ///
+    /// The first partition has an open lower bound and the last partition has an
+    /// open upper bound to account for stale `relpages` estimates.
+    ///
+    /// Note: `relpages` is not snapshot-isolated - it reflects current stats from
+    /// autovacuum/ANALYZE. For tables with row filters, this may create imbalanced
+    /// partitions since we can't efficiently estimate filtered row distribution.
     async fn plan_ctid_partitions(
         &self,
         table_id: TableId,
-        publication_name: Option<&str>,
+        _publication_name: Option<&str>,
         num_partitions: u16,
     ) -> EtlResult<Vec<CtidPartition>> {
-        let table_name = self.get_table_name(table_id).await?;
-        let table_name_quoted = table_name.as_quoted_identifier();
-        let row_filter = self.get_row_filter(table_id, publication_name).await?;
+        // Old NTILE-based algorithm with better partitioning but slow.
+        //
+        // let table_name = self.get_table_name(table_id).await?;
+        // let table_name_quoted = table_name.as_quoted_identifier();
+        // let row_filter = self.get_row_filter(table_id, publication_name).await?;
+        //
+        // let where_clause = match row_filter {
+        //     Some(filter) => format!(" where ({filter})"),
+        //     None => String::new(),
+        // };
+        //
+        // let query = format!(
+        //     "select bucket, min(ctid) as start_tid, max(ctid) as end_tid \
+        //      from ( \
+        //          select ntile({num_partitions}) over (order by ctid) as bucket, ctid \
+        //          from {table_name_quoted}{where_clause} \
+        //      ) t \
+        //      group by bucket \
+        //      order by bucket;"
+        // );
+        //
+        // let results = self.client.simple_query(&query).await?;
+        // let mut partitions = Vec::new();
+        //
+        // for msg in results {
+        //     if let SimpleQueryMessage::Row(row) = msg {
+        //         let start_tid = row
+        //             .try_get("start_tid")?
+        //             .ok_or_else(|| {
+        //                 etl_error!(
+        //                     ErrorKind::SourceSchemaError,
+        //                     "Missing start_tid in NTILE partition query"
+        //                 )
+        //             })?
+        //             .to_string();
+        //         let end_tid = row
+        //             .try_get("end_tid")?
+        //             .ok_or_else(|| {
+        //                 etl_error!(
+        //                     ErrorKind::SourceSchemaError,
+        //                     "Missing end_tid in NTILE partition query"
+        //                 )
+        //             })?
+        //             .to_string();
+        //
+        //         partitions.push(CtidPartition { start_tid, end_tid });
+        //     }
+        // }
+        //
+        // Ok(partitions)
 
-        let where_clause = match row_filter {
-            Some(filter) => format!(" where ({filter})"),
-            None => String::new(),
-        };
 
-        let query = format!(
-            "select bucket, min(ctid) as start_tid, max(ctid) as end_tid \
-             from ( \
-                 select ntile({num_partitions}) over (order by ctid) as bucket, ctid \
-                 from {table_name_quoted}{where_clause} \
-             ) t \
-             group by bucket \
-             order by bucket;"
+        // Fetch table statistics: total pages and estimated rows
+        // Note: relpages/reltuples are stale until ANALYZE runs, so they may be 0/-1 for new tables
+        let stats_query = format!(
+            "select relpages, reltuples::bigint as reltuples from pg_class where oid = {table_id}"
         );
+        let stats_results = self.client.simple_query(&stats_query).await?;
 
-        let results = self.client.simple_query(&query).await?;
+        let (mut relpages, reltuples) = stats_results
+            .iter()
+            .find_map(|msg| {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let pages: i64 = row.try_get("relpages").ok()??.parse().ok()?;
+                    let tuples: i64 = row.try_get("reltuples").ok()??.parse().ok()?;
+                    Some((pages, tuples))
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::SourceSchemaError,
+                    "Could not retrieve table statistics for partition planning",
+                    format!("table_id: {table_id}")
+                )
+            })?;
+
+        // If stats are stale (relpages=0 or reltuples=-1), get actual page count using pg_relation_size
+        if relpages <= 0 || reltuples < 0 {
+            let size_query =
+                format!("select pg_relation_size({table_id})::bigint / 8192 as actual_pages");
+            let size_results = self.client.simple_query(&size_query).await?;
+
+            relpages = size_results
+                .iter()
+                .find_map(|msg| {
+                    if let SimpleQueryMessage::Row(row) = msg {
+                        row.try_get("actual_pages").ok()??.parse().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+        }
+
+        // If table is truly empty, return empty vec
+        if relpages == 0 {
+            return Ok(vec![]);
+        }
+
+        // Calculate pages per partition (integer division, final partition may span the remainder)
+        let pages_per_partition = (relpages as f64 / num_partitions as f64).ceil() as i64;
+
         let mut partitions = Vec::new();
 
-        for msg in results {
-            if let SimpleQueryMessage::Row(row) = msg {
-                let start_tid = row
-                    .try_get("start_tid")?
-                    .ok_or_else(|| {
-                        etl_error!(
-                            ErrorKind::SourceSchemaError,
-                            "Missing start_tid in NTILE partition query"
-                        )
-                    })?
-                    .to_string();
-                let end_tid = row
-                    .try_get("end_tid")?
-                    .ok_or_else(|| {
-                        etl_error!(
-                            ErrorKind::SourceSchemaError,
-                            "Missing end_tid in NTILE partition query"
-                        )
-                    })?
-                    .to_string();
+        for i in 0..num_partitions {
+            let start_page = i as i64 * pages_per_partition;
+            let end_page = ((i as i64 + 1) * pages_per_partition).min(relpages) - 1;
 
-                partitions.push(CtidPartition { start_tid, end_tid });
-            }
+            let partition = if num_partitions == 1 {
+                CtidPartition::OpenEnd {
+                    start_tid: "(0,1)".to_string(),
+                }
+            } else if i == 0 {
+                CtidPartition::OpenStart {
+                    end_tid: format!("({end_page},65535)"),
+                }
+            } else if i == num_partitions - 1 {
+                CtidPartition::OpenEnd {
+                    start_tid: format!("({start_page},1)"),
+                }
+            } else {
+                CtidPartition::Closed {
+                    start_tid: format!("({start_page},1)"),
+                    end_tid: format!("({end_page},65535)"),
+                }
+            };
+
+            partitions.push(partition);
         }
+
+        warn!(
+            "partitions planned using page-based ranges: {} partitions for {} pages ({} estimated rows)",
+            partitions.len(),
+            relpages,
+            reltuples
+        );
+        warn!("partitions computed {:?}", partitions);
 
         Ok(partitions)
     }

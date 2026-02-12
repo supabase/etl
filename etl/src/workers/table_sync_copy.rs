@@ -39,7 +39,7 @@ pub enum TableCopyResult {
 
 /// Describes which slice of a table a single parallel copy task should read.
 ///
-/// For non-partitioned tables, the table is divided into ctid ranges via NTILE.
+/// For non-partitioned tables, the table is divided into ctid ranges by page estimation.
 /// For partitioned tables, each leaf partition becomes its own copy unit.
 #[derive(Debug)]
 enum CopyPartition {
@@ -182,7 +182,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 
 /// Copies a table in parallel across multiple child connections.
 ///
-/// For non-partitioned tables, uses ctid-based partitioning via NTILE.
+/// For non-partitioned tables, uses ctid-based partitioning by page estimation.
 /// For partitioned tables, copies each leaf partition as a separate unit.
 /// A semaphore limits the number of concurrent copy tasks to `max_copy_connections`.
 #[expect(clippy::too_many_arguments)]
@@ -254,7 +254,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     let mut join_set = JoinSet::new();
 
     for partition in copy_partitions {
-        // Acquire a concurrency slot and hold it until the copy is done.
+        // Acquire a concurrency slot to make sure we are always using at most `max_copy_connections`.
         let permit = semaphore.clone().acquire_owned().await.map_err(|err| {
             etl_error!(
                 ErrorKind::InvalidState,
@@ -263,10 +263,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             )
         })?;
 
-        let child_replication_client = transaction.fork_child().await?;
-        let child_transaction =
-            PgReplicationChildTransaction::new(child_replication_client, &snapshot_id).await?;
-
+        let replication_client = transaction.client();
+        let snapshot_id = snapshot_id.clone();
         let column_schemas = table_schema.column_schemas.clone();
         let publication_name = publication_name.map(|s| s.to_string());
         let batch_config = batch_config.clone();
@@ -274,6 +272,10 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         let destination = destination.clone();
 
         join_set.spawn(async move {
+            let child_replication_client = replication_client.fork_child().await?;
+            let child_transaction =
+                PgReplicationChildTransaction::new(child_replication_client, &snapshot_id).await?;
+
             let result = copy_partition(
                 child_transaction,
                 table_id,
@@ -370,14 +372,30 @@ where
     D: Destination + Clone + Send + 'static,
 {
     match &partition {
-        CopyPartition::CtidRange(ctid) => {
-            info!(
-                table_id = table_id.0,
-                start_tid = %ctid.start_tid,
-                end_tid = %ctid.end_tid,
-                "starting ctid partition copy"
-            );
-        }
+        CopyPartition::CtidRange(ctid) => match ctid {
+            CtidPartition::OpenStart { end_tid } => {
+                info!(
+                    table_id = table_id.0,
+                    end_tid = %end_tid,
+                    "starting ctid partition copy (open start)"
+                );
+            }
+            CtidPartition::Closed { start_tid, end_tid } => {
+                info!(
+                    table_id = table_id.0,
+                    start_tid = %start_tid,
+                    end_tid = %end_tid,
+                    "starting ctid partition copy (closed)"
+                );
+            }
+            CtidPartition::OpenEnd { start_tid } => {
+                info!(
+                    table_id = table_id.0,
+                    start_tid = %start_tid,
+                    "starting ctid partition copy (open end)"
+                );
+            }
+        },
         CopyPartition::LeafPartition { leaf_table_id } => {
             info!(
                 table_id = table_id.0,
@@ -474,15 +492,33 @@ where
     .record(rows_copied as f64);
 
     match &partition {
-        CopyPartition::CtidRange(ctid) => {
-            info!(
-                table_id = table_id.0,
-                rows_copied,
-                start_tid = %ctid.start_tid,
-                end_tid = %ctid.end_tid,
-                "completed ctid partition copy"
-            );
-        }
+        CopyPartition::CtidRange(ctid) => match ctid {
+            CtidPartition::OpenStart { end_tid } => {
+                info!(
+                    table_id = table_id.0,
+                    rows_copied,
+                    end_tid = %end_tid,
+                    "completed ctid partition copy (open start)"
+                );
+            }
+            CtidPartition::Closed { start_tid, end_tid } => {
+                info!(
+                    table_id = table_id.0,
+                    rows_copied,
+                    start_tid = %start_tid,
+                    end_tid = %end_tid,
+                    "completed ctid partition copy (closed)"
+                );
+            }
+            CtidPartition::OpenEnd { start_tid } => {
+                info!(
+                    table_id = table_id.0,
+                    rows_copied,
+                    start_tid = %start_tid,
+                    "completed ctid partition copy (open end)"
+                );
+            }
+        },
         CopyPartition::LeafPartition { leaf_table_id } => {
             info!(
                 table_id = table_id.0,

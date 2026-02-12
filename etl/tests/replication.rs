@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 
 use etl::error::ErrorKind;
-use etl::replication::client::{PgReplicationChildTransaction, PgReplicationClient, SlotState};
+use etl::replication::client::{
+    CtidPartition, PgReplicationChildTransaction, PgReplicationClient, SlotState,
+};
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::test_slot_name;
 use etl::test_utils::table::assert_table_schema;
@@ -895,18 +897,40 @@ async fn test_plan_ctid_partitions_returns_correct_partitions() {
         .unwrap();
 
     assert_eq!(partitions.len(), 4, "expected 4 partitions");
+    assert!(matches!(
+        partitions.first(),
+        Some(CtidPartition::OpenStart { .. })
+    ));
+    assert!(matches!(
+        partitions.last(),
+        Some(CtidPartition::OpenEnd { .. })
+    ));
 
     for partition in &partitions {
-        assert!(
-            partition.start_tid.starts_with('(') && partition.start_tid.ends_with(')'),
-            "start_tid should be a valid tid format: {}",
-            partition.start_tid
-        );
-        assert!(
-            partition.end_tid.starts_with('(') && partition.end_tid.ends_with(')'),
-            "end_tid should be a valid tid format: {}",
-            partition.end_tid
-        );
+        match partition {
+            CtidPartition::OpenStart { end_tid } => {
+                assert!(
+                    end_tid.starts_with('(') && end_tid.ends_with(')'),
+                    "end_tid should be a valid tid format: {end_tid}"
+                );
+            }
+            CtidPartition::Closed { start_tid, end_tid } => {
+                assert!(
+                    start_tid.starts_with('(') && start_tid.ends_with(')'),
+                    "start_tid should be a valid tid format: {start_tid}"
+                );
+                assert!(
+                    end_tid.starts_with('(') && end_tid.ends_with(')'),
+                    "end_tid should be a valid tid format: {end_tid}"
+                );
+            }
+            CtidPartition::OpenEnd { start_tid } => {
+                assert!(
+                    start_tid.starts_with('(') && start_tid.ends_with(')'),
+                    "start_tid should be a valid tid format: {start_tid}"
+                );
+            }
+        }
     }
 
     transaction.commit().await.unwrap();
@@ -989,7 +1013,7 @@ async fn test_table_copy_stream_with_ctid_partition() {
 
     let mut total_rows: u64 = 0;
     for partition in &partitions {
-        let child = transaction.fork_child().await.unwrap();
+        let child = transaction.client().fork_child().await.unwrap();
         let child_tx = PgReplicationChildTransaction::new(child, &snapshot_id)
             .await
             .unwrap();

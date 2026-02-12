@@ -103,6 +103,7 @@ echo "   Workers: ${MAX_TABLE_SYNC_WORKERS}"
 echo "   Max copy connections per table: ${MAX_COPY_CONNECTIONS_PER_TABLE}"
 echo "   Log target: ${LOG_TARGET}"
 echo "   Destination: ${DESTINATION}"
+echo "   Expected row count: ${EXPECTED_ROW_COUNT}"
 if [[ "${DESTINATION}" == "big-query" ]]; then
   echo "   BigQuery Project: ${BQ_PROJECT_ID}"
   echo "   BigQuery Dataset: ${BQ_DATASET_ID}"
@@ -153,6 +154,27 @@ fi
 
 echo "✅ Found table IDs: ${TPCC_TABLE_IDS}"
 
+# Get expected total row count for validation by querying each table exactly
+echo "🔍 Querying exact row count for each table..."
+EXPECTED_ROW_COUNT=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}" -d "${DB_NAME}" -tAc "
+  select
+    (select count(*) from customer) +
+    (select count(*) from district) +
+    (select count(*) from item) +
+    (select count(*) from new_order) +
+    (select count(*) from order_line) +
+    (select count(*) from orders) +
+    (select count(*) from stock) +
+    (select count(*) from warehouse);
+" 2>/dev/null || echo "0")
+
+if [[ -z "${EXPECTED_ROW_COUNT}" || "${EXPECTED_ROW_COUNT}" == "0" ]]; then
+  echo "❌ Error: Could not determine expected row count"
+  exit 1
+fi
+
+echo "✅ Expected total row count: ${EXPECTED_ROW_COUNT}"
+
 # Validate BigQuery configuration if using BigQuery destination
 if [[ "${DESTINATION}" == "big-query" ]]; then
   if [[ -z "${BQ_PROJECT_ID}" ]]; then
@@ -202,7 +224,7 @@ RUN_CMD="cargo bench --bench table_copies ${FEATURES_FLAG} -- --log-target ${LOG
 if [[ -n "${DB_PASSWORD}" && "${DB_PASSWORD}" != "" ]]; then
   RUN_CMD="${RUN_CMD} --password ${DB_PASSWORD}"
 fi
-RUN_CMD="${RUN_CMD} --publication-name ${PUBLICATION_NAME} --batch-max-size ${BATCH_MAX_SIZE} --batch-max-fill-ms ${BATCH_MAX_FILL_MS} --max-table-sync-workers ${MAX_TABLE_SYNC_WORKERS} --max-copy-connections-per-table ${MAX_COPY_CONNECTIONS_PER_TABLE} --table-ids ${TPCC_TABLE_IDS}"
+RUN_CMD="${RUN_CMD} --publication-name ${PUBLICATION_NAME} --batch-max-size ${BATCH_MAX_SIZE} --batch-max-fill-ms ${BATCH_MAX_FILL_MS} --max-table-sync-workers ${MAX_TABLE_SYNC_WORKERS} --max-copy-connections-per-table ${MAX_COPY_CONNECTIONS_PER_TABLE} --table-ids ${TPCC_TABLE_IDS} --expected-row-count ${EXPECTED_ROW_COUNT}"
 
 # Add destination-specific options
 RUN_CMD="${RUN_CMD} --destination ${DESTINATION}"
