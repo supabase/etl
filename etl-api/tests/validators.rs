@@ -66,11 +66,12 @@ fn create_bigquery_config(
 fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
     FullApiPipelineConfig {
         publication_name: publication_name.to_string(),
-        max_table_sync_workers: Some(2),
         batch: None,
         log_level: None,
         table_error_retry_delay_ms: None,
         table_error_retry_max_attempts: None,
+        max_table_sync_workers: Some(2),
+        max_copy_connections_per_table: None,
         table_sync_copy: None,
         invalidated_slot_behavior: None,
     }

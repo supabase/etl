@@ -1,7 +1,10 @@
+use crate::config::ApiConfig;
 use crate::configs::encryption::EncryptionKey;
-use crate::configs::source::{FullApiSourceConfig, StrippedApiSourceConfig};
+use crate::configs::source::{FullApiSourceConfig, StoredSourceConfig, StrippedApiSourceConfig};
 use crate::db;
-use crate::db::sources::SourcesDbError;
+use crate::db::connect_to_source_database_from_api;
+use crate::db::sources::{SourcesDbError, validate_trusted_username};
+use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
@@ -27,15 +30,24 @@ pub enum SourceError {
 
     #[error(transparent)]
     SourcesDb(#[from] SourcesDbError),
+
+    #[error("Database error: {0}")]
+    Database(#[from] sqlx::Error),
+
+    #[error(transparent)]
+    TrustedRootCerts(#[from] TrustedRootCertsError),
+
+    #[error("Invalid source username: connected as '{0}' but expected '{1}'")]
+    InvalidUsername(String, String),
 }
 
 impl SourceError {
     pub fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            SourceError::SourcesDb(SourcesDbError::Database(_)) => {
-                "internal server error".to_string()
-            }
+            SourceError::SourcesDb(SourcesDbError::Database(_))
+            | SourceError::Database(_)
+            | SourceError::TrustedRootCerts(_) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -48,6 +60,9 @@ impl ResponseError for SourceError {
             SourceError::SourcesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SourceError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             SourceError::TenantId(_) => StatusCode::BAD_REQUEST,
+            SourceError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SourceError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SourceError::InvalidUsername(_, _) => StatusCode::FORBIDDEN,
         }
     }
 
@@ -121,11 +136,25 @@ pub struct ReadSourcesResponse {
 pub async fn create_source(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     encryption_key: Data<EncryptionKey>,
     source: Json<CreateSourceRequest>,
 ) -> Result<impl Responder, SourceError> {
     let tenant_id = extract_tenant_id(&req)?;
     let source = source.into_inner();
+
+    // Validate username if configured.
+    if api_config.trusted_source_username.is_some() {
+        let tls_config = trusted_root_certs_cache
+            .get_tls_config(api_config.source_tls_enabled)
+            .await?;
+        let stored_config: StoredSourceConfig = source.config.clone().into();
+        let source_config = stored_config.into_connection_config(tls_config);
+        let source_pool = connect_to_source_database_from_api(&source_config).await?;
+
+        validate_trusted_username(&source_pool, &api_config.trusted_source_username).await?;
+    }
 
     let id = db::sources::create_source(
         &**pool,
@@ -197,6 +226,8 @@ pub async fn read_source(
 pub async fn update_source(
     req: HttpRequest,
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     source_id: Path<i64>,
     encryption_key: Data<EncryptionKey>,
     source: Json<UpdateSourceRequest>,
@@ -204,6 +235,18 @@ pub async fn update_source(
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
     let source = source.into_inner();
+
+    // Validate username if configured.
+    if api_config.trusted_source_username.is_some() {
+        let tls_config = trusted_root_certs_cache
+            .get_tls_config(api_config.source_tls_enabled)
+            .await?;
+        let stored_config: StoredSourceConfig = source.config.clone().into();
+        let source_config = stored_config.into_connection_config(tls_config);
+        let source_pool = connect_to_source_database_from_api(&source_config).await?;
+
+        validate_trusted_username(&source_pool, &api_config.trusted_source_username).await?;
+    }
 
     db::sources::update_source(
         &**pool,

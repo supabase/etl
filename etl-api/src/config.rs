@@ -47,6 +47,15 @@ pub struct ApiConfig {
     /// Defaults to `true` for production environments.
     #[serde(default = "default_source_tls_enabled")]
     pub source_tls_enabled: bool,
+    /// Optional trusted source username for validation bypass.
+    ///
+    /// When provided, source validation will skip detailed permission checks
+    /// if the connected username matches this value. This is useful in production
+    /// environments where a standard username (e.g., "supabase_etl_admin") is used
+    /// with pre-configured permissions.
+    ///
+    /// If `None`, source validation is skipped entirely for all usernames.
+    pub trusted_source_username: Option<String>,
 }
 
 fn default_source_tls_enabled() -> bool {

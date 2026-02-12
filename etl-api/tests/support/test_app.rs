@@ -506,6 +506,12 @@ fn generate_random_bytes<const N: usize>() -> [u8; N] {
 }
 
 pub async fn spawn_test_app() -> TestApp {
+    spawn_test_app_with_trusted_username(None).await
+}
+
+pub async fn spawn_test_app_with_trusted_username(
+    trusted_source_username: Option<String>,
+) -> TestApp {
     Environment::Dev.set();
 
     let base_address = "127.0.0.1";
@@ -541,6 +547,7 @@ pub async fn spawn_test_app() -> TestApp {
         supabase_api_url: None,
         configcat_sdk_key: None,
         source_tls_enabled: false,
+        trusted_source_username,
     };
 
     let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient);

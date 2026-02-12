@@ -18,6 +18,10 @@ const fn default_max_table_sync_workers() -> u16 {
     PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
 }
 
+const fn default_max_copy_connections_per_table() -> u16 {
+    PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE
+}
+
 /// Batch processing configuration for pipelines.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +50,9 @@ pub struct FullApiPipelineConfig {
     #[schema(example = 4)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
+    #[schema(example = 4)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_copy_connections_per_table: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_sync_copy: Option<TableSyncCopyConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,6 +71,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
             table_error_retry_delay_ms: Some(value.table_error_retry_delay_ms),
             table_error_retry_max_attempts: Some(value.table_error_retry_max_attempts),
             max_table_sync_workers: Some(value.max_table_sync_workers),
+            max_copy_connections_per_table: Some(value.max_copy_connections_per_table),
             table_sync_copy: Some(value.table_sync_copy),
             invalidated_slot_behavior: Some(value.invalidated_slot_behavior),
             log_level: value.log_level,
@@ -92,6 +100,9 @@ pub struct PartialApiPipelineConfig {
     #[schema(example = 4)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
+    #[schema(example = 4)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_copy_connections_per_table: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_sync_copy: Option<TableSyncCopyConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -111,6 +122,8 @@ pub struct StoredPipelineConfig {
     pub table_error_retry_max_attempts: u32,
     #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
+    #[serde(default = "default_max_copy_connections_per_table")]
+    pub max_copy_connections_per_table: u16,
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
     #[serde(default)]
@@ -134,7 +147,7 @@ impl StoredPipelineConfig {
             max_table_sync_workers: self.max_table_sync_workers,
             table_sync_copy: self.table_sync_copy,
             invalidated_slot_behavior: self.invalidated_slot_behavior,
-            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+            max_copy_connections_per_table: self.max_copy_connections_per_table,
         }
     }
 
@@ -162,6 +175,10 @@ impl StoredPipelineConfig {
 
         if let Some(value) = partial.max_table_sync_workers {
             self.max_table_sync_workers = value;
+        }
+
+        if let Some(value) = partial.max_copy_connections_per_table {
+            self.max_copy_connections_per_table = value;
         }
 
         if let Some(value) = partial.table_sync_copy {
@@ -203,6 +220,9 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
             max_table_sync_workers: value
                 .max_table_sync_workers
                 .unwrap_or(PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS),
+            max_copy_connections_per_table: value
+                .max_copy_connections_per_table
+                .unwrap_or(PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE),
             table_sync_copy: value.table_sync_copy.unwrap_or_default(),
             invalidated_slot_behavior: value.invalidated_slot_behavior.unwrap_or_default(),
             log_level: value.log_level,
@@ -226,6 +246,7 @@ mod tests {
             table_error_retry_delay_ms: 2000,
             table_error_retry_max_attempts: 7,
             max_table_sync_workers: 4,
+            max_copy_connections_per_table: 8,
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             log_level: None,
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
@@ -248,6 +269,10 @@ mod tests {
             config.max_table_sync_workers,
             deserialized.max_table_sync_workers
         );
+        assert_eq!(
+            config.max_copy_connections_per_table,
+            deserialized.max_copy_connections_per_table
+        );
     }
 
     #[test]
@@ -258,6 +283,7 @@ mod tests {
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
+            max_copy_connections_per_table: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
             log_level: Some(LogLevel::Debug),
@@ -277,6 +303,7 @@ mod tests {
             table_error_retry_delay_ms: None,
             table_error_retry_max_attempts: None,
             max_table_sync_workers: None,
+            max_copy_connections_per_table: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
             log_level: None,
@@ -299,6 +326,10 @@ mod tests {
             PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
         );
         assert_eq!(
+            stored.max_copy_connections_per_table,
+            PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE
+        );
+        assert_eq!(
             stored.invalidated_slot_behavior,
             InvalidatedSlotBehavior::Error
         );
@@ -315,6 +346,7 @@ mod tests {
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 3,
             max_table_sync_workers: 2,
+            max_copy_connections_per_table: 1,
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             log_level: None,
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
@@ -329,6 +361,7 @@ mod tests {
             table_error_retry_delay_ms: Some(5000),
             table_error_retry_max_attempts: Some(9),
             max_table_sync_workers: None,
+            max_copy_connections_per_table: Some(8),
             table_sync_copy: Some(TableSyncCopyConfig::SkipAllTables),
             invalidated_slot_behavior: Some(InvalidatedSlotBehavior::Recreate),
             log_level: None,
@@ -342,6 +375,7 @@ mod tests {
         assert_eq!(stored.table_error_retry_delay_ms, 5000);
         assert_eq!(stored.table_error_retry_max_attempts, 9);
         assert_eq!(stored.max_table_sync_workers, 2);
+        assert_eq!(stored.max_copy_connections_per_table, 8);
         assert_eq!(stored.table_sync_copy, TableSyncCopyConfig::SkipAllTables);
         assert_eq!(
             stored.invalidated_slot_behavior,
