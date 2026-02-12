@@ -81,6 +81,7 @@
 //!         table_error_retry_delay_ms: 10000,
 //!         table_error_retry_max_attempts: 5,
 //!         max_table_sync_workers: 4,
+//!         max_copy_connections_per_table: 1,
 //!         table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
 //!         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
 //!     };

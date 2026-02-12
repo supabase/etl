@@ -30,7 +30,7 @@ echo "📊 Configuration:"
 echo "   Database: ${DB_NAME}@${DB_HOST}:${DB_PORT}"
 echo "   User: ${DB_USER}"
 echo "   Warehouses: ${WAREHOUSES}"
-echo "   Threads: ${THREADS}"
+echo "   Threads: ${THREADS}"ma
 
 # Wait for Postgres to be ready
 echo "⏳ Waiting for Postgres to be ready..."
@@ -82,24 +82,3 @@ else
 
   echo "✅ TPC-C data preparation complete!"
 fi
-
-# Create publication for logical replication
-echo "📡 Creating publication 'bench_pub' for TPC-C tables..."
-PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}" -d "${DB_NAME}" -c "
-  -- Drop publication if it exists
-  drop publication if exists bench_pub;
-  
-  -- Create publication with all TPC-C tables
-  create publication bench_pub for table 
-    customer,
-    district,
-    item,
-    new_order,
-    order_line,
-    orders,
-    stock,
-    warehouse;
-"
-
-echo "✅ Publication 'bench_pub' created successfully!"
-echo "✨ TPC-C preparation complete with publication setup!"

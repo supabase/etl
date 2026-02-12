@@ -10,6 +10,9 @@ pub const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_duration_sec
 pub const ETL_TRANSACTIONS_TOTAL: &str = "etl_transactions_total";
 pub const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
+pub const ETL_TABLE_COPY_ROWS: &str = "etl_table_copy_rows";
+pub const ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE: &str = "etl_parallel_table_copy_time_imbalance";
+pub const ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE: &str = "etl_parallel_table_copy_rows_imbalance";
 pub const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
 pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
@@ -28,6 +31,8 @@ pub const ACTION_LABEL: &str = "action";
 pub const DESTINATION_LABEL: &str = "destination";
 /// Label key for pipeline id.
 pub const PIPELINE_ID_LABEL: &str = "pipeline_id";
+/// Label to tag the table copy metric if it was using partitioning.
+pub const PARTITIONING_LABEL: &str = "partitioning";
 /// Label key for event type (copy, insert, update, delete).
 pub const EVENT_TYPE_LABEL: &str = "event_type";
 /// Label key for whether the status update was forced.
@@ -76,6 +81,22 @@ pub(crate) fn register_metrics() {
             ETL_TABLE_COPY_DURATION_SECONDS,
             Unit::Seconds,
             "Duration in seconds to complete initial table copy from DataSync to FinishedCopy phase"
+        );
+
+        describe_histogram!(
+            ETL_TABLE_COPY_ROWS,
+            Unit::Count,
+            "Number of rows copied per table copy partition, labeled by pipeline_id, destination, and partitioning"
+        );
+
+        describe_histogram!(
+            ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
+            "Load Imbalance Factor for parallel table copy duration (max_time / avg_time), labeled by pipeline_id and destination. Value of 1.0 indicates perfect balance, higher values indicate more imbalance."
+        );
+
+        describe_histogram!(
+            ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
+            "Load Imbalance Factor for parallel table copy row distribution (max_rows / avg_rows), labeled by pipeline_id and destination. Value of 1.0 indicates perfect balance, higher values indicate more imbalance."
         );
 
         describe_counter!(
