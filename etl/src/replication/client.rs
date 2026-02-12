@@ -205,11 +205,10 @@ impl PgReplicationTransaction {
     pub async fn plan_ctid_partitions(
         &self,
         table_id: TableId,
-        publication_name: Option<&str>,
         num_partitions: u16,
     ) -> EtlResult<Vec<CtidPartition>> {
         self.client
-            .plan_ctid_partitions(table_id, publication_name, num_partitions)
+            .plan_ctid_partitions(table_id, num_partitions)
             .await
     }
 
@@ -1467,8 +1466,6 @@ impl PgReplicationClient {
     async fn plan_ctid_partitions(
         &self,
         table_id: TableId,
-        // TODO: remove once we figure out if we don't need it anymore.
-        _publication_name: Option<&str>,
         num_partitions: u16,
     ) -> EtlResult<Vec<CtidPartition>> {
         if num_partitions == 0 {
@@ -1539,14 +1536,6 @@ impl PgReplicationClient {
 
             partitions.push(partition);
         }
-
-        warn!(
-            "partitions planned using block-based ranges: {} partitions (requested {}), {} blocks",
-            partitions.len(),
-            requested_partitions,
-            table_blocks,
-        );
-        warn!("partitions computed {:?}", partitions);
 
         Ok(partitions)
     }

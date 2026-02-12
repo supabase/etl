@@ -19,8 +19,9 @@ use crate::etl_error;
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC, etl_fail_point};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-    ETL_EVENTS_PROCESSED_TOTAL, ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL, PIPELINE_ID_LABEL,
-    WORKER_TYPE_LABEL,
+    ETL_EVENTS_PROCESSED_TOTAL, ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
+    ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE, ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL,
+    PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::{
     CtidPartition, PgReplicationChildTransaction, PgReplicationTransaction,
@@ -28,11 +29,44 @@ use crate::replication::client::{
 use crate::replication::stream::TableCopyStream;
 use crate::types::PipelineId;
 
+/// Calculates Load Imbalance Factor (LIF) for a set of values.
+///
+/// LIF = max_value / mean_value
+///
+/// A value of 1.0 indicates perfect balance (all partitions equal).
+/// Higher values indicate more imbalance (e.g., 2.0 means the slowest partition
+/// took twice the average time).
+///
+/// Returns 0.0 if the input is empty or mean is zero.
+fn calculate_skew_metrics(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    let n = values.len() as f64;
+    let mean = values.iter().sum::<f64>() / n;
+
+    if mean == 0.0 {
+        return 0.0;
+    }
+
+    let max_value = values
+        .iter()
+        .copied()
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or(0.0);
+
+    max_value / mean
+}
+
 /// Result of a table copy operation.
 #[derive(Debug)]
 pub enum TableCopyResult {
     /// All rows copied successfully.
-    Completed { total_rows: u64 },
+    Completed {
+        total_rows: u64,
+        total_duration_secs: f64,
+    },
     /// Copy was interrupted by a shutdown signal.
     Shutdown,
 }
@@ -107,6 +141,8 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     pipeline_id: PipelineId,
     destination: D,
 ) -> EtlResult<TableCopyResult> {
+    let start_time = Instant::now();
+
     let table_copy_stream = transaction
         .get_table_copy_stream(table_id, &table_schema.column_schemas, publication_name)
         .await?;
@@ -172,12 +208,17 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     )
     .record(total_rows as f64);
 
+    let total_duration_secs = start_time.elapsed().as_secs_f64();
+
     info!(
         table_id = table_id.0,
-        total_rows, "completed serial table copy"
+        total_rows, total_duration_secs, "completed serial table copy"
     );
 
-    Ok(TableCopyResult::Completed { total_rows })
+    Ok(TableCopyResult::Completed {
+        total_rows,
+        total_duration_secs,
+    })
 }
 
 /// Copies a table in parallel across multiple child connections.
@@ -197,6 +238,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     pipeline_id: PipelineId,
     destination: D,
 ) -> EtlResult<TableCopyResult> {
+    let start_time = Instant::now();
+
     info!(
         table_id = table_id.0,
         max_copy_connections, "starting parallel table copy"
@@ -221,7 +264,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             .collect()
     } else {
         let ctid_partitions = transaction
-            .plan_ctid_partitions(table_id, publication_name, max_copy_connections)
+            .plan_ctid_partitions(table_id, max_copy_connections)
             .await?;
 
         info!(
@@ -242,7 +285,10 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             "table is empty, skipping parallel copy"
         );
 
-        return Ok(TableCopyResult::Completed { total_rows: 0 });
+        return Ok(TableCopyResult::Completed {
+            total_rows: 0,
+            total_duration_secs: 0.0,
+        });
     }
 
     // Export the snapshot from the main connection's transaction so child connections can
@@ -296,6 +342,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     }
 
     let mut total_rows: u64 = 0;
+    let mut partition_durations = Vec::new();
+    let mut partition_row_counts = Vec::new();
 
     // TODO: we might want to edit retries within the same partition if the copy fails. However, we
     //  need to investigate the frequency.
@@ -308,8 +356,11 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 match result {
                     TableCopyResult::Completed {
                         total_rows: partition_total_rows,
+                        total_duration_secs: partition_total_duration_secs,
                     } => {
                         total_rows += partition_total_rows;
+                        partition_row_counts.push(partition_total_rows);
+                        partition_durations.push(partition_total_duration_secs);
                     }
                     TableCopyResult::Shutdown => {
                         return Ok(TableCopyResult::Shutdown);
@@ -343,12 +394,45 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         }
     }
 
-    info!(
-        table_id = table_id.0,
-        total_rows, "completed parallel table copy"
+    let total_duration_secs = start_time.elapsed().as_secs_f64();
+
+    // Calculate partition skew metrics
+    let time_lif = calculate_skew_metrics(&partition_durations);
+    let rows_lif = calculate_skew_metrics(
+        &partition_row_counts
+            .iter()
+            .map(|&r| r as f64)
+            .collect::<Vec<_>>(),
     );
 
-    Ok(TableCopyResult::Completed { total_rows })
+    // Record imbalance metrics.
+    histogram!(
+        ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        DESTINATION_LABEL => D::name(),
+    )
+    .record(time_lif);
+
+    histogram!(
+        ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        DESTINATION_LABEL => D::name(),
+    )
+    .record(rows_lif);
+
+    info!(
+        table_id = table_id.0,
+        total_rows,
+        total_duration_secs,
+        time_load_imbalance_factor = time_lif,
+        rows_load_imbalance_factor = rows_lif,
+        "completed parallel table copy"
+    );
+
+    Ok(TableCopyResult::Completed {
+        total_rows,
+        total_duration_secs,
+    })
 }
 
 /// Copies a single partition from the source table to the destination.
@@ -371,6 +455,8 @@ async fn copy_partition<D>(
 where
     D: Destination + Clone + Send + 'static,
 {
+    let start_time = Instant::now();
+
     match &partition {
         CopyPartition::CtidRange(ctid) => match ctid {
             CtidPartition::OpenStart { end_tid } => {
@@ -427,14 +513,14 @@ where
     let table_copy_stream = TimeoutBatchStream::wrap(table_copy_stream, batch_config, shutdown_rx);
     pin!(table_copy_stream);
 
-    let mut rows_copied: u64 = 0;
+    let mut total_rows: u64 = 0;
 
     while let Some(result) = table_copy_stream.next().await {
         match result {
             ShutdownResult::Ok(table_rows) => {
                 let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
                 let batch_size = table_rows.len() as u64;
-                rows_copied += batch_size;
+                total_rows += batch_size;
 
                 let before_sending = Instant::now();
 
@@ -466,7 +552,7 @@ where
             ShutdownResult::Shutdown(_) => {
                 info!(
                     table_id = table_id.0,
-                    rows_copied, "partition copy interrupted by shutdown"
+                    total_rows, "partition copy interrupted by shutdown"
                 );
 
                 // If during the copy, we were told to shutdown, we cleanly rollback even if
@@ -489,14 +575,17 @@ where
         DESTINATION_LABEL => D::name(),
         PARTITIONING_LABEL => "true",
     )
-    .record(rows_copied as f64);
+    .record(total_rows as f64);
+
+    let total_duration_secs = start_time.elapsed().as_secs_f64();
 
     match &partition {
         CopyPartition::CtidRange(ctid) => match ctid {
             CtidPartition::OpenStart { end_tid } => {
                 info!(
                     table_id = table_id.0,
-                    rows_copied,
+                    total_rows,
+                    total_duration_secs,
                     end_tid = %end_tid,
                     "completed ctid partition copy (open start)"
                 );
@@ -504,7 +593,8 @@ where
             CtidPartition::Closed { start_tid, end_tid } => {
                 info!(
                     table_id = table_id.0,
-                    rows_copied,
+                    total_rows,
+                    total_duration_secs,
                     start_tid = %start_tid,
                     end_tid = %end_tid,
                     "completed ctid partition copy (closed)"
@@ -513,7 +603,8 @@ where
             CtidPartition::OpenEnd { start_tid } => {
                 info!(
                     table_id = table_id.0,
-                    rows_copied,
+                    total_rows,
+                    total_duration_secs,
                     start_tid = %start_tid,
                     "completed ctid partition copy (open end)"
                 );
@@ -523,13 +614,15 @@ where
             info!(
                 table_id = table_id.0,
                 leaf_table_id = leaf_table_id.0,
-                rows_copied,
+                total_rows,
+                total_duration_secs,
                 "completed leaf partition copy"
             );
         }
     }
 
     Ok(TableCopyResult::Completed {
-        total_rows: rows_copied,
+        total_rows,
+        total_duration_secs,
     })
 }

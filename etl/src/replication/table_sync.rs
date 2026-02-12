@@ -3,7 +3,6 @@ use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::types::TableId;
 use metrics::histogram;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
 
@@ -196,8 +195,8 @@ where
             // pipeline is restarted, since it's outside the lifecycle of the pipeline.
             store.store_table_schema(table_schema.clone()).await?;
 
-            let table_copy_start = Instant::now();
             let mut total_rows_copied = 0;
+            let mut total_table_copy_duration = 0.0;
 
             // We check if the table should be copied, or we can skip it.
             if config
@@ -218,8 +217,12 @@ where
                 .await?;
 
                 match result {
-                    TableCopyResult::Completed { total_rows } => {
+                    TableCopyResult::Completed {
+                        total_rows,
+                        total_duration_secs: duration_secs,
+                    } => {
                         total_rows_copied = total_rows as usize;
+                        total_table_copy_duration = duration_secs;
                     }
                     TableCopyResult::Shutdown => {
                         // If during the copy, we were told to shutdown, we cleanly rollback even if
@@ -247,18 +250,17 @@ where
             }
 
             // Record the table copy duration.
-            let table_copy_duration = table_copy_start.elapsed().as_secs_f64();
             let with_partitioning = config.max_copy_connections_per_table > 1;
             histogram!(
                 ETL_TABLE_COPY_DURATION_SECONDS,
                 PIPELINE_ID_LABEL => pipeline_id.to_string(),
                 PARTITIONING_LABEL => with_partitioning.to_string(),
             )
-            .record(table_copy_duration);
+            .record(total_table_copy_duration);
 
             info!(
                 table_id = table_id.0,
-                total_rows_copied, "completed table copy"
+                total_rows_copied, total_table_copy_duration, "completed table copy"
             );
 
             // We mark that we finished the copy of the table schema and data.

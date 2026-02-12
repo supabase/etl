@@ -891,10 +891,7 @@ async fn test_plan_ctid_partitions_returns_correct_partitions() {
         .await
         .unwrap();
 
-    let partitions = transaction
-        .plan_ctid_partitions(table_id, None, 4)
-        .await
-        .unwrap();
+    let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
 
     assert!(
         !partitions.is_empty(),
@@ -970,10 +967,7 @@ async fn test_plan_ctid_partitions_returns_empty_for_empty_table() {
         .await
         .unwrap();
 
-    let partitions = transaction
-        .plan_ctid_partitions(table_id, None, 4)
-        .await
-        .unwrap();
+    let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
 
     assert!(
         partitions.is_empty(),
@@ -1016,10 +1010,7 @@ async fn test_table_copy_stream_with_ctid_partition() {
         primary: false,
     }];
 
-    let partitions = transaction
-        .plan_ctid_partitions(table_id, None, 4)
-        .await
-        .unwrap();
+    let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
     assert!(
         !partitions.is_empty(),
         "expected at least one partition for non-empty table"
