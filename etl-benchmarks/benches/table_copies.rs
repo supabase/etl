@@ -266,6 +266,7 @@ struct RunArgs {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct PrepareArgs {
     host: String,
     port: u16,
@@ -275,52 +276,58 @@ struct PrepareArgs {
     tls_enabled: bool,
 }
 
-async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
-    info!("preparing benchmark environment");
+async fn prepare_benchmark(_args: PrepareArgs) -> Result<(), Box<dyn Error>> {
+    // Prepare step is now a no-op since cleanup happens after each benchmark run.
+    // This function exists to maintain compatibility with the benchmark script.
+    info!("prepare step: no action needed (cleanup happens after benchmark)");
+    Ok(())
+}
 
+#[allow(clippy::too_many_arguments)]
+async fn cleanup_replication_slots(
+    host: &str,
+    port: u16,
+    database: &str,
+    username: &str,
+    password: Option<&str>,
+    tls_enabled: bool,
+    pipeline_id: u64,
+    table_ids: &[u32],
+) -> Result<(), Box<dyn Error>> {
     // Build connection string
-    let mut connection_string = format!(
-        "postgres://{}@{}:{}/{}",
-        args.username, args.host, args.port, args.database
-    );
+    let mut connection_string = format!("postgres://{username}@{host}:{port}/{database}");
 
-    if let Some(password) = &args.password {
-        connection_string = format!(
-            "postgres://{}:{}@{}:{}/{}",
-            args.username, password, args.host, args.port, args.database
-        );
+    if let Some(password) = password {
+        connection_string = format!("postgres://{username}:{password}@{host}:{port}/{database}");
     }
 
-    // Add SSL mode based on TLS settings
-    if args.tls_enabled {
+    // Add SSL mode
+    if tls_enabled {
         connection_string.push_str("?sslmode=require");
     } else {
         connection_string.push_str("?sslmode=disable");
     }
 
-    info!(host = %args.host, port = %args.port, "connecting to database");
-
     // Connect to the database
     let pool = PgPool::connect(&connection_string).await?;
 
-    info!("cleaning up existing replication slots");
+    // Drop the main apply slot
+    let apply_slot = format!("supabase_etl_apply_{pipeline_id}");
+    info!(slot_name = %apply_slot, "dropping apply replication slot");
+    let drop_apply_sql = format!(
+        "select pg_drop_replication_slot('{apply_slot}') where exists (select 1 from pg_replication_slots where slot_name = '{apply_slot}')"
+    );
+    sqlx::query(&drop_apply_sql).execute(&pool).await.ok(); // Ignore errors if slot doesn't exist
 
-    // Execute the cleanup SQL
-    let cleanup_sql = r#"
-        do $$
-        declare
-            slot record;
-        begin
-            for slot in (select slot_name from pg_replication_slots where slot_name like 'supabase_etl_%')
-            loop
-                execute 'select pg_drop_replication_slot(' || quote_literal(slot.slot_name) || ')';
-            end loop;
-        end $$;
-    "#;
-
-    sqlx::query(cleanup_sql).execute(&pool).await?;
-
-    info!("replication slots cleanup completed");
+    // Drop table sync slots for each table
+    for table_id in table_ids {
+        let table_slot = format!("supabase_etl_table_sync_{pipeline_id}_{table_id}");
+        info!(slot_name = %table_slot, "dropping table sync replication slot");
+        let drop_table_sql = format!(
+            "select pg_drop_replication_slot('{table_slot}') where exists (select 1 from pg_replication_slots where slot_name = '{table_slot}')"
+        );
+        sqlx::query(&drop_table_sql).execute(&pool).await.ok(); // Ignore errors if slot doesn't exist
+    }
 
     // Close the connection
     pool.close().await;
@@ -340,6 +347,14 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     info!(table_ids = ?args.table_ids, "target tables");
     info!(destination = ?args.destination, "destination type");
 
+    // Save connection parameters for cleanup before moving
+    let cleanup_host = args.host.clone();
+    let cleanup_port = args.port;
+    let cleanup_database = args.database.clone();
+    let cleanup_username = args.username.clone();
+    let cleanup_password = args.password.clone();
+    let cleanup_tls_enabled = args.tls_enabled;
+
     let pg_connection_config = PgConnectionConfig {
         host: args.host,
         port: args.port,
@@ -352,8 +367,6 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         },
         keepalive: None,
     };
-
-    let store = NotifyingStore::new();
 
     let pipeline_config = PipelineConfig {
         id: 1,
@@ -371,12 +384,13 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         max_copy_connections_per_table: args.max_copy_connections_per_table,
     };
 
+    let store = NotifyingStore::new();
+
     // Create the appropriate destination based on the argument
     let destination = match args.destination {
         DestinationType::Null => BenchDestination::Null(NullDestination {
             row_count: Arc::new(AtomicU64::new(0)),
         }),
-
         DestinationType::BigQuery => {
             install_crypto_provider();
 
@@ -416,6 +430,9 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         table_copied_notifications.push(table_copied);
     }
 
+    // Save values needed for cleanup before moving
+    let pipeline_id = pipeline_config.id;
+
     let mut pipeline = Pipeline::new(pipeline_config, store, destination.clone());
     info!("starting pipeline");
     pipeline.start().await?;
@@ -425,13 +442,28 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         "waiting for tables to complete copy phase"
     );
     for notification in table_copied_notifications {
-        notification.notified().await;
+        notification.inner().notified().await;
     }
     info!("all tables completed copy phase");
 
     info!("shutting down pipeline");
     pipeline.shutdown_and_wait().await?;
     info!("etl pipeline benchmark completed");
+
+    // Clean up replication slots created during benchmark
+    info!("cleaning up replication slots");
+    cleanup_replication_slots(
+        &cleanup_host,
+        cleanup_port,
+        &cleanup_database,
+        &cleanup_username,
+        cleanup_password.as_deref(),
+        cleanup_tls_enabled,
+        pipeline_id,
+        &args.table_ids,
+    )
+    .await?;
+    info!("replication slots cleaned up");
 
     // Validate row count if expected count was provided
     if let Some(expected) = args.expected_row_count {

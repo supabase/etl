@@ -16,6 +16,10 @@ set -eo pipefail
 #   Benchmark Configuration:
 #     HYPERFINE_RUNS, PUBLICATION_NAME, BATCH_MAX_SIZE, BATCH_MAX_FILL_MS, MAX_TABLE_SYNC_WORKERS
 #     MAX_COPY_CONNECTIONS_PER_TABLE - Number of parallel connections per table for copying (default: 1)
+#     TPCC_TABLES - Comma-separated list of TPC-C tables to replicate (default: all 8 tables)
+#                   Example: TPCC_TABLES="order_line,stock,customer"
+#                   Available: customer,district,item,new_order,order_line,orders,stock,warehouse
+#                   Note: Publication will be recreated with only these tables
 #     DESTINATION (null or big-query)
 #     LOG_TARGET (terminal or file) - Where to send logs (default: terminal)
 #     DRY_RUN (true/false) - Show commands without executing them
@@ -36,6 +40,12 @@ set -eo pipefail
 #
 #   # Dry run to see commands that would be executed
 #   DRY_RUN=true ./etl-benchmarks/scripts/benchmark.sh
+#
+#   # Run with only large tables
+#   TPCC_TABLES="order_line,stock,customer" ./etl-benchmarks/scripts/benchmark.sh
+#
+#   # Run with only small tables
+#   TPCC_TABLES="warehouse,district,item" ./etl-benchmarks/scripts/benchmark.sh
 #
 #   # Run with BigQuery destination
 #   DESTINATION=big-query \
@@ -65,6 +75,12 @@ DB_PASSWORD="${POSTGRES_PASSWORD:=postgres}"
 DB_NAME="${POSTGRES_DB:=bench}"
 DB_PORT="${POSTGRES_PORT:=5430}"
 DB_HOST="${POSTGRES_HOST:=localhost}"
+
+# TPC-C table configuration
+# Default: all TPC-C tables
+# Override with comma-separated list: TPCC_TABLES="order_line,stock,customer"
+DEFAULT_TPCC_TABLES="customer,district,item,new_order,order_line,orders,stock,warehouse"
+TPCC_TABLES="${TPCC_TABLES:=$DEFAULT_TPCC_TABLES}"
 
 # Benchmark configuration
 RUNS="${HYPERFINE_RUNS:=1}"
@@ -103,7 +119,7 @@ echo "   Workers: ${MAX_TABLE_SYNC_WORKERS}"
 echo "   Max copy connections per table: ${MAX_COPY_CONNECTIONS_PER_TABLE}"
 echo "   Log target: ${LOG_TARGET}"
 echo "   Destination: ${DESTINATION}"
-echo "   Expected row count: ${EXPECTED_ROW_COUNT}"
+echo "   TPC-C tables: ${TPCC_TABLES}"
 if [[ "${DESTINATION}" == "big-query" ]]; then
   echo "   BigQuery Project: ${BQ_PROJECT_ID}"
   echo "   BigQuery Dataset: ${BQ_DATASET_ID}"
@@ -116,12 +132,17 @@ if [[ "${DESTINATION}" == "big-query" ]]; then
   fi
 fi
 
+# Convert comma-separated table names to SQL IN clause format
+# e.g., "order_line,stock" -> "'order_line','stock'"
+TPCC_TABLES_SQL=$(echo "${TPCC_TABLES}" | sed "s/,/','/g" | sed "s/^/'/;s/$/'/")
+
 # Get table IDs from the database for TPC-C tables
 echo "🔍 Querying table IDs from database..."
+echo "   Tables: ${TPCC_TABLES}"
 TPCC_TABLE_IDS=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}" -d "${DB_NAME}" -tAc "
   select string_agg(oid::text, ',')
   from pg_class
-  where relname in ('customer', 'district', 'item', 'new_order', 'order_line', 'orders', 'stock', 'warehouse')
+  where relname in (${TPCC_TABLES_SQL})
     and relkind = 'r';
 " 2>/dev/null || echo "")
 
@@ -136,7 +157,7 @@ if [[ -z "${TPCC_TABLE_IDS}" ]]; then
     TPCC_TABLE_IDS=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}" -d "${DB_NAME}" -tAc "
       select string_agg(oid::text, ',')
       from pg_class
-      where relname in ('customer', 'district', 'item', 'new_order', 'order_line', 'orders', 'stock', 'warehouse')
+      where relname in (${TPCC_TABLES_SQL})
         and relkind = 'r';
     " 2>/dev/null || echo "")
 
@@ -156,17 +177,22 @@ echo "✅ Found table IDs: ${TPCC_TABLE_IDS}"
 
 # Get expected total row count for validation by querying each table exactly
 echo "🔍 Querying exact row count for each table..."
-EXPECTED_ROW_COUNT=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}" -d "${DB_NAME}" -tAc "
-  select
-    (select count(*) from customer) +
-    (select count(*) from district) +
-    (select count(*) from item) +
-    (select count(*) from new_order) +
-    (select count(*) from order_line) +
-    (select count(*) from orders) +
-    (select count(*) from stock) +
-    (select count(*) from warehouse);
-" 2>/dev/null || echo "0")
+
+# Build the row count query dynamically based on selected tables
+ROW_COUNT_QUERY="select "
+FIRST=true
+IFS=',' read -ra TABLES <<< "${TPCC_TABLES}"
+for table in "${TABLES[@]}"; do
+  if [ "$FIRST" = true ]; then
+    ROW_COUNT_QUERY="${ROW_COUNT_QUERY}(select count(*) from ${table})"
+    FIRST=false
+  else
+    ROW_COUNT_QUERY="${ROW_COUNT_QUERY} + (select count(*) from ${table})"
+  fi
+done
+ROW_COUNT_QUERY="${ROW_COUNT_QUERY};"
+
+EXPECTED_ROW_COUNT=$(PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}" -d "${DB_NAME}" -tAc "${ROW_COUNT_QUERY}" 2>/dev/null || echo "0")
 
 if [[ -z "${EXPECTED_ROW_COUNT}" || "${EXPECTED_ROW_COUNT}" == "0" ]]; then
   echo "❌ Error: Could not determine expected row count"
@@ -174,6 +200,28 @@ if [[ -z "${EXPECTED_ROW_COUNT}" || "${EXPECTED_ROW_COUNT}" == "0" ]]; then
 fi
 
 echo "✅ Expected total row count: ${EXPECTED_ROW_COUNT}"
+
+# Create/recreate publication for selected tables
+echo "📡 Setting up publication '${PUBLICATION_NAME}' for selected tables..."
+
+# Build comma-separated table list for publication
+PUBLICATION_TABLES=$(echo "${TPCC_TABLES}" | sed 's/,/, /g')
+
+# Drop and recreate publication
+PGPASSWORD="${DB_PASSWORD}" psql -h "${DB_HOST}" -U "${DB_USER}" -p "${DB_PORT}" -d "${DB_NAME}" -c "
+  -- Drop publication if it exists
+  drop publication if exists ${PUBLICATION_NAME};
+
+  -- Create publication with selected tables
+  create publication ${PUBLICATION_NAME} for table ${PUBLICATION_TABLES};
+" >/dev/null 2>&1
+
+if [[ $? -eq 0 ]]; then
+  echo "✅ Publication '${PUBLICATION_NAME}' created for tables: ${PUBLICATION_TABLES}"
+else
+  echo "❌ Error: Failed to create publication"
+  exit 1
+fi
 
 # Validate BigQuery configuration if using BigQuery destination
 if [[ "${DESTINATION}" == "big-query" ]]; then

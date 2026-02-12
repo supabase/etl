@@ -1522,7 +1522,6 @@ impl PgReplicationClient {
         //
         // Ok(partitions)
 
-
         // Fetch table statistics: total pages and estimated rows
         // Note: relpages/reltuples are stale until ANALYZE runs, so they may be 0/-1 for new tables
         let stats_query = format!(
