@@ -201,8 +201,6 @@ pub struct PgConnectionConfig {
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
-    ///
-    /// Default values ensure connections stay alive with 30-second intervals.
     #[serde(default)]
     pub keepalive: TcpKeepaliveConfig,
 }
