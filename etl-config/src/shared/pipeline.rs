@@ -105,17 +105,17 @@ pub struct PipelineConfig {
     /// Maximum number of table sync workers that can run at a time
     #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
+    /// Maximum parallel connections per table during initial copy.
+    /// When 1 (default), the existing serial copy path is used.
+    /// When >1, ctid-based partitioning splits the table across N connections.
+    #[serde(default = "default_max_copy_connections_per_table")]
+    pub max_copy_connections_per_table: u16,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
-    /// Maximum parallel connections per table during initial copy.
-    /// When 1 (default), the existing serial copy path is used.
-    /// When >1, ctid-based partitioning splits the table across N connections.
-    #[serde(default = "default_max_copy_connections_per_table")]
-    pub max_copy_connections_per_table: u16,
 }
 
 impl PipelineConfig {
@@ -209,17 +209,17 @@ pub struct PipelineConfigWithoutSecrets {
     /// Maximum number of table sync workers that can run at a time
     #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
+    /// Maximum parallel connections per table during initial copy.
+    /// When 1 (default), the existing serial copy path is used.
+    /// When >1, ctid-based partitioning splits the table across N connections.
+    #[serde(default = "default_max_copy_connections_per_table")]
+    pub max_copy_connections_per_table: u16,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
-    /// Maximum parallel connections per table during initial copy.
-    /// When 1 (default), the existing serial copy path is used.
-    /// When >1, ctid-based partitioning splits the table across N connections.
-    #[serde(default = "default_max_copy_connections_per_table")]
-    pub max_copy_connections_per_table: u16,
 }
 
 impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
@@ -232,9 +232,9 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             table_error_retry_delay_ms: value.table_error_retry_delay_ms,
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
             max_table_sync_workers: value.max_table_sync_workers,
+            max_copy_connections_per_table: value.max_copy_connections_per_table,
             table_sync_copy: value.table_sync_copy,
             invalidated_slot_behavior: value.invalidated_slot_behavior,
-            max_copy_connections_per_table: value.max_copy_connections_per_table,
         }
     }
 }

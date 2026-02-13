@@ -411,7 +411,7 @@ pub async fn delete_destination_and_pipeline(
     .ok_or(DestinationPipelineError::SourceNotFound(pipeline.source_id))?;
 
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
     db::pipelines::delete_pipeline_cascading(
         txn,

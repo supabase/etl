@@ -23,6 +23,9 @@ FullApiPipelineConfig {
     max_table_sync_workers: Some(
         4,
     ),
+    max_copy_connections_per_table: Some(
+        8,
+    ),
     table_sync_copy: Some(
         IncludeAllTables,
     ),
