@@ -226,7 +226,7 @@ impl PgReplicationTransaction {
     }
 
     /// Returns the inner connection without consuming the transaction.
-    pub fn client(&self) -> PgReplicationClient {
+    pub fn get_cloned_client(&self) -> PgReplicationClient {
         self.client.clone()
     }
 

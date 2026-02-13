@@ -1,5 +1,5 @@
 use etl_config::SerializableSecretString;
-use etl_config::shared::{PgConnectionConfig, TlsConfig};
+use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -84,7 +84,7 @@ impl StoredSourceConfig {
             username: self.username,
             password: self.password.map(|p| p.into()),
             tls: tls_config,
-            keepalive: None,
+            keepalive: TcpKeepaliveConfig::default(),
         }
     }
 }

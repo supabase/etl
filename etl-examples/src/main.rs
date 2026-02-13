@@ -34,7 +34,7 @@ The pipeline will automatically:
 use clap::{Args, Parser};
 use etl::config::{
     BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
-    TlsConfig,
+    TcpKeepaliveConfig, TlsConfig,
 };
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
@@ -170,7 +170,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
             trusted_root_certs: String::new(),
             enabled: false, // Set to true and provide certs for production
         },
-        keepalive: None,
+        keepalive: TcpKeepaliveConfig::default(),
     };
 
     // Create in-memory store for tracking table replication states and table schemas

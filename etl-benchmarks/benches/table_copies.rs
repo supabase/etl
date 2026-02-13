@@ -8,7 +8,7 @@ use etl::types::{Event, TableRow};
 use etl_config::Environment;
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
-    TlsConfig,
+    TcpKeepaliveConfig, TlsConfig,
 };
 use etl_destinations::bigquery::BigQueryDestination;
 use etl_postgres::types::TableId;
@@ -319,7 +319,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
             trusted_root_certs: args.tls_certs,
             enabled: args.tls_enabled,
         },
-        keepalive: None,
+        keepalive: TcpKeepaliveConfig::default(),
     };
 
     let pipeline_config = PipelineConfig {

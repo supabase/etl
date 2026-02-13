@@ -1026,7 +1026,7 @@ async fn test_table_copy_stream_with_ctid_partition() {
 
     let mut total_rows: u64 = 0;
     for partition in &partitions {
-        let child = transaction.client().fork_child().await.unwrap();
+        let child = transaction.get_cloned_client().fork_child().await.unwrap();
         let child_tx = PgReplicationChildTransaction::new(child, &snapshot_id)
             .await
             .unwrap();

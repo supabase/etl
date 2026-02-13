@@ -201,8 +201,10 @@ pub struct PgConnectionConfig {
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
-    /// When `None`, TCP keepalives are disabled.
-    pub keepalive: Option<TcpKeepaliveConfig>,
+    ///
+    /// Default values ensure connections stay alive with 30-second intervals.
+    #[serde(default)]
+    pub keepalive: TcpKeepaliveConfig,
 }
 
 impl Config for PgConnectionConfig {
@@ -225,8 +227,8 @@ pub struct PgConnectionConfigWithoutSecrets {
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
-    /// When `None`, TCP keepalives are disabled.
-    pub keepalive: Option<TcpKeepaliveConfig>,
+    #[serde(default)]
+    pub keepalive: TcpKeepaliveConfig,
 }
 
 impl From<PgConnectionConfig> for PgConnectionConfigWithoutSecrets {
@@ -276,7 +278,7 @@ impl Default for TcpKeepaliveConfig {
     fn default() -> Self {
         Self {
             idle_secs: 30,
-            interval_secs: 30,
+            interval_secs: 10,
             retries: 3,
         }
     }
@@ -325,6 +327,14 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
             connect_options = connect_options.password(password.expose_secret());
         }
 
+        // TODO: Enable TCP keepalive once available in sqlx.
+        // The tcp_keepalive_time() method was added in PR #3559 but may not be
+        // available in the current sqlx version (0.8.6). When upgrading sqlx,
+        // uncomment the following to enable keepalive for API/state connections:
+        //
+        // connect_options = connect_options
+        //     .tcp_keepalive_time(Duration::from_secs(self.keepalive.idle_secs));
+
         // Apply options if provided
         if let Some(opts) = options {
             connect_options = connect_options.options(opts.to_key_value_pairs());
@@ -368,13 +378,15 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
             config.password(password.expose_secret());
         }
 
-        if let Some(keepalive) = &self.keepalive {
-            config
-                .keepalives(true)
-                .keepalives_idle(Duration::from_secs(keepalive.idle_secs))
-                .keepalives_interval(Duration::from_secs(keepalive.interval_secs))
-                .keepalives_retries(keepalive.retries);
-        }
+        // Always enable TCP keepalive to prevent idle connection timeouts,
+        // especially on managed Postgres services like Supabase. This is critical
+        // during parallel table copies where the main connection holds an exported
+        // snapshot but sits idle while child connections perform the actual data copy.
+        config
+            .keepalives(true)
+            .keepalives_idle(Duration::from_secs(self.keepalive.idle_secs))
+            .keepalives_interval(Duration::from_secs(self.keepalive.interval_secs))
+            .keepalives_retries(self.keepalive.retries);
 
         // Apply options if provided
         if let Some(opts) = options {

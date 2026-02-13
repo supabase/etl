@@ -1064,7 +1064,7 @@ mod tests {
     use etl_config::shared::{
         BatchConfig, DestinationConfig, InvalidatedSlotBehavior, PgConnectionConfig,
         PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets, TableSyncCopyConfig,
-        TlsConfig,
+        TcpKeepaliveConfig, TlsConfig,
     };
     use insta::assert_json_snapshot;
 
@@ -1157,7 +1157,7 @@ mod tests {
                     username: "postgres".to_string(),
                     password: Some("password".into()),
                     tls: TlsConfig::disabled(),
-                    keepalive: None,
+                    keepalive: TcpKeepaliveConfig::default(),
                 },
                 batch: BatchConfig {
                     max_size: 10_000,
