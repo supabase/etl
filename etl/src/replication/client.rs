@@ -225,8 +225,8 @@ impl PgReplicationTransaction {
         self.client.get_leaf_partitions(table_id).await
     }
 
-    /// Returns the inner connection without consuming the transaction.
-    pub fn client(&self) -> PgReplicationClient {
+    /// Returns the cloned connection that is used in this transaction.
+    pub fn get_cloned_client(&self) -> PgReplicationClient {
         self.client.clone()
     }
 

@@ -309,7 +309,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             )
         })?;
 
-        let replication_client = transaction.client();
+        let replication_client = transaction.get_cloned_client();
         let snapshot_id = snapshot_id.clone();
         let column_schemas = table_schema.column_schemas.clone();
         let publication_name = publication_name.map(|s| s.to_string());
