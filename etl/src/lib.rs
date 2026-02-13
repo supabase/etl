@@ -49,7 +49,7 @@
 //!
 //! ```rust,no_run
 //! use etl::{
-//!     config::{BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TlsConfig, TableSyncCopyConfig},
+//!     config::{BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TcpKeepaliveConfig, TlsConfig, TableSyncCopyConfig},
 //!     destination::memory::MemoryDestination,
 //!     pipeline::Pipeline,
 //!     store::both::memory::MemoryStore,
@@ -65,7 +65,7 @@
 //!         username: "postgres".to_string(),
 //!         password: Some("password".to_string().into()),
 //!         tls: TlsConfig { enabled: false, trusted_root_certs: String::new() },
-//!         keepalive: None
+//!         keepalive: TcpKeepaliveConfig::default()
 //!     };
 //!
 //!     // Create memory-based store and destination for testing
