@@ -128,7 +128,7 @@ where
             // slot might be there from the previous run.
             replication_client.delete_slot_if_exists(&slot_name).await?;
 
-            // We must truncate the destination table before starting a copy to avoid data inconsistencies.
+            // We should truncate the destination table before starting a copy to avoid data inconsistencies.
             // Example scenario:
             // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
             // 2. Before the table's phase is set to `FinishedCopy`, the process crashes.
@@ -136,14 +136,27 @@ where
             // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
             // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
             // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
-            // Fix: Always truncate the destination table before starting a copy.
+            // Fix: truncate the destination table before starting a copy when we have enough metadata.
             //
             // We try to truncate the table also during `Init` because we support state rollback and
-            // a table might be there from a previous run. We only truncate if we have a schema
-            // loaded for the table, otherwise we skip this step.
+            // a table might be there from a previous run.
+            //
+            // We only attempt truncation when both table schema and mapping are present in the store.
+            // If either is missing, we skip this step. However, if the mapping exists, it doesn't say
+            // anything about the existence of the table in the destination since our internal metadata
+            // operations are not atomic with the destination operations. We are investigating how to
+            // introduce atomicity there.
             let existing_table_schema = store.get_table_schema(&table_id).await?;
-            if existing_table_schema.is_some() {
-                destination.truncate_table(table_id).await?;
+            let existing_table_mapping = store.get_table_mapping(&table_id).await?;
+            if existing_table_schema.is_some()
+                && existing_table_mapping.is_some()
+                && let Err(err) = destination.truncate_table(table_id).await
+            {
+                warn!(
+                    table_id = table_id.0,
+                    error = %err,
+                    "failed to truncate destination table before copy, continuing"
+                );
             }
 
             // We are ready to start copying table data, and we update the state accordingly.
