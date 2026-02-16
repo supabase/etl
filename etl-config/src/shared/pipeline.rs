@@ -106,8 +106,8 @@ pub struct PipelineConfig {
     #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
     /// Maximum parallel connections per table during initial copy.
-    /// When 1 (default), the existing serial copy path is used.
-    /// When >1, ctid-based partitioning splits the table across N connections.
+    /// When 1, the existing serial copy path is used.
+    /// When >1 (default), ctid-based partitioning splits the table across N connections.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
     /// Selection rules for tables participating in replication.
@@ -129,7 +129,7 @@ impl PipelineConfig {
     pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
 
     /// Default maximum parallel connections per table during initial copy.
-    pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 4;
+    pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 2;
 
     /// Validates pipeline configuration settings.
     ///
@@ -210,8 +210,8 @@ pub struct PipelineConfigWithoutSecrets {
     #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
     /// Maximum parallel connections per table during initial copy.
-    /// When 1 (default), the existing serial copy path is used.
-    /// When >1, ctid-based partitioning splits the table across N connections.
+    /// When 1, the existing serial copy path is used.
+    /// When >1 (default), ctid-based partitioning splits the table across N connections.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
     /// Selection rules for tables participating in replication.
