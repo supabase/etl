@@ -14,7 +14,7 @@ pub trait FromTableRow: Sized {
     fn id(&self) -> Self::Id;
 }
 
-/// Materializes events from a MemoryDestination into a collection of typed records
+/// Materializes destination events into a collection of typed records
 ///
 /// This function processes Insert/Update/Delete events sequentially:
 /// - Insert: Add new record to collection

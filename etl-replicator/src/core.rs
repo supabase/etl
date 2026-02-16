@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use crate::error::{ReplicatorError, ReplicatorResult};
 use crate::migrations::migrate_state_store;
-use etl::destination::memory::MemoryDestination;
 use etl::pipeline::Pipeline;
 use etl::store::both::postgres::PostgresStore;
 use etl::store::cleanup::CleanupStore;
@@ -28,8 +27,7 @@ use tracing::{debug, info, warn};
 /// Starts the replicator service with the provided configuration.
 ///
 /// Initializes the state store, creates the appropriate destination based on
-/// configuration, and starts the pipeline. Handles both memory and BigQuery
-/// destinations with proper initialization and error handling.
+/// configuration, and starts the pipeline.
 pub async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
 ) -> ReplicatorResult<()> {
@@ -47,12 +45,6 @@ pub async fn start_replicator_with_config(
     // For each destination, we start the pipeline. This is more verbose due to static dispatch, but
     // we prefer more performance at the cost of ergonomics.
     match &replicator_config.destination {
-        DestinationConfig::Memory => {
-            let destination = MemoryDestination::new();
-
-            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
-            start_pipeline(pipeline).await?;
-        }
         DestinationConfig::BigQuery {
             project_id,
             dataset_id,
@@ -166,9 +158,6 @@ fn log_config(config: &ReplicatorConfig) {
 
 fn log_destination_config(config: &DestinationConfig) {
     match config {
-        DestinationConfig::Memory => {
-            debug!("using memory destination config");
-        }
         DestinationConfig::BigQuery {
             project_id,
             dataset_id,

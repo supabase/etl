@@ -142,7 +142,6 @@ pub trait Validator: Send + Sync {
 /// Checks that the destination is accessible and properly configured:
 /// - **BigQuery**: Validates dataset exists and is accessible.
 /// - **Iceberg**: Validates catalog connectivity.
-/// - **Memory**: Always passes.
 pub async fn validate_destination(
     ctx: &ValidationContext,
     destination_config: &FullApiDestinationConfig,

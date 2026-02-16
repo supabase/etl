@@ -7,6 +7,7 @@
 pub mod database;
 pub mod event;
 pub mod materialize;
+pub mod memory_destination;
 pub mod notify;
 pub mod notifying_store;
 pub mod pipeline;

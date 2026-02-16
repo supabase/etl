@@ -15,8 +15,6 @@ fn default_connection_pool_size() -> usize {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DestinationConfig {
-    /// In-memory destination for ephemeral or test data.
-    Memory,
     /// Google BigQuery destination configuration.
     ///
     /// Use this variant to configure a BigQuery destination, including
@@ -171,8 +169,6 @@ impl From<IcebergConfig> for IcebergConfigWithoutSecrets {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DestinationConfigWithoutSecrets {
-    /// In-memory destination for ephemeral or test data.
-    Memory,
     /// Google BigQuery destination configuration.
     ///
     /// Use this variant to configure a BigQuery destination, including
@@ -208,7 +204,6 @@ pub enum DestinationConfigWithoutSecrets {
 impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
     fn from(value: DestinationConfig) -> Self {
         match value {
-            DestinationConfig::Memory => DestinationConfigWithoutSecrets::Memory,
             DestinationConfig::BigQuery {
                 project_id,
                 dataset_id,

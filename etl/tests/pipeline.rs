@@ -1,10 +1,10 @@
 #![cfg(feature = "test-utils")]
 
-use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
+use etl::test_utils::memory_destination::MemoryDestination;
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{
     PipelineBuilder, create_pipeline, create_pipeline_with_batch_config,
@@ -37,7 +37,7 @@ async fn pipeline_shutdown_calls_destination_shutdown() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -77,7 +77,7 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
 
@@ -163,7 +163,7 @@ async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
 
@@ -235,7 +235,7 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
     insert_users_data(&mut database, &database_schema.users_schema().name, 1..=5).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
 
@@ -361,7 +361,7 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
     assert_eq!(rows_affected, total_rows as u64);
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Create a pipeline with many parallel copy connections.
     let pipeline_id: PipelineId = random();
@@ -438,7 +438,7 @@ async fn table_copy_with_row_filter_and_parallel_connections() {
     let expected_rows = (total_rows - 18 + 1) as usize;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Create a pipeline with parallel copy connections.
     let pipeline_id: PipelineId = random();
@@ -480,7 +480,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -605,7 +605,7 @@ async fn publication_changes_are_correctly_handled() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -772,7 +772,7 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         .unwrap();
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -863,7 +863,7 @@ async fn run_table_sync_copy_case<F>(
     insert_orders_data(&mut database, &orders_table_name, 0..=0).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
     let table_sync_copy = table_sync_copy_fn(users_table_id, orders_table_id);
@@ -989,7 +989,7 @@ async fn table_copy_replicates_existing_data() {
     .await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -1078,7 +1078,7 @@ async fn table_copy_and_sync_streams_new_data() {
     .await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -1237,7 +1237,7 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -1313,7 +1313,7 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Insert some data to test that the table copy is performed.
     let rows_inserted = 5;
@@ -1384,7 +1384,7 @@ async fn table_processing_with_schema_change_errors_table() {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -1531,7 +1531,7 @@ async fn table_without_primary_key_is_errored() {
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -1606,7 +1606,7 @@ async fn pipeline_respects_column_level_publication() {
         .expect("Failed to create publication with column filter");
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -1703,7 +1703,7 @@ async fn empty_tables_are_created_at_destination() {
         .unwrap();
 
     let state_store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
     // Start the pipeline.
     let pipeline_id: PipelineId = random();
@@ -1769,7 +1769,7 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(

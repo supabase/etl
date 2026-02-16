@@ -317,6 +317,7 @@ impl StateStore for NotifyingStore {
         inner
             .table_mappings
             .insert(source_table_id, destination_table_id);
+
         Ok(())
     }
 }

@@ -143,15 +143,6 @@ async fn validate_bigquery_invalid_credentials() {
 }
 
 #[tokio::test]
-async fn validate_memory_destination_always_passes() {
-    let ctx = create_validation_context();
-    let config = FullApiDestinationConfig::Memory;
-    let failures = validate_destination(&ctx, &config).await.unwrap();
-
-    assert!(failures.is_empty());
-}
-
-#[tokio::test]
 async fn validate_pipeline_wal_level_success() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 

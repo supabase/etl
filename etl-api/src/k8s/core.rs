@@ -136,7 +136,6 @@ fn build_secrets_from_configs(
         .unwrap_or_default();
 
     match destination_config {
-        StoredDestinationConfig::Memory => Secrets::None,
         StoredDestinationConfig::BigQuery {
             service_account_key,
             ..
