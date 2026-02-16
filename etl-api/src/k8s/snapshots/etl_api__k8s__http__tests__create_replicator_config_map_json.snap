@@ -6,7 +6,7 @@ expression: config_map_json
   "apiVersion": "v1",
   "data": {
     "base.json": "",
-    "prod.json": "{\"destination\":{\"big_query\":{\"project_id\":\"project-id\",\"dataset_id\":\"dataset-id\",\"connection_pool_size\":4}},\"pipeline\":{\"id\":42,\"publication_name\":\"all-pub\",\"pg_connection\":{\"host\":\"localhost\",\"port\":5432,\"name\":\"postgres\",\"username\":\"postgres\",\"tls\":{\"trusted_root_certs\":\"\",\"enabled\":false},\"keepalive\":{\"idle_secs\":30,\"interval_secs\":10,\"retries\":3}},\"batch\":{\"max_size\":10000,\"max_fill_ms\":1000},\"table_error_retry_delay_ms\":500,\"table_error_retry_max_attempts\":3,\"max_table_sync_workers\":4,\"max_copy_connections_per_table\":4,\"table_sync_copy\":{\"type\":\"include_all_tables\"},\"invalidated_slot_behavior\":\"error\"}}"
+    "prod.json": "{\"destination\":{\"big_query\":{\"project_id\":\"project-id\",\"dataset_id\":\"dataset-id\",\"connection_pool_size\":4}},\"pipeline\":{\"id\":42,\"publication_name\":\"all-pub\",\"pg_connection\":{\"host\":\"localhost\",\"port\":5432,\"name\":\"postgres\",\"username\":\"postgres\",\"tls\":{\"trusted_root_certs\":\"\",\"enabled\":false},\"keepalive\":{\"idle_secs\":30,\"interval_secs\":10,\"retries\":3}},\"batch\":{\"max_size\":10000,\"max_fill_ms\":1000},\"table_error_retry_delay_ms\":500,\"table_error_retry_max_attempts\":3,\"max_table_sync_workers\":4,\"max_copy_connections_per_table\":2,\"table_sync_copy\":{\"type\":\"include_all_tables\"},\"invalidated_slot_behavior\":\"error\"}}"
   },
   "kind": "ConfigMap",
   "metadata": {

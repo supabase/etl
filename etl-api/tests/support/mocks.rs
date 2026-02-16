@@ -238,7 +238,7 @@ pub mod pipelines {
             table_error_retry_delay_ms: Some(10000),
             table_error_retry_max_attempts: Some(5),
             max_table_sync_workers: Some(2),
-            max_copy_connections_per_table: Some(4),
+            max_copy_connections_per_table: Some(2),
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             invalidated_slot_behavior: None,
             log_level: Some(LogLevel::Info),

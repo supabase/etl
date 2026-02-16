@@ -50,7 +50,7 @@ pub struct FullApiPipelineConfig {
     #[schema(example = 4)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
-    #[schema(example = 4)]
+    #[schema(example = 2)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_copy_connections_per_table: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,7 +100,7 @@ pub struct PartialApiPipelineConfig {
     #[schema(example = 4)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_table_sync_workers: Option<u16>,
-    #[schema(example = 4)]
+    #[schema(example = 2)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_copy_connections_per_table: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]

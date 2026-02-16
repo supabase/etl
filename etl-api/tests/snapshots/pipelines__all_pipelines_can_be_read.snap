@@ -24,7 +24,7 @@ FullApiPipelineConfig {
         2,
     ),
     max_copy_connections_per_table: Some(
-        4,
+        2,
     ),
     table_sync_copy: Some(
         IncludeAllTables,

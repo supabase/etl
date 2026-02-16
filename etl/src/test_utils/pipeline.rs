@@ -56,7 +56,7 @@ pub struct PipelineBuilder<S, D> {
     table_sync_copy: TableSyncCopyConfig,
     /// Behavior when the main replication slot is found to be invalidated.
     invalidated_slot_behavior: InvalidatedSlotBehavior,
-    /// Maximum parallel connections per table during initial copy. Default: 1 (serial).
+    /// Maximum parallel connections per table during initial copy. Default: 2.
     max_copy_connections_per_table: u16,
 }
 
