@@ -27,8 +27,7 @@ use tracing::{debug, info, warn};
 /// Starts the replicator service with the provided configuration.
 ///
 /// Initializes the state store, creates the appropriate destination based on
-/// configuration, and starts the pipeline. Handles both BigQuery
-/// destinations with proper initialization and error handling.
+/// configuration, and starts the pipeline.
 pub async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
 ) -> ReplicatorResult<()> {
