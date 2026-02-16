@@ -1,5 +1,5 @@
 use etl_postgres::types::TableId;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -7,20 +7,17 @@ use tokio::sync::{Notify, RwLock};
 
 use crate::destination::Destination;
 use crate::error::EtlResult;
-use crate::store::state::StateStore;
 use crate::test_utils::event::{check_all_events_count, check_events_count, deduplicate_events};
 use crate::test_utils::notify::TimedNotify;
 use crate::types::{Event, EventType, TableRow};
-use uuid::Uuid;
 
 type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
 type TableRowCondition = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
 type CombinedCondition =
     Box<dyn Fn(&[Event], &HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
 
-struct Inner<D, S> {
+struct Inner<D> {
     wrapped_destination: D,
-    state_store: S,
     events: Vec<Event>,
     table_rows: HashMap<TableId, Vec<TableRow>>,
     event_conditions: Vec<(EventCondition, Arc<Notify>)>,
@@ -30,7 +27,7 @@ struct Inner<D, S> {
     shutdown_called: bool,
 }
 
-impl<D, S> Inner<D, S> {
+impl<D> Inner<D> {
     async fn check_conditions(&mut self) {
         // Check event conditions
         let events = self.events.clone();
@@ -74,11 +71,11 @@ impl<D, S> Inner<D, S> {
 /// The wrapper supports waiting for specific conditions to be met, making it ideal
 /// for testing asynchronous ETL operations with deterministic assertions.
 #[derive(Clone)]
-pub struct TestDestinationWrapper<D, S> {
-    inner: Arc<RwLock<Inner<D, S>>>,
+pub struct TestDestinationWrapper<D> {
+    inner: Arc<RwLock<Inner<D>>>,
 }
 
-impl<D: fmt::Debug, S> fmt::Debug for TestDestinationWrapper<D, S> {
+impl<D: fmt::Debug> fmt::Debug for TestDestinationWrapper<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let inner = tokio::task::block_in_place(move || {
             Handle::current().block_on(async move { self.inner.read().await })
@@ -91,18 +88,14 @@ impl<D: fmt::Debug, S> fmt::Debug for TestDestinationWrapper<D, S> {
     }
 }
 
-impl<D, S> TestDestinationWrapper<D, S>
-where
-    S: StateStore + Clone + Send + Sync + 'static,
-{
+impl<D> TestDestinationWrapper<D> {
     /// Creates a new test wrapper around any destination implementation.
     ///
     /// The wrapper will track all method calls and data operations performed
     /// on the destination, enabling comprehensive testing and verification.
-    pub fn wrap(destination: D, state_store: S) -> Self {
+    pub fn wrap(destination: D) -> Self {
         let inner = Inner {
             wrapped_destination: destination,
-            state_store,
             events: Vec::new(),
             table_rows: HashMap::new(),
             event_conditions: Vec::new(),
@@ -223,10 +216,9 @@ where
     }
 }
 
-impl<D, S> Destination for TestDestinationWrapper<D, S>
+impl<D> Destination for TestDestinationWrapper<D>
 where
     D: Destination + Send + Sync + Clone,
-    S: StateStore + Clone + Send + Sync + 'static,
 {
     fn name() -> &'static str {
         "wrapper"
@@ -273,13 +265,6 @@ where
     ) -> EtlResult<()> {
         let destination = {
             let mut inner = self.inner.write().await;
-            inner
-                .state_store
-                .store_table_mapping(
-                    table_id,
-                    format!("test_destination_mapping_{}", Uuid::new_v4()),
-                )
-                .await?;
             inner.write_table_rows_called += 1;
             inner.wrapped_destination.clone()
         };
@@ -305,41 +290,8 @@ where
     }
 
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        let mut table_ids = HashSet::new();
-        for event in &events {
-            match event {
-                Event::Insert(event) => {
-                    table_ids.insert(event.table_id);
-                }
-                Event::Update(event) => {
-                    table_ids.insert(event.table_id);
-                }
-                Event::Delete(event) => {
-                    table_ids.insert(event.table_id);
-                }
-                Event::Relation(event) => {
-                    table_ids.insert(event.table_schema.id);
-                }
-                Event::Truncate(event) => {
-                    for table_id in &event.rel_ids {
-                        table_ids.insert(TableId::new(*table_id));
-                    }
-                }
-                Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
-            }
-        }
-
         let destination = {
             let inner = self.inner.read().await;
-            for table_id in table_ids {
-                inner
-                    .state_store
-                    .store_table_mapping(
-                        table_id,
-                        format!("test_destination_mapping_{}", Uuid::new_v4()),
-                    )
-                    .await?;
-            }
             inner.wrapped_destination.clone()
         };
 

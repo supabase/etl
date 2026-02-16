@@ -4,7 +4,6 @@ use std::ops::RangeInclusive;
 use tokio_postgres::types::{PgLsn, Type};
 use tokio_postgres::{Client, GenericClient};
 
-use crate::store::state::StateStore;
 use crate::test_utils::database::{TEST_DATABASE_SCHEMA, test_table_name};
 use crate::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use crate::types::{Cell, Event, InsertEvent, TableRow};
@@ -259,13 +258,10 @@ pub async fn insert_mock_data(
     }
 }
 
-pub async fn get_users_age_sum_from_rows<D, S>(
-    destination: &TestDestinationWrapper<D, S>,
+pub async fn get_users_age_sum_from_rows<D>(
+    destination: &TestDestinationWrapper<D>,
     table_id: TableId,
-) -> i32
-where
-    S: StateStore + Clone + Send + Sync + 'static,
-{
+) -> i32 {
     let mut actual_sum = 0;
 
     let tables_rows = destination.get_table_rows().await;

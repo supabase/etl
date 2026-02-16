@@ -24,9 +24,9 @@
 //! to a destination. It manages the replication stream, applies transformations,
 //! and handles failures gracefully.
 //!
-//! ## Destinations  
+//! ## Destinations
 //! [`destination::Destination`] trait implementations define where replicated data should be sent.
-//! Built-in destinations include in-memory storage for testing and external integrations.
+//! Destinations are pluggable and can integrate with external systems.
 //!
 //! ## Store
 //! The [`store::schema::SchemaStore`] and [`store::state::StateStore`] traits define where the
@@ -50,10 +50,23 @@
 //! ```rust,no_run
 //! use etl::{
 //!     config::{BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TcpKeepaliveConfig, TlsConfig, TableSyncCopyConfig},
-//!     destination::memory::MemoryDestination,
+//!     destination::Destination,
+//!     error::EtlResult,
 //!     pipeline::Pipeline,
 //!     store::both::memory::MemoryStore,
+//!     types::{Event, TableRow},
 //! };
+//! use etl_postgres::types::TableId;
+//!
+//! #[derive(Clone)]
+//! struct NoopDestination;
+//!
+//! impl Destination for NoopDestination {
+//!     fn name() -> &'static str { "noop" }
+//!     async fn truncate_table(&self, _table_id: TableId) -> EtlResult<()> { Ok(()) }
+//!     async fn write_table_rows(&self, _table_id: TableId, _table_rows: Vec<TableRow>) -> EtlResult<()> { Ok(()) }
+//!     async fn write_events(&self, _events: Vec<Event>) -> EtlResult<()> { Ok(()) }
+//! }
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,7 +83,7 @@
 //!
 //!     // Create memory-based store and destination for testing
 //!     let store = MemoryStore::new();
-//!     let destination = MemoryDestination::new();
+//!     let destination = NoopDestination;
 //!
 //!     // Configure the pipeline
 //!     let config = PipelineConfig {

@@ -18,7 +18,6 @@ pub const fn default_connection_pool_size() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FullApiDestinationConfig {
-    Memory,
     BigQuery {
         #[schema(example = "my-gcp-project")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
@@ -44,7 +43,6 @@ pub enum FullApiDestinationConfig {
 impl From<StoredDestinationConfig> for FullApiDestinationConfig {
     fn from(value: StoredDestinationConfig) -> Self {
         match value {
-            StoredDestinationConfig::Memory => Self::Memory,
             StoredDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
@@ -102,7 +100,6 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
 
 #[derive(Debug, Clone)]
 pub enum StoredDestinationConfig {
-    Memory,
     BigQuery {
         project_id: String,
         dataset_id: String,
@@ -118,7 +115,6 @@ pub enum StoredDestinationConfig {
 impl StoredDestinationConfig {
     pub fn into_etl_config(self) -> DestinationConfig {
         match self {
-            Self::Memory => DestinationConfig::Memory,
             Self::BigQuery {
                 project_id,
                 dataset_id,
@@ -177,7 +173,6 @@ impl StoredDestinationConfig {
 impl From<FullApiDestinationConfig> for StoredDestinationConfig {
     fn from(value: FullApiDestinationConfig) -> Self {
         match value {
-            FullApiDestinationConfig::Memory => Self::Memory,
             FullApiDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,
@@ -240,7 +235,6 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
         encryption_key: &EncryptionKey,
     ) -> Result<EncryptedStoredDestinationConfig, EncryptionError> {
         match self {
-            Self::Memory => Ok(EncryptedStoredDestinationConfig::Memory),
             Self::BigQuery {
                 project_id,
                 dataset_id,
@@ -324,7 +318,6 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EncryptedStoredDestinationConfig {
-    Memory,
     BigQuery {
         project_id: String,
         dataset_id: String,
@@ -347,7 +340,6 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
         encryption_key: &EncryptionKey,
     ) -> Result<StoredDestinationConfig, DecryptionError> {
         match self {
-            Self::Memory => Ok(StoredDestinationConfig::Memory),
             Self::BigQuery {
                 project_id,
                 dataset_id,

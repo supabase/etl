@@ -63,7 +63,7 @@ async fn table_copy_and_streaming_with_restart() {
     let raw_destination = bigquery_database
         .build_destination(pipeline_id, store.clone())
         .await;
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
     let mut pipeline = create_pipeline(
@@ -198,7 +198,7 @@ async fn table_insert_update_delete() {
     let raw_destination = bigquery_database
         .build_destination(pipeline_id, store.clone())
         .await;
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
     let mut pipeline = create_pipeline(
@@ -317,7 +317,7 @@ async fn table_subsequent_updates() {
     let raw_destination = bigquery_database
         .build_destination(pipeline_id, store.clone())
         .await;
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
     let mut pipeline = create_pipeline(
@@ -412,7 +412,7 @@ async fn table_truncate_with_batching() {
     let raw_destination = bigquery_database
         .build_destination(pipeline_id, store.clone())
         .await;
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
     let mut pipeline = create_pipeline_with_batch_config(
@@ -555,7 +555,7 @@ async fn table_nullable_scalar_columns() {
     let raw_destination = bigquery_database
         .build_destination(pipeline_id, store.clone())
         .await;
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub".to_string();
     database
@@ -766,7 +766,7 @@ async fn table_nullable_array_columns() {
     let raw_destination = bigquery_database
         .build_destination(pipeline_id, store.clone())
         .await;
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array".to_string();
     database
@@ -1003,7 +1003,7 @@ async fn table_non_nullable_scalar_columns() {
     let raw_destination = bigquery_database
         .build_destination(pipeline_id, store.clone())
         .await;
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null".to_string();
     database
@@ -1255,7 +1255,7 @@ async fn table_non_nullable_array_columns() {
     let raw_destination = bigquery_database
         .build_destination(pipeline_id, store.clone())
         .await;
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null_array".to_string();
     database
@@ -1541,7 +1541,7 @@ async fn table_array_with_null_values() {
     let raw_destination = bigquery_database
         .build_destination(pipeline_id, store.clone())
         .await;
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array_nulls".to_string();
     database
@@ -1760,7 +1760,7 @@ async fn table_validation_out_of_bounds_values() {
     let raw_destination = bigquery_database
         .build_destination(pipeline_id, store.clone())
         .await;
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_validation".to_string();
     database

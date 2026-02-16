@@ -1,12 +1,12 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
-use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::failpoints::{
     START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, START_TABLE_SYNC_DURING_DATA_SYNC,
 };
 use etl::state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType};
 use etl::test_utils::database::spawn_source_database;
+use etl::test_utils::memory_destination::MemoryDestination;
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
@@ -40,7 +40,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     .await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(), store.clone());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -104,7 +104,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     .await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(), store.clone());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -172,7 +172,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     .await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(), store.clone());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();
@@ -235,7 +235,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     .await;
 
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(), store.clone());
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
     let pipeline_id: PipelineId = random();

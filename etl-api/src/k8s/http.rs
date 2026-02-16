@@ -743,7 +743,6 @@ fn create_container_environment_json(
     }
 
     match destination_type {
-        DestinationType::Memory => {}
         DestinationType::BigQuery => {
             let postgres_secret_name = create_postgres_secret_name(prefix);
             let postgres_secret_env_var_json =

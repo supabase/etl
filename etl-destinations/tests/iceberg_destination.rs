@@ -69,7 +69,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let raw_destination =
         IcebergDestination::new(client.clone(), destination_namespace, store.clone());
     // let raw_destination = bigquery_database.build_destination(store.clone()).await;
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
     let mut pipeline = create_pipeline(
@@ -218,7 +218,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     let single_destination_namespace = destination_namespace.is_single();
     let raw_destination =
         IcebergDestination::new(client.clone(), destination_namespace, store.clone());
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch (no initial data). We'll stream CDC events only.
     let mut pipeline = create_pipeline(
@@ -525,7 +525,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     let single_destination_namespace = destination_namespace.is_single();
     let raw_destination =
         IcebergDestination::new(client.clone(), destination_namespace, store.clone());
-    let destination = TestDestinationWrapper::wrap(raw_destination, store.clone());
+    let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch (no initial data). We'll stream CDC events only.
     let mut pipeline = create_pipeline(
