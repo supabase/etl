@@ -317,7 +317,7 @@ impl StateStore for NotifyingStore {
         inner
             .table_mappings
             .insert(source_table_id, destination_table_id);
-        
+
         Ok(())
     }
 }
@@ -342,10 +342,6 @@ impl SchemaStore for NotifyingStore {
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
-        inner
-            .table_mappings
-            .entry(table_schema.id)
-            .or_insert_with(|| format!("notifying_store_table_{}", table_schema.id.0));
         inner
             .table_schemas
             .insert(table_schema.id, Arc::new(table_schema));

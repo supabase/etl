@@ -123,7 +123,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
 
     let store = NotifyingStore::new();
     let memory_destination = MemoryDestination::new();
-    let destination = TestDestinationWrapper::wrap(memory_destination);
+    let destination = TestDestinationWrapper::wrap(memory_destination, store.clone());
 
     let publication_name = "test_pub_toast".to_string();
     database
@@ -255,7 +255,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
 
     let store = NotifyingStore::new();
     let memory_destination = MemoryDestination::new();
-    let destination = TestDestinationWrapper::wrap(memory_destination);
+    let destination = TestDestinationWrapper::wrap(memory_destination, store.clone());
 
     let publication_name = "test_pub_toast".to_string();
     database
@@ -378,7 +378,7 @@ async fn update_toast_values_with_default_replica_identity() {
 
     let store = NotifyingStore::new();
     let memory_destination = MemoryDestination::new();
-    let destination = TestDestinationWrapper::wrap(memory_destination);
+    let destination = TestDestinationWrapper::wrap(memory_destination, store.clone());
 
     let publication_name = "test_pub_toast".to_string();
     database
@@ -511,7 +511,7 @@ async fn update_non_toast_values_with_none_replica_identity() {
 
     let store = NotifyingStore::new();
     let memory_destination = MemoryDestination::new();
-    let destination = TestDestinationWrapper::wrap(memory_destination);
+    let destination = TestDestinationWrapper::wrap(memory_destination, store.clone());
 
     let publication_name = "test_pub_toast".to_string();
     database
@@ -657,7 +657,7 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
 
     let store = NotifyingStore::new();
     let memory_destination = MemoryDestination::new();
-    let destination = TestDestinationWrapper::wrap(memory_destination);
+    let destination = TestDestinationWrapper::wrap(memory_destination, store.clone());
 
     let publication_name = "test_pub_toast".to_string();
     database
