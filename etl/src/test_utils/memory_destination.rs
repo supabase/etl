@@ -33,6 +33,7 @@ where
 
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         info!(table_id = table_id.0, "truncating table");
+
         Ok(())
     }
 
@@ -41,6 +42,10 @@ where
         table_id: TableId,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
+        self.state_store
+            .store_table_mapping(table_id, format!("memory_destination_table_{}", table_id.0))
+            .await?;
+
         info!(
             table_id = table_id.0,
             row_count = table_rows.len(),
