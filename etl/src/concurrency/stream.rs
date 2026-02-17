@@ -488,6 +488,7 @@ mod tests {
             memory_sub,
         ));
 
+        // Memory is full, so we block any poll.
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
             _ => panic!("expected pending while blocked"),
@@ -495,6 +496,8 @@ mod tests {
         .await;
 
         memory.set_blocked_for_test(false);
+
+        // Memory is now back, so we should get the batch of 1 element.
         let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
 
         match batch {
@@ -509,7 +512,7 @@ mod tests {
         memory.set_blocked_for_test(true);
         let memory_sub = memory.subscribe();
 
-        // Expectation: when blocked, wrapped stream stays pending even if it has data.
+        // When blocked, wrapped stream stays pending even if it has data.
         let mut stream = Box::pin(BackpressureStream::wrap(
             futures::stream::iter(vec![10]),
             memory_sub,
@@ -521,8 +524,9 @@ mod tests {
         })
         .await;
 
-        // Expectation: once unblocked, wrapper yields underlying item.
         memory.set_blocked_for_test(false);
+
+        // Once unblocked, wrapper yields underlying item.
         let item = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         assert_eq!(item, Some(10));
     }
@@ -537,8 +541,9 @@ mod tests {
         ));
 
         // Set blocked after subscribe and before next poll.
-        // Expectation: even if `poll_update` is pending, wrapper falls back to current state.
         memory.set_blocked_for_test(true);
+
+        // Even if `poll_update` is pending, wrapper falls back to current state.
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
             _ => panic!("expected pending based on current blocked state"),
@@ -559,6 +564,8 @@ mod tests {
         tx.send(PostgresConnectionUpdate::Errored)
             .expect("connection update send should succeed");
 
+        // If the connection errors out, we expect the stream to poll the wrapped stream and return
+        // its result.
         let item = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         assert_eq!(item, Some(12));
     }
@@ -586,6 +593,8 @@ mod tests {
         tx.send(PostgresConnectionUpdate::Errored)
             .expect("connection update send should succeed");
 
+        // If the connection errors out, we expect the stream to poll the wrapped stream and return
+        // its accumulated batch + the latest returned item.
         let result = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         match result {
             Some(ShutdownResult::Ok(items)) => assert_eq!(items, vec![1]),
