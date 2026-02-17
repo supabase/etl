@@ -68,6 +68,7 @@ impl<'a> Stream for TableCopyStream<'a> {
     /// structured [`TableRow`] objects, with detailed error reporting for various failure modes.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
+
         match ready!(this.stream.poll_next(cx)) {
             // TODO: allow pluggable table row conversion based on if the data is in text or binary format.
             Some(Ok(row)) => {
@@ -141,7 +142,7 @@ impl Display for StatusUpdateType {
 pin_project! {
     /// A stream that yields replication events from a Postgres logical replication stream and keeps
     /// track of last sent status updates.
-    pub struct EventsStream {
+pub struct EventsStream {
         #[pin]
         stream: LogicalReplicationStream,
         last_update: Option<Instant>,

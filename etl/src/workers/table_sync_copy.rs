@@ -10,8 +10,9 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{error, info};
 
+use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::stream::TimeoutBatchStream;
+use crate::concurrency::stream::BatchBackpressureStream;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
@@ -100,6 +101,7 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
+    memory_monitor: MemoryMonitor,
 ) -> EtlResult<TableCopyResult> {
     if max_copy_connections > 1 {
         parallel_table_copy(
@@ -112,6 +114,7 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
             shutdown_rx,
             pipeline_id,
             destination,
+            memory_monitor,
         )
         .await
     } else {
@@ -124,6 +127,7 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
             shutdown_rx,
             pipeline_id,
             destination,
+            memory_monitor,
         )
         .await
     }
@@ -140,6 +144,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
+    memory_monitor: MemoryMonitor,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
@@ -148,7 +153,12 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         .await?;
     let table_copy_stream =
         TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
-    let table_copy_stream = TimeoutBatchStream::wrap(table_copy_stream, batch_config, shutdown_rx);
+    let table_copy_stream = BatchBackpressureStream::wrap(
+        table_copy_stream,
+        batch_config,
+        shutdown_rx,
+        memory_monitor.subscribe(),
+    );
     pin!(table_copy_stream);
 
     info!(table_id = table_id.0, "starting serial table copy");
@@ -237,6 +247,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
+    memory_monitor: MemoryMonitor,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
@@ -316,6 +327,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         let batch_config = batch_config.clone();
         let shutdown_rx = shutdown_rx.clone();
         let destination = destination.clone();
+        let memory_monitor = memory_monitor.clone();
 
         join_set.spawn(async move {
             let child_replication_client = replication_client.fork_child().await?;
@@ -332,6 +344,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 shutdown_rx,
                 pipeline_id,
                 destination,
+                memory_monitor,
             )
             .await;
 
@@ -451,6 +464,7 @@ async fn copy_partition<D>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
+    memory_monitor: MemoryMonitor,
 ) -> EtlResult<TableCopyResult>
 where
     D: Destination + Clone + Send + 'static,
@@ -510,7 +524,12 @@ where
     };
 
     let table_copy_stream = TableCopyStream::wrap(copy_stream, &column_schemas, pipeline_id);
-    let table_copy_stream = TimeoutBatchStream::wrap(table_copy_stream, batch_config, shutdown_rx);
+    let table_copy_stream = BatchBackpressureStream::wrap(
+        table_copy_stream,
+        batch_config,
+        shutdown_rx,
+        memory_monitor.subscribe(),
+    );
     pin!(table_copy_stream);
 
     let mut total_rows: u64 = 0;

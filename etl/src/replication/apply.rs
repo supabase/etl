@@ -23,7 +23,9 @@ use tokio::sync::Semaphore;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
 
+use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::concurrency::stream::BackpressureStream;
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
@@ -196,6 +198,8 @@ pub struct ApplyWorkerContext<S, D> {
     pub shutdown_rx: ShutdownRx,
     /// Semaphore controlling maximum concurrent table sync workers.
     pub table_sync_worker_permits: Arc<Semaphore>,
+    /// Shared memory backpressure controller.
+    pub memory_monitor: MemoryMonitor,
 }
 
 /// Resources for the table sync worker during the apply loop.
@@ -436,6 +440,8 @@ pub struct ApplyLoop<S, D> {
     shutdown_rx: ShutdownRx,
     /// Worker context for worker-specific behavior.
     worker_context: WorkerContext<S, D>,
+    /// Shared memory backpressure controller.
+    memory_monitor: MemoryMonitor,
     /// Internal loop state.
     state: ApplyLoopState,
 }
@@ -458,6 +464,7 @@ where
         destination: D,
         worker_context: WorkerContext<S, D>,
         shutdown_rx: ShutdownRx,
+        memory_monitor: MemoryMonitor,
     ) -> EtlResult<ApplyLoopResult> {
         info!(
             worker_type = %worker_context.worker_type(),
@@ -483,6 +490,7 @@ where
             destination,
             shutdown_rx,
             worker_context,
+            memory_monitor,
             state,
         };
 
@@ -506,6 +514,8 @@ where
             .await?;
 
         let events_stream = EventsStream::wrap(logical_replication_stream, self.pipeline_id);
+        let events_stream =
+            BackpressureStream::wrap(events_stream, self.memory_monitor.subscribe());
         pin!(events_stream);
 
         // If the loop produces a result while waiting for shutdown acknowledgement,
@@ -666,7 +676,7 @@ where
     /// not complete within an acceptable timeframe.
     async fn handle_shutdown_signal(
         &mut self,
-        mut events_stream: Pin<&mut EventsStream>,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<()> {
         let worker_type = self.worker_context.worker_type();
 
@@ -708,12 +718,14 @@ where
     /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
     async fn initiate_graceful_shutdown(
         &mut self,
-        events_stream: Pin<&mut EventsStream>,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<()> {
         // Use effective flush LSN to report last received LSN when idle, since
         // last flush LSN only advances during actual flushes.
         let flush_lsn = self.state.effective_flush_lsn();
         events_stream
+            .as_mut()
+            .stream_mut()
             .send_status_update(
                 self.state.last_received_lsn(),
                 flush_lsn,
@@ -735,7 +747,7 @@ where
     /// at transaction boundaries.
     async fn handle_stream_message(
         &mut self,
-        mut events_stream: Pin<&mut EventsStream>,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<ApplyLoopAction> {
@@ -786,7 +798,7 @@ where
     /// Handles a replication message and flushes the batch if necessary.
     async fn handle_replication_message_and_flush(
         &mut self,
-        mut events_stream: Pin<&mut EventsStream>,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<ApplyLoopAction> {
         let result = self
@@ -840,7 +852,7 @@ where
     /// mid-transaction), this will initiate graceful shutdown.
     async fn flush_batch(
         &mut self,
-        events_stream: Pin<&mut EventsStream>,
+        events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<ApplyLoopAction> {
         self.state.reset_batch_deadline();
 
@@ -908,7 +920,7 @@ where
     /// Dispatches replication protocol messages to appropriate handlers.
     async fn handle_replication_message(
         &mut self,
-        events_stream: Pin<&mut EventsStream>,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<HandleMessageResult> {
         match message {
@@ -945,6 +957,8 @@ where
                 );
 
                 events_stream
+                    .as_mut()
+                    .stream_mut()
                     .send_status_update(
                         self.state.last_received_lsn(),
                         // Use effective flush LSN to report last received LSN when idle, since
@@ -2047,6 +2061,7 @@ mod apply_worker {
             ctx.destination.clone(),
             ctx.shutdown_rx.clone(),
             ctx.table_sync_worker_permits.clone(),
+            ctx.memory_monitor.clone(),
         )
     }
 

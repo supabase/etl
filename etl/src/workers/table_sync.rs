@@ -11,6 +11,7 @@ use tokio::task::AbortHandle;
 use tracing::{Instrument, debug, error, info};
 
 use crate::bail;
+use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
@@ -336,6 +337,7 @@ pub struct TableSyncWorker<S, D> {
     destination: D,
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
+    memory_monitor: MemoryMonitor,
 }
 
 impl<S, D> TableSyncWorker<S, D> {
@@ -354,6 +356,7 @@ impl<S, D> TableSyncWorker<S, D> {
         destination: D,
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
+        memory_monitor: MemoryMonitor,
     ) -> Self {
         Self {
             pipeline_id,
@@ -364,6 +367,7 @@ impl<S, D> TableSyncWorker<S, D> {
             destination,
             shutdown_rx,
             run_permit,
+            memory_monitor,
         }
     }
 
@@ -590,6 +594,7 @@ where
                 destination: destination.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 run_permit: run_permit.clone(),
+                memory_monitor: self.memory_monitor.clone(),
             };
 
             let result = worker.run_table_sync_worker(state.clone()).await;
@@ -667,6 +672,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
+            self.memory_monitor.clone(),
         )
         .await;
 
@@ -696,6 +702,7 @@ where
             self.destination,
             worker_context,
             self.shutdown_rx,
+            self.memory_monitor.clone(),
         )
         .await?;
 
