@@ -8,27 +8,45 @@ use tracing::info;
 
 use crate::concurrency::memory_monitor::MemoryMonitorSubscription;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::replication::client::{PgConnectionSubscription, PostgresConnectionUpdate};
 
 pin_project! {
     /// A stream adapter that pauses polling when memory monitor reports pressure.
     #[must_use = "streams do nothing unless polled"]
     #[derive(Debug)]
-    pub struct BackpressureStream<S: Stream> {
+pub struct BackpressureStream<S: Stream> {
         #[pin]
         stream: S,
-        memory_monitor: MemoryMonitorSubscription,
+        memory_subscription: MemoryMonitorSubscription,
+        connection_subscription: Option<PgConnectionSubscription>,
+        connection_update: PostgresConnectionUpdate,
         paused_for_memory: bool,
     }
 }
 
 impl<S: Stream> BackpressureStream<S> {
     /// Creates a new [`BackpressureStream`] wrapping `stream`.
-    pub fn wrap(stream: S, memory_monitor: MemoryMonitorSubscription) -> Self {
+    pub fn wrap(stream: S, memory_subscription: MemoryMonitorSubscription) -> Self {
         Self {
             stream,
-            memory_monitor,
+            memory_subscription,
+            connection_subscription: None,
+            connection_update: PostgresConnectionUpdate::Running,
             paused_for_memory: false,
         }
+    }
+
+    /// Configures optional connection lifecycle updates for this stream wrapper.
+    ///
+    /// This is used only to unblock paused/idle streams when the underlying PostgreSQL
+    /// connection is no longer usable. It does not inspect or consume items from the wrapped
+    /// stream.
+    pub fn with_connection_updates(
+        mut self,
+        connection_subscription: Option<PgConnectionSubscription>,
+    ) -> Self {
+        self.connection_subscription = connection_subscription;
+        self
     }
 
     /// Returns a pinned mutable reference to the wrapped stream.
@@ -44,15 +62,48 @@ impl<S: Stream> Stream for BackpressureStream<S> {
         let mut this = self.project();
         let was_paused = *this.paused_for_memory;
 
-        match this.memory_monitor.poll_update(cx) {
+        if let Some(connection_subscription) = this.connection_subscription {
+            match connection_subscription.poll_update(cx) {
+                Poll::Ready(Some(update)) => {
+                    *this.connection_update = update;
+                }
+                Poll::Ready(None) => {
+                    // If the watch channel was dropped, we assume that the connection was terminated.
+                    *this.connection_update = PostgresConnectionUpdate::Terminated;
+                }
+                Poll::Pending => {
+                    let current_update = connection_subscription.current_update();
+                    if *this.connection_update != current_update {
+                        *this.connection_update = current_update;
+                    }
+                }
+            }
+        }
+
+        // Terminal connection updates bypass backpressure and immediately forward whatever the
+        // wrapped stream reports next. This unblocks paused streams while preserving the stream's
+        // native termination/error behavior.
+        if this.connection_update.signals_connection_closed() {
+            info!(
+                update = ?this.connection_update,
+                "postgres connection closed, forwarding wrapped stream result"
+            );
+
+            return this.stream.as_mut().poll_next(cx);
+        }
+
+        match this.memory_subscription.poll_update(cx) {
             Poll::Ready(Some(blocked)) => {
                 *this.paused_for_memory = blocked;
             }
             Poll::Ready(None) => {
+                // If the was channel was dropped, we assume that memory is fine, to be resilient.
                 *this.paused_for_memory = false;
             }
             Poll::Pending => {
-                let currently_blocked = this.memory_monitor.current_blocked();
+                // If the memory state didn't change, we just use the current state that is on the
+                // watch.
+                let currently_blocked = this.memory_subscription.current_blocked();
                 if *this.paused_for_memory != currently_blocked {
                     *this.paused_for_memory = currently_blocked;
                 }
@@ -83,7 +134,7 @@ pin_project! {
     /// - A timeout occurs
     #[must_use = "streams do nothing unless polled"]
     #[derive(Debug)]
-    pub struct BatchBackpressureStream<B, S: Stream<Item = B>> {
+pub struct BatchBackpressureStream<B, S: Stream<Item = B>> {
         #[pin]
         stream: S,
         #[pin]
@@ -94,7 +145,9 @@ pin_project! {
         reset_timer: bool,
         inner_stream_ended: bool,
         stream_stopped: bool,
-        memory_monitor: MemoryMonitorSubscription,
+        memory_subscription: MemoryMonitorSubscription,
+        connection_subscription: Option<PgConnectionSubscription>,
+        connection_update: PostgresConnectionUpdate,
         paused_for_memory: bool,
     }
 }
@@ -105,7 +158,7 @@ impl<B, S: Stream<Item = B>> BatchBackpressureStream<B, S> {
         stream: S,
         batch_config: BatchConfig,
         shutdown_rx: ShutdownRx,
-        memory_monitor: MemoryMonitorSubscription,
+        memory_subscription: MemoryMonitorSubscription,
     ) -> Self {
         BatchBackpressureStream {
             stream,
@@ -116,9 +169,24 @@ impl<B, S: Stream<Item = B>> BatchBackpressureStream<B, S> {
             reset_timer: true,
             inner_stream_ended: false,
             stream_stopped: false,
-            memory_monitor,
+            memory_subscription,
+            connection_subscription: None,
+            connection_update: PostgresConnectionUpdate::Running,
             paused_for_memory: false,
         }
+    }
+
+    /// Configures optional connection lifecycle updates for this batch stream wrapper.
+    ///
+    /// This is used only to unblock paused/idle streams when the underlying PostgreSQL
+    /// connection is no longer usable. It does not inspect or consume items from the wrapped
+    /// stream.
+    pub fn with_connection_updates(
+        mut self,
+        connection_subscription: Option<PgConnectionSubscription>,
+    ) -> Self {
+        self.connection_subscription = connection_subscription;
+        self
     }
 }
 
@@ -162,19 +230,75 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
                 return Poll::Ready(Some(ShutdownResult::Shutdown(std::mem::take(this.items))));
             }
 
-            // PRIORITY 2: Memory backpressure.
+            // PRIORITY 2: Connection updates.
+            // Terminal updates are treated as stream shutdown to unblock paused streams without
+            // performing stream-item lookahead.
+            if let Some(connection_subscription) = this.connection_subscription {
+                match connection_subscription.poll_update(cx) {
+                    Poll::Ready(Some(update)) => {
+                        *this.connection_update = update;
+                    }
+                    Poll::Ready(None) => {
+                        // If the watch channel was dropped, we assume that the connection was terminated.
+                        *this.connection_update = PostgresConnectionUpdate::Terminated;
+                    }
+                    Poll::Pending => {
+                        let current_update = connection_subscription.current_update();
+                        if *this.connection_update != current_update {
+                            *this.connection_update = current_update;
+                        }
+                    }
+                }
+            }
+
+            if this.connection_update.signals_connection_closed() {
+                info!(
+                    update = ?this.connection_update,
+                    "postgres connection closed, forwarding wrapped batch stream result"
+                );
+
+                match this.stream.as_mut().poll_next(cx) {
+                    Poll::Ready(Some(item)) => {
+                        this.items.push(item);
+                        *this.reset_timer = true;
+                        *this.stream_stopped = true;
+
+                        return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
+                    }
+                    Poll::Ready(None) => {
+                        *this.inner_stream_ended = true;
+                        *this.stream_stopped = true;
+
+                        if this.items.is_empty() {
+                            return Poll::Ready(None);
+                        }
+
+                        *this.reset_timer = true;
+
+                        return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
+                    }
+                    Poll::Pending => {
+                        return Poll::Pending;
+                    }
+                }
+            }
+
+            // PRIORITY 3: Memory backpressure.
             // If memory is blocked and there are buffered items, flush immediately to avoid
             // accumulating more memory in this stream.
             let was_paused = *this.paused_for_memory;
-            match this.memory_monitor.poll_update(cx) {
+            match this.memory_subscription.poll_update(cx) {
                 Poll::Ready(Some(blocked)) => {
                     *this.paused_for_memory = blocked;
                 }
                 Poll::Ready(None) => {
+                    // If the was channel was dropped, we assume that memory is fine, to be resilient.
                     *this.paused_for_memory = false;
                 }
                 Poll::Pending => {
-                    let currently_blocked = this.memory_monitor.current_blocked();
+                    // If the memory state didn't change, we just use the current state that is on the
+                    // watch.
+                    let currently_blocked = this.memory_subscription.current_blocked();
                     if *this.paused_for_memory != currently_blocked {
                         *this.paused_for_memory = currently_blocked;
                     }
@@ -201,7 +325,7 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
                 return Poll::Pending;
             }
 
-            // PRIORITY 3: Timer management
+            // PRIORITY 4: Timer management
             // Reset the timeout timer when starting a new batch or after emitting a batch
             if *this.reset_timer {
                 this.deadline
@@ -211,14 +335,14 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
                 *this.reset_timer = false;
             }
 
-            // PRIORITY 4: Memory optimization
+            // PRIORITY 5: Memory optimization
             // Pre-allocate batch capacity when starting to collect items
             // This avoids reallocations during batch collection.
             if this.items.is_empty() {
                 this.items.reserve_exact(this.batch_config.max_size);
             }
 
-            // PRIORITY 5: Poll underlying stream for new items
+            // PRIORITY 6: Poll underlying stream for new items
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Pending => {
                     // No more items available right now, check if we should emit due to timeout.
@@ -253,7 +377,7 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
             }
         }
 
-        // PRIORITY 6: Time-based emission check
+        // PRIORITY 7: Time-based emission check
         // If we have items and the timeout has expired, emit the current batch
         // This provides latency bounds to prevent indefinite delays in low-volume scenarios.
         if !this.items.is_empty()
@@ -420,5 +544,52 @@ mod tests {
             _ => panic!("expected pending based on current blocked state"),
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn backpressure_stream_stops_when_connection_errors() {
+        let memory = MemoryMonitor::new_for_test();
+        let memory_sub = memory.subscribe();
+        let (tx, rx) = tokio::sync::watch::channel(PostgresConnectionUpdate::Running);
+        let mut stream = Box::pin(
+            BackpressureStream::wrap(futures::stream::iter(vec![12]), memory_sub)
+                .with_connection_updates(Some(PgConnectionSubscription::new(rx))),
+        );
+
+        tx.send(PostgresConnectionUpdate::Errored)
+            .expect("connection update send should succeed");
+
+        let item = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+        assert_eq!(item, Some(12));
+    }
+
+    #[tokio::test]
+    async fn batch_backpressure_stream_stops_when_connection_errors() {
+        let memory = MemoryMonitor::new_for_test();
+        let memory_sub = memory.subscribe();
+        let (_, shutdown_rx) = create_shutdown_channel();
+        let batch_config = BatchConfig {
+            max_size: 10,
+            max_fill_ms: 10_000,
+        };
+        let (tx, rx) = tokio::sync::watch::channel(PostgresConnectionUpdate::Running);
+        let mut stream = Box::pin(
+            BatchBackpressureStream::wrap(
+                futures::stream::iter(vec![1, 2, 3]),
+                batch_config,
+                shutdown_rx,
+                memory_sub,
+            )
+            .with_connection_updates(Some(PgConnectionSubscription::new(rx))),
+        );
+
+        tx.send(PostgresConnectionUpdate::Errored)
+            .expect("connection update send should succeed");
+
+        let result = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+        match result {
+            Some(ShutdownResult::Ok(items)) => assert_eq!(items, vec![1]),
+            _ => panic!("expected wrapped stream value when connection errors"),
+        }
     }
 }

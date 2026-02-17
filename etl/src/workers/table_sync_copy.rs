@@ -153,12 +153,14 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         .await?;
     let table_copy_stream =
         TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
+    let connection_subscription = transaction.get_cloned_client().connection_subscription();
     let table_copy_stream = BatchBackpressureStream::wrap(
         table_copy_stream,
         batch_config,
         shutdown_rx,
         memory_monitor.subscribe(),
-    );
+    )
+    .with_connection_updates(Some(connection_subscription));
     pin!(table_copy_stream);
 
     info!(table_id = table_id.0, "starting serial table copy");
@@ -524,12 +526,16 @@ where
     };
 
     let table_copy_stream = TableCopyStream::wrap(copy_stream, &column_schemas, pipeline_id);
+    let connection_subscription = child_transaction
+        .get_cloned_client()
+        .connection_subscription();
     let table_copy_stream = BatchBackpressureStream::wrap(
         table_copy_stream,
         batch_config,
         shutdown_rx,
         memory_monitor.subscribe(),
-    );
+    )
+    .with_connection_updates(Some(connection_subscription));
     pin!(table_copy_stream);
 
     let mut total_rows: u64 = 0;

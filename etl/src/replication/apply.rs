@@ -515,7 +515,8 @@ where
 
         let events_stream = EventsStream::wrap(logical_replication_stream, self.pipeline_id);
         let events_stream =
-            BackpressureStream::wrap(events_stream, self.memory_monitor.subscribe());
+            BackpressureStream::wrap(events_stream, self.memory_monitor.subscribe())
+                .with_connection_updates(Some(replication_client.connection_subscription()));
         pin!(events_stream);
 
         // If the loop produces a result while waiting for shutdown acknowledgement,

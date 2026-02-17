@@ -139,10 +139,10 @@ impl MemoryMonitor {
         // stream will return the new values from this point onward, independently of when it will be
         // polled.
         let rx = self.inner.blocked_tx.subscribe();
-        let updates = WatchStream::from_changes(rx);
+        let updates = WatchStream::from_changes(rx.clone());
 
         MemoryMonitorSubscription {
-            signal: self.clone(),
+            current_rx: rx,
             updates,
         }
     }
@@ -193,14 +193,14 @@ impl MemoryMonitor {
 /// blocked without risking missed wakeups.
 #[derive(Debug)]
 pub struct MemoryMonitorSubscription {
-    signal: MemoryMonitor,
+    current_rx: watch::Receiver<bool>,
     updates: WatchStream<bool>,
 }
 
 impl MemoryMonitorSubscription {
     /// Returns the current blocked flag.
     pub fn current_blocked(&self) -> bool {
-        self.signal.is_blocked()
+        *self.current_rx.borrow()
     }
 
     /// Polls for a new backpressure update.
