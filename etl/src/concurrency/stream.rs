@@ -42,6 +42,7 @@ impl<S: Stream> Stream for BackpressureStream<S> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
+        let was_paused = *this.paused_for_memory;
 
         match this.memory_monitor.poll_update(cx) {
             Poll::Ready(Some(blocked)) => {
@@ -56,6 +57,12 @@ impl<S: Stream> Stream for BackpressureStream<S> {
                     *this.paused_for_memory = currently_blocked;
                 }
             }
+        }
+
+        if !was_paused && *this.paused_for_memory {
+            info!("backpressure active, stream paused");
+        } else if was_paused && !*this.paused_for_memory {
+            info!("backpressure released, stream resumed");
         }
 
         if *this.paused_for_memory {
@@ -158,6 +165,7 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
             // PRIORITY 2: Memory backpressure.
             // If memory is blocked and there are buffered items, flush immediately to avoid
             // accumulating more memory in this stream.
+            let was_paused = *this.paused_for_memory;
             match this.memory_monitor.poll_update(cx) {
                 Poll::Ready(Some(blocked)) => {
                     *this.paused_for_memory = blocked;
@@ -173,8 +181,18 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
                 }
             }
 
+            if !was_paused && *this.paused_for_memory {
+                info!("backpressure active, batch stream paused");
+            } else if was_paused && !*this.paused_for_memory {
+                info!("backpressure released, batch stream resumed");
+            }
+
             if *this.paused_for_memory {
                 if !this.items.is_empty() {
+                    info!(
+                        buffered_items = this.items.len(),
+                        "backpressure active, flushing buffered batch"
+                    );
                     *this.reset_timer = true;
 
                     return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
