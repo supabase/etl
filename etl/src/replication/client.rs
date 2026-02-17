@@ -85,6 +85,16 @@ impl PostgresConnectionUpdate {
     }
 }
 
+impl fmt::Display for PostgresConnectionUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Running => write!(f, "running"),
+            Self::Terminated => write!(f, "terminated"),
+            Self::Errored => write!(f, "errored"),
+        }
+    }
+}
+
 /// Subscription to PostgreSQL connection lifecycle updates.
 ///
 /// This subscription is intended to provide wake-safe connection state observation for stream

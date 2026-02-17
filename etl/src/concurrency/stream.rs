@@ -85,7 +85,7 @@ impl<S: Stream> Stream for BackpressureStream<S> {
         // native termination/error behavior.
         if this.connection_update.signals_connection_closed() {
             info!(
-                update = ?this.connection_update,
+                update = %this.connection_update,
                 "postgres connection closed, forwarding wrapped stream result"
             );
 
@@ -253,7 +253,7 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
 
             if this.connection_update.signals_connection_closed() {
                 info!(
-                    update = ?this.connection_update,
+                    update = %this.connection_update,
                     "postgres connection closed, forwarding wrapped batch stream result"
                 );
 

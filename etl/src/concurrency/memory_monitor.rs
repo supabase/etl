@@ -13,9 +13,9 @@ use crate::concurrency::shutdown::ShutdownRx;
 // configurable.
 
 /// Hardcoded memory usage percentage above which backpressure activates.
-const MAX_MEMORY_LIMIT_PERCENTAGE: f32 = 0.85;
+const MAX_MEMORY_LIMIT_PERCENTAGE: f32 = 0.50;
 /// Hardcoded memory usage percentage below which backpressure is released.
-const MEMORY_RESUME_PERCENTAGE: f32 = 0.75;
+const MEMORY_RESUME_PERCENTAGE: f32 = 0.40;
 /// Memory refresh interval in milliseconds.
 const MEMORY_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
