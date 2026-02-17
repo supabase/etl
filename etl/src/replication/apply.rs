@@ -775,7 +775,7 @@ where
         if replication_client.is_closed() {
             warn!(
                 %worker_type,
-                "replication stream ended: PostgreSQL connection closed",
+                "replication stream ended: postgresql connection closed",
             );
 
             etl_error!(
