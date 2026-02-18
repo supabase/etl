@@ -31,7 +31,8 @@ postgres-replication = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+sysinfo = { workspace = true, features = ["system"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 tokio-postgres = { workspace = true, features = [
     "runtime",
     "with-chrono-0_4",
@@ -39,6 +40,7 @@ tokio-postgres = { workspace = true, features = [
     "with-serde_json-1",
 ] }
 tokio-rustls = { workspace = true, default-features = false }
+tokio-stream = { workspace = true }
 tracing = { workspace = true, default-features = true }
 uuid = { workspace = true, features = ["v4"] }
 x509-cert = { workspace = true, default-features = false }

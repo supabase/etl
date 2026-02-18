@@ -75,7 +75,7 @@ impl Default for SourceConfig {
     }
 }
 
-fn default_source_tls_enabled() -> bool {
+const fn default_source_tls_enabled() -> bool {
     true
 }
 

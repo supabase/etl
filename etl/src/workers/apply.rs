@@ -9,6 +9,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, error, info, warn};
 
 use crate::bail;
+use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
@@ -81,6 +82,7 @@ pub struct ApplyWorker<S, D> {
     destination: D,
     shutdown_rx: ShutdownRx,
     table_sync_worker_permits: Arc<Semaphore>,
+    memory_monitor: Option<MemoryMonitor>,
 }
 
 impl<S, D> ApplyWorker<S, D> {
@@ -88,6 +90,7 @@ impl<S, D> ApplyWorker<S, D> {
     ///
     /// The worker creates a fresh replication connection for each run attempt and
     /// coordinates with the table sync worker pool for initial synchronization operations.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
@@ -96,6 +99,7 @@ impl<S, D> ApplyWorker<S, D> {
         destination: D,
         shutdown_rx: ShutdownRx,
         table_sync_worker_permits: Arc<Semaphore>,
+        memory_monitor: Option<MemoryMonitor>,
     ) -> Self {
         Self {
             pipeline_id,
@@ -105,6 +109,7 @@ impl<S, D> ApplyWorker<S, D> {
             destination,
             shutdown_rx,
             table_sync_worker_permits,
+            memory_monitor,
         }
     }
 }
@@ -165,10 +170,13 @@ where
         );
 
         tokio::select! {
+            biased;
+
             _ = shutdown_rx.changed() => {
                 info!("shutting down apply worker while waiting to retry");
                 Ok(true)
             }
+
             _ = tokio::time::sleep(sleep_duration) => Ok(false)
         }
     }
@@ -221,6 +229,7 @@ where
                 destination: destination.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 table_sync_worker_permits: table_sync_worker_permits.clone(),
+                memory_monitor: self.memory_monitor.clone(),
             };
 
             let result = worker.run_apply_worker().await;
@@ -265,6 +274,7 @@ where
             destination: self.destination.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
             table_sync_worker_permits: self.table_sync_worker_permits,
+            memory_monitor: self.memory_monitor.clone(),
         });
 
         ApplyLoop::start(
@@ -276,6 +286,7 @@ where
             self.destination,
             worker_context,
             self.shutdown_rx,
+            self.memory_monitor,
         )
         .await?;
 

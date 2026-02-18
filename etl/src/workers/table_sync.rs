@@ -11,6 +11,7 @@ use tokio::task::AbortHandle;
 use tracing::{Instrument, debug, error, info};
 
 use crate::bail;
+use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
@@ -336,6 +337,7 @@ pub struct TableSyncWorker<S, D> {
     destination: D,
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
+    memory_monitor: Option<MemoryMonitor>,
 }
 
 impl<S, D> TableSyncWorker<S, D> {
@@ -354,6 +356,7 @@ impl<S, D> TableSyncWorker<S, D> {
         destination: D,
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
+        memory_monitor: Option<MemoryMonitor>,
     ) -> Self {
         Self {
             pipeline_id,
@@ -364,6 +367,7 @@ impl<S, D> TableSyncWorker<S, D> {
             destination,
             shutdown_rx,
             run_permit,
+            memory_monitor,
         }
     }
 
@@ -464,10 +468,13 @@ where
 
                     // Stop retrying immediately on shutdown instead of sleeping through it.
                     tokio::select! {
+                        biased;
+
                         _ = shutdown_rx.changed() => {
                             info!(table_id = table_id.0, "shutting down table sync worker while waiting to retry");
                             should_shutdown = true;
                         }
+
                         _ = tokio::time::sleep(sleep_duration) => {}
                     }
 
@@ -590,6 +597,7 @@ where
                 destination: destination.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 run_permit: run_permit.clone(),
+                memory_monitor: self.memory_monitor.clone(),
             };
 
             let result = worker.run_table_sync_worker(state.clone()).await;
@@ -636,6 +644,8 @@ where
         // of table sync workers running in parallel which in turn helps limit the max
         // number of concurrent connections to the source database.
         let permit = tokio::select! {
+            biased;
+
             _ = self.shutdown_rx.changed() => {
                 info!(table_id = self.table_id.0, "shutting down table sync worker while waiting for a run permit");
                 return Ok(());
@@ -667,6 +677,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
+            self.memory_monitor.clone(),
         )
         .await;
 
@@ -696,6 +707,7 @@ where
             self.destination,
             worker_context,
             self.shutdown_rx,
+            self.memory_monitor.clone(),
         )
         .await?;
 

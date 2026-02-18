@@ -1,5 +1,6 @@
 use etl_config::shared::{
-    BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
+    BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+    PipelineConfig, TableSyncCopyConfig,
 };
 use uuid::Uuid;
 
@@ -58,6 +59,8 @@ pub struct PipelineBuilder<S, D> {
     invalidated_slot_behavior: InvalidatedSlotBehavior,
     /// Maximum parallel connections per table during initial copy. Default: 2.
     max_copy_connections_per_table: u16,
+    /// Optional memory-based backpressure configuration. Default: enabled with defaults.
+    memory_backpressure: Option<MemoryBackpressureConfig>,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -105,6 +108,7 @@ where
             table_sync_copy: TableSyncCopyConfig::default(),
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
             max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+            memory_backpressure: Some(MemoryBackpressureConfig::default()),
         }
     }
 
@@ -179,6 +183,7 @@ where
             table_sync_copy: self.table_sync_copy,
             invalidated_slot_behavior: self.invalidated_slot_behavior,
             max_copy_connections_per_table: self.max_copy_connections_per_table,
+            memory_backpressure: self.memory_backpressure,
         };
 
         Pipeline::new(config, self.store, self.destination)

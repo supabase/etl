@@ -26,6 +26,13 @@ FullApiPipelineConfig {
     max_copy_connections_per_table: Some(
         8,
     ),
+    memory_backpressure: Some(
+        MemoryBackpressureConfig {
+            activate_threshold: 0.85,
+            resume_threshold: 0.75,
+            memory_refresh_interval_ms: 100,
+        },
+    ),
     table_sync_copy: Some(
         IncludeAllTables,
     ),

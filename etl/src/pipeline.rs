@@ -4,6 +4,7 @@
 //! with destination systems. Manages worker lifecycles, shutdown coordination, and error handling.
 
 use crate::bail;
+use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -120,6 +121,12 @@ where
             "starting pipeline"
         );
 
+        // We start memory monitoring only when memory backpressure is enabled.
+        let memory_monitor =
+            self.config.memory_backpressure.clone().map(|config| {
+                MemoryMonitor::new(self.config.id, self.shutdown_tx.subscribe(), config)
+            });
+
         // We create the first connection to Postgres.
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
@@ -145,8 +152,6 @@ where
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
-        // We create and start the apply worker (temporarily leaving out retries_orchestrator)
-        // TODO: Remove retries_orchestrator from ApplyWorker constructor
         let apply_worker = ApplyWorker::new(
             self.config.id,
             self.config.clone(),
@@ -155,6 +160,7 @@ where
             self.destination.clone(),
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
+            memory_monitor,
         )
         .spawn()
         .await?;

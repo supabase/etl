@@ -2,9 +2,61 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
-use crate::shared::{
-    PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError, batch::BatchConfig,
-};
+use crate::shared::{PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError};
+
+/// Batch processing configuration for pipelines.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct BatchConfig {
+    /// Maximum number of items in a batch for table copy and event streaming.
+    #[serde(default = "default_batch_max_size")]
+    #[cfg_attr(feature = "utoipa", schema(example = 10000))]
+    pub max_size: usize,
+    /// Maximum time, in milliseconds, to wait for a batch to fill before processing.
+    #[serde(default = "default_batch_max_fill_ms")]
+    #[cfg_attr(feature = "utoipa", schema(example = 0))]
+    pub max_fill_ms: u64,
+}
+
+impl BatchConfig {
+    /// Default maximum batch size for table copy and event streaming.
+    pub const DEFAULT_MAX_SIZE: usize = 100000;
+
+    /// Default maximum fill time in milliseconds.
+    pub const DEFAULT_MAX_FILL_MS: u64 = 10000;
+
+    /// Validates batch configuration settings.
+    ///
+    /// Ensures max_size is non-zero.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.max_size == 0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "batch.max_size".to_string(),
+                constraint: "must be greater than 0".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self {
+            max_size: default_batch_max_size(),
+            max_fill_ms: default_batch_max_fill_ms(),
+        }
+    }
+}
+
+const fn default_batch_max_size() -> usize {
+    BatchConfig::DEFAULT_MAX_SIZE
+}
+
+const fn default_batch_max_fill_ms() -> u64 {
+    BatchConfig::DEFAULT_MAX_FILL_MS
+}
 
 /// Behavior when the main replication slot is found to be invalidated.
 ///
@@ -70,6 +122,80 @@ impl TableSyncCopyConfig {
     }
 }
 
+/// Memory-based backpressure configuration.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct MemoryBackpressureConfig {
+    /// Memory usage ratio above which backpressure is activated.
+    ///
+    /// Valid range is `(0.0, 1.0]`.
+    pub activate_threshold: f32,
+    /// Memory usage ratio below which backpressure is released.
+    ///
+    /// Valid range is `[0.0, 1.0)`, and this value must be lower than
+    /// [`Self::activate_threshold`].
+    pub resume_threshold: f32,
+    /// Number of milliseconds between one memory usage refresh and another.
+    #[serde(default = "default_memory_refresh_interval_ms")]
+    pub memory_refresh_interval_ms: u64,
+}
+
+impl MemoryBackpressureConfig {
+    /// Default memory usage ratio to activate backpressure.
+    pub const DEFAULT_ACTIVATE_THRESHOLD: f32 = 0.85;
+    /// Default memory usage ratio to release backpressure.
+    pub const DEFAULT_RESUME_THRESHOLD: f32 = 0.75;
+    /// Default interval in milliseconds between one memory refresh and another.
+    pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
+
+    /// Validates memory backpressure thresholds.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if !(0.0..=1.0).contains(&self.activate_threshold) || self.activate_threshold == 0.0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "memory_backpressure.activate_threshold".to_string(),
+                constraint: "must be in the (0.0, 1.0] interval".to_string(),
+            });
+        }
+
+        if !(0.0..=1.0).contains(&self.resume_threshold) || self.resume_threshold == 1.0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "memory_backpressure.resume_threshold".to_string(),
+                constraint: "must be in the [0.0, 1.0) interval".to_string(),
+            });
+        }
+
+        if self.resume_threshold >= self.activate_threshold {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "memory_backpressure.resume_threshold".to_string(),
+                constraint: "must be lower than memory_backpressure.activate_threshold".to_string(),
+            });
+        }
+
+        if self.memory_refresh_interval_ms == 0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "memory_backpressure.memory_refresh_interval_ms".to_string(),
+                constraint: "must be greater than 0".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for MemoryBackpressureConfig {
+    fn default() -> Self {
+        Self {
+            activate_threshold: Self::DEFAULT_ACTIVATE_THRESHOLD,
+            resume_threshold: Self::DEFAULT_RESUME_THRESHOLD,
+            memory_refresh_interval_ms: Self::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
+        }
+    }
+}
+
+const fn default_memory_refresh_interval_ms() -> u64 {
+    MemoryBackpressureConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
+}
+
 /// Configuration for an ETL pipeline.
 ///
 /// Contains all settings required to run a replication pipeline including
@@ -110,6 +236,12 @@ pub struct PipelineConfig {
     /// When >1 (default), ctid-based partitioning splits the table across N connections.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
+    /// Optional memory-based backpressure configuration.
+    ///
+    /// `None` disables memory backpressure. When omitted, this defaults to
+    /// `Some(MemoryBackpressureConfig::default())`.
+    #[serde(default)]
+    pub memory_backpressure: Option<MemoryBackpressureConfig>,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
@@ -130,7 +262,6 @@ impl PipelineConfig {
 
     /// Default maximum parallel connections per table during initial copy.
     pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 2;
-
     /// Validates pipeline configuration settings.
     ///
     /// Checks batch configuration and ensures worker counts and retry attempts are non-zero.
@@ -158,23 +289,27 @@ impl PipelineConfig {
             });
         }
 
+        if let Some(memory_backpressure) = &self.memory_backpressure {
+            memory_backpressure.validate()?;
+        }
+
         Ok(())
     }
 }
 
-fn default_table_error_retry_delay_ms() -> u64 {
+const fn default_table_error_retry_delay_ms() -> u64 {
     PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
 }
 
-fn default_table_error_retry_max_attempts() -> u32 {
+const fn default_table_error_retry_max_attempts() -> u32 {
     PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
 }
 
-fn default_max_table_sync_workers() -> u16 {
+const fn default_max_table_sync_workers() -> u16 {
     PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
 }
 
-fn default_max_copy_connections_per_table() -> u16 {
+const fn default_max_copy_connections_per_table() -> u16 {
     PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE
 }
 
@@ -214,6 +349,12 @@ pub struct PipelineConfigWithoutSecrets {
     /// When >1 (default), ctid-based partitioning splits the table across N connections.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
+    /// Optional memory-based backpressure configuration.
+    ///
+    /// `None` disables memory backpressure. When omitted, this defaults to
+    /// `Some(MemoryBackpressureConfig::default())`.
+    #[serde(default)]
+    pub memory_backpressure: Option<MemoryBackpressureConfig>,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
@@ -233,6 +374,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
             max_table_sync_workers: value.max_table_sync_workers,
             max_copy_connections_per_table: value.max_copy_connections_per_table,
+            memory_backpressure: value.memory_backpressure,
             table_sync_copy: value.table_sync_copy,
             invalidated_slot_behavior: value.invalidated_slot_behavior,
         }

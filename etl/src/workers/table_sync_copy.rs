@@ -1,17 +1,20 @@
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
 use etl_config::shared::BatchConfig;
 use etl_postgres::types::{ColumnSchema, TableId, TableSchema};
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use metrics::{counter, histogram};
 use tokio::pin;
 use tokio::sync::Semaphore;
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{error, info};
 
+use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::stream::TimeoutBatchStream;
+use crate::concurrency::stream::BatchBackpressureStream;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
@@ -25,9 +28,10 @@ use crate::metrics::{
 };
 use crate::replication::client::{
     CtidPartition, PgReplicationChildTransaction, PgReplicationTransaction,
+    PostgresConnectionUpdate,
 };
 use crate::replication::stream::TableCopyStream;
-use crate::types::PipelineId;
+use crate::types::{PipelineId, TableRow};
 
 /// Calculates Load Imbalance Factor (LIF) for a set of values.
 ///
@@ -71,6 +75,103 @@ pub enum TableCopyResult {
     Shutdown,
 }
 
+/// Copies rows from a batched table-copy stream into the destination with prioritized shutdown handling.
+async fn copy_table_rows_from_stream<D, S>(
+    mut table_copy_stream: Pin<&mut S>,
+    mut shutdown_rx: ShutdownRx,
+    mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
+    table_id: TableId,
+    pipeline_id: PipelineId,
+    partitioning: &'static str,
+    destination: D,
+) -> EtlResult<ShutdownResult<u64, u64>>
+where
+    D: Destination + Clone + Send + 'static,
+    S: Stream<Item = Vec<EtlResult<TableRow>>> + ?Sized,
+{
+    let mut total_rows: u64 = 0;
+
+    loop {
+        tokio::select! {
+            biased;
+
+            // PRIORITY 1: Handle shutdown signals.
+            // Shutdown takes precedence so table copy workers stop promptly when requested.
+            _ = shutdown_rx.changed() => {
+                return Ok(ShutdownResult::Shutdown(total_rows));
+            }
+
+            // PRIORITY 2: Handle PostgreSQL connection lifecycle updates.
+            // Connection termination or errors stop copy immediately and surface a source error.
+            changed = connection_updates_rx.changed() => {
+                if changed.is_err() {
+                    return Err(etl_error!(
+                        ErrorKind::SourceConnectionFailed,
+                        "postgresql connection updates ended during table copy"
+                    ));
+                }
+
+                let update = connection_updates_rx.borrow().clone();
+                match update {
+                    PostgresConnectionUpdate::Running => {}
+                    PostgresConnectionUpdate::Terminated => {
+                        return Err(etl_error!(
+                            ErrorKind::SourceConnectionFailed,
+                            "postgresql connection terminated during table copy"
+                        ));
+                    }
+                    PostgresConnectionUpdate::Errored { error } => {
+                        return Err(etl_error!(
+                            ErrorKind::SourceConnectionFailed,
+                            "postgresql connection errored during table copy",
+                            error.to_string()
+                        ));
+                    }
+                }
+            }
+
+            // PRIORITY 3: Consume batched COPY rows.
+            // This is the normal copy path and runs when no higher-priority branch is pending.
+            maybe_batch = table_copy_stream.next() => {
+                let Some(table_rows) = maybe_batch else {
+                    return Ok(ShutdownResult::Ok(total_rows));
+                };
+
+                let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
+                let batch_size = table_rows.len() as u64;
+                total_rows += batch_size;
+
+                let before_sending = Instant::now();
+
+                destination.write_table_rows(table_id, table_rows).await?;
+
+                counter!(
+                    ETL_EVENTS_PROCESSED_TOTAL,
+                    WORKER_TYPE_LABEL => "table_sync",
+                    ACTION_LABEL => "table_copy",
+                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                    DESTINATION_LABEL => D::name(),
+                )
+                .increment(batch_size);
+
+                let send_duration_seconds = before_sending.elapsed().as_secs_f64();
+                histogram!(
+                    ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+                    WORKER_TYPE_LABEL => "table_sync",
+                    ACTION_LABEL => "table_copy",
+                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
+                    DESTINATION_LABEL => D::name(),
+                    PARTITIONING_LABEL => partitioning,
+                )
+                .record(send_duration_seconds);
+
+                #[cfg(feature = "failpoints")]
+                etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC)?;
+            }
+        }
+    }
+}
+
 /// Describes which slice of a table a single parallel copy task should read.
 ///
 /// For non-partitioned tables, the table is divided into ctid ranges by page estimation.
@@ -100,6 +201,7 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
+    memory_monitor: Option<MemoryMonitor>,
 ) -> EtlResult<TableCopyResult> {
     if max_copy_connections > 1 {
         parallel_table_copy(
@@ -112,6 +214,7 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
             shutdown_rx,
             pipeline_id,
             destination,
+            memory_monitor,
         )
         .await
     } else {
@@ -124,6 +227,7 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
             shutdown_rx,
             pipeline_id,
             destination,
+            memory_monitor,
         )
         .await
     }
@@ -140,6 +244,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
+    memory_monitor: Option<MemoryMonitor>,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
@@ -148,57 +253,39 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         .await?;
     let table_copy_stream =
         TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
-    let table_copy_stream = TimeoutBatchStream::wrap(table_copy_stream, batch_config, shutdown_rx);
+    let connection_updates_rx = transaction.get_cloned_client().connection_updates_rx();
+    let table_copy_stream = BatchBackpressureStream::wrap(
+        table_copy_stream,
+        batch_config,
+        memory_monitor
+            .as_ref()
+            .map(|memory_monitor| memory_monitor.subscribe()),
+    );
     pin!(table_copy_stream);
 
     info!(table_id = table_id.0, "starting serial table copy");
 
-    let mut total_rows: u64 = 0;
+    let total_rows = match copy_table_rows_from_stream(
+        table_copy_stream.as_mut(),
+        shutdown_rx,
+        connection_updates_rx,
+        table_id,
+        pipeline_id,
+        "false",
+        destination,
+    )
+    .await?
+    {
+        ShutdownResult::Ok(total_rows) => total_rows,
+        ShutdownResult::Shutdown(total_rows) => {
+            info!(
+                table_id = table_id.0,
+                total_rows, "shutting down serial table copy"
+            );
 
-    while let Some(result) = table_copy_stream.next().await {
-        match result {
-            ShutdownResult::Ok(table_rows) => {
-                let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
-                let batch_size = table_rows.len() as u64;
-                total_rows += batch_size;
-
-                let before_sending = Instant::now();
-
-                destination.write_table_rows(table_id, table_rows).await?;
-
-                counter!(
-                    ETL_EVENTS_PROCESSED_TOTAL,
-                    WORKER_TYPE_LABEL => "table_sync",
-                    ACTION_LABEL => "table_copy",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                    DESTINATION_LABEL => D::name(),
-                )
-                .increment(batch_size);
-
-                let send_duration_seconds = before_sending.elapsed().as_secs_f64();
-                histogram!(
-                    ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-                    WORKER_TYPE_LABEL => "table_sync",
-                    ACTION_LABEL => "table_copy",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                    DESTINATION_LABEL => D::name(),
-                    PARTITIONING_LABEL => "false",
-                )
-                .record(send_duration_seconds);
-
-                #[cfg(feature = "failpoints")]
-                etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC)?;
-            }
-            ShutdownResult::Shutdown(_) => {
-                info!(
-                    table_id = table_id.0,
-                    total_rows, "shutting down serial table copy"
-                );
-
-                return Ok(TableCopyResult::Shutdown);
-            }
+            return Ok(TableCopyResult::Shutdown);
         }
-    }
+    };
 
     histogram!(
         ETL_TABLE_COPY_ROWS,
@@ -237,6 +324,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
+    memory_monitor: Option<MemoryMonitor>,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
@@ -316,6 +404,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         let batch_config = batch_config.clone();
         let shutdown_rx = shutdown_rx.clone();
         let destination = destination.clone();
+        let memory_monitor = memory_monitor.clone();
 
         join_set.spawn(async move {
             let child_replication_client = replication_client.fork_child().await?;
@@ -332,6 +421,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 shutdown_rx,
                 pipeline_id,
                 destination,
+                memory_monitor,
             )
             .await;
 
@@ -451,6 +541,7 @@ async fn copy_partition<D>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
+    memory_monitor: Option<MemoryMonitor>,
 ) -> EtlResult<TableCopyResult>
 where
     D: Destination + Clone + Send + 'static,
@@ -510,60 +601,44 @@ where
     };
 
     let table_copy_stream = TableCopyStream::wrap(copy_stream, &column_schemas, pipeline_id);
-    let table_copy_stream = TimeoutBatchStream::wrap(table_copy_stream, batch_config, shutdown_rx);
+    let connection_updates_rx = child_transaction
+        .get_cloned_client()
+        .connection_updates_rx();
+    let table_copy_stream = BatchBackpressureStream::wrap(
+        table_copy_stream,
+        batch_config,
+        memory_monitor
+            .as_ref()
+            .map(|memory_monitor| memory_monitor.subscribe()),
+    );
     pin!(table_copy_stream);
 
-    let mut total_rows: u64 = 0;
+    let total_rows = match copy_table_rows_from_stream(
+        table_copy_stream.as_mut(),
+        shutdown_rx,
+        connection_updates_rx,
+        table_id,
+        pipeline_id,
+        "true",
+        destination,
+    )
+    .await?
+    {
+        ShutdownResult::Ok(total_rows) => total_rows,
+        ShutdownResult::Shutdown(total_rows) => {
+            info!(
+                table_id = table_id.0,
+                total_rows, "partition copy interrupted by shutdown"
+            );
 
-    while let Some(result) = table_copy_stream.next().await {
-        match result {
-            ShutdownResult::Ok(table_rows) => {
-                let table_rows = table_rows.into_iter().collect::<Result<Vec<_>, _>>()?;
-                let batch_size = table_rows.len() as u64;
-                total_rows += batch_size;
+            // If during the copy, we were told to shutdown, we cleanly rollback even if
+            // we didn't have any writes, so that we let Postgres clean up everything as
+            // soon as possible.
+            child_transaction.rollback().await?;
 
-                let before_sending = Instant::now();
-
-                destination.write_table_rows(table_id, table_rows).await?;
-
-                counter!(
-                    ETL_EVENTS_PROCESSED_TOTAL,
-                    WORKER_TYPE_LABEL => "table_sync",
-                    ACTION_LABEL => "table_copy",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                    DESTINATION_LABEL => D::name(),
-                )
-                .increment(batch_size);
-
-                let send_duration_seconds = before_sending.elapsed().as_secs_f64();
-                histogram!(
-                    ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-                    WORKER_TYPE_LABEL => "table_sync",
-                    ACTION_LABEL => "table_copy",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
-                    DESTINATION_LABEL => D::name(),
-                    PARTITIONING_LABEL => "true",
-                )
-                .record(send_duration_seconds);
-
-                #[cfg(feature = "failpoints")]
-                etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC)?;
-            }
-            ShutdownResult::Shutdown(_) => {
-                info!(
-                    table_id = table_id.0,
-                    total_rows, "partition copy interrupted by shutdown"
-                );
-
-                // If during the copy, we were told to shutdown, we cleanly rollback even if
-                // we didn't have any writes, so that we let Postgres clean up everything as
-                // soon as possible.
-                child_transaction.rollback().await?;
-
-                return Ok(TableCopyResult::Shutdown);
-            }
+            return Ok(TableCopyResult::Shutdown);
         }
-    }
+    };
 
     // We commit the transaction for the same reason as the rollback, to let Postgres immediately free
     // up things related to in-progress transactions.

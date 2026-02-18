@@ -7,6 +7,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
 
 use crate::bail;
+use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -53,6 +54,7 @@ pub async fn start_table_sync<S, D>(
     store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
+    memory_monitor: Option<MemoryMonitor>,
 ) -> EtlResult<TableSyncResult>
 where
     S: StateStore + SchemaStore + Clone + Send + 'static,
@@ -226,6 +228,7 @@ where
                     shutdown_rx.clone(),
                     pipeline_id,
                     destination.clone(),
+                    memory_monitor.clone(),
                 )
                 .await?;
 

@@ -15,6 +15,7 @@ use std::fmt;
 use std::num::NonZeroI32;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
@@ -31,18 +32,31 @@ use tracing::{Instrument, error, info, warn};
 const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Spawns a background task to monitor a Postgres connection until it terminates.
-fn spawn_postgres_connection<T>(connection: Connection<Socket, T::Stream>)
+fn spawn_postgres_connection<T>(
+    connection: Connection<Socket, T::Stream>,
+) -> watch::Receiver<PostgresConnectionUpdate>
 where
     T: MakeTlsConnect<Socket>,
     T::Stream: Send + 'static,
 {
+    // We use this watch channel to send connection updates without relying on the errors/terminations
+    // propagated by the active connection consumers.
+    let (updates_tx, updates_rx) = watch::channel(PostgresConnectionUpdate::Running);
+
     let span = tracing::Span::current();
     let task = async move {
         let result = connection.await;
 
         match result {
-            Err(err) => error!(error = %err, "postgres connection error"),
-            Ok(()) => info!("postgres connection terminated"),
+            Err(err) => {
+                let error_message = err.to_string();
+                let _ = updates_tx.send(PostgresConnectionUpdate::errored(error_message.clone()));
+                error!(error = %error_message, "postgres connection error");
+            }
+            Ok(()) => {
+                let _ = updates_tx.send(PostgresConnectionUpdate::Terminated);
+                info!("postgres connection terminated");
+            }
         }
     }
     .instrument(span);
@@ -50,6 +64,43 @@ where
     // There is no need to track the connection task via the `JoinHandle` since the `Client`, which
     // returned the connection, will automatically terminate the connection when dropped.
     tokio::spawn(task);
+
+    updates_rx
+}
+
+/// Updates emitted by the background task driving the PostgreSQL connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostgresConnectionUpdate {
+    /// The connection task is running.
+    Running,
+    /// The connection task terminated cleanly.
+    Terminated,
+    /// The connection task exited due to an error.
+    Errored { error: Arc<str> },
+}
+
+impl PostgresConnectionUpdate {
+    /// Creates an error update from an error message.
+    pub fn errored(error: impl Into<Arc<str>>) -> Self {
+        Self::Errored {
+            error: error.into(),
+        }
+    }
+
+    /// Returns `true` when this update indicates that the connection has been closed.
+    pub fn signals_connection_closed(&self) -> bool {
+        matches!(self, Self::Terminated | Self::Errored { .. })
+    }
+}
+
+impl fmt::Display for PostgresConnectionUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Running => write!(f, "running"),
+            Self::Terminated => write!(f, "terminated"),
+            Self::Errored { .. } => write!(f, "errored"),
+        }
+    }
 }
 
 /// Internal snapshot action for `CREATE_REPLICATION_SLOT`.
@@ -303,6 +354,11 @@ impl PgReplicationChildTransaction {
             .await
     }
 
+    /// Returns the cloned connection that is used in this child transaction.
+    pub fn get_cloned_client(&self) -> PgReplicationClient {
+        self.client.client.clone()
+    }
+
     /// Commits the current transaction.
     pub async fn commit(self) -> EtlResult<()> {
         self.client.client.commit_tx().await
@@ -335,6 +391,7 @@ pub struct PgReplicationClient {
     client: Arc<Client>,
     pg_connection_config: Arc<PgConnectionConfig>,
     server_version: Option<NonZeroI32>,
+    connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
 }
 
 impl PgReplicationClient {
@@ -364,7 +421,7 @@ impl PgReplicationClient {
             .parameter("server_version")
             .and_then(extract_server_version);
 
-        spawn_postgres_connection::<NoTls>(connection);
+        let connection_updates_rx = spawn_postgres_connection::<NoTls>(connection);
 
         info!("connected to postgres without tls");
 
@@ -372,6 +429,7 @@ impl PgReplicationClient {
             client: Arc::new(client),
             pg_connection_config: Arc::new(pg_connection_config),
             server_version,
+            connection_updates_rx,
         })
     }
 
@@ -404,7 +462,7 @@ impl PgReplicationClient {
             .parameter("server_version")
             .and_then(extract_server_version);
 
-        spawn_postgres_connection::<MakeRustlsConnect>(connection);
+        let connection_updates_rx = spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
         info!("connected to postgres with tls");
 
@@ -412,6 +470,7 @@ impl PgReplicationClient {
             client: Arc::new(client),
             pg_connection_config: Arc::new(pg_connection_config),
             server_version,
+            connection_updates_rx,
         })
     }
 
@@ -424,12 +483,13 @@ impl PgReplicationClient {
             .with_db(Some(&ETL_REPLICATION_OPTIONS));
 
         let (client, connection) = config.connect(NoTls).await?;
-        spawn_postgres_connection::<NoTls>(connection);
+        let connection_updates_rx = spawn_postgres_connection::<NoTls>(connection);
 
         let client = PgReplicationClient {
             client: Arc::new(client),
             pg_connection_config: self.pg_connection_config.clone(),
             server_version: self.server_version,
+            connection_updates_rx,
         };
 
         Ok(ChildPgReplicationClient {
@@ -459,12 +519,13 @@ impl PgReplicationClient {
             .with_no_client_auth();
 
         let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
-        spawn_postgres_connection::<MakeRustlsConnect>(connection);
+        let connection_updates_rx = spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
         let client = PgReplicationClient {
             client: Arc::new(client),
             pg_connection_config: self.pg_connection_config.clone(),
             server_version: self.server_version,
+            connection_updates_rx,
         };
 
         Ok(ChildPgReplicationClient {
@@ -488,6 +549,11 @@ impl PgReplicationClient {
     /// Checks if the underlying connection is closed.
     pub fn is_closed(&self) -> bool {
         self.client.is_closed()
+    }
+
+    /// Returns a receiver for background connection task updates.
+    pub fn connection_updates_rx(&self) -> watch::Receiver<PostgresConnectionUpdate> {
+        self.connection_updates_rx.clone()
     }
 
     /// Executes a simple query on the underlying connection and returns all result messages.

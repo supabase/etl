@@ -68,8 +68,9 @@ impl<'a> Stream for TableCopyStream<'a> {
     /// structured [`TableRow`] objects, with detailed error reporting for various failure modes.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
+
         match ready!(this.stream.poll_next(cx)) {
-            // TODO: allow pluggable table row conversion based on if the data is in text or binary format.
+            // Row copy received.
             Some(Ok(row)) => {
                 counter!(
                     ETL_BYTES_PROCESSED_TOTAL,
@@ -85,27 +86,15 @@ impl<'a> Stream for TableCopyStream<'a> {
                 )
                 .record(row.len() as f64);
 
-                // CONVERSION PHASE: Transform raw bytes into structured TableRow
-                // This is where most errors occur due to data format or type issues
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas) {
                     Ok(row) => Poll::Ready(Some(Ok(row))),
-                    Err(err) => {
-                        // CONVERSION ERROR: Preserve full error context for debugging
-                        // These errors typically indicate schema mismatches or data corruption
-                        Poll::Ready(Some(Err(err)))
-                    }
+                    Err(err) => Poll::Ready(Some(Err(err))),
                 }
             }
-            Some(Err(err)) => {
-                // PROTOCOL ERROR: Postgres connection or protocol-level failure
-                // Convert tokio-postgres errors to ETL errors with additional context
-                Poll::Ready(Some(Err(err.into())))
-            }
-            None => {
-                // STREAM END: Normal completion - no more rows available
-                // This is the success termination condition for table copying
-                Poll::Ready(None)
-            }
+            // Postgres connection or protocol-level failure.
+            Some(Err(err)) => Poll::Ready(Some(Err(err.into()))),
+            // Normal completion, no more rows available.
+            None => Poll::Ready(None),
         }
     }
 }
@@ -141,7 +130,7 @@ impl Display for StatusUpdateType {
 pin_project! {
     /// A stream that yields replication events from a Postgres logical replication stream and keeps
     /// track of last sent status updates.
-    pub struct EventsStream {
+pub struct EventsStream {
         #[pin]
         stream: LogicalReplicationStream,
         last_update: Option<Instant>,
@@ -286,9 +275,13 @@ impl Stream for EventsStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
         match this.stream.poll_next(cx) {
+            // A successful message.
             Poll::Ready(Some(Ok(item))) => Poll::Ready(Some(Ok(item))),
+            // An error occurred on the server side.
             Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err.into()))),
+            // The connection had an error and/or was dropped.
             Poll::Ready(None) => Poll::Ready(None),
+            // No message available.
             Poll::Pending => Poll::Pending,
         }
     }
