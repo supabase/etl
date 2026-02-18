@@ -468,10 +468,13 @@ where
 
                     // Stop retrying immediately on shutdown instead of sleeping through it.
                     tokio::select! {
+                        biased;
+
                         _ = shutdown_rx.changed() => {
                             info!(table_id = table_id.0, "shutting down table sync worker while waiting to retry");
                             should_shutdown = true;
                         }
+
                         _ = tokio::time::sleep(sleep_duration) => {}
                     }
 
@@ -641,6 +644,8 @@ where
         // of table sync workers running in parallel which in turn helps limit the max
         // number of concurrent connections to the source database.
         let permit = tokio::select! {
+            biased;
+
             _ = self.shutdown_rx.changed() => {
                 info!(table_id = self.table_id.0, "shutting down table sync worker while waiting for a run permit");
                 return Ok(());

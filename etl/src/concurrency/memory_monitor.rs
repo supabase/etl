@@ -99,11 +99,14 @@ impl MemoryMonitor {
 
             loop {
                 tokio::select! {
+                    biased;
+
                     _ = shutdown_rx.changed() => {
                         info!("memory monitor stopped due to shutdown");
 
                         return;
                     }
+
                     _ = ticker.tick() => {
                         let snapshot = MemorySnapshot::from_system(&mut system);
                         let used_percent = snapshot.used_percent();

@@ -170,10 +170,13 @@ where
         );
 
         tokio::select! {
+            biased;
+
             _ = shutdown_rx.changed() => {
                 info!("shutting down apply worker while waiting to retry");
                 Ok(true)
             }
+
             _ = tokio::time::sleep(sleep_duration) => Ok(false)
         }
     }
