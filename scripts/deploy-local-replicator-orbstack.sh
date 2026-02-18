@@ -15,8 +15,8 @@ ENABLE_TRACING_VALUE="${ENABLE_TRACING:-1}"
 # Allow both generic and "mac_*" env var names.
 CPU_REQUEST="${CPU_REQUEST:-${MAC_CPU_REQUEST:-250m}}"
 CPU_LIMIT="${CPU_LIMIT:-${MAC_CPU_LIMIT:-1000m}}"
-MEMORY_REQUEST="${MEMORY_REQUEST:-${MAC_MEMORY_REQUEST:-512Mi}}"
-MEMORY_LIMIT="${MEMORY_LIMIT:-${MAC_MEMORY_LIMIT:-1024Mi}}"
+MEMORY_REQUEST="${MEMORY_REQUEST:-${MAC_MEMORY_REQUEST:-40Mi}}"
+MEMORY_LIMIT="${MEMORY_LIMIT:-${MAC_MEMORY_LIMIT:-50Mi}}"
 
 SKIP_BUILD=0
 SKIP_WAIT=0
@@ -35,8 +35,8 @@ options:
   --app-environment <env>     app environment to run (default: dev)
   --cpu-request <value>       cpu request (default: 250m)
   --cpu-limit <value>         cpu limit (default: 1000m)
-  --memory-request <value>    memory request (default: 512Mi)
-  --memory-limit <value>      memory limit (default: 1024Mi)
+  --memory-request <value>    memory request (default: 40Mi)
+  --memory-limit <value>      memory limit (default: 50Mi)
   --skip-build                skip docker build
   --skip-wait                 skip rollout wait
   -h, --help                  show this help
@@ -189,10 +189,6 @@ if [[ "${SKIP_BUILD}" -eq 0 ]]; then
   echo "building image ${IMAGE}..."
   docker build -f "${BUILD_CONTEXT_DIR}/etl-replicator/Dockerfile" -t "${IMAGE}" "${BUILD_CONTEXT_DIR}"
 fi
-
-echo "ensuring namespace prerequisites..."
-kubectl --context "${CONTEXT}" apply -f "${SCRIPT_DIR}/etl-data-plane.yaml"
-kubectl --context "${CONTEXT}" apply -f "${SCRIPT_DIR}/trusted-root-certs-config.yaml"
 
 CONFIG_MAP_NAME="${NAME}-config"
 ENV_CONFIG_MAP_NAME="${NAME}-env"
