@@ -82,7 +82,7 @@ pub struct ApplyWorker<S, D> {
     destination: D,
     shutdown_rx: ShutdownRx,
     table_sync_worker_permits: Arc<Semaphore>,
-    memory_monitor: MemoryMonitor,
+    memory_monitor: Option<MemoryMonitor>,
 }
 
 impl<S, D> ApplyWorker<S, D> {
@@ -99,7 +99,7 @@ impl<S, D> ApplyWorker<S, D> {
         destination: D,
         shutdown_rx: ShutdownRx,
         table_sync_worker_permits: Arc<Semaphore>,
-        memory_monitor: MemoryMonitor,
+        memory_monitor: Option<MemoryMonitor>,
     ) -> Self {
         Self {
             pipeline_id,

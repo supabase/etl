@@ -30,6 +30,7 @@ FullApiPipelineConfig {
         MemoryBackpressureConfig {
             activate_threshold: 0.85,
             resume_threshold: 0.75,
+            memory_refresh_interval_ms: 100,
         },
     ),
     table_sync_copy: Some(

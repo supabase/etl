@@ -83,6 +83,9 @@ pub struct MemoryBackpressureConfig {
     /// Valid range is `[0.0, 1.0)`, and this value must be lower than
     /// [`Self::activate_threshold`].
     pub resume_threshold: f32,
+    /// Number of milliseconds between one memory usage refresh and another.
+    #[serde(default = "default_memory_refresh_interval_ms")]
+    pub memory_refresh_interval_ms: u64,
 }
 
 impl MemoryBackpressureConfig {
@@ -90,6 +93,8 @@ impl MemoryBackpressureConfig {
     pub const DEFAULT_ACTIVATE_THRESHOLD: f32 = 0.85;
     /// Default memory usage ratio to release backpressure.
     pub const DEFAULT_RESUME_THRESHOLD: f32 = 0.75;
+    /// Default interval in milliseconds between one memory refresh and another.
+    pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
 
     /// Validates memory backpressure thresholds.
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -114,6 +119,13 @@ impl MemoryBackpressureConfig {
             });
         }
 
+        if self.memory_refresh_interval_ms == 0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "memory_backpressure.memory_refresh_interval_ms".to_string(),
+                constraint: "must be greater than 0".to_string(),
+            });
+        }
+
         Ok(())
     }
 }
@@ -123,8 +135,13 @@ impl Default for MemoryBackpressureConfig {
         Self {
             activate_threshold: Self::DEFAULT_ACTIVATE_THRESHOLD,
             resume_threshold: Self::DEFAULT_RESUME_THRESHOLD,
+            memory_refresh_interval_ms: Self::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
         }
     }
+}
+
+fn default_memory_refresh_interval_ms() -> u64 {
+    MemoryBackpressureConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
 /// Configuration for an ETL pipeline.

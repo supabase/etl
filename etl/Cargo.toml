@@ -32,7 +32,7 @@ rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
 sysinfo = { workspace = true, features = ["system"] }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 tokio-postgres = { workspace = true, features = [
     "runtime",
     "with-chrono-0_4",

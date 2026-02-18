@@ -121,12 +121,11 @@ where
             "starting pipeline"
         );
 
-        // We start memory monitoring as first thing.
-        let memory_monitor = MemoryMonitor::new(
-            self.config.id,
-            self.shutdown_tx.subscribe(),
-            self.config.memory_backpressure.clone(),
-        );
+        // We start memory monitoring only when memory backpressure is enabled.
+        let memory_monitor =
+            self.config.memory_backpressure.clone().map(|config| {
+                MemoryMonitor::new(self.config.id, self.shutdown_tx.subscribe(), config)
+            });
 
         // We create the first connection to Postgres.
         let replication_client =

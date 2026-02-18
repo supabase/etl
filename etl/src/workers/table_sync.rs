@@ -337,7 +337,7 @@ pub struct TableSyncWorker<S, D> {
     destination: D,
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
-    memory_monitor: MemoryMonitor,
+    memory_monitor: Option<MemoryMonitor>,
 }
 
 impl<S, D> TableSyncWorker<S, D> {
@@ -356,7 +356,7 @@ impl<S, D> TableSyncWorker<S, D> {
         destination: D,
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
-        memory_monitor: MemoryMonitor,
+        memory_monitor: Option<MemoryMonitor>,
     ) -> Self {
         Self {
             pipeline_id,

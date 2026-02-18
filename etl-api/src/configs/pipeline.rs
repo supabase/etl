@@ -271,6 +271,7 @@ mod tests {
             memory_backpressure: Some(MemoryBackpressureConfig {
                 activate_threshold: 0.8,
                 resume_threshold: 0.7,
+                memory_refresh_interval_ms: 100,
             }),
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             log_level: None,
@@ -394,6 +395,7 @@ mod tests {
             memory_backpressure: Some(MemoryBackpressureConfig {
                 activate_threshold: 1.0,
                 resume_threshold: 0.99,
+                memory_refresh_interval_ms: 100,
             }),
             table_sync_copy: Some(TableSyncCopyConfig::SkipAllTables),
             invalidated_slot_behavior: Some(InvalidatedSlotBehavior::Recreate),
@@ -414,6 +416,7 @@ mod tests {
             Some(MemoryBackpressureConfig {
                 activate_threshold: 1.0,
                 resume_threshold: 0.99,
+                memory_refresh_interval_ms: 100,
             })
         );
         assert_eq!(stored.table_sync_copy, TableSyncCopyConfig::SkipAllTables);

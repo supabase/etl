@@ -199,7 +199,7 @@ pub struct ApplyWorkerContext<S, D> {
     /// Semaphore controlling maximum concurrent table sync workers.
     pub table_sync_worker_permits: Arc<Semaphore>,
     /// Shared memory backpressure controller.
-    pub memory_monitor: MemoryMonitor,
+    pub memory_monitor: Option<MemoryMonitor>,
 }
 
 /// Resources for the table sync worker during the apply loop.
@@ -441,7 +441,7 @@ pub struct ApplyLoop<S, D> {
     /// Worker context for worker-specific behavior.
     worker_context: WorkerContext<S, D>,
     /// Shared memory backpressure controller.
-    memory_monitor: MemoryMonitor,
+    memory_monitor: Option<MemoryMonitor>,
     /// Internal loop state.
     state: ApplyLoopState,
 }
@@ -464,7 +464,7 @@ where
         destination: D,
         worker_context: WorkerContext<S, D>,
         shutdown_rx: ShutdownRx,
-        memory_monitor: MemoryMonitor,
+        memory_monitor: Option<MemoryMonitor>,
     ) -> EtlResult<ApplyLoopResult> {
         info!(
             worker_type = %worker_context.worker_type(),
@@ -515,8 +515,12 @@ where
 
         let mut connection_updates_rx = replication_client.connection_updates_rx();
         let events_stream = EventsStream::wrap(logical_replication_stream, self.pipeline_id);
-        let events_stream =
-            BackpressureStream::wrap(events_stream, self.memory_monitor.subscribe());
+        let events_stream = BackpressureStream::wrap(
+            events_stream,
+            self.memory_monitor
+                .as_ref()
+                .map(|memory_monitor| memory_monitor.subscribe()),
+        );
         pin!(events_stream);
 
         // If the loop produces a result while waiting for shutdown acknowledgement,

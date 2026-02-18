@@ -1168,6 +1168,7 @@ mod tests {
                 memory_backpressure: Some(MemoryBackpressureConfig {
                     activate_threshold: 1.0,
                     resume_threshold: 0.99,
+                    memory_refresh_interval_ms: 100,
                 }),
                 table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
                 invalidated_slot_behavior: InvalidatedSlotBehavior::Error,

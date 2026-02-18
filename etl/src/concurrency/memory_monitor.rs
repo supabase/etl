@@ -1,3 +1,4 @@
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -7,6 +8,7 @@ use etl_config::shared::MemoryBackpressureConfig;
 use futures::Stream;
 use metrics::{counter, gauge, histogram};
 use tokio::sync::watch;
+use tokio::time::MissedTickBehavior;
 use tokio_stream::wrappers::WatchStream;
 use tracing::{debug, info};
 
@@ -16,9 +18,6 @@ use crate::metrics::{
     ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL, PIPELINE_ID_LABEL,
 };
 use crate::types::PipelineId;
-
-/// Memory refresh interval in milliseconds.
-const MEMORY_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Represents a memory snapshot.
 #[derive(Debug, Clone, Copy)]
@@ -59,7 +58,7 @@ impl MemorySnapshot {
 #[derive(Debug)]
 struct MemoryMonitorInner {
     backpressure_active_tx: watch::Sender<bool>,
-    config: Option<MemoryBackpressureConfig>,
+    config: MemoryBackpressureConfig,
 }
 
 /// Shared memory backpressure controller.
@@ -76,7 +75,7 @@ impl MemoryMonitor {
     pub fn new(
         pipeline_id: PipelineId,
         mut shutdown_rx: ShutdownRx,
-        config: Option<MemoryBackpressureConfig>,
+        config: MemoryBackpressureConfig,
     ) -> Self {
         // sysinfo docs suggest to use a single instance of `System` across the program.
         let mut system = sysinfo::System::new();
@@ -84,15 +83,12 @@ impl MemoryMonitor {
         // Initialize from a real memory snapshot so startup state reflects current pressure.
         let startup_snapshot = MemorySnapshot::from_system(&mut system);
         let startup_used_percent = startup_snapshot.used_percent();
-        let startup_backpressure_active = match &config {
-            Some(config) => compute_next_backpressure_active(
-                false,
-                startup_used_percent,
-                config.activate_threshold,
-                config.resume_threshold,
-            ),
-            None => false,
-        };
+        let startup_backpressure_active = compute_next_backpressure_active(
+            false,
+            startup_used_percent,
+            config.activate_threshold,
+            config.resume_threshold,
+        );
         emit_backpressure_active_metric(pipeline_id, startup_backpressure_active);
 
         let this = Self {
@@ -104,7 +100,10 @@ impl MemoryMonitor {
 
         let this_clone = this.clone();
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(MEMORY_REFRESH_INTERVAL);
+            let refresh_interval =
+                Duration::from_millis(this_clone.inner.config.memory_refresh_interval_ms);
+            let mut ticker = tokio::time::interval(refresh_interval);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut currently_backpressure_active = startup_backpressure_active;
             let mut activation_started_at = startup_backpressure_active.then(Instant::now);
 
@@ -121,64 +120,52 @@ impl MemoryMonitor {
                     _ = ticker.tick() => {
                         let snapshot = MemorySnapshot::from_system(&mut system);
                         let used_percent = snapshot.used_percent();
-                        match this_clone.inner.config.as_ref() {
-                            Some(config) => {
-                                let next_backpressure_active = compute_next_backpressure_active(
-                                    currently_backpressure_active,
-                                    used_percent,
-                                    config.activate_threshold,
-                                    config.resume_threshold,
-                                );
+                        let config = &this_clone.inner.config;
+                        let next_backpressure_active = compute_next_backpressure_active(
+                            currently_backpressure_active,
+                            used_percent,
+                            config.activate_threshold,
+                            config.resume_threshold,
+                        );
 
-                                debug!(
-                                    used_memory_bytes = snapshot.used,
-                                    total_memory_bytes = snapshot.total,
-                                    used_percent,
-                                    backpressure_active = currently_backpressure_active,
-                                    next_backpressure_active,
-                                    "memory monitor refreshed memory snapshot"
-                                );
+                        debug!(
+                            used_memory_bytes = snapshot.used,
+                            total_memory_bytes = snapshot.total,
+                            used_percent,
+                            backpressure_active = currently_backpressure_active,
+                            next_backpressure_active,
+                            "memory monitor refreshed memory snapshot"
+                        );
 
-                                if next_backpressure_active != currently_backpressure_active {
-                                    debug!(
-                                        backpressure_active = currently_backpressure_active,
-                                        next_backpressure_active,
-                                        used_percent,
-                                        "memory monitor state changed"
-                                    );
+                        if next_backpressure_active != currently_backpressure_active {
+                            debug!(
+                                backpressure_active = currently_backpressure_active,
+                                next_backpressure_active,
+                                used_percent,
+                                "memory monitor state changed"
+                            );
 
-                                    emit_backpressure_active_metric(
-                                        pipeline_id,
-                                        next_backpressure_active,
-                                    );
-                                    emit_transition_metric(
-                                        pipeline_id,
-                                        next_backpressure_active,
-                                    );
+                            emit_backpressure_active_metric(
+                                pipeline_id,
+                                next_backpressure_active,
+                            );
+                            emit_transition_metric(
+                                pipeline_id,
+                                next_backpressure_active,
+                            );
 
-                                    if next_backpressure_active {
-                                        activation_started_at = Some(Instant::now());
-                                    } else if let Some(started_at) = activation_started_at.take() {
-                                        emit_activation_duration_metric(
-                                            pipeline_id,
-                                            started_at.elapsed(),
-                                        );
-                                    }
-                                }
-
-                                currently_backpressure_active = next_backpressure_active;
-                                this_clone.set_backpressure_active(next_backpressure_active);
-                            }
-                            None => {
-                                debug!(
-                                    used_memory_bytes = snapshot.used,
-                                    total_memory_bytes = snapshot.total,
-                                    used_percent,
-                                    backpressure_active = currently_backpressure_active,
-                                    "memory monitor refreshed memory snapshot with backpressure disabled"
+                            if next_backpressure_active {
+                                activation_started_at = Some(Instant::now());
+                            } else if let Some(started_at) = activation_started_at.take() {
+                                emit_activation_duration_metric(
+                                    pipeline_id,
+                                    started_at.elapsed(),
                                 );
                             }
                         }
+
+                        currently_backpressure_active = next_backpressure_active;
+                        this_clone.set_backpressure_active(next_backpressure_active);
                     }
                 }
             }
@@ -269,7 +256,7 @@ impl MemoryMonitor {
         Self {
             inner: Arc::new(MemoryMonitorInner {
                 backpressure_active_tx: watch::channel(false).0,
-                config: None,
+                config: MemoryBackpressureConfig::default(),
             }),
         }
     }
@@ -295,6 +282,10 @@ impl MemoryMonitorSubscription {
     pub fn current_backpressure_active(&self) -> bool {
         *self.current_rx.borrow()
     }
+}
+
+impl Stream for MemoryMonitorSubscription {
+    type Item = bool;
 
     /// Polls for a new backpressure update.
     ///
@@ -302,12 +293,8 @@ impl MemoryMonitorSubscription {
     /// - `Poll::Ready(Some(backpressure_active))` when there is an unseen update.
     /// - `Poll::Ready(None)` when the underlying signal channel is closed.
     /// - `Poll::Pending` when no update is available yet.
-    pub fn poll_update(&mut self, cx: &mut Context<'_>) -> Poll<Option<bool>> {
-        match std::pin::Pin::new(&mut self.updates).poll_next(cx) {
-            Poll::Ready(Some(backpressure_active)) => Poll::Ready(Some(backpressure_active)),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.updates).poll_next(cx)
     }
 }
 
@@ -369,11 +356,13 @@ mod tests {
         let mut sub = signal.subscribe();
 
         signal.set_backpressure_active_for_test(true);
-        let backpressure_active = futures::future::poll_fn(|cx| sub.poll_update(cx)).await;
+        let backpressure_active =
+            futures::future::poll_fn(|cx| std::pin::Pin::new(&mut sub).poll_next(cx)).await;
         assert_eq!(backpressure_active, Some(true));
 
         signal.set_backpressure_active_for_test(false);
-        let backpressure_active = futures::future::poll_fn(|cx| sub.poll_update(cx)).await;
+        let backpressure_active =
+            futures::future::poll_fn(|cx| std::pin::Pin::new(&mut sub).poll_next(cx)).await;
         assert_eq!(backpressure_active, Some(false));
     }
 }

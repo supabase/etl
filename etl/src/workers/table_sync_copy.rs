@@ -201,7 +201,7 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
-    memory_monitor: MemoryMonitor,
+    memory_monitor: Option<MemoryMonitor>,
 ) -> EtlResult<TableCopyResult> {
     if max_copy_connections > 1 {
         parallel_table_copy(
@@ -244,7 +244,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
-    memory_monitor: MemoryMonitor,
+    memory_monitor: Option<MemoryMonitor>,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
@@ -254,8 +254,13 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     let table_copy_stream =
         TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
     let connection_updates_rx = transaction.get_cloned_client().connection_updates_rx();
-    let table_copy_stream =
-        BatchBackpressureStream::wrap(table_copy_stream, batch_config, memory_monitor.subscribe());
+    let table_copy_stream = BatchBackpressureStream::wrap(
+        table_copy_stream,
+        batch_config,
+        memory_monitor
+            .as_ref()
+            .map(|memory_monitor| memory_monitor.subscribe()),
+    );
     pin!(table_copy_stream);
 
     info!(table_id = table_id.0, "starting serial table copy");
@@ -319,7 +324,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
-    memory_monitor: MemoryMonitor,
+    memory_monitor: Option<MemoryMonitor>,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
@@ -536,7 +541,7 @@ async fn copy_partition<D>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
-    memory_monitor: MemoryMonitor,
+    memory_monitor: Option<MemoryMonitor>,
 ) -> EtlResult<TableCopyResult>
 where
     D: Destination + Clone + Send + 'static,
@@ -599,8 +604,13 @@ where
     let connection_updates_rx = child_transaction
         .get_cloned_client()
         .connection_updates_rx();
-    let table_copy_stream =
-        BatchBackpressureStream::wrap(table_copy_stream, batch_config, memory_monitor.subscribe());
+    let table_copy_stream = BatchBackpressureStream::wrap(
+        table_copy_stream,
+        batch_config,
+        memory_monitor
+            .as_ref()
+            .map(|memory_monitor| memory_monitor.subscribe()),
+    );
     pin!(table_copy_stream);
 
     let total_rows = match copy_table_rows_from_stream(

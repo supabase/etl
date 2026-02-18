@@ -54,7 +54,7 @@ pub async fn start_table_sync<S, D>(
     store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
-    memory_monitor: MemoryMonitor,
+    memory_monitor: Option<MemoryMonitor>,
 ) -> EtlResult<TableSyncResult>
 where
     S: StateStore + SchemaStore + Clone + Send + 'static,
