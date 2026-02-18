@@ -95,6 +95,8 @@
 //!         table_error_retry_max_attempts: 5,
 //!         max_table_sync_workers: 4,
 //!         max_copy_connections_per_table: 1,
+//!         memory_backpressure_activate_percentage: 0.85,
+//!         memory_backpressure_resume_percentage: 0.75,
 //!         table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
 //!         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
 //!     };

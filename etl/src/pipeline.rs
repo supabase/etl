@@ -121,8 +121,12 @@ where
             "starting pipeline"
         );
 
-        // We immediately start memory monitoring.
-        let memory_monitor = MemoryMonitor::new(self.shutdown_tx.subscribe());
+        // We start memory monitoring as first thing.
+        let memory_monitor = MemoryMonitor::new(
+            self.shutdown_tx.subscribe(),
+            self.config.memory_backpressure_activate_percentage,
+            self.config.memory_backpressure_resume_percentage,
+        );
 
         // We create the first connection to Postgres.
         let replication_client =

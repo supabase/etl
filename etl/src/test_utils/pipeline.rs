@@ -58,6 +58,10 @@ pub struct PipelineBuilder<S, D> {
     invalidated_slot_behavior: InvalidatedSlotBehavior,
     /// Maximum parallel connections per table during initial copy. Default: 2.
     max_copy_connections_per_table: u16,
+    /// Memory usage ratio above which backpressure is activated. Default: 0.85.
+    memory_backpressure_activate_percentage: f32,
+    /// Memory usage ratio below which backpressure is released. Default: 0.75.
+    memory_backpressure_resume_percentage: f32,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -105,6 +109,10 @@ where
             table_sync_copy: TableSyncCopyConfig::default(),
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
             max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+            memory_backpressure_activate_percentage:
+                PipelineConfig::DEFAULT_MEMORY_BACKPRESSURE_ACTIVATE_THRESHOLD,
+            memory_backpressure_resume_percentage:
+                PipelineConfig::DEFAULT_MEMORY_BACKPRESSURE_RESUME_THRESHOLD,
         }
     }
 
@@ -179,6 +187,8 @@ where
             table_sync_copy: self.table_sync_copy,
             invalidated_slot_behavior: self.invalidated_slot_behavior,
             max_copy_connections_per_table: self.max_copy_connections_per_table,
+            memory_backpressure_activate_percentage: self.memory_backpressure_activate_percentage,
+            memory_backpressure_resume_percentage: self.memory_backpressure_resume_percentage,
         };
 
         Pipeline::new(config, self.store, self.destination)

@@ -110,6 +110,18 @@ pub struct PipelineConfig {
     /// When >1 (default), ctid-based partitioning splits the table across N connections.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
+    /// Memory usage ratio above which backpressure is activated.
+    ///
+    /// The value must be in the `(0.0, 1.0]` interval and greater than
+    /// [`Self::memory_backpressure_resume_percentage`].
+    #[serde(default = "default_memory_backpressure_activate_percentage")]
+    pub memory_backpressure_activate_percentage: f32,
+    /// Memory usage ratio below which backpressure is released.
+    ///
+    /// The value must be in the `[0.0, 1.0)` interval and lower than
+    /// [`Self::memory_backpressure_activate_percentage`].
+    #[serde(default = "default_memory_backpressure_resume_percentage")]
+    pub memory_backpressure_resume_percentage: f32,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
@@ -130,6 +142,10 @@ impl PipelineConfig {
 
     /// Default maximum parallel connections per table during initial copy.
     pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 2;
+    /// Default memory usage ratio to activate backpressure.
+    pub const DEFAULT_MEMORY_BACKPRESSURE_ACTIVATE_THRESHOLD: f32 = 0.85;
+    /// Default memory usage ratio to release backpressure.
+    pub const DEFAULT_MEMORY_BACKPRESSURE_RESUME_THRESHOLD: f32 = 0.75;
 
     /// Validates pipeline configuration settings.
     ///
@@ -158,6 +174,34 @@ impl PipelineConfig {
             });
         }
 
+        if !(0.0..=1.0).contains(&self.memory_backpressure_activate_percentage)
+            || self.memory_backpressure_activate_percentage == 0.0
+        {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "memory_backpressure_activate_percentage".to_string(),
+                constraint: "must be in the (0.0, 1.0] interval".to_string(),
+            });
+        }
+
+        if !(0.0..=1.0).contains(&self.memory_backpressure_resume_percentage)
+            || self.memory_backpressure_resume_percentage == 1.0
+        {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "memory_backpressure_resume_percentage".to_string(),
+                constraint: "must be in the [0.0, 1.0) interval".to_string(),
+            });
+        }
+
+        if self.memory_backpressure_resume_percentage
+            >= self.memory_backpressure_activate_percentage
+        {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "memory_backpressure_resume_percentage".to_string(),
+                constraint: "must be lower than memory_backpressure_activate_percentage"
+                    .to_string(),
+            });
+        }
+
         Ok(())
     }
 }
@@ -176,6 +220,14 @@ fn default_max_table_sync_workers() -> u16 {
 
 fn default_max_copy_connections_per_table() -> u16 {
     PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE
+}
+
+fn default_memory_backpressure_activate_percentage() -> f32 {
+    PipelineConfig::DEFAULT_MEMORY_BACKPRESSURE_ACTIVATE_THRESHOLD
+}
+
+fn default_memory_backpressure_resume_percentage() -> f32 {
+    PipelineConfig::DEFAULT_MEMORY_BACKPRESSURE_RESUME_THRESHOLD
 }
 
 /// Same as [`PipelineConfig`] but without secrets. This type
@@ -214,6 +266,12 @@ pub struct PipelineConfigWithoutSecrets {
     /// When >1 (default), ctid-based partitioning splits the table across N connections.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
+    /// Memory usage ratio above which backpressure is activated.
+    #[serde(default = "default_memory_backpressure_activate_percentage")]
+    pub memory_backpressure_activate_percentage: f32,
+    /// Memory usage ratio below which backpressure is released.
+    #[serde(default = "default_memory_backpressure_resume_percentage")]
+    pub memory_backpressure_resume_percentage: f32,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
@@ -233,6 +291,8 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
             max_table_sync_workers: value.max_table_sync_workers,
             max_copy_connections_per_table: value.max_copy_connections_per_table,
+            memory_backpressure_activate_percentage: value.memory_backpressure_activate_percentage,
+            memory_backpressure_resume_percentage: value.memory_backpressure_resume_percentage,
             table_sync_copy: value.table_sync_copy,
             invalidated_slot_behavior: value.invalidated_slot_behavior,
         }

@@ -9,13 +9,6 @@ use tracing::{debug, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
 
-// For now these values are hardcoded on purpose as good generics, but we might want to have them
-// configurable.
-
-/// Hardcoded memory usage percentage above which backpressure activates.
-const MAX_MEMORY_LIMIT_PERCENTAGE: f32 = 0.85;
-/// Hardcoded memory usage percentage below which backpressure is released.
-const MEMORY_RESUME_PERCENTAGE: f32 = 0.75;
 /// Memory refresh interval in milliseconds.
 const MEMORY_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -58,6 +51,8 @@ impl MemorySnapshot {
 #[derive(Debug)]
 struct MemoryMonitorInner {
     blocked_tx: watch::Sender<bool>,
+    activate_threshold: f32,
+    resume_threshold: f32,
 }
 
 /// Shared memory backpressure controller.
@@ -71,21 +66,36 @@ pub struct MemoryMonitor {
 
 impl MemoryMonitor {
     /// Creates a new memory backpressure controller and starts the refresh task.
-    pub fn new(mut shutdown_rx: ShutdownRx) -> Self {
+    pub fn new(
+        mut shutdown_rx: ShutdownRx,
+        activate_threshold: f32,
+        resume_threshold: f32,
+    ) -> Self {
+        // sysinfo docs suggest to use a single instance of `System` across the program.
+        let mut system = sysinfo::System::new();
+
+        // Initialize from a real memory snapshot so startup state reflects current pressure.
+        let startup_snapshot = MemorySnapshot::from_system(&mut system);
+        let startup_used_percent = startup_snapshot.used_percent();
+        let startup_blocked = compute_next_blocked(
+            false,
+            startup_used_percent,
+            activate_threshold,
+            resume_threshold,
+        );
+
         let this = Self {
             inner: Arc::new(MemoryMonitorInner {
-                // We start the channel with no memory blocked, assuming that
-                blocked_tx: watch::channel(false).0,
+                blocked_tx: watch::channel(startup_blocked).0,
+                activate_threshold,
+                resume_threshold,
             }),
         };
 
-        // sysinfo docs suggest to use a single instance of `System` across the program.
-        let mut system = sysinfo::System::new();
-        let signal = this.clone();
-
+        let this_clone = this.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(MEMORY_REFRESH_INTERVAL);
-            let mut currently_blocked = signal.is_blocked();
+            let mut currently_blocked = startup_blocked;
 
             loop {
                 tokio::select! {
@@ -98,7 +108,12 @@ impl MemoryMonitor {
                         let snapshot = MemorySnapshot::from_system(&mut system);
                         let used_percent = snapshot.used_percent();
 
-                        let next_blocked = compute_next_blocked(currently_blocked, used_percent);
+                        let next_blocked = compute_next_blocked(
+                            currently_blocked,
+                            used_percent,
+                            this_clone.inner.activate_threshold,
+                            this_clone.inner.resume_threshold,
+                        );
 
                         debug!(
                             used_memory_bytes = snapshot.used,
@@ -119,7 +134,7 @@ impl MemoryMonitor {
                         }
 
                         currently_blocked = next_blocked;
-                        signal.set_blocked(next_blocked);
+                        this_clone.set_blocked(next_blocked);
                     }
                 }
             }
@@ -162,12 +177,17 @@ impl MemoryMonitor {
 }
 
 /// Computes the next blocked state given the current state and memory usage.
-fn compute_next_blocked(currently_blocked: bool, used_percent: f32) -> bool {
+fn compute_next_blocked(
+    currently_blocked: bool,
+    used_percent: f32,
+    activate_threshold: f32,
+    resume_threshold: f32,
+) -> bool {
     if currently_blocked {
-        return used_percent >= MEMORY_RESUME_PERCENTAGE;
+        return used_percent >= resume_threshold;
     }
 
-    used_percent >= MAX_MEMORY_LIMIT_PERCENTAGE
+    used_percent >= activate_threshold
 }
 
 #[cfg(test)]
@@ -177,6 +197,8 @@ impl MemoryMonitor {
         Self {
             inner: Arc::new(MemoryMonitorInner {
                 blocked_tx: watch::channel(false).0,
+                activate_threshold: 0.85,
+                resume_threshold: 0.75,
             }),
         }
     }
@@ -242,16 +264,32 @@ mod tests {
 
     #[test]
     fn threshold_hysteresis_blocks_and_releases() {
+        let activate_threshold = 0.85;
+        let resume_threshold = 0.75;
         assert!(!compute_next_blocked(
             false,
-            MAX_MEMORY_LIMIT_PERCENTAGE - 0.01
+            activate_threshold - 0.01,
+            activate_threshold,
+            resume_threshold
         ));
         assert!(compute_next_blocked(
             false,
-            MAX_MEMORY_LIMIT_PERCENTAGE + 0.01
+            activate_threshold + 0.01,
+            activate_threshold,
+            resume_threshold
         ));
-        assert!(compute_next_blocked(true, MEMORY_RESUME_PERCENTAGE + 0.01));
-        assert!(!compute_next_blocked(true, MEMORY_RESUME_PERCENTAGE - 0.01));
+        assert!(compute_next_blocked(
+            true,
+            resume_threshold + 0.01,
+            activate_threshold,
+            resume_threshold
+        ));
+        assert!(!compute_next_blocked(
+            true,
+            resume_threshold - 0.01,
+            activate_threshold,
+            resume_threshold
+        ));
     }
 
     #[tokio::test]

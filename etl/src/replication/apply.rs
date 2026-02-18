@@ -558,7 +558,7 @@ where
                             "postgresql connection updates ended during the apply loop"
                         ));
                     }
-                    
+
                     let update = connection_updates_rx.borrow().clone();
                     match update {
                         PostgresConnectionUpdate::Running => {}
