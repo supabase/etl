@@ -44,8 +44,8 @@ impl<S: Stream> Stream for BackpressureStream<S> {
         let was_paused = *this.paused_for_memory;
 
         match this.memory_subscription.poll_update(cx) {
-            Poll::Ready(Some(blocked)) => {
-                *this.paused_for_memory = blocked;
+            Poll::Ready(Some(backpressure_active)) => {
+                *this.paused_for_memory = backpressure_active;
             }
             Poll::Ready(None) => {
                 // If the was channel was dropped, we assume that memory is fine, to be resilient.
@@ -54,9 +54,10 @@ impl<S: Stream> Stream for BackpressureStream<S> {
             Poll::Pending => {
                 // If the memory state didn't change, we just use the current state that is on the
                 // watch.
-                let currently_blocked = this.memory_subscription.current_blocked();
-                if *this.paused_for_memory != currently_blocked {
-                    *this.paused_for_memory = currently_blocked;
+                let currently_backpressure_active =
+                    this.memory_subscription.current_backpressure_active();
+                if *this.paused_for_memory != currently_backpressure_active {
+                    *this.paused_for_memory = currently_backpressure_active;
                 }
             }
         }
@@ -138,12 +139,12 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
 
         loop {
             // PRIORITY 1: Memory backpressure.
-            // If memory is blocked and there are buffered items, flush immediately to avoid
+            // If memory backpressure is active and there are buffered items, flush immediately to avoid
             // accumulating more memory in this stream.
             let was_paused = *this.paused_for_memory;
             match this.memory_subscription.poll_update(cx) {
-                Poll::Ready(Some(blocked)) => {
-                    *this.paused_for_memory = blocked;
+                Poll::Ready(Some(backpressure_active)) => {
+                    *this.paused_for_memory = backpressure_active;
                 }
                 Poll::Ready(None) => {
                     // If the was channel was dropped, we assume that memory is fine, to be resilient.
@@ -152,9 +153,10 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
                 Poll::Pending => {
                     // If the memory state didn't change, we just use the current state that is on the
                     // watch.
-                    let currently_blocked = this.memory_subscription.current_blocked();
-                    if *this.paused_for_memory != currently_blocked {
-                        *this.paused_for_memory = currently_blocked;
+                    let currently_backpressure_active =
+                        this.memory_subscription.current_backpressure_active();
+                    if *this.paused_for_memory != currently_backpressure_active {
+                        *this.paused_for_memory = currently_backpressure_active;
                     }
                 }
             }
@@ -298,10 +300,10 @@ mod tests {
     #[tokio::test]
     async fn backpressure_stream_pauses_while_blocked_then_resumes() {
         let memory = MemoryMonitor::new_for_test();
-        memory.set_blocked_for_test(true);
+        memory.set_backpressure_active_for_test(true);
         let memory_sub = memory.subscribe();
 
-        // When blocked, wrapped stream stays pending even if it has data.
+        // When backpressure is active, wrapped stream stays pending even if it has data.
         let mut stream = Box::pin(BackpressureStream::wrap(
             futures::stream::iter(vec![10]),
             memory_sub,
@@ -309,11 +311,11 @@ mod tests {
 
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
-            _ => panic!("expected pending while blocked"),
+            _ => panic!("expected pending while backpressure is active"),
         })
         .await;
 
-        memory.set_blocked_for_test(false);
+        memory.set_backpressure_active_for_test(false);
 
         // Once unblocked, wrapper yields underlying item.
         let item = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
@@ -329,13 +331,13 @@ mod tests {
             memory_sub,
         ));
 
-        // Set blocked after subscribe and before next poll.
-        memory.set_blocked_for_test(true);
+        // Activate backpressure after subscribe and before next poll.
+        memory.set_backpressure_active_for_test(true);
 
         // Even if `poll_update` is pending, wrapper falls back to current state.
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
-            _ => panic!("expected pending based on current blocked state"),
+            _ => panic!("expected pending based on current backpressure state"),
         })
         .await;
     }
@@ -364,9 +366,9 @@ mod tests {
         })
         .await;
 
-        memory.set_blocked_for_test(true);
+        memory.set_backpressure_active_for_test(true);
 
-        // Now the memory is blocked, so the system is expected to flush its existing state.
+        // Now backpressure is active, so the system is expected to flush its existing state.
         let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         assert_eq!(batch, Some(vec![1, 2]));
     }
@@ -374,7 +376,7 @@ mod tests {
     #[tokio::test]
     async fn returns_pending_while_blocked_then_resumes_after_unblock() {
         let memory = MemoryMonitor::new_for_test();
-        memory.set_blocked_for_test(true);
+        memory.set_backpressure_active_for_test(true);
         let memory_sub = memory.subscribe();
 
         let batch_config = BatchConfig {
@@ -390,11 +392,11 @@ mod tests {
         // Memory is full, so we block any poll.
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
-            _ => panic!("expected pending while blocked"),
+            _ => panic!("expected pending while backpressure is active"),
         })
         .await;
 
-        memory.set_blocked_for_test(false);
+        memory.set_backpressure_active_for_test(false);
 
         // Memory is now back, so we should get the batch of 1 element.
         let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;

@@ -49,7 +49,7 @@
 //!
 //! ```rust,no_run
 //! use etl::{
-//!     config::{BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TcpKeepaliveConfig, TlsConfig, TableSyncCopyConfig},
+//!     config::{BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TcpKeepaliveConfig, TlsConfig, TableSyncCopyConfig},
 //!     destination::Destination,
 //!     error::EtlResult,
 //!     pipeline::Pipeline,

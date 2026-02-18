@@ -51,14 +51,14 @@ impl MemorySnapshot {
 /// Internal shared state for memory backpressure.
 #[derive(Debug)]
 struct MemoryMonitorInner {
-    blocked_tx: watch::Sender<bool>,
+    backpressure_active_tx: watch::Sender<bool>,
     config: Option<MemoryBackpressureConfig>,
 }
 
 /// Shared memory backpressure controller.
 ///
 /// This component owns a periodic task that samples memory usage and updates a boolean backpressure
-/// signal. Consumers can subscribe and pause polling when memory is blocked.
+/// signal. Consumers can subscribe and pause polling when backpressure is active.
 #[derive(Debug, Clone)]
 pub struct MemoryMonitor {
     inner: Arc<MemoryMonitorInner>,
@@ -73,8 +73,8 @@ impl MemoryMonitor {
         // Initialize from a real memory snapshot so startup state reflects current pressure.
         let startup_snapshot = MemorySnapshot::from_system(&mut system);
         let startup_used_percent = startup_snapshot.used_percent();
-        let startup_blocked = match &config {
-            Some(config) => compute_next_blocked(
+        let startup_backpressure_active = match &config {
+            Some(config) => compute_next_backpressure_active(
                 false,
                 startup_used_percent,
                 config.activate_threshold,
@@ -85,7 +85,7 @@ impl MemoryMonitor {
 
         let this = Self {
             inner: Arc::new(MemoryMonitorInner {
-                blocked_tx: watch::channel(startup_blocked).0,
+                backpressure_active_tx: watch::channel(startup_backpressure_active).0,
                 config,
             }),
         };
@@ -93,7 +93,7 @@ impl MemoryMonitor {
         let this_clone = this.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(MEMORY_REFRESH_INTERVAL);
-            let mut currently_blocked = startup_blocked;
+            let mut currently_backpressure_active = startup_backpressure_active;
 
             loop {
                 tokio::select! {
@@ -110,8 +110,8 @@ impl MemoryMonitor {
                         let used_percent = snapshot.used_percent();
                         match this_clone.inner.config.as_ref() {
                             Some(config) => {
-                                let next_blocked = compute_next_blocked(
-                                    currently_blocked,
+                                let next_backpressure_active = compute_next_backpressure_active(
+                                    currently_backpressure_active,
                                     used_percent,
                                     config.activate_threshold,
                                     config.resume_threshold,
@@ -121,29 +121,29 @@ impl MemoryMonitor {
                                     used_memory_bytes = snapshot.used,
                                     total_memory_bytes = snapshot.total,
                                     used_percent,
-                                    blocked = currently_blocked,
-                                    next_blocked,
+                                    backpressure_active = currently_backpressure_active,
+                                    next_backpressure_active,
                                     "memory monitor refreshed memory snapshot"
                                 );
 
-                                if next_blocked != currently_blocked {
+                                if next_backpressure_active != currently_backpressure_active {
                                     debug!(
-                                        blocked = currently_blocked,
-                                        next_blocked,
+                                        backpressure_active = currently_backpressure_active,
+                                        next_backpressure_active,
                                         used_percent,
                                         "memory monitor state changed"
                                     );
                                 }
 
-                                currently_blocked = next_blocked;
-                                this_clone.set_blocked(next_blocked);
+                                currently_backpressure_active = next_backpressure_active;
+                                this_clone.set_backpressure_active(next_backpressure_active);
                             }
                             None => {
                                 debug!(
                                     used_memory_bytes = snapshot.used,
                                     total_memory_bytes = snapshot.total,
                                     used_percent,
-                                    blocked = currently_blocked,
+                                    backpressure_active = currently_backpressure_active,
                                     "memory monitor refreshed memory snapshot with backpressure disabled"
                                 );
                             }
@@ -156,9 +156,9 @@ impl MemoryMonitor {
         this
     }
 
-    /// Returns `true` when memory pressure is currently blocking stream progress.
-    pub fn is_blocked(&self) -> bool {
-        *self.inner.blocked_tx.borrow()
+    /// Returns `true` when memory pressure currently activates backpressure.
+    pub fn is_backpressure_active(&self) -> bool {
+        *self.inner.backpressure_active_tx.borrow()
     }
 
     /// Creates a new subscription for polling backpressure updates.
@@ -166,7 +166,7 @@ impl MemoryMonitor {
         // We snapshot the current state of the watch channel and create a stream out of it. The
         // stream will return the new values from this point onward, independently of when it will be
         // polled.
-        let rx = self.inner.blocked_tx.subscribe();
+        let rx = self.inner.backpressure_active_tx.subscribe();
         let updates = WatchStream::from_changes(rx.clone());
 
         MemoryMonitorSubscription {
@@ -175,28 +175,31 @@ impl MemoryMonitor {
         }
     }
 
-    /// Updates the blocked state and notifies subscribers when it changes.
-    fn set_blocked(&self, blocked: bool) {
-        let _ = self.inner.blocked_tx.send_if_modified(|current| {
-            if *current == blocked {
-                return false;
-            }
+    /// Updates the backpressure active state and notifies subscribers when it changes.
+    fn set_backpressure_active(&self, backpressure_active: bool) {
+        let _ = self
+            .inner
+            .backpressure_active_tx
+            .send_if_modified(|current| {
+                if *current == backpressure_active {
+                    return false;
+                }
 
-            *current = blocked;
+                *current = backpressure_active;
 
-            true
-        });
+                true
+            });
     }
 }
 
-/// Computes the next blocked state given the current state and memory usage.
-fn compute_next_blocked(
-    currently_blocked: bool,
+/// Computes the next backpressure active state given the current state and memory usage.
+fn compute_next_backpressure_active(
+    currently_backpressure_active: bool,
     used_percent: f32,
     activate_threshold: f32,
     resume_threshold: f32,
 ) -> bool {
-    if currently_blocked {
+    if currently_backpressure_active {
         return used_percent >= resume_threshold;
     }
 
@@ -209,22 +212,22 @@ impl MemoryMonitor {
     pub fn new_for_test() -> Self {
         Self {
             inner: Arc::new(MemoryMonitorInner {
-                blocked_tx: watch::channel(false).0,
+                backpressure_active_tx: watch::channel(false).0,
                 config: None,
             }),
         }
     }
 
-    /// Updates the blocked state in tests.
-    pub fn set_blocked_for_test(&self, blocked: bool) {
-        self.set_blocked(blocked);
+    /// Updates the backpressure active state in tests.
+    pub fn set_backpressure_active_for_test(&self, backpressure_active: bool) {
+        self.set_backpressure_active(backpressure_active);
     }
 }
 
 /// Subscription to memory backpressure updates.
 ///
 /// This type provides wake-safe polling semantics so streams can return `Pending` while memory is
-/// blocked without risking missed wakeups.
+/// active without risking missed wakeups.
 #[derive(Debug)]
 pub struct MemoryMonitorSubscription {
     current_rx: watch::Receiver<bool>,
@@ -232,20 +235,20 @@ pub struct MemoryMonitorSubscription {
 }
 
 impl MemoryMonitorSubscription {
-    /// Returns the current blocked flag.
-    pub fn current_blocked(&self) -> bool {
+    /// Returns the current backpressure active flag.
+    pub fn current_backpressure_active(&self) -> bool {
         *self.current_rx.borrow()
     }
 
     /// Polls for a new backpressure update.
     ///
     /// Returns:
-    /// - `Poll::Ready(Some(blocked))` when there is an unseen update.
+    /// - `Poll::Ready(Some(backpressure_active))` when there is an unseen update.
     /// - `Poll::Ready(None)` when the underlying signal channel is closed.
     /// - `Poll::Pending` when no update is available yet.
     pub fn poll_update(&mut self, cx: &mut Context<'_>) -> Poll<Option<bool>> {
         match std::pin::Pin::new(&mut self.updates).poll_next(cx) {
-            Poll::Ready(Some(blocked)) => Poll::Ready(Some(blocked)),
+            Poll::Ready(Some(backpressure_active)) => Poll::Ready(Some(backpressure_active)),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
@@ -278,25 +281,25 @@ mod tests {
     fn threshold_hysteresis_blocks_and_releases() {
         let activate_threshold = 0.85;
         let resume_threshold = 0.75;
-        assert!(!compute_next_blocked(
+        assert!(!compute_next_backpressure_active(
             false,
             activate_threshold - 0.01,
             activate_threshold,
             resume_threshold
         ));
-        assert!(compute_next_blocked(
+        assert!(compute_next_backpressure_active(
             false,
             activate_threshold + 0.01,
             activate_threshold,
             resume_threshold
         ));
-        assert!(compute_next_blocked(
+        assert!(compute_next_backpressure_active(
             true,
             resume_threshold + 0.01,
             activate_threshold,
             resume_threshold
         ));
-        assert!(!compute_next_blocked(
+        assert!(!compute_next_backpressure_active(
             true,
             resume_threshold - 0.01,
             activate_threshold,
@@ -305,16 +308,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscription_receives_blocking_transitions() {
+    async fn subscription_receives_backpressure_transitions() {
         let signal = MemoryMonitor::new_for_test();
         let mut sub = signal.subscribe();
 
-        signal.set_blocked_for_test(true);
-        let blocked = futures::future::poll_fn(|cx| sub.poll_update(cx)).await;
-        assert_eq!(blocked, Some(true));
+        signal.set_backpressure_active_for_test(true);
+        let backpressure_active = futures::future::poll_fn(|cx| sub.poll_update(cx)).await;
+        assert_eq!(backpressure_active, Some(true));
 
-        signal.set_blocked_for_test(false);
-        let blocked = futures::future::poll_fn(|cx| sub.poll_update(cx)).await;
-        assert_eq!(blocked, Some(false));
+        signal.set_backpressure_active_for_test(false);
+        let backpressure_active = futures::future::poll_fn(|cx| sub.poll_update(cx)).await;
+        assert_eq!(backpressure_active, Some(false));
     }
 }
