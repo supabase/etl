@@ -241,10 +241,10 @@ where
                         total_table_copy_duration_secs = total_duration_secs;
                     }
                     TableCopyResult::Shutdown => {
-                        // If during the copy, we were told to shutdown, we cleanly rollback even if
-                        // we didn't have any writes, so that we let Postgres clean up everything as
-                        // soon as possible.
-                        transaction.rollback().await?;
+                        info!(
+                            table_id = table_id.0,
+                            "table copy interrupted by shutdown, terminating table sync without rollback"
+                        );
 
                         return Ok(TableSyncResult::SyncStopped);
                     }
