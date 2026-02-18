@@ -1,7 +1,7 @@
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
-fn default_connection_pool_size() -> usize {
+const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
 }
 

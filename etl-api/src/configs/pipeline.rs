@@ -23,10 +23,6 @@ const fn default_max_copy_connections_per_table() -> u16 {
     PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE
 }
 
-fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
-    Some(MemoryBackpressureConfig::default())
-}
-
 /// Batch processing configuration for pipelines.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -58,10 +54,7 @@ pub struct FullApiPipelineConfig {
     #[schema(example = 2)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_copy_connections_per_table: Option<u16>,
-    #[serde(
-        default = "default_memory_backpressure",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_sync_copy: Option<TableSyncCopyConfig>,
@@ -137,7 +130,7 @@ pub struct StoredPipelineConfig {
     pub max_table_sync_workers: u16,
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
-    #[serde(default = "default_memory_backpressure")]
+    #[serde(default)]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,

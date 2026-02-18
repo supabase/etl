@@ -2,9 +2,61 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
-use crate::shared::{
-    PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError, batch::BatchConfig,
-};
+use crate::shared::{PgConnectionConfig, PgConnectionConfigWithoutSecrets, ValidationError};
+
+/// Batch processing configuration for pipelines.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub struct BatchConfig {
+    /// Maximum number of items in a batch for table copy and event streaming.
+    #[serde(default = "default_batch_max_size")]
+    #[cfg_attr(feature = "utoipa", schema(example = 10000))]
+    pub max_size: usize,
+    /// Maximum time, in milliseconds, to wait for a batch to fill before processing.
+    #[serde(default = "default_batch_max_fill_ms")]
+    #[cfg_attr(feature = "utoipa", schema(example = 0))]
+    pub max_fill_ms: u64,
+}
+
+impl BatchConfig {
+    /// Default maximum batch size for table copy and event streaming.
+    pub const DEFAULT_MAX_SIZE: usize = 100000;
+
+    /// Default maximum fill time in milliseconds.
+    pub const DEFAULT_MAX_FILL_MS: u64 = 10000;
+
+    /// Validates batch configuration settings.
+    ///
+    /// Ensures max_size is non-zero.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.max_size == 0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "batch.max_size".to_string(),
+                constraint: "must be greater than 0".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self {
+            max_size: default_batch_max_size(),
+            max_fill_ms: default_batch_max_fill_ms(),
+        }
+    }
+}
+
+const fn default_batch_max_size() -> usize {
+    BatchConfig::DEFAULT_MAX_SIZE
+}
+
+const fn default_batch_max_fill_ms() -> u64 {
+    BatchConfig::DEFAULT_MAX_FILL_MS
+}
 
 /// Behavior when the main replication slot is found to be invalidated.
 ///
@@ -140,7 +192,7 @@ impl Default for MemoryBackpressureConfig {
     }
 }
 
-fn default_memory_refresh_interval_ms() -> u64 {
+const fn default_memory_refresh_interval_ms() -> u64 {
     MemoryBackpressureConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
@@ -188,7 +240,7 @@ pub struct PipelineConfig {
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
     /// `Some(MemoryBackpressureConfig::default())`.
-    #[serde(default = "default_memory_backpressure")]
+    #[serde(default)]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
@@ -245,24 +297,20 @@ impl PipelineConfig {
     }
 }
 
-fn default_table_error_retry_delay_ms() -> u64 {
+const fn default_table_error_retry_delay_ms() -> u64 {
     PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS
 }
 
-fn default_table_error_retry_max_attempts() -> u32 {
+const fn default_table_error_retry_max_attempts() -> u32 {
     PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
 }
 
-fn default_max_table_sync_workers() -> u16 {
+const fn default_max_table_sync_workers() -> u16 {
     PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
 }
 
-fn default_max_copy_connections_per_table() -> u16 {
+const fn default_max_copy_connections_per_table() -> u16 {
     PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE
-}
-
-fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
-    Some(MemoryBackpressureConfig::default())
 }
 
 /// Same as [`PipelineConfig`] but without secrets. This type
@@ -305,7 +353,7 @@ pub struct PipelineConfigWithoutSecrets {
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
     /// `Some(MemoryBackpressureConfig::default())`.
-    #[serde(default = "default_memory_backpressure")]
+    #[serde(default)]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
