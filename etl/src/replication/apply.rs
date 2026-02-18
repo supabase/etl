@@ -39,7 +39,7 @@ use crate::metrics::{
     ETL_EVENTS_PROCESSED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
     ETL_TRANSACTIONS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
-use crate::replication::client::PgReplicationClient;
+use crate::replication::client::{PgReplicationClient, PostgresConnectionUpdate};
 use crate::replication::stream::{EventsStream, StatusUpdateType};
 use crate::state::table::{
     RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -513,10 +513,10 @@ where
             .start_logical_replication(&self.config.publication_name, &slot_name, start_lsn)
             .await?;
 
+        let mut connection_updates_rx = replication_client.connection_updates_rx();
         let events_stream = EventsStream::wrap(logical_replication_stream, self.pipeline_id);
         let events_stream =
-            BackpressureStream::wrap(events_stream, self.memory_monitor.subscribe())
-                .with_connection_updates(Some(replication_client.connection_subscription()));
+            BackpressureStream::wrap(events_stream, self.memory_monitor.subscribe());
         pin!(events_stream);
 
         // If the loop produces a result while waiting for shutdown acknowledgement,
@@ -549,7 +549,36 @@ where
                     self.handle_shutdown_signal(events_stream.as_mut()).await?;
                 }
 
-                // PRIORITY 2: Handle batch flush timer expiry.
+                // PRIORITY 2: Handle PostgreSQL connection lifecycle updates.
+                // Closed connections stop the loop and surface a source connection error.
+                changed = connection_updates_rx.changed() => {
+                    if changed.is_err() {
+                        return Err(etl_error!(
+                            ErrorKind::SourceConnectionFailed,
+                            "postgresql connection updates ended during the apply loop"
+                        ));
+                    }
+                    
+                    let update = connection_updates_rx.borrow().clone();
+                    match update {
+                        PostgresConnectionUpdate::Running => {}
+                        PostgresConnectionUpdate::Terminated => {
+                            return Err(etl_error!(
+                                ErrorKind::SourceConnectionFailed,
+                                "postgresql connection terminated during the apply loop"
+                            ));
+                        }
+                        PostgresConnectionUpdate::Errored { error } => {
+                            return Err(etl_error!(
+                                ErrorKind::SourceConnectionFailed,
+                                "postgresql connection errored during the apply loop",
+                                error.to_string()
+                            ));
+                        }
+                    }
+                }
+
+                // PRIORITY 3: Handle batch flush timer expiry.
                 // Ensures batches don't wait indefinitely when message rate is low. The timer
                 // is started when the first event enters the batch and reset after each flush.
                 _ = Self::wait_for_batch_deadline(&self.state) => {
@@ -570,15 +599,15 @@ where
                     }
                 }
 
-                // PRIORITY 3: Process incoming replication messages from PostgreSQL.
+                // PRIORITY 4: Process incoming replication messages from PostgreSQL.
                 // This is the main work of the apply loop - receiving WAL events and converting
                 // them to destination writes. Has lowest priority so shutdown and flush timer
                 // are always handled promptly.
-                message = events_stream.next() => {
+                maybe_message = events_stream.next() => {
                     let action = self
                         .handle_stream_message(
                             events_stream.as_mut(),
-                            message,
+                            maybe_message,
                             &replication_client,
                         )
                         .await?;
@@ -749,17 +778,20 @@ where
     async fn handle_stream_message(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
-        message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
+        maybe_message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<ApplyLoopAction> {
         // If there is no message anymore, it means that the connection has been closed or had some
         // issues, we must handle this case.
-        let Some(message) = message else {
+        let Some(message) = maybe_message else {
             return Err(self.build_stream_ended_error(replication_client));
         };
 
+        // If the Postgres had an error, we want to raise it immediately.
+        let message = message?;
+
         let action = self
-            .handle_replication_message_and_flush(events_stream.as_mut(), message?)
+            .handle_replication_message_and_flush(events_stream.as_mut(), message)
             .await?;
 
         if !self.state.events_batch.is_empty() {

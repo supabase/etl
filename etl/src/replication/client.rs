@@ -7,7 +7,6 @@ use etl_postgres::types::convert_type_oid_to_type;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use etl_postgres::version::POSTGRES_15;
 use etl_postgres::{below_version, requires_version};
-use futures::Stream;
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
@@ -15,10 +14,8 @@ use rustls::pki_types::{CertificateDer, pem::PemObject};
 use std::fmt;
 use std::num::NonZeroI32;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::watch;
-use tokio_stream::wrappers::WatchStream;
 
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
@@ -42,15 +39,19 @@ where
     T: MakeTlsConnect<Socket>,
     T::Stream: Send + 'static,
 {
+    // We use this watch channel to send connection updates without relying on the errors/terminations
+    // propagated by the active connection consumers.
     let (updates_tx, updates_rx) = watch::channel(PostgresConnectionUpdate::Running);
+
     let span = tracing::Span::current();
     let task = async move {
         let result = connection.await;
 
         match result {
             Err(err) => {
-                let _ = updates_tx.send(PostgresConnectionUpdate::Errored);
-                error!(error = %err, "postgres connection error");
+                let error_message = err.to_string();
+                let _ = updates_tx.send(PostgresConnectionUpdate::errored(error_message.clone()));
+                error!(error = %error_message, "postgres connection error");
             }
             Ok(()) => {
                 let _ = updates_tx.send(PostgresConnectionUpdate::Terminated);
@@ -68,20 +69,27 @@ where
 }
 
 /// Updates emitted by the background task driving the PostgreSQL connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PostgresConnectionUpdate {
     /// The connection task is running.
     Running,
     /// The connection task terminated cleanly.
     Terminated,
     /// The connection task exited due to an error.
-    Errored,
+    Errored { error: Arc<str> },
 }
 
 impl PostgresConnectionUpdate {
+    /// Creates an error update from an error message.
+    pub fn errored(error: impl Into<Arc<str>>) -> Self {
+        Self::Errored {
+            error: error.into(),
+        }
+    }
+
     /// Returns `true` when this update indicates that the connection has been closed.
-    pub fn signals_connection_closed(self) -> bool {
-        matches!(self, Self::Terminated | Self::Errored)
+    pub fn signals_connection_closed(&self) -> bool {
+        matches!(self, Self::Terminated | Self::Errored { .. })
     }
 }
 
@@ -90,50 +98,7 @@ impl fmt::Display for PostgresConnectionUpdate {
         match self {
             Self::Running => write!(f, "running"),
             Self::Terminated => write!(f, "terminated"),
-            Self::Errored => write!(f, "errored"),
-        }
-    }
-}
-
-/// Subscription to PostgreSQL connection lifecycle updates.
-///
-/// This subscription is intended to provide wake-safe connection state observation for stream
-/// adapters that may intentionally pause polling their inner stream (e.g. memory backpressure).
-/// It allows those adapters to observe terminal connection states without performing lookahead on
-/// the replicated item stream.
-#[derive(Debug)]
-pub struct PgConnectionSubscription {
-    current_rx: watch::Receiver<PostgresConnectionUpdate>,
-    updates: WatchStream<PostgresConnectionUpdate>,
-}
-
-impl PgConnectionSubscription {
-    /// Creates a new connection update subscription from a watch receiver.
-    pub fn new(updates_rx: watch::Receiver<PostgresConnectionUpdate>) -> Self {
-        let updates = WatchStream::from_changes(updates_rx.clone());
-
-        Self {
-            current_rx: updates_rx,
-            updates,
-        }
-    }
-
-    /// Returns the latest known connection update.
-    pub fn current_update(&self) -> PostgresConnectionUpdate {
-        *self.current_rx.borrow()
-    }
-
-    /// Polls for a new connection update.
-    ///
-    /// Returns:
-    /// - `Poll::Ready(Some(update))` when there is an unseen update.
-    /// - `Poll::Ready(None)` when the connection update channel is closed.
-    /// - `Poll::Pending` when no update is available yet.
-    pub fn poll_update(&mut self, cx: &mut Context<'_>) -> Poll<Option<PostgresConnectionUpdate>> {
-        match std::pin::Pin::new(&mut self.updates).poll_next(cx) {
-            Poll::Ready(Some(update)) => Poll::Ready(Some(update)),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
+            Self::Errored { .. } => write!(f, "errored"),
         }
     }
 }
@@ -587,8 +552,8 @@ impl PgReplicationClient {
     }
 
     /// Returns a receiver for background connection task updates.
-    pub fn connection_subscription(&self) -> PgConnectionSubscription {
-        PgConnectionSubscription::new(self.connection_updates_rx.clone())
+    pub fn connection_updates_rx(&self) -> watch::Receiver<PostgresConnectionUpdate> {
+        self.connection_updates_rx.clone()
     }
 
     /// Executes a simple query on the underlying connection and returns all result messages.

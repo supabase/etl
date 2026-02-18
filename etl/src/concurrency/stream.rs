@@ -7,8 +7,6 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::concurrency::memory_monitor::MemoryMonitorSubscription;
-use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::replication::client::{PgConnectionSubscription, PostgresConnectionUpdate};
 
 pin_project! {
     /// A stream adapter that pauses polling when memory monitor reports pressure.
@@ -18,8 +16,6 @@ pub struct BackpressureStream<S: Stream> {
         #[pin]
         stream: S,
         memory_subscription: MemoryMonitorSubscription,
-        connection_subscription: Option<PgConnectionSubscription>,
-        connection_update: PostgresConnectionUpdate,
         paused_for_memory: bool,
     }
 }
@@ -30,23 +26,8 @@ impl<S: Stream> BackpressureStream<S> {
         Self {
             stream,
             memory_subscription,
-            connection_subscription: None,
-            connection_update: PostgresConnectionUpdate::Running,
             paused_for_memory: false,
         }
-    }
-
-    /// Configures optional connection lifecycle updates for this stream wrapper.
-    ///
-    /// This is used only to unblock paused/idle streams when the underlying PostgreSQL
-    /// connection is no longer usable. It does not inspect or consume items from the wrapped
-    /// stream.
-    pub fn with_connection_updates(
-        mut self,
-        connection_subscription: Option<PgConnectionSubscription>,
-    ) -> Self {
-        self.connection_subscription = connection_subscription;
-        self
     }
 
     /// Returns a pinned mutable reference to the wrapped stream.
@@ -61,36 +42,6 @@ impl<S: Stream> Stream for BackpressureStream<S> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
         let was_paused = *this.paused_for_memory;
-
-        if let Some(connection_subscription) = this.connection_subscription {
-            match connection_subscription.poll_update(cx) {
-                Poll::Ready(Some(update)) => {
-                    *this.connection_update = update;
-                }
-                Poll::Ready(None) => {
-                    // If the watch channel was dropped, we assume that the connection was terminated.
-                    *this.connection_update = PostgresConnectionUpdate::Terminated;
-                }
-                Poll::Pending => {
-                    let current_update = connection_subscription.current_update();
-                    if *this.connection_update != current_update {
-                        *this.connection_update = current_update;
-                    }
-                }
-            }
-        }
-
-        // Terminal connection updates bypass backpressure and immediately forward whatever the
-        // wrapped stream reports next. This unblocks paused streams while preserving the stream's
-        // native termination/error behavior.
-        if this.connection_update.signals_connection_closed() {
-            info!(
-                update = %this.connection_update,
-                "postgres connection closed, forwarding wrapped stream result"
-            );
-
-            return this.stream.as_mut().poll_next(cx);
-        }
 
         match this.memory_subscription.poll_update(cx) {
             Poll::Ready(Some(blocked)) => {
@@ -139,15 +90,11 @@ pub struct BatchBackpressureStream<B, S: Stream<Item = B>> {
         stream: S,
         #[pin]
         deadline: Option<tokio::time::Sleep>,
-        shutdown_rx: ShutdownRx,
         items: Vec<S::Item>,
         batch_config: BatchConfig,
         reset_timer: bool,
         inner_stream_ended: bool,
-        stream_stopped: bool,
         memory_subscription: MemoryMonitorSubscription,
-        connection_subscription: Option<PgConnectionSubscription>,
-        connection_update: PostgresConnectionUpdate,
         paused_for_memory: bool,
     }
 }
@@ -157,48 +104,30 @@ impl<B, S: Stream<Item = B>> BatchBackpressureStream<B, S> {
     pub fn wrap(
         stream: S,
         batch_config: BatchConfig,
-        shutdown_rx: ShutdownRx,
         memory_subscription: MemoryMonitorSubscription,
     ) -> Self {
         BatchBackpressureStream {
             stream,
             deadline: None,
-            shutdown_rx,
             items: Vec::with_capacity(batch_config.max_size),
             batch_config,
             reset_timer: true,
             inner_stream_ended: false,
-            stream_stopped: false,
             memory_subscription,
-            connection_subscription: None,
-            connection_update: PostgresConnectionUpdate::Running,
             paused_for_memory: false,
         }
-    }
-
-    /// Configures optional connection lifecycle updates for this batch stream wrapper.
-    ///
-    /// This is used only to unblock paused/idle streams when the underlying PostgreSQL
-    /// connection is no longer usable. It does not inspect or consume items from the wrapped
-    /// stream.
-    pub fn with_connection_updates(
-        mut self,
-        connection_subscription: Option<PgConnectionSubscription>,
-    ) -> Self {
-        self.connection_subscription = connection_subscription;
-        self
     }
 }
 
 impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
-    type Item = ShutdownResult<Vec<S::Item>, Vec<S::Item>>;
+    type Item = Vec<S::Item>;
 
     /// Polls the stream for the next batch of items using a complex state machine.
     ///
     /// This method implements a batching algorithm that balances throughput
     /// and latency by collecting items into batches based on both size and time constraints.
-    /// The polling state machine handles multiple concurrent conditions and ensures proper
-    /// resource cleanup during shutdown scenarios.
+    /// The polling state machine handles multiple concurrent conditions while preserving bounded
+    /// buffering behavior.
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.as_mut().project();
 
@@ -208,82 +137,7 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
         }
 
         loop {
-            // Fast path: if we've been marked as stopped, terminate immediately.
-            if *this.stream_stopped {
-                return Poll::Ready(None);
-            }
-
-            // PRIORITY 1: Check for shutdown signal
-            // Shutdown handling takes priority over all other operations to ensure
-            // graceful termination. We return any accumulated items with shutdown indication.
-            if this.shutdown_rx.has_changed().unwrap_or(false) {
-                info!("stream forcefully stopped due to shutdown signal");
-
-                // Mark stream as permanently stopped to prevent further polling.
-                *this.stream_stopped = true;
-
-                // Acknowledge that we've seen the shutdown signal to maintain watch semantics.
-                this.shutdown_rx.mark_unchanged();
-
-                // Return accumulated items (if any) with shutdown indication.
-                // Even empty batches are returned to signal shutdown occurred.
-                return Poll::Ready(Some(ShutdownResult::Shutdown(std::mem::take(this.items))));
-            }
-
-            // PRIORITY 2: Connection updates.
-            // Terminal updates are treated as stream shutdown to unblock paused streams without
-            // performing stream-item lookahead.
-            if let Some(connection_subscription) = this.connection_subscription {
-                match connection_subscription.poll_update(cx) {
-                    Poll::Ready(Some(update)) => {
-                        *this.connection_update = update;
-                    }
-                    Poll::Ready(None) => {
-                        // If the watch channel was dropped, we assume that the connection was terminated.
-                        *this.connection_update = PostgresConnectionUpdate::Terminated;
-                    }
-                    Poll::Pending => {
-                        let current_update = connection_subscription.current_update();
-                        if *this.connection_update != current_update {
-                            *this.connection_update = current_update;
-                        }
-                    }
-                }
-            }
-
-            if this.connection_update.signals_connection_closed() {
-                info!(
-                    update = %this.connection_update,
-                    "postgres connection closed, forwarding wrapped batch stream result"
-                );
-
-                match this.stream.as_mut().poll_next(cx) {
-                    Poll::Ready(Some(item)) => {
-                        this.items.push(item);
-                        *this.reset_timer = true;
-                        *this.stream_stopped = true;
-
-                        return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
-                    }
-                    Poll::Ready(None) => {
-                        *this.inner_stream_ended = true;
-                        *this.stream_stopped = true;
-
-                        if this.items.is_empty() {
-                            return Poll::Ready(None);
-                        }
-
-                        *this.reset_timer = true;
-
-                        return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
-                    }
-                    Poll::Pending => {
-                        return Poll::Pending;
-                    }
-                }
-            }
-
-            // PRIORITY 3: Memory backpressure.
+            // PRIORITY 1: Memory backpressure.
             // If memory is blocked and there are buffered items, flush immediately to avoid
             // accumulating more memory in this stream.
             let was_paused = *this.paused_for_memory;
@@ -319,13 +173,13 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
                     );
                     *this.reset_timer = true;
 
-                    return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
+                    return Poll::Ready(Some(std::mem::take(this.items)));
                 }
 
                 return Poll::Pending;
             }
 
-            // PRIORITY 4: Timer management
+            // PRIORITY 2: Timer management.
             // Reset the timeout timer when starting a new batch or after emitting a batch
             if *this.reset_timer {
                 this.deadline
@@ -335,14 +189,14 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
                 *this.reset_timer = false;
             }
 
-            // PRIORITY 5: Memory optimization
+            // PRIORITY 3: Memory optimization.
             // Pre-allocate batch capacity when starting to collect items
             // This avoids reallocations during batch collection.
             if this.items.is_empty() {
                 this.items.reserve_exact(this.batch_config.max_size);
             }
 
-            // PRIORITY 6: Poll underlying stream for new items
+            // PRIORITY 4: Poll underlying stream for new items.
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Pending => {
                     // No more items available right now, check if we should emit due to timeout.
@@ -352,43 +206,49 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
                     // New item available - add to current batch.
                     this.items.push(item);
 
-                    // SIZE-BASED EMISSION: If batch is full, emit immediately.
+                    // If batch is full, emit immediately.
                     // This provides throughput optimization for high-volume streams.
                     if this.items.len() >= this.batch_config.max_size {
-                        *this.reset_timer = true; // Schedule timer reset for next batch.
-                        return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
+                        *this.reset_timer = true;
+
+                        return Poll::Ready(Some(std::mem::take(this.items)));
                     }
+
                     // Continue loop to collect more items or check other conditions.
                 }
                 Poll::Ready(None) => {
-                    // STREAM END: Underlying stream finished.
+                    // Underlying stream finished.
                     // Return final batch if we have items, otherwise signal completion.
                     let last = if this.items.is_empty() {
-                        None // No final batch needed.
+                        None
                     } else {
-                        *this.reset_timer = true; // Clean up timer state.
-                        Some(ShutdownResult::Ok(std::mem::take(this.items)))
+                        *this.reset_timer = true;
+
+                        Some(std::mem::take(this.items))
                     };
 
-                    *this.inner_stream_ended = true; // Mark stream as permanently ended.
+                    // Mark stream as permanently ended. We do this, since we might be returning
+                    // the last accumulated data, and the future will be polled again and we need
+                    // to return `Poll::Ready(None)`.
+                    *this.inner_stream_ended = true;
 
                     return Poll::Ready(last);
                 }
             }
         }
 
-        // PRIORITY 7: Time-based emission check
+        // PRIORITY 5: Time-based emission check
         // If we have items and the timeout has expired, emit the current batch
         // This provides latency bounds to prevent indefinite delays in low-volume scenarios.
         if !this.items.is_empty()
             && let Some(deadline) = this.deadline.as_pin_mut()
         {
-            // Check if timeout has elapsed (this will register waker if not ready).
+            // Check if timeout has elapsed.
             ready!(deadline.poll(cx));
             // Schedule timer reset for next batch.
             *this.reset_timer = true;
 
-            return Poll::Ready(Some(ShutdownResult::Ok(std::mem::take(this.items))));
+            return Poll::Ready(Some(std::mem::take(this.items)));
         }
 
         // No conditions met for batch emission, wait for more items or timeout.
@@ -400,7 +260,6 @@ impl<B, S: Stream<Item = B>> Stream for BatchBackpressureStream<B, S> {
 mod tests {
     use super::*;
     use crate::concurrency::memory_monitor::MemoryMonitor;
-    use crate::concurrency::shutdown::create_shutdown_channel;
     use core::task::Poll;
     use futures::future::poll_fn;
     use pin_project_lite::pin_project;
@@ -435,77 +294,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn flushes_buffered_items_immediately_when_memory_blocks() {
-        let memory = MemoryMonitor::new_for_test();
-        let memory_sub = memory.subscribe();
-        let (_, shutdown_rx) = create_shutdown_channel();
-
-        let batch_config = BatchConfig {
-            max_size: 10,
-            max_fill_ms: 10_000,
-        };
-        let mut stream = Box::pin(BatchBackpressureStream::wrap(
-            TwoThenPending::new(),
-            batch_config,
-            shutdown_rx,
-            memory_sub,
-        ));
-
-        // First the first poll, we are pending since we are waiting for 10 elements but the stream
-        // only yields 2 and then suspends.
-        poll_fn(|cx| match stream.as_mut().poll_next(cx) {
-            Poll::Pending => Poll::Ready(()),
-            _ => panic!("expected pending"),
-        })
-        .await;
-
-        memory.set_blocked_for_test(true);
-
-        // Now the memory is blocked, so the system is expected to flush its existing state.
-        let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        match batch {
-            Some(ShutdownResult::Ok(items)) => assert_eq!(items, vec![1, 2]),
-            _ => panic!("expected flushed batch"),
-        }
-    }
-
-    #[tokio::test]
-    async fn returns_pending_while_blocked_then_resumes_after_unblock() {
-        let memory = MemoryMonitor::new_for_test();
-        memory.set_blocked_for_test(true);
-        let memory_sub = memory.subscribe();
-        let (_, shutdown_rx) = create_shutdown_channel();
-
-        let batch_config = BatchConfig {
-            max_size: 1,
-            max_fill_ms: 10_000,
-        };
-        let mut stream = Box::pin(BatchBackpressureStream::wrap(
-            futures::stream::iter(vec![1]),
-            batch_config,
-            shutdown_rx,
-            memory_sub,
-        ));
-
-        // Memory is full, so we block any poll.
-        poll_fn(|cx| match stream.as_mut().poll_next(cx) {
-            Poll::Pending => Poll::Ready(()),
-            _ => panic!("expected pending while blocked"),
-        })
-        .await;
-
-        memory.set_blocked_for_test(false);
-
-        // Memory is now back, so we should get the batch of 1 element.
-        let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-
-        match batch {
-            Some(ShutdownResult::Ok(items)) => assert_eq!(items, vec![1]),
-            _ => panic!("expected resumed batch"),
-        }
-    }
-
+    // BackpressureStream tests.
     #[tokio::test]
     async fn backpressure_stream_pauses_while_blocked_then_resumes() {
         let memory = MemoryMonitor::new_for_test();
@@ -551,54 +340,165 @@ mod tests {
         .await;
     }
 
+    // BatchBackpressureStream tests.
     #[tokio::test]
-    async fn backpressure_stream_stops_when_connection_errors() {
+    async fn flushes_buffered_items_immediately_when_memory_blocks() {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
-        let (tx, rx) = tokio::sync::watch::channel(PostgresConnectionUpdate::Running);
-        let mut stream = Box::pin(
-            BackpressureStream::wrap(futures::stream::iter(vec![12]), memory_sub)
-                .with_connection_updates(Some(PgConnectionSubscription::new(rx))),
-        );
 
-        tx.send(PostgresConnectionUpdate::Errored)
-            .expect("connection update send should succeed");
-
-        // If the connection errors out, we expect the stream to poll the wrapped stream and return
-        // its result.
-        let item = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(item, Some(12));
-    }
-
-    #[tokio::test]
-    async fn batch_backpressure_stream_stops_when_connection_errors() {
-        let memory = MemoryMonitor::new_for_test();
-        let memory_sub = memory.subscribe();
-        let (_, shutdown_rx) = create_shutdown_channel();
         let batch_config = BatchConfig {
             max_size: 10,
             max_fill_ms: 10_000,
         };
-        let (tx, rx) = tokio::sync::watch::channel(PostgresConnectionUpdate::Running);
-        let mut stream = Box::pin(
-            BatchBackpressureStream::wrap(
-                futures::stream::iter(vec![1, 2, 3]),
-                batch_config,
-                shutdown_rx,
-                memory_sub,
-            )
-            .with_connection_updates(Some(PgConnectionSubscription::new(rx))),
-        );
+        let mut stream = Box::pin(BatchBackpressureStream::wrap(
+            TwoThenPending::new(),
+            batch_config,
+            memory_sub,
+        ));
 
-        tx.send(PostgresConnectionUpdate::Errored)
-            .expect("connection update send should succeed");
+        // First the first poll, we are pending since we are waiting for 10 elements but the stream
+        // only yields 2 and then suspends.
+        poll_fn(|cx| match stream.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Ready(()),
+            _ => panic!("expected pending"),
+        })
+        .await;
 
-        // If the connection errors out, we expect the stream to poll the wrapped stream and return
-        // its accumulated batch + the latest returned item.
+        memory.set_blocked_for_test(true);
+
+        // Now the memory is blocked, so the system is expected to flush its existing state.
+        let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+        assert_eq!(batch, Some(vec![1, 2]));
+    }
+
+    #[tokio::test]
+    async fn returns_pending_while_blocked_then_resumes_after_unblock() {
+        let memory = MemoryMonitor::new_for_test();
+        memory.set_blocked_for_test(true);
+        let memory_sub = memory.subscribe();
+
+        let batch_config = BatchConfig {
+            max_size: 1,
+            max_fill_ms: 10_000,
+        };
+        let mut stream = Box::pin(BatchBackpressureStream::wrap(
+            futures::stream::iter(vec![1]),
+            batch_config,
+            memory_sub,
+        ));
+
+        // Memory is full, so we block any poll.
+        poll_fn(|cx| match stream.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Ready(()),
+            _ => panic!("expected pending while blocked"),
+        })
+        .await;
+
+        memory.set_blocked_for_test(false);
+
+        // Memory is now back, so we should get the batch of 1 element.
+        let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+        assert_eq!(batch, Some(vec![1]));
+    }
+
+    #[tokio::test]
+    async fn flushes_immediately_when_batch_reaches_max_size() {
+        let memory = MemoryMonitor::new_for_test();
+        let memory_sub = memory.subscribe();
+
+        let batch_config = BatchConfig {
+            max_size: 2,
+            max_fill_ms: 10_000,
+        };
+        let mut stream = Box::pin(BatchBackpressureStream::wrap(
+            futures::stream::iter(vec![1, 2, 3]),
+            batch_config,
+            memory_sub,
+        ));
+
+        // The first poll should flush exactly when max_size is reached so memory stays bounded.
+        let first = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+        assert_eq!(first, Some(vec![1, 2]));
+
+        // The remaining item should be emitted as a final partial batch when the inner stream ends.
+        let second = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+        assert_eq!(second, Some(vec![3]));
+
+        // After final emission, the wrapper must report completion.
+        let done = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+        assert_eq!(done, None);
+    }
+
+    #[tokio::test]
+    async fn flushes_buffered_items_when_timeout_elapses() {
+        let memory = MemoryMonitor::new_for_test();
+        let memory_sub = memory.subscribe();
+
+        let batch_config = BatchConfig {
+            max_size: 10,
+            max_fill_ms: 100,
+        };
+        let mut stream = Box::pin(BatchBackpressureStream::wrap(
+            TwoThenPending::new(),
+            batch_config,
+            memory_sub,
+        ));
+
+        // The stream has buffered items but not enough to reach max_size, so it should wait.
+        poll_fn(|cx| match stream.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Ready(()),
+            _ => panic!("expected pending before timeout"),
+        })
+        .await;
+
+        // Waiting past the deadline should trigger timeout-based flush to bound latency.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        let flushed = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+        assert_eq!(flushed, Some(vec![1, 2]));
+    }
+
+    #[tokio::test]
+    async fn emits_final_partial_batch_then_returns_none() {
+        let memory = MemoryMonitor::new_for_test();
+        let memory_sub = memory.subscribe();
+
+        let batch_config = BatchConfig {
+            max_size: 10,
+            max_fill_ms: 10_000,
+        };
+        let mut stream = Box::pin(BatchBackpressureStream::wrap(
+            futures::stream::iter(vec![7, 8]),
+            batch_config,
+            memory_sub,
+        ));
+
+        // End-of-stream with buffered items must emit one final batch before completion.
+        let last = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+        assert_eq!(last, Some(vec![7, 8]));
+
+        // A subsequent poll must return None, proving the stream transitions to ended state.
+        let done = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+        assert_eq!(done, None);
+    }
+
+    #[tokio::test]
+    async fn returns_none_immediately_for_empty_inner_stream() {
+        let memory = MemoryMonitor::new_for_test();
+        let memory_sub = memory.subscribe();
+
+        let batch_config = BatchConfig {
+            max_size: 10,
+            max_fill_ms: 10_000,
+        };
+        let mut stream = Box::pin(BatchBackpressureStream::wrap(
+            futures::stream::empty::<i32>(),
+            batch_config,
+            memory_sub,
+        ));
+
+        // Empty streams should complete immediately without emitting empty batches.
         let result = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        match result {
-            Some(ShutdownResult::Ok(items)) => assert_eq!(items, vec![1]),
-            _ => panic!("expected wrapped stream value when connection errors"),
-        }
+        assert_eq!(result, None);
     }
 }
