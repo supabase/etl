@@ -123,6 +123,7 @@ where
 
         // We start memory monitoring as first thing.
         let memory_monitor = MemoryMonitor::new(
+            self.config.id,
             self.shutdown_tx.subscribe(),
             self.config.memory_backpressure.clone(),
         );

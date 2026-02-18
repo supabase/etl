@@ -20,6 +20,11 @@ pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_t
 pub const ETL_ROW_SIZE_BYTES: &str = "etl_row_size_bytes";
 pub const ETL_SLOT_INVALIDATIONS_TOTAL: &str = "etl_slot_invalidations_total";
 pub const ETL_WORKER_ERRORS_TOTAL: &str = "etl_worker_errors_total";
+pub const ETL_MEMORY_BACKPRESSURE_ACTIVE: &str = "etl_memory_backpressure_active";
+pub const ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL: &str =
+    "etl_memory_backpressure_transitions_total";
+pub const ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS: &str =
+    "etl_memory_backpressure_activation_duration_seconds";
 
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
@@ -41,6 +46,8 @@ pub const FORCED_LABEL: &str = "forced";
 pub const STATUS_UPDATE_TYPE_LABEL: &str = "status_update_type";
 /// Label key for worker error classification ("timed", "manual", "no_retry").
 pub const ERROR_TYPE_LABEL: &str = "error_type";
+/// Label key for transition direction ("activate" or "resume").
+pub const DIRECTION_LABEL: &str = "direction";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaranteed to register the
@@ -139,6 +146,24 @@ pub(crate) fn register_metrics() {
             ETL_WORKER_ERRORS_TOTAL,
             Unit::Count,
             "Total number of worker errors, labeled by pipeline_id, worker_type, and error_type"
+        );
+
+        describe_gauge!(
+            ETL_MEMORY_BACKPRESSURE_ACTIVE,
+            Unit::Count,
+            "Memory backpressure current state (0 or 1), labeled by pipeline_id"
+        );
+
+        describe_counter!(
+            ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
+            Unit::Count,
+            "Total memory backpressure state transitions, labeled by pipeline_id and direction"
+        );
+
+        describe_histogram!(
+            ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
+            Unit::Seconds,
+            "Duration in seconds of each memory backpressure active period, labeled by pipeline_id"
         );
     });
 }

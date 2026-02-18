@@ -1,14 +1,21 @@
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
+use std::time::Instant;
 
 use etl_config::shared::MemoryBackpressureConfig;
 use futures::Stream;
+use metrics::{counter, gauge, histogram};
 use tokio::sync::watch;
 use tokio_stream::wrappers::WatchStream;
 use tracing::{debug, info};
 
 use crate::concurrency::shutdown::ShutdownRx;
+use crate::metrics::{
+    DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
+    ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL, PIPELINE_ID_LABEL,
+};
+use crate::types::PipelineId;
 
 /// Memory refresh interval in milliseconds.
 const MEMORY_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
@@ -66,7 +73,11 @@ pub struct MemoryMonitor {
 
 impl MemoryMonitor {
     /// Creates a new memory backpressure controller and starts the refresh task.
-    pub fn new(mut shutdown_rx: ShutdownRx, config: Option<MemoryBackpressureConfig>) -> Self {
+    pub fn new(
+        pipeline_id: PipelineId,
+        mut shutdown_rx: ShutdownRx,
+        config: Option<MemoryBackpressureConfig>,
+    ) -> Self {
         // sysinfo docs suggest to use a single instance of `System` across the program.
         let mut system = sysinfo::System::new();
 
@@ -82,6 +93,7 @@ impl MemoryMonitor {
             ),
             None => false,
         };
+        emit_backpressure_active_metric(pipeline_id, startup_backpressure_active);
 
         let this = Self {
             inner: Arc::new(MemoryMonitorInner {
@@ -94,6 +106,7 @@ impl MemoryMonitor {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(MEMORY_REFRESH_INTERVAL);
             let mut currently_backpressure_active = startup_backpressure_active;
+            let mut activation_started_at = startup_backpressure_active.then(Instant::now);
 
             loop {
                 tokio::select! {
@@ -133,6 +146,24 @@ impl MemoryMonitor {
                                         used_percent,
                                         "memory monitor state changed"
                                     );
+
+                                    emit_backpressure_active_metric(
+                                        pipeline_id,
+                                        next_backpressure_active,
+                                    );
+                                    emit_transition_metric(
+                                        pipeline_id,
+                                        next_backpressure_active,
+                                    );
+
+                                    if next_backpressure_active {
+                                        activation_started_at = Some(Instant::now());
+                                    } else if let Some(started_at) = activation_started_at.take() {
+                                        emit_activation_duration_metric(
+                                            pipeline_id,
+                                            started_at.elapsed(),
+                                        );
+                                    }
                                 }
 
                                 currently_backpressure_active = next_backpressure_active;
@@ -204,6 +235,31 @@ fn compute_next_backpressure_active(
     }
 
     used_percent >= activate_threshold
+}
+
+fn emit_backpressure_active_metric(pipeline_id: PipelineId, backpressure_active: bool) {
+    gauge!(
+        ETL_MEMORY_BACKPRESSURE_ACTIVE,
+        PIPELINE_ID_LABEL => pipeline_id.to_string()
+    )
+    .set(if backpressure_active { 1.0 } else { 0.0 });
+}
+
+fn emit_transition_metric(pipeline_id: PipelineId, backpressure_active: bool) {
+    counter!(
+        ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        DIRECTION_LABEL => if backpressure_active { "activate" } else { "resume" }
+    )
+    .increment(1);
+}
+
+fn emit_activation_duration_metric(pipeline_id: PipelineId, duration: Duration) {
+    histogram!(
+        ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
+        PIPELINE_ID_LABEL => pipeline_id.to_string()
+    )
+    .record(duration.as_secs_f64());
 }
 
 #[cfg(test)]

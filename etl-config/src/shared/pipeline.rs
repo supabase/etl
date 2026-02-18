@@ -169,8 +169,9 @@ pub struct PipelineConfig {
     pub max_copy_connections_per_table: u16,
     /// Optional memory-based backpressure configuration.
     ///
-    /// `None` disables memory backpressure.
-    #[serde(default)]
+    /// `None` disables memory backpressure. When omitted, this defaults to
+    /// `Some(MemoryBackpressureConfig::default())`.
+    #[serde(default = "default_memory_backpressure")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
@@ -243,6 +244,10 @@ fn default_max_copy_connections_per_table() -> u16 {
     PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE
 }
 
+fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
+    Some(MemoryBackpressureConfig::default())
+}
+
 /// Same as [`PipelineConfig`] but without secrets. This type
 /// implements [`Serialize`] because it does not contains secrets
 /// so is safe to serialize.
@@ -281,8 +286,9 @@ pub struct PipelineConfigWithoutSecrets {
     pub max_copy_connections_per_table: u16,
     /// Optional memory-based backpressure configuration.
     ///
-    /// `None` disables memory backpressure.
-    #[serde(default)]
+    /// `None` disables memory backpressure. When omitted, this defaults to
+    /// `Some(MemoryBackpressureConfig::default())`.
+    #[serde(default = "default_memory_backpressure")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
