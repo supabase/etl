@@ -225,7 +225,7 @@ pub mod tenants {
 pub mod pipelines {
     use super::*;
     use etl_api::configs::{log::LogLevel, pipeline::ApiBatchConfig};
-    use etl_config::shared::TableSyncCopyConfig;
+    use etl_config::shared::{MemoryBackpressureConfig, TableSyncCopyConfig};
 
     /// Returns a default pipeline config.
     pub fn new_pipeline_config() -> FullApiPipelineConfig {
@@ -239,6 +239,7 @@ pub mod pipelines {
             table_error_retry_max_attempts: Some(5),
             max_table_sync_workers: Some(2),
             max_copy_connections_per_table: Some(2),
+            memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             invalidated_slot_behavior: None,
             log_level: Some(LogLevel::Info),
@@ -257,6 +258,7 @@ pub mod pipelines {
             table_error_retry_max_attempts: Some(10),
             max_table_sync_workers: Some(4),
             max_copy_connections_per_table: Some(8),
+            memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             invalidated_slot_behavior: None,
             log_level: Some(LogLevel::Info),
@@ -284,6 +286,7 @@ pub mod pipelines {
                 table_error_retry_max_attempts: None,
                 max_table_sync_workers: None,
                 max_copy_connections_per_table: None,
+                memory_backpressure: None,
                 table_sync_copy: None,
                 invalidated_slot_behavior: None,
                 log_level: None,
@@ -296,6 +299,7 @@ pub mod pipelines {
                     table_error_retry_max_attempts: None,
                     max_table_sync_workers: None,
                     max_copy_connections_per_table: None,
+                    memory_backpressure: None,
                     table_sync_copy: None,
                     invalidated_slot_behavior: None,
                     log_level: None,
@@ -309,6 +313,7 @@ pub mod pipelines {
                     table_error_retry_max_attempts: Some(max_attempts),
                     max_table_sync_workers: None,
                     max_copy_connections_per_table: None,
+                    memory_backpressure: None,
                     table_sync_copy: None,
                     invalidated_slot_behavior: None,
                     log_level: None,
@@ -321,6 +326,7 @@ pub mod pipelines {
                 table_error_retry_max_attempts: None,
                 max_table_sync_workers: Some(n),
                 max_copy_connections_per_table: None,
+                memory_backpressure: None,
                 table_sync_copy: None,
                 invalidated_slot_behavior: None,
                 log_level: None,
@@ -332,6 +338,7 @@ pub mod pipelines {
                 table_error_retry_max_attempts: None,
                 max_table_sync_workers: None,
                 max_copy_connections_per_table: None,
+                memory_backpressure: None,
                 table_sync_copy: None,
                 invalidated_slot_behavior: None,
                 log_level,
@@ -351,6 +358,7 @@ pub mod pipelines {
             table_error_retry_max_attempts: Some(6),
             max_table_sync_workers: Some(8),
             max_copy_connections_per_table: None,
+            memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
             log_level: None,

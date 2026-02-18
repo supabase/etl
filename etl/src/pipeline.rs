@@ -124,8 +124,7 @@ where
         // We start memory monitoring as first thing.
         let memory_monitor = MemoryMonitor::new(
             self.shutdown_tx.subscribe(),
-            self.config.memory_backpressure_activate_percentage,
-            self.config.memory_backpressure_resume_percentage,
+            self.config.memory_backpressure.clone(),
         );
 
         // We create the first connection to Postgres.

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use etl_config::shared::MemoryBackpressureConfig;
 use futures::Stream;
 use tokio::sync::watch;
 use tokio_stream::wrappers::WatchStream;
@@ -51,8 +52,7 @@ impl MemorySnapshot {
 #[derive(Debug)]
 struct MemoryMonitorInner {
     blocked_tx: watch::Sender<bool>,
-    activate_threshold: f32,
-    resume_threshold: f32,
+    config: Option<MemoryBackpressureConfig>,
 }
 
 /// Shared memory backpressure controller.
@@ -66,29 +66,27 @@ pub struct MemoryMonitor {
 
 impl MemoryMonitor {
     /// Creates a new memory backpressure controller and starts the refresh task.
-    pub fn new(
-        mut shutdown_rx: ShutdownRx,
-        activate_threshold: f32,
-        resume_threshold: f32,
-    ) -> Self {
+    pub fn new(mut shutdown_rx: ShutdownRx, config: Option<MemoryBackpressureConfig>) -> Self {
         // sysinfo docs suggest to use a single instance of `System` across the program.
         let mut system = sysinfo::System::new();
 
         // Initialize from a real memory snapshot so startup state reflects current pressure.
         let startup_snapshot = MemorySnapshot::from_system(&mut system);
         let startup_used_percent = startup_snapshot.used_percent();
-        let startup_blocked = compute_next_blocked(
-            false,
-            startup_used_percent,
-            activate_threshold,
-            resume_threshold,
-        );
+        let startup_blocked = match &config {
+            Some(config) => compute_next_blocked(
+                false,
+                startup_used_percent,
+                config.activate_threshold,
+                config.resume_threshold,
+            ),
+            None => false,
+        };
 
         let this = Self {
             inner: Arc::new(MemoryMonitorInner {
                 blocked_tx: watch::channel(startup_blocked).0,
-                activate_threshold,
-                resume_threshold,
+                config,
             }),
         };
 
@@ -110,34 +108,46 @@ impl MemoryMonitor {
                     _ = ticker.tick() => {
                         let snapshot = MemorySnapshot::from_system(&mut system);
                         let used_percent = snapshot.used_percent();
+                        match this_clone.inner.config.as_ref() {
+                            Some(config) => {
+                                let next_blocked = compute_next_blocked(
+                                    currently_blocked,
+                                    used_percent,
+                                    config.activate_threshold,
+                                    config.resume_threshold,
+                                );
 
-                        let next_blocked = compute_next_blocked(
-                            currently_blocked,
-                            used_percent,
-                            this_clone.inner.activate_threshold,
-                            this_clone.inner.resume_threshold,
-                        );
+                                debug!(
+                                    used_memory_bytes = snapshot.used,
+                                    total_memory_bytes = snapshot.total,
+                                    used_percent,
+                                    blocked = currently_blocked,
+                                    next_blocked,
+                                    "memory monitor refreshed memory snapshot"
+                                );
 
-                        debug!(
-                            used_memory_bytes = snapshot.used,
-                            total_memory_bytes = snapshot.total,
-                            used_percent,
-                            blocked = currently_blocked,
-                            next_blocked,
-                            "memory monitor refreshed memory snapshot"
-                        );
+                                if next_blocked != currently_blocked {
+                                    debug!(
+                                        blocked = currently_blocked,
+                                        next_blocked,
+                                        used_percent,
+                                        "memory monitor state changed"
+                                    );
+                                }
 
-                        if next_blocked != currently_blocked {
-                            debug!(
-                                blocked = currently_blocked,
-                                next_blocked,
-                                used_percent,
-                                "memory monitor state changed"
-                            );
+                                currently_blocked = next_blocked;
+                                this_clone.set_blocked(next_blocked);
+                            }
+                            None => {
+                                debug!(
+                                    used_memory_bytes = snapshot.used,
+                                    total_memory_bytes = snapshot.total,
+                                    used_percent,
+                                    blocked = currently_blocked,
+                                    "memory monitor refreshed memory snapshot with backpressure disabled"
+                                );
+                            }
                         }
-
-                        currently_blocked = next_blocked;
-                        this_clone.set_blocked(next_blocked);
                     }
                 }
             }
@@ -200,8 +210,7 @@ impl MemoryMonitor {
         Self {
             inner: Arc::new(MemoryMonitorInner {
                 blocked_tx: watch::channel(false).0,
-                activate_threshold: 0.85,
-                resume_threshold: 0.75,
+                config: None,
             }),
         }
     }

@@ -1061,9 +1061,9 @@ mod tests {
     use super::*;
 
     use etl_config::shared::{
-        BatchConfig, DestinationConfig, InvalidatedSlotBehavior, PgConnectionConfig,
-        PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets, TableSyncCopyConfig,
-        TcpKeepaliveConfig, TlsConfig,
+        BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
+        PgConnectionConfig, PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
+        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     };
     use insta::assert_json_snapshot;
 
@@ -1165,6 +1165,10 @@ mod tests {
                 table_error_retry_delay_ms: 500,
                 table_error_retry_max_attempts: 3,
                 max_table_sync_workers: 4,
+                memory_backpressure: Some(MemoryBackpressureConfig {
+                    activate_threshold: 1.0,
+                    resume_threshold: 0.99,
+                }),
                 table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
                 invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
                 max_copy_connections_per_table:
