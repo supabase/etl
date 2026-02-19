@@ -261,8 +261,7 @@ where
         )?),
         None => None,
     };
-    if old_table_row.is_some()
-    {
+    if old_table_row.is_some() {
         histogram!(
             ETL_ROW_SIZE_BYTES,
             PIPELINE_ID_LABEL => pipeline_id.to_string(),
