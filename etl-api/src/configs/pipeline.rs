@@ -34,9 +34,18 @@ pub struct ApiBatchConfig {
     /// Maximum number of items in a batch for table copy and event streaming.
     #[schema(example = 1000)]
     pub max_size: Option<usize>,
-    /// Maximum time, in milliseconds, to wait for a batch to fill before processing.
+    /// Maximum time, in milliseconds, to wait before flushing a partially filled batch.
+    ///
+    /// This is the latency bound in streams: after the first item is buffered, the batch is
+    /// flushed when this timeout elapses even if size-based targets are not reached.
     #[schema(example = 1000)]
     pub max_fill_ms: Option<u64>,
+    /// Ratio of process memory reserved for incoming stream batch bytes.
+    ///
+    /// The effective byte budget is divided by active streams at runtime, and flush happens on
+    /// the first trigger between this byte budget and [`Self::max_fill_ms`].
+    #[schema(example = 0.2)]
+    pub memory_budget_ratio: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -77,6 +86,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
             batch: Some(ApiBatchConfig {
                 max_size: Some(value.batch.max_size),
                 max_fill_ms: Some(value.batch.max_fill_ms),
+                memory_budget_ratio: Some(value.batch.memory_budget_ratio),
             }),
             table_error_retry_delay_ms: Some(value.table_error_retry_delay_ms),
             table_error_retry_max_attempts: Some(value.table_error_retry_max_attempts),
@@ -179,13 +189,16 @@ impl StoredPipelineConfig {
             self.publication_name = value;
         }
 
-        if let Some(value) = partial.batch
-            && let (Some(max_size), Some(max_fill_ms)) = (value.max_size, value.max_fill_ms)
-        {
-            self.batch = BatchConfig {
-                max_size,
-                max_fill_ms,
-            };
+        if let Some(value) = partial.batch {
+            if let Some(max_size) = value.max_size {
+                self.batch.max_size = max_size;
+            }
+            if let Some(max_fill_ms) = value.max_fill_ms {
+                self.batch.max_fill_ms = max_fill_ms;
+            }
+            if let Some(memory_budget_ratio) = value.memory_budget_ratio {
+                self.batch.memory_budget_ratio = memory_budget_ratio;
+            }
         }
 
         if let Some(value) = partial.table_error_retry_delay_ms {
@@ -233,10 +246,14 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
             .map(|b| BatchConfig {
                 max_size: b.max_size.unwrap_or(BatchConfig::DEFAULT_MAX_SIZE),
                 max_fill_ms: b.max_fill_ms.unwrap_or(BatchConfig::DEFAULT_MAX_FILL_MS),
+                memory_budget_ratio: b
+                    .memory_budget_ratio
+                    .unwrap_or(BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO),
             })
             .unwrap_or(BatchConfig {
                 max_size: BatchConfig::DEFAULT_MAX_SIZE,
                 max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
+                memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
             });
 
         Self {
@@ -277,6 +294,7 @@ mod tests {
             batch: BatchConfig {
                 max_size: 1000,
                 max_fill_ms: 5000,
+                memory_budget_ratio: 0.2,
             },
             table_error_retry_delay_ms: 2000,
             table_error_retry_max_attempts: 7,
@@ -391,6 +409,7 @@ mod tests {
             batch: BatchConfig {
                 max_size: 500,
                 max_fill_ms: 2000,
+                memory_budget_ratio: 0.2,
             },
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 3,
@@ -408,6 +427,7 @@ mod tests {
             batch: Some(ApiBatchConfig {
                 max_size: Some(1000),
                 max_fill_ms: Some(8000),
+                memory_budget_ratio: Some(0.3),
             }),
             table_error_retry_delay_ms: Some(5000),
             table_error_retry_max_attempts: Some(9),

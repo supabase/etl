@@ -14,10 +14,31 @@ pub struct BatchConfig {
     #[serde(default = "default_batch_max_size")]
     #[cfg_attr(feature = "utoipa", schema(example = 10000))]
     pub max_size: usize,
-    /// Maximum time, in milliseconds, to wait for a batch to fill before processing.
+    /// Maximum time, in milliseconds, to wait before flushing a partially filled batch.
+    ///
+    /// This is the latency bound for stream batching: once the first item enters a batch,
+    /// the batch is flushed when this timer elapses, even if byte/row targets were not met.
+    ///
+    /// In practice, flush happens on the first trigger between this timeout and the
+    /// memory-based byte budget driven by [`Self::memory_budget_ratio`].
     #[serde(default = "default_batch_max_fill_ms")]
     #[cfg_attr(feature = "utoipa", schema(example = 0))]
     pub max_fill_ms: u64,
+    /// Ratio of process memory reserved for incoming stream batch bytes.
+    ///
+    /// This value is expressed as a ratio in the `(0.0, 1.0]` interval.
+    /// The configured memory is divided by the number of active streams at runtime, so each
+    /// stream gets only a per-stream share of the global memory budget.
+    ///
+    /// Together with [`Self::max_fill_ms`], this controls stream flushes: batches flush either
+    /// when their accumulated size estimate reaches the per-stream byte budget or when the
+    /// fill timeout elapses, whichever happens first.
+    ///
+    /// The goal is to preserve headroom for allocations beyond incoming rows, such as
+    /// destination batch building and serialization buffers.
+    #[serde(default = "default_memory_budget_ratio")]
+    #[cfg_attr(feature = "utoipa", schema(example = 0.2))]
+    pub memory_budget_ratio: f32,
 }
 
 impl BatchConfig {
@@ -26,6 +47,9 @@ impl BatchConfig {
 
     /// Default maximum fill time in milliseconds.
     pub const DEFAULT_MAX_FILL_MS: u64 = 10000;
+
+    /// Default percentage of total memory used for batch bytes budgeting.
+    pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.3;
 
     /// Validates batch configuration settings.
     ///
@@ -38,6 +62,13 @@ impl BatchConfig {
             });
         }
 
+        if !(0.0..=1.0).contains(&self.memory_budget_ratio) || self.memory_budget_ratio == 0.0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "batch.memory_budget_ratio".to_string(),
+                constraint: "must be in the (0.0, 1.0] interval".to_string(),
+            });
+        }
+
         Ok(())
     }
 }
@@ -47,6 +78,7 @@ impl Default for BatchConfig {
         Self {
             max_size: default_batch_max_size(),
             max_fill_ms: default_batch_max_fill_ms(),
+            memory_budget_ratio: default_memory_budget_ratio(),
         }
     }
 }
@@ -57,6 +89,10 @@ const fn default_batch_max_size() -> usize {
 
 const fn default_batch_max_fill_ms() -> u64 {
     BatchConfig::DEFAULT_MAX_FILL_MS
+}
+
+const fn default_memory_budget_ratio() -> f32 {
+    BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO
 }
 
 /// Behavior when the main replication slot is found to be invalidated.
@@ -220,15 +256,15 @@ pub struct PipelineConfig {
     /// When >1 (default), ctid-based partitioning splits the table across N connections.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
+    /// Number of milliseconds between one memory usage refresh and another.
+    #[serde(default = "default_memory_refresh_interval_ms")]
+    pub memory_refresh_interval_ms: u64,
     /// Optional memory-based backpressure configuration.
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
     /// `Some(MemoryBackpressureConfig::default())`.
     #[serde(default)]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
-    /// Number of milliseconds between one memory usage refresh and another.
-    #[serde(default = "default_memory_refresh_interval_ms")]
-    pub memory_refresh_interval_ms: u64,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
@@ -350,15 +386,15 @@ pub struct PipelineConfigWithoutSecrets {
     /// When >1 (default), ctid-based partitioning splits the table across N connections.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
+    /// Number of milliseconds between one memory usage refresh and another.
+    #[serde(default = "default_memory_refresh_interval_ms")]
+    pub memory_refresh_interval_ms: u64,
     /// Optional memory-based backpressure configuration.
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
     /// `Some(MemoryBackpressureConfig::default())`.
     #[serde(default)]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
-    /// Number of milliseconds between one memory usage refresh and another.
-    #[serde(default = "default_memory_refresh_interval_ms")]
-    pub memory_refresh_interval_ms: u64,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
@@ -378,8 +414,8 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
             max_table_sync_workers: value.max_table_sync_workers,
             max_copy_connections_per_table: value.max_copy_connections_per_table,
-            memory_backpressure: value.memory_backpressure,
             memory_refresh_interval_ms: value.memory_refresh_interval_ms,
+            memory_backpressure: value.memory_backpressure,
             table_sync_copy: value.table_sync_copy,
             invalidated_slot_behavior: value.invalidated_slot_behavior,
         }

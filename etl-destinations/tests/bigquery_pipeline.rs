@@ -426,6 +426,7 @@ async fn table_truncate_with_batching() {
         BatchConfig {
             max_size: 10,
             max_fill_ms: 1000,
+            memory_budget_ratio: 0.2,
         },
     );
 

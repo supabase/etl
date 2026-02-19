@@ -376,6 +376,7 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
     .with_batch_config(BatchConfig {
         max_size: 10_000,
         max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
     })
     .build();
 
@@ -453,6 +454,7 @@ async fn table_copy_with_row_filter_and_parallel_connections() {
     .with_batch_config(BatchConfig {
         max_size: 10_000,
         max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
     })
     .build();
 
@@ -1246,6 +1248,7 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     let batch_config = BatchConfig {
         max_size: 1000,
         max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
     };
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
@@ -1331,6 +1334,7 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     let batch_config = BatchConfig {
         max_size: 1000,
         max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
     };
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,

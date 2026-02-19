@@ -185,6 +185,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         batch: BatchConfig {
             max_size: args.bq_args.max_batch_size,
             max_fill_ms: args.bq_args.max_batch_fill_duration_ms,
+            memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,

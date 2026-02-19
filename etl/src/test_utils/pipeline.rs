@@ -103,6 +103,7 @@ where
             batch: BatchConfig {
                 max_size: 1,
                 max_fill_ms: 1000,
+                memory_budget_ratio: 0.2,
             },
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 2,

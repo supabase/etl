@@ -234,6 +234,7 @@ pub mod pipelines {
             batch: Some(ApiBatchConfig {
                 max_size: Some(1000),
                 max_fill_ms: Some(5),
+                memory_budget_ratio: Some(0.2),
             }),
             table_error_retry_delay_ms: Some(10000),
             table_error_retry_max_attempts: Some(5),
@@ -254,6 +255,7 @@ pub mod pipelines {
             batch: Some(ApiBatchConfig {
                 max_size: Some(2000),
                 max_fill_ms: Some(10),
+                memory_budget_ratio: Some(0.2),
             }),
             table_error_retry_delay_ms: Some(20000),
             table_error_retry_max_attempts: Some(10),
@@ -360,6 +362,7 @@ pub mod pipelines {
             batch: Some(ApiBatchConfig {
                 max_size: Some(1_000_000),
                 max_fill_ms: Some(100),
+                memory_budget_ratio: Some(0.2),
             }),
             table_error_retry_delay_ms: Some(10000),
             table_error_retry_max_attempts: Some(6),

@@ -329,6 +329,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         batch: BatchConfig {
             max_size: args.batch_max_size,
             max_fill_ms: args.batch_max_fill_ms,
+            memory_budget_ratio: 0.2,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,

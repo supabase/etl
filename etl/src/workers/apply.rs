@@ -103,7 +103,11 @@ impl<S, D> ApplyWorker<S, D> {
         table_sync_worker_permits: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
     ) -> Self {
-        let batch_budget = BatchBudgetController::new(pipeline_id, memory_monitor.clone());
+        let batch_budget = BatchBudgetController::new(
+            pipeline_id,
+            memory_monitor.clone(),
+            config.batch.memory_budget_ratio,
+        );
 
         Self {
             pipeline_id,

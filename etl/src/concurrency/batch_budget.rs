@@ -9,11 +9,6 @@ use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::metrics::{ETL_IDEAL_BATCH_SIZE_BYTES, PIPELINE_ID_LABEL};
 use crate::types::PipelineId;
 
-// This value is purposefully fixed for now.
-/// Safety factor applied to the configured memory threshold for batch filling.
-const BATCH_FILL_TARGET_SAFETY_FACTOR: f64 = 0.8;
-/// Fallback target memory usage ratio when no backpressure threshold is configured.
-const BATCH_FILL_TARGET_FALLBACK_RATIO: f64 = 0.8;
 /// Refresh interval for cached batch budget reads.
 const CACHED_BATCH_BUDGET_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -22,15 +17,21 @@ const CACHED_BATCH_BUDGET_REFRESH_INTERVAL: Duration = Duration::from_millis(100
 pub struct BatchBudgetController {
     pipeline_id: PipelineId,
     memory_monitor: MemoryMonitor,
+    memory_budget_ratio: f64,
     active_streams: Arc<AtomicUsize>,
 }
 
 impl BatchBudgetController {
     /// Creates a new [`BatchBudgetController`] instance.
-    pub fn new(pipeline_id: PipelineId, memory_monitor: MemoryMonitor) -> Self {
+    pub fn new(
+        pipeline_id: PipelineId,
+        memory_monitor: MemoryMonitor,
+        memory_budget_ratio: f32,
+    ) -> Self {
         Self {
             pipeline_id,
             memory_monitor,
+            memory_budget_ratio: f64::from(memory_budget_ratio),
             active_streams: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -51,26 +52,17 @@ impl BatchBudgetController {
         CachedBatchBudget::new(self.clone())
     }
 
-    /// Returns the target memory usage ratio for batch filling.
-    ///
-    /// When memory backpressure is configured, this is `activate_threshold * 0.8`.
-    /// Otherwise this falls back to `0.8`.
-    fn batch_fill_target_ratio(&self) -> f64 {
-        self.memory_monitor
-            .memory_backpressure_activate_threshold()
-            .map(|threshold| {
-                (f64::from(threshold) * BATCH_FILL_TARGET_SAFETY_FACTOR).clamp(0.0, 1.0)
-            })
-            .unwrap_or(BATCH_FILL_TARGET_FALLBACK_RATIO)
-    }
-
     /// Returns the ideal per-batch size in bytes.
     ///
     /// The budget is computed as:
-    /// (total_memory_bytes * target_ratio) / active_streams
+    /// `(total_memory_bytes * target_ratio) / active_streams`.
+    ///
+    /// This intentionally subdivides the configured memory percentage across concurrently active
+    /// streams, leaving headroom for other allocations in the process, such as destination batch
+    /// construction and serialization buffers.
     pub fn ideal_batch_size_bytes(&self) -> usize {
         let total_memory_bytes = self.memory_monitor.total_memory_bytes() as f64;
-        let target_ratio = self.batch_fill_target_ratio();
+        let target_ratio = self.memory_budget_ratio;
         let target_bytes = (total_memory_bytes * target_ratio).max(1.0) as usize;
         let active_streams = self.active_streams.load(Ordering::Relaxed).max(1);
         let ideal_batch_size_bytes = (target_bytes / active_streams).max(1);

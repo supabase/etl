@@ -1161,6 +1161,7 @@ mod tests {
                 batch: BatchConfig {
                     max_size: 10_000,
                     max_fill_ms: 1_000,
+                    memory_budget_ratio: 0.2,
                 },
                 table_error_retry_delay_ms: 500,
                 table_error_retry_max_attempts: 3,
@@ -1172,8 +1173,7 @@ mod tests {
                 }),
                 table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
                 invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
-                max_copy_connections_per_table:
-                    PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+                max_copy_connections_per_table: 2,
             },
             sentry: None,
             supabase: None,

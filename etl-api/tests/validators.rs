@@ -1,7 +1,7 @@
 mod support;
 
 use etl_api::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
-use etl_api::configs::pipeline::FullApiPipelineConfig;
+use etl_api::configs::pipeline::{ApiBatchConfig, FullApiPipelineConfig};
 use etl_api::validation::{
     FailureType, ValidationContext, validate_destination, validate_pipeline,
 };
@@ -66,7 +66,11 @@ fn create_bigquery_config(
 fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
     FullApiPipelineConfig {
         publication_name: publication_name.to_string(),
-        batch: None,
+        batch: Some(ApiBatchConfig {
+            max_size: None,
+            max_fill_ms: None,
+            memory_budget_ratio: Some(0.2),
+        }),
         log_level: None,
         table_error_retry_delay_ms: None,
         table_error_retry_max_attempts: None,
