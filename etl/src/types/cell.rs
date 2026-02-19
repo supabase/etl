@@ -32,7 +32,8 @@ macro_rules! convert_array_variant {
 ///
 /// The enum is designed to preserve type information and enable efficient conversion
 /// to destination formats while maintaining data fidelity.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum Cell {
     /// Represents a NULL database value
     Null,
@@ -108,7 +109,8 @@ impl Cell {
 ///
 /// This type is used internally during data conversion and can be converted to
 /// [`ArrayCellNonOptional`] for destinations that don't support nullable array elements.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum ArrayCell {
     /// Array of nullable boolean values
     Bool(Vec<Option<bool>>),
@@ -176,7 +178,8 @@ impl ArrayCell {
 ///
 /// This type is typically used when writing to destinations like BigQuery that require
 /// all array elements to be non-null.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum CellNonOptional {
     Null,
     Bool(bool),
@@ -264,7 +267,8 @@ impl CellNonOptional {
 /// if any element is NULL.
 ///
 /// Each variant corresponds to a Postgres array type with guaranteed non-null elements.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum ArrayCellNonOptional {
     Bool(Vec<bool>),
     String(Vec<String>),
