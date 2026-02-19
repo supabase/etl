@@ -424,7 +424,6 @@ async fn table_truncate_with_batching() {
         // We use a batch size > 1, so that we can make sure that interleaved truncate statements
         // work well with multiple batches of events.
         BatchConfig {
-            max_size: 10,
             max_fill_ms: 1000,
             memory_budget_ratio: 0.2,
         },

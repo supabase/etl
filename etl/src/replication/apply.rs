@@ -350,16 +350,12 @@ struct ApplyLoopState {
 
 impl ApplyLoopState {
     /// Creates a new [`ApplyLoopState`] with initial replication progress and event batch.
-    fn new(
-        replication_progress: ReplicationProgress,
-        max_batch_size: usize,
-        max_batch_fill_duration: Duration,
-    ) -> Self {
+    fn new(replication_progress: ReplicationProgress, max_batch_fill_duration: Duration) -> Self {
         Self {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
             replication_progress,
-            events_batch: Vec::with_capacity(max_batch_size),
+            events_batch: Vec::new(),
             events_batch_bytes: 0,
             current_tx_begin_ts: None,
             current_tx_events: 0,
@@ -488,7 +484,6 @@ where
 
         let state = ApplyLoopState::new(
             initial_progress,
-            config.batch.max_size,
             Duration::from_millis(config.batch.max_fill_ms),
         );
 
@@ -933,10 +928,7 @@ where
         }
 
         // We replace the existing vector with a new one and reset the accumulated batch bytes size.
-        let events_batch = std::mem::replace(
-            &mut self.state.events_batch,
-            Vec::with_capacity(self.config.batch.max_size),
-        );
+        let events_batch = std::mem::take(&mut self.state.events_batch);
         let events_batch_bytes = self.state.events_batch_bytes;
         self.state.events_batch_bytes = 0;
 

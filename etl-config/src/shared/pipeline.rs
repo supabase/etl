@@ -9,11 +9,6 @@ use crate::shared::{PgConnectionConfig, PgConnectionConfigWithoutSecrets, Valida
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct BatchConfig {
-    // TODO: remove the max size once we are sure about the new approach.
-    /// Maximum number of items in a batch for table copy and event streaming.
-    #[serde(default = "default_batch_max_size")]
-    #[cfg_attr(feature = "utoipa", schema(example = 10000))]
-    pub max_size: usize,
     /// Maximum time, in milliseconds, to wait before flushing a partially filled batch.
     ///
     /// This is the latency bound for stream batching: once the first item enters a batch,
@@ -42,9 +37,6 @@ pub struct BatchConfig {
 }
 
 impl BatchConfig {
-    /// Default maximum batch size for table copy and event streaming.
-    pub const DEFAULT_MAX_SIZE: usize = 100000;
-
     /// Default maximum fill time in milliseconds.
     pub const DEFAULT_MAX_FILL_MS: u64 = 10000;
 
@@ -53,15 +45,8 @@ impl BatchConfig {
 
     /// Validates batch configuration settings.
     ///
-    /// Ensures max_size is non-zero.
+    /// Ensures memory budget ratio is in range.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.max_size == 0 {
-            return Err(ValidationError::InvalidFieldValue {
-                field: "batch.max_size".to_string(),
-                constraint: "must be greater than 0".to_string(),
-            });
-        }
-
         if !(0.0..=1.0).contains(&self.memory_budget_ratio) || self.memory_budget_ratio == 0.0 {
             return Err(ValidationError::InvalidFieldValue {
                 field: "batch.memory_budget_ratio".to_string(),
@@ -76,15 +61,10 @@ impl BatchConfig {
 impl Default for BatchConfig {
     fn default() -> Self {
         Self {
-            max_size: default_batch_max_size(),
             max_fill_ms: default_batch_max_fill_ms(),
             memory_budget_ratio: default_memory_budget_ratio(),
         }
     }
-}
-
-const fn default_batch_max_size() -> usize {
-    BatchConfig::DEFAULT_MAX_SIZE
 }
 
 const fn default_batch_max_fill_ms() -> u64 {

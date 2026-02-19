@@ -104,9 +104,6 @@ struct BqArgs {
     /// BigQuery dataset ID (must exist in the specified project)
     #[arg(long)]
     bq_dataset_id: String,
-    /// Maximum batch size for processing events (higher values = better throughput, more memory usage)
-    #[arg(long, default_value = "1000")]
-    max_batch_size: usize,
     /// Maximum time to wait for a batch to fill in milliseconds (lower values = lower latency, less throughput)
     #[arg(long, default_value = "5000")]
     max_batch_fill_duration_ms: u64,
@@ -183,7 +180,6 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         publication_name: args.publication,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
-            max_size: args.bq_args.max_batch_size,
             max_fill_ms: args.bq_args.max_batch_fill_duration_ms,
             memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
         },

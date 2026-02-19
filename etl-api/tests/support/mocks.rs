@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use etl_api::configs::destination::FullApiDestinationConfig;
-use etl_api::configs::pipeline::{FullApiPipelineConfig, PartialApiPipelineConfig};
+use etl_api::configs::pipeline::FullApiPipelineConfig;
 use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::destinations::{CreateDestinationRequest, CreateDestinationResponse};
 use etl_api::routes::images::{CreateImageRequest, CreateImageResponse};
@@ -232,7 +232,6 @@ pub mod pipelines {
         FullApiPipelineConfig {
             publication_name: "publication".to_owned(),
             batch: Some(ApiBatchConfig {
-                max_size: Some(1000),
                 max_fill_ms: Some(5),
                 memory_budget_ratio: Some(0.2),
             }),
@@ -253,7 +252,6 @@ pub mod pipelines {
         FullApiPipelineConfig {
             publication_name: "updated_publication".to_owned(),
             batch: Some(ApiBatchConfig {
-                max_size: Some(2000),
                 max_fill_ms: Some(10),
                 memory_budget_ratio: Some(0.2),
             }),
@@ -266,113 +264,6 @@ pub mod pipelines {
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             invalidated_slot_behavior: None,
             log_level: Some(LogLevel::Info),
-        }
-    }
-
-    /// Partial config update variants used in tests.
-    pub enum ConfigUpdateType {
-        Batch(ApiBatchConfig),
-        TableErrorRetryDelayMs(u64),
-        TableErrorRetryMaxAttempts(u32),
-        MaxTableSyncWorkers(u16),
-        LogLevel(Option<LogLevel>),
-    }
-
-    /// Returns a partial pipeline config with a single field updated.
-    pub fn partially_updated_optional_pipeline_config(
-        update: ConfigUpdateType,
-    ) -> PartialApiPipelineConfig {
-        match update {
-            ConfigUpdateType::Batch(batch_config) => PartialApiPipelineConfig {
-                publication_name: None,
-                batch: Some(batch_config),
-                table_error_retry_delay_ms: None,
-                table_error_retry_max_attempts: None,
-                max_table_sync_workers: None,
-                memory_refresh_interval_ms: None,
-                max_copy_connections_per_table: None,
-                memory_backpressure: None,
-                table_sync_copy: None,
-                invalidated_slot_behavior: None,
-                log_level: None,
-            },
-            ConfigUpdateType::TableErrorRetryDelayMs(table_error_retry_delay_ms) => {
-                PartialApiPipelineConfig {
-                    publication_name: None,
-                    batch: None,
-                    table_error_retry_delay_ms: Some(table_error_retry_delay_ms),
-                    table_error_retry_max_attempts: None,
-                    max_table_sync_workers: None,
-                    memory_refresh_interval_ms: None,
-                    max_copy_connections_per_table: None,
-                    memory_backpressure: None,
-                    table_sync_copy: None,
-                    invalidated_slot_behavior: None,
-                    log_level: None,
-                }
-            }
-            ConfigUpdateType::TableErrorRetryMaxAttempts(max_attempts) => {
-                PartialApiPipelineConfig {
-                    publication_name: None,
-                    batch: None,
-                    table_error_retry_delay_ms: None,
-                    table_error_retry_max_attempts: Some(max_attempts),
-                    max_table_sync_workers: None,
-                    memory_refresh_interval_ms: None,
-                    max_copy_connections_per_table: None,
-                    memory_backpressure: None,
-                    table_sync_copy: None,
-                    invalidated_slot_behavior: None,
-                    log_level: None,
-                }
-            }
-            ConfigUpdateType::MaxTableSyncWorkers(n) => PartialApiPipelineConfig {
-                publication_name: None,
-                batch: None,
-                table_error_retry_delay_ms: None,
-                table_error_retry_max_attempts: None,
-                max_table_sync_workers: Some(n),
-                memory_refresh_interval_ms: None,
-                max_copy_connections_per_table: None,
-                memory_backpressure: None,
-                table_sync_copy: None,
-                invalidated_slot_behavior: None,
-                log_level: None,
-            },
-            ConfigUpdateType::LogLevel(log_level) => PartialApiPipelineConfig {
-                publication_name: None,
-                batch: None,
-                table_error_retry_delay_ms: None,
-                table_error_retry_max_attempts: None,
-                max_table_sync_workers: None,
-                memory_refresh_interval_ms: None,
-                max_copy_connections_per_table: None,
-                memory_backpressure: None,
-                table_sync_copy: None,
-                invalidated_slot_behavior: None,
-                log_level,
-            },
-        }
-    }
-
-    /// Returns a partial pipeline config with multiple optional fields updated.
-    pub fn updated_optional_pipeline_config() -> PartialApiPipelineConfig {
-        PartialApiPipelineConfig {
-            publication_name: None,
-            batch: Some(ApiBatchConfig {
-                max_size: Some(1_000_000),
-                max_fill_ms: Some(100),
-                memory_budget_ratio: Some(0.2),
-            }),
-            table_error_retry_delay_ms: Some(10000),
-            table_error_retry_max_attempts: Some(6),
-            max_table_sync_workers: Some(8),
-            memory_refresh_interval_ms: None,
-            max_copy_connections_per_table: None,
-            memory_backpressure: None,
-            table_sync_copy: None,
-            invalidated_slot_behavior: None,
-            log_level: None,
         }
     }
 

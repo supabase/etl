@@ -31,9 +31,6 @@ const fn default_memory_refresh_interval_ms() -> u64 {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ApiBatchConfig {
-    /// Maximum number of items in a batch for table copy and event streaming.
-    #[schema(example = 1000)]
-    pub max_size: Option<usize>,
     /// Maximum time, in milliseconds, to wait before flushing a partially filled batch.
     ///
     /// This is the latency bound in streams: after the first item is buffered, the batch is
@@ -84,7 +81,6 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
         Self {
             publication_name: value.publication_name,
             batch: Some(ApiBatchConfig {
-                max_size: Some(value.batch.max_size),
                 max_fill_ms: Some(value.batch.max_fill_ms),
                 memory_budget_ratio: Some(value.batch.memory_budget_ratio),
             }),
@@ -99,43 +95,6 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
             log_level: value.log_level,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct PartialApiPipelineConfig {
-    #[schema(example = "my_publication")]
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::utils::trim_option_string"
-    )]
-    pub publication_name: Option<String>,
-    #[schema(example = r#"{"max_size": 1000000, "max_fill_ms": 10000}"#)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub batch: Option<ApiBatchConfig>,
-    #[schema(example = 1000)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_error_retry_delay_ms: Option<u64>,
-    #[schema(example = 5)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_error_retry_max_attempts: Option<u32>,
-    #[schema(example = 4)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_table_sync_workers: Option<u16>,
-    #[schema(example = 2)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_copy_connections_per_table: Option<u16>,
-    #[schema(example = 100)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub memory_refresh_interval_ms: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub memory_backpressure: Option<MemoryBackpressureConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_sync_copy: Option<TableSyncCopyConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub invalidated_slot_behavior: Option<InvalidatedSlotBehavior>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub log_level: Option<LogLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,58 +142,6 @@ impl StoredPipelineConfig {
             max_copy_connections_per_table: self.max_copy_connections_per_table,
         }
     }
-
-    pub fn merge(&mut self, partial: PartialApiPipelineConfig) {
-        if let Some(value) = partial.publication_name {
-            self.publication_name = value;
-        }
-
-        if let Some(value) = partial.batch {
-            if let Some(max_size) = value.max_size {
-                self.batch.max_size = max_size;
-            }
-            if let Some(max_fill_ms) = value.max_fill_ms {
-                self.batch.max_fill_ms = max_fill_ms;
-            }
-            if let Some(memory_budget_ratio) = value.memory_budget_ratio {
-                self.batch.memory_budget_ratio = memory_budget_ratio;
-            }
-        }
-
-        if let Some(value) = partial.table_error_retry_delay_ms {
-            self.table_error_retry_delay_ms = value;
-        }
-
-        if let Some(value) = partial.table_error_retry_max_attempts {
-            self.table_error_retry_max_attempts = value;
-        }
-
-        if let Some(value) = partial.max_table_sync_workers {
-            self.max_table_sync_workers = value;
-        }
-
-        if let Some(value) = partial.max_copy_connections_per_table {
-            self.max_copy_connections_per_table = value;
-        }
-
-        if let Some(value) = partial.memory_refresh_interval_ms {
-            self.memory_refresh_interval_ms = value;
-        }
-
-        if let Some(value) = partial.memory_backpressure {
-            self.memory_backpressure = Some(value);
-        }
-
-        if let Some(value) = partial.table_sync_copy {
-            self.table_sync_copy = value;
-        }
-
-        if let Some(value) = partial.invalidated_slot_behavior {
-            self.invalidated_slot_behavior = value;
-        }
-
-        self.log_level = partial.log_level
-    }
 }
 
 impl Store for StoredPipelineConfig {}
@@ -244,14 +151,12 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
         let batch = value
             .batch
             .map(|b| BatchConfig {
-                max_size: b.max_size.unwrap_or(BatchConfig::DEFAULT_MAX_SIZE),
                 max_fill_ms: b.max_fill_ms.unwrap_or(BatchConfig::DEFAULT_MAX_FILL_MS),
                 memory_budget_ratio: b
                     .memory_budget_ratio
                     .unwrap_or(BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO),
             })
             .unwrap_or(BatchConfig {
-                max_size: BatchConfig::DEFAULT_MAX_SIZE,
                 max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
                 memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
             });
@@ -292,7 +197,6 @@ mod tests {
         let config = StoredPipelineConfig {
             publication_name: "test_publication".to_string(),
             batch: BatchConfig {
-                max_size: 1000,
                 max_fill_ms: 5000,
                 memory_budget_ratio: 0.2,
             },
@@ -314,7 +218,6 @@ mod tests {
         let deserialized: StoredPipelineConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(config.publication_name, deserialized.publication_name);
-        assert_eq!(config.batch.max_size, deserialized.batch.max_size);
         assert_eq!(
             config.table_error_retry_delay_ms,
             deserialized.table_error_retry_delay_ms
@@ -373,7 +276,6 @@ mod tests {
 
         let stored: StoredPipelineConfig = full_config.into();
 
-        assert_eq!(stored.batch.max_size, BatchConfig::DEFAULT_MAX_SIZE);
         assert_eq!(stored.batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
         assert_eq!(
             stored.table_error_retry_delay_ms,
@@ -399,71 +301,6 @@ mod tests {
         assert_eq!(
             stored.invalidated_slot_behavior,
             InvalidatedSlotBehavior::Error
-        );
-    }
-
-    #[test]
-    fn test_partial_api_pipeline_config_merge() {
-        let mut stored = StoredPipelineConfig {
-            publication_name: "old_publication".to_string(),
-            batch: BatchConfig {
-                max_size: 500,
-                max_fill_ms: 2000,
-                memory_budget_ratio: 0.2,
-            },
-            table_error_retry_delay_ms: 1000,
-            table_error_retry_max_attempts: 3,
-            max_table_sync_workers: 2,
-            max_copy_connections_per_table: 1,
-            memory_refresh_interval_ms: 100,
-            memory_backpressure: Some(MemoryBackpressureConfig::default()),
-            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
-            log_level: None,
-            invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
-        };
-
-        let partial = PartialApiPipelineConfig {
-            publication_name: Some("new_publication".to_string()),
-            batch: Some(ApiBatchConfig {
-                max_size: Some(1000),
-                max_fill_ms: Some(8000),
-                memory_budget_ratio: Some(0.3),
-            }),
-            table_error_retry_delay_ms: Some(5000),
-            table_error_retry_max_attempts: Some(9),
-            max_table_sync_workers: None,
-            max_copy_connections_per_table: Some(8),
-            memory_refresh_interval_ms: Some(200),
-            memory_backpressure: Some(MemoryBackpressureConfig {
-                activate_threshold: 1.0,
-                resume_threshold: 0.99,
-            }),
-            table_sync_copy: Some(TableSyncCopyConfig::SkipAllTables),
-            invalidated_slot_behavior: Some(InvalidatedSlotBehavior::Recreate),
-            log_level: None,
-        };
-
-        stored.merge(partial);
-
-        assert_eq!(stored.publication_name, "new_publication");
-        assert_eq!(stored.batch.max_size, 1000);
-        assert_eq!(stored.batch.max_fill_ms, 8000);
-        assert_eq!(stored.table_error_retry_delay_ms, 5000);
-        assert_eq!(stored.table_error_retry_max_attempts, 9);
-        assert_eq!(stored.max_table_sync_workers, 2);
-        assert_eq!(stored.max_copy_connections_per_table, 8);
-        assert_eq!(stored.memory_refresh_interval_ms, 200);
-        assert_eq!(
-            stored.memory_backpressure,
-            Some(MemoryBackpressureConfig {
-                activate_threshold: 1.0,
-                resume_threshold: 0.99,
-            })
-        );
-        assert_eq!(stored.table_sync_copy, TableSyncCopyConfig::SkipAllTables);
-        assert_eq!(
-            stored.invalidated_slot_behavior,
-            InvalidatedSlotBehavior::Recreate
         );
     }
 }

@@ -67,7 +67,6 @@ fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
     FullApiPipelineConfig {
         publication_name: publication_name.to_string(),
         batch: Some(ApiBatchConfig {
-            max_size: None,
             max_fill_ms: None,
             memory_budget_ratio: Some(0.2),
         }),

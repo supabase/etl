@@ -1159,7 +1159,6 @@ mod tests {
                     keepalive: TcpKeepaliveConfig::default(),
                 },
                 batch: BatchConfig {
-                    max_size: 10_000,
                     max_fill_ms: 1_000,
                     memory_budget_ratio: 0.2,
                 },

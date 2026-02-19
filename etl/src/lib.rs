@@ -90,7 +90,7 @@
 //!         id: 1,
 //!         publication_name: "my_publication".to_string(),
 //!         pg_connection: pg_config,
-//!         batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
+//!         batch: BatchConfig { max_fill_ms: 5000, memory_budget_ratio: 0.2 },
 //!         table_error_retry_delay_ms: 10000,
 //!         table_error_retry_max_attempts: 5,
 //!         max_table_sync_workers: 4,

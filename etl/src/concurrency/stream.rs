@@ -131,7 +131,7 @@ where
         BatchBackpressureStream {
             stream,
             deadline: None,
-            items: Vec::with_capacity(batch_config.max_size),
+            items: Vec::new(),
             current_batch_bytes: 0,
             cached_batch_budget,
             batch_config,
@@ -232,14 +232,7 @@ where
                 *this.reset_timer = false;
             }
 
-            // PRIORITY 3: Memory optimization.
-            // Pre-allocate batch capacity when starting to collect items
-            // This avoids reallocations during batch collection.
-            if this.items.is_empty() {
-                this.items.reserve_exact(this.batch_config.max_size);
-            }
-
-            // PRIORITY 4: Poll underlying stream for new items.
+            // PRIORITY 3: Poll underlying stream for new items.
             match this.stream.as_mut().poll_next(cx) {
                 Poll::Pending => {
                     // No more items available right now, check if we should emit due to timeout.
@@ -468,7 +461,6 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = BatchConfig {
-            max_size: 10,
             max_fill_ms: 10_000,
             memory_budget_ratio: 0.2,
         };
@@ -501,7 +493,6 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = BatchConfig {
-            max_size: 1,
             max_fill_ms: 10_000,
             memory_budget_ratio: 0.2,
         };
@@ -532,7 +523,6 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = BatchConfig {
-            max_size: 1,
             max_fill_ms: 10_000,
             memory_budget_ratio: 0.2,
         };
@@ -573,12 +563,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn does_not_flush_when_only_max_size_is_reached() {
+    async fn does_not_flush_before_timeout_when_bytes_limit_not_reached() {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
         let batch_config = BatchConfig {
-            max_size: 2,
             max_fill_ms: 100,
             memory_budget_ratio: 0.2,
         };
@@ -589,7 +578,7 @@ mod tests {
             test_cached_budget(&memory),
         ));
 
-        // Even though max_size is 2 and stream emits exactly two items, we do not flush by item count.
+        // Even with two buffered items, we do not flush by item count.
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
             _ => panic!("expected pending before timeout when only item count threshold is met"),
@@ -607,7 +596,6 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = BatchConfig {
-            max_size: 10,
             max_fill_ms: 10_000,
             memory_budget_ratio: 0.2,
         };
@@ -647,7 +635,6 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = BatchConfig {
-            max_size: 10,
             max_fill_ms: 10_000,
             memory_budget_ratio: 0.2,
         };
@@ -688,7 +675,6 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = BatchConfig {
-            max_size: 10,
             max_fill_ms: 100,
             memory_budget_ratio: 0.2,
         };
@@ -699,7 +685,7 @@ mod tests {
             test_cached_budget(&memory),
         ));
 
-        // The stream has buffered items but not enough to reach max_size, so it should wait.
+        // The stream has buffered items but not enough to reach byte budget, so it should wait.
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
             _ => panic!("expected pending before timeout"),
@@ -719,7 +705,6 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = BatchConfig {
-            max_size: 10,
             max_fill_ms: 10_000,
             memory_budget_ratio: 0.2,
         };
@@ -745,7 +730,6 @@ mod tests {
         let memory_sub = memory.subscribe();
 
         let batch_config = BatchConfig {
-            max_size: 10,
             max_fill_ms: 10_000,
             memory_budget_ratio: 0.2,
         };

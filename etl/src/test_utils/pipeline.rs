@@ -35,7 +35,7 @@ pub fn test_slot_name(slot_name: &str) -> String {
 ///
 /// // Create a pipeline with custom batch and retry configurations
 /// let pipeline = PipelineBuilder::new(pg_config, id, pub_name, store, dest)
-///     .with_batch_config(BatchConfig { max_size: 100, max_fill_ms: 5000 })
+///     .with_batch_config(BatchConfig { max_fill_ms: 5000, memory_budget_ratio: 0.2 })
 ///     .with_retry_config(2000, 10)
 ///     .build();
 /// ```
@@ -45,7 +45,7 @@ pub struct PipelineBuilder<S, D> {
     publication_name: String,
     store: S,
     destination: D,
-    /// Batch configuration. Defaults to max_size=1, max_fill_ms=1000 if not specified.
+    /// Batch configuration.
     batch: BatchConfig,
     /// Delay in milliseconds before retrying a failed table operation. Default: 1000ms.
     table_error_retry_delay_ms: u64,
@@ -82,7 +82,7 @@ where
     ///
     /// # Default Settings
     ///
-    /// * Batch: max_size=1, max_fill_ms=1000
+    /// * Batch: max_fill_ms=1000
     /// * Retry delay: 1000ms
     /// * Max retry attempts: 2
     /// * Max table sync workers: 1
@@ -101,7 +101,6 @@ where
             store,
             destination,
             batch: BatchConfig {
-                max_size: 1,
                 max_fill_ms: 1000,
                 memory_budget_ratio: 0.2,
             },
