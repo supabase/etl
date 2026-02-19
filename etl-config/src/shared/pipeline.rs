@@ -251,6 +251,7 @@ impl PipelineConfig {
     pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 2;
     /// Default interval in milliseconds between one memory refresh and another.
     pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
+
     /// Validates pipeline configuration settings.
     ///
     /// Checks batch configuration and ensures worker counts and retry attempts are non-zero.

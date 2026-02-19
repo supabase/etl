@@ -77,7 +77,6 @@ pub enum TableCopyResult {
 }
 
 /// Copies rows from a batched table-copy stream into the destination with prioritized shutdown handling.
-#[expect(clippy::too_many_arguments)]
 async fn copy_table_rows_from_stream<D, S>(
     mut table_copy_stream: Pin<&mut S>,
     mut shutdown_rx: ShutdownRx,
@@ -86,13 +85,11 @@ async fn copy_table_rows_from_stream<D, S>(
     pipeline_id: PipelineId,
     partitioning: &'static str,
     destination: D,
-    batch_budget: BatchBudgetController,
 ) -> EtlResult<ShutdownResult<u64, u64>>
 where
     D: Destination + Clone + Send + 'static,
     S: Stream<Item = Vec<EtlResult<TableRow>>> + ?Sized,
 {
-    let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let mut total_rows: u64 = 0;
 
     loop {
@@ -262,6 +259,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     let table_copy_stream =
         TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
     let connection_updates_rx = transaction.get_cloned_client().connection_updates_rx();
+    let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
     let table_copy_stream = BatchBackpressureStream::wrap(
         table_copy_stream,
@@ -281,7 +279,6 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         pipeline_id,
         "false",
         destination,
-        batch_budget,
     )
     .await?
     {
@@ -619,6 +616,7 @@ where
     let connection_updates_rx = child_transaction
         .get_cloned_client()
         .connection_updates_rx();
+    let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
     let table_copy_stream = BatchBackpressureStream::wrap(
         table_copy_stream,
@@ -636,7 +634,6 @@ where
         pipeline_id,
         "true",
         destination,
-        batch_budget,
     )
     .await?
     {
