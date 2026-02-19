@@ -453,6 +453,10 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                         partition_durations.push(partition_total_duration_secs);
                     }
                     TableCopyResult::Shutdown => {
+                        info!(
+                            "shutting down parallel table copy since one or more partitions were interrupted by shutdown"
+                        );
+
                         return Ok(TableCopyResult::Shutdown);
                     }
                 }
@@ -463,7 +467,6 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                     error = %err,
                     "one or more parallel copy partitions failed"
                 );
-                join_set.abort_all();
 
                 return Err(err);
             }
@@ -473,7 +476,6 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                     error = %join_err,
                     "one or more parallel copy partitions panicked"
                 );
-                join_set.abort_all();
 
                 return Err(etl_error!(
                     ErrorKind::TableSyncWorkerPanic,
@@ -628,13 +630,8 @@ where
         ShutdownResult::Shutdown(total_rows) => {
             info!(
                 table_id = table_id.0,
-                total_rows, "partition copy interrupted by shutdown"
+                total_rows, "partition copy interrupted by shutdown, skipping rollback"
             );
-
-            // If during the copy, we were told to shutdown, we cleanly rollback even if
-            // we didn't have any writes, so that we let Postgres clean up everything as
-            // soon as possible.
-            child_transaction.rollback().await?;
 
             return Ok(TableCopyResult::Shutdown);
         }

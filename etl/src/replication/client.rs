@@ -285,11 +285,6 @@ impl PgReplicationTransaction {
     pub async fn commit(self) -> EtlResult<()> {
         self.client.commit_tx().await
     }
-
-    /// Rolls back the current transaction.
-    pub async fn rollback(self) -> EtlResult<()> {
-        self.client.rollback_tx().await
-    }
 }
 
 /// A transaction on a child connection pinned to an exported snapshot.
@@ -362,11 +357,6 @@ impl PgReplicationChildTransaction {
     /// Commits the current transaction.
     pub async fn commit(self) -> EtlResult<()> {
         self.client.client.commit_tx().await
-    }
-
-    /// Rolls back the current transaction.
-    pub async fn rollback(self) -> EtlResult<()> {
-        self.client.client.rollback_tx().await
     }
 }
 
@@ -1006,13 +996,6 @@ impl PgReplicationClient {
     /// Commits the current transaction.
     async fn commit_tx(&self) -> EtlResult<()> {
         self.client.simple_query("commit;").await?;
-
-        Ok(())
-    }
-
-    /// Rolls back the current transaction.
-    async fn rollback_tx(&self) -> EtlResult<()> {
-        self.client.simple_query("rollback;").await?;
 
         Ok(())
     }
