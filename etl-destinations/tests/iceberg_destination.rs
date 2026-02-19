@@ -114,6 +114,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
 
     let expected_users = vec![
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(1),
                 Cell::String("user_1".to_string()),
@@ -123,6 +124,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
             ],
         },
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(2),
                 Cell::String("user_2".to_string()),
@@ -142,6 +144,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
 
     let expected_orders = vec![
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(1),
                 Cell::String("description_1".to_string()),
@@ -150,6 +153,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
             ],
         },
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(2),
                 Cell::String("description_2".to_string()),
@@ -360,6 +364,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     let expected_users = vec![
         // Initial insert of user 1
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(1),
                 Cell::String("user_1".to_string()),
@@ -369,6 +374,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         },
         // Initial insert of user 2
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(2),
                 Cell::String("user_2".to_string()),
@@ -378,6 +384,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         },
         // Update of user 1
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(1),
                 Cell::String("updated_name".to_string()),
@@ -387,6 +394,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         },
         // Update of user 2
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(2),
                 Cell::String("updated_name".to_string()),
@@ -396,6 +404,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         },
         // Delete of user with id 1
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(1),
                 Cell::String("".to_string()),
@@ -425,6 +434,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     let expected_orders = vec![
         // Initial insert of order 1
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(1),
                 Cell::String("description_1".to_string()),
@@ -433,6 +443,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         },
         // Initial insert of order 2
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(2),
                 Cell::String("description_2".to_string()),
@@ -441,6 +452,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         },
         // Update of order 1
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(1),
                 Cell::String("updated_description".to_string()),
@@ -449,6 +461,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         },
         // Update of order 2
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(2),
                 Cell::String("updated_description".to_string()),
@@ -457,6 +470,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         },
         // Delete of order 2
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(2),
                 Cell::String("".to_string()),
@@ -637,6 +651,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
 
     let expected_users = vec![
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(3),
                 Cell::String("user_3".to_string()),
@@ -645,6 +660,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
             ],
         },
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(4),
                 Cell::String("user_4".to_string()),
@@ -664,6 +680,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
 
     let expected_orders = vec![
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(3),
                 Cell::String("description_3".to_string()),
@@ -671,6 +688,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
             ],
         },
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I64(4),
                 Cell::String("description_4".to_string()),

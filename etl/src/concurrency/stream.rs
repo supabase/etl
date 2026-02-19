@@ -6,6 +6,7 @@ use pin_project_lite::pin_project;
 use std::time::Duration;
 use tracing::info;
 
+use crate::concurrency::batch_budget::CachedBatchBudget;
 use crate::concurrency::memory_monitor::MemoryMonitorSubscription;
 use crate::types::SizeHint;
 
@@ -96,7 +97,7 @@ pin_project! {
     /// A stream adapter that batches items based on size limits and timeouts.
     ///
     /// This stream collects items from the underlying stream into batches, emitting them when either:
-    /// - The batch reaches its maximum bytes (when configured)
+    /// - The batch reaches its current byte budget
     /// - A timeout occurs
     #[must_use = "streams do nothing unless polled"]
     #[derive(Debug)]
@@ -107,7 +108,7 @@ pub struct BatchBackpressureStream<B, S: Stream<Item = B>> {
         deadline: Option<tokio::time::Sleep>,
         items: Vec<S::Item>,
         current_batch_bytes: usize,
-        max_batch_bytes: Option<usize>,
+        cached_batch_budget: CachedBatchBudget,
         batch_config: BatchConfig,
         reset_timer: bool,
         inner_stream_ended: bool,
@@ -125,14 +126,14 @@ where
         stream: S,
         batch_config: BatchConfig,
         memory_subscription: Option<MemoryMonitorSubscription>,
-        max_batch_bytes: Option<usize>,
+        cached_batch_budget: CachedBatchBudget,
     ) -> Self {
         BatchBackpressureStream {
             stream,
             deadline: None,
             items: Vec::with_capacity(batch_config.max_size),
             current_batch_bytes: 0,
-            max_batch_bytes,
+            cached_batch_budget,
             batch_config,
             reset_timer: true,
             inner_stream_ended: false,
@@ -251,10 +252,8 @@ where
                     this.items.push(item);
 
                     // If byte budget is reached, emit immediately.
-                    let max_batch_bytes_reached =
-                        this.max_batch_bytes.is_some_and(|max_batch_bytes| {
-                            *this.current_batch_bytes >= max_batch_bytes
-                        });
+                    let max_batch_bytes_reached = *this.current_batch_bytes
+                        >= this.cached_batch_budget.current_batch_size_bytes();
                     if max_batch_bytes_reached {
                         *this.reset_timer = true;
                         *this.current_batch_bytes = 0;
@@ -309,6 +308,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::concurrency::batch_budget::BatchBudgetController;
     use crate::concurrency::memory_monitor::MemoryMonitor;
     use crate::types::SizeHint;
     use core::task::Poll;
@@ -364,6 +364,22 @@ mod tests {
         }
     }
 
+    /// Returns a cached budget with a very high limit so byte-based flushes do not interfere.
+    fn test_cached_budget(memory_monitor: &MemoryMonitor) -> CachedBatchBudget {
+        memory_monitor.set_total_memory_bytes_for_test(10_000_000_000);
+
+        BatchBudgetController::new(1, memory_monitor.clone()).cached()
+    }
+
+    /// Returns a cached budget and the computed byte limit for assertions in byte-based tests.
+    fn test_cached_budget_with_limit(memory_monitor: &MemoryMonitor) -> (CachedBatchBudget, usize) {
+        memory_monitor.set_total_memory_bytes_for_test(10_000);
+        let mut cached_budget = BatchBudgetController::new(1, memory_monitor.clone()).cached();
+        let limit = cached_budget.current_batch_size_bytes();
+
+        (cached_budget, limit)
+    }
+
     // BackpressureStream tests.
     #[tokio::test]
     async fn backpressure_stream_pauses_while_blocked_then_resumes() {
@@ -374,7 +390,7 @@ mod tests {
         // When backpressure is active, wrapped stream stays pending even if it has data.
         let mut stream = Box::pin(BackpressureStream::wrap(
             futures::stream::iter(vec![10]),
-            Some(memory_sub),
+            memory_sub,
         ));
 
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
@@ -396,7 +412,7 @@ mod tests {
         let memory_sub = memory.subscribe();
         let mut stream = Box::pin(BackpressureStream::wrap(
             futures::stream::iter(vec![11]),
-            Some(memory_sub),
+            memory_sub,
         ));
 
         // Activate backpressure after subscribe and before next poll.
@@ -414,7 +430,7 @@ mod tests {
     async fn backpressure_stream_first_poll_blocked_update_waits_until_unblock() {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
-        let stream = BackpressureStream::wrap(futures::stream::iter(vec![14]), Some(memory_sub));
+        let stream = BackpressureStream::wrap(futures::stream::iter(vec![14]), memory_sub);
 
         // Set blocked before first poll so the first poll observes an immediate update.
         memory.set_backpressure_active_for_test(true);
@@ -458,8 +474,8 @@ mod tests {
         let mut stream = Box::pin(BatchBackpressureStream::wrap(
             TwoThenPending::new(),
             batch_config,
-            Some(memory_sub),
-            None,
+            memory_sub,
+            test_cached_budget(&memory),
         ));
 
         // First the first poll, we are pending since we are waiting for 10 elements but the stream
@@ -490,8 +506,8 @@ mod tests {
         let mut stream = Box::pin(BatchBackpressureStream::wrap(
             futures::stream::iter(vec![1]),
             batch_config,
-            Some(memory_sub),
-            None,
+            memory_sub,
+            test_cached_budget(&memory),
         ));
 
         // Memory is full, so we block any poll.
@@ -520,8 +536,8 @@ mod tests {
         let stream = BatchBackpressureStream::wrap(
             futures::stream::iter(vec![2]),
             batch_config,
-            Some(memory_sub),
-            None,
+            memory_sub,
+            test_cached_budget(&memory),
         );
 
         // Set blocked before first poll so the first poll observes an immediate update.
@@ -565,8 +581,8 @@ mod tests {
         let mut stream = Box::pin(BatchBackpressureStream::wrap(
             TwoThenPending::new(),
             batch_config,
-            Some(memory_sub),
-            None,
+            memory_sub,
+            test_cached_budget(&memory),
         ));
 
         // Even though max_size is 2 and stream emits exactly two items, we do not flush by item count.
@@ -590,16 +606,27 @@ mod tests {
             max_size: 10,
             max_fill_ms: 10_000,
         };
+        let (cached_budget, byte_limit) = test_cached_budget_with_limit(&memory);
+        let byte_size = (byte_limit / 2).max(1);
         let items = vec![
-            SizedToken { value: 1, bytes: 3 },
-            SizedToken { value: 2, bytes: 3 },
-            SizedToken { value: 3, bytes: 3 },
+            SizedToken {
+                value: 1,
+                bytes: byte_size,
+            },
+            SizedToken {
+                value: 2,
+                bytes: byte_size,
+            },
+            SizedToken {
+                value: 3,
+                bytes: byte_size,
+            },
         ];
         let mut stream = Box::pin(BatchBackpressureStream::wrap(
             futures::stream::iter(items.clone()),
             batch_config,
-            Some(memory_sub),
-            Some(6),
+            memory_sub,
+            cached_budget,
         ));
 
         let first = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
@@ -618,16 +645,31 @@ mod tests {
             max_size: 10,
             max_fill_ms: 10_000,
         };
+        let (cached_budget, byte_limit) = test_cached_budget_with_limit(&memory);
+        let first = (byte_limit / 4).max(1);
+        let second = (byte_limit / 4).max(1);
+        let third = byte_limit
+            .saturating_sub(first.saturating_add(second))
+            .max(1);
         let items = vec![
-            SizedToken { value: 1, bytes: 2 },
-            SizedToken { value: 2, bytes: 5 },
-            SizedToken { value: 3, bytes: 4 },
+            SizedToken {
+                value: 1,
+                bytes: first,
+            },
+            SizedToken {
+                value: 2,
+                bytes: second,
+            },
+            SizedToken {
+                value: 3,
+                bytes: third,
+            },
         ];
         let mut stream = Box::pin(BatchBackpressureStream::wrap(
             futures::stream::iter(items.clone()),
             batch_config,
-            Some(memory_sub),
-            Some(9),
+            memory_sub,
+            cached_budget,
         ));
 
         let first = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
@@ -646,8 +688,8 @@ mod tests {
         let mut stream = Box::pin(BatchBackpressureStream::wrap(
             TwoThenPending::new(),
             batch_config,
-            Some(memory_sub),
-            None,
+            memory_sub,
+            test_cached_budget(&memory),
         ));
 
         // The stream has buffered items but not enough to reach max_size, so it should wait.
@@ -676,8 +718,8 @@ mod tests {
         let mut stream = Box::pin(BatchBackpressureStream::wrap(
             futures::stream::iter(vec![7, 8]),
             batch_config,
-            Some(memory_sub),
-            None,
+            memory_sub,
+            test_cached_budget(&memory),
         ));
 
         // End-of-stream with buffered items must emit one final batch before completion.
@@ -701,8 +743,8 @@ mod tests {
         let mut stream = Box::pin(BatchBackpressureStream::wrap(
             futures::stream::empty::<i32>(),
             batch_config,
-            Some(memory_sub),
-            None,
+            memory_sub,
+            test_cached_budget(&memory),
         ));
 
         // Empty streams should complete immediately without emitting empty batches.

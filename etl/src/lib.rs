@@ -95,6 +95,7 @@
 //!         table_error_retry_max_attempts: 5,
 //!         max_table_sync_workers: 4,
 //!         max_copy_connections_per_table: 1,
+//!         memory_refresh_interval_ms: 100,
 //!         memory_backpressure: Some(MemoryBackpressureConfig::default()),
 //!         table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
 //!         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,

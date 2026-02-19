@@ -12,6 +12,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{error, info};
 
+use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::stream::BatchBackpressureStream;
@@ -32,13 +33,6 @@ use crate::replication::client::{
 };
 use crate::replication::stream::TableCopyStream;
 use crate::types::{PipelineId, TableRow};
-
-/// Computes the static size-aware batch threshold from current total memory.
-fn compute_static_max_batch_bytes(total_memory_bytes: usize) -> usize {
-    let total_memory_bytes = total_memory_bytes as u128;
-    let target = (total_memory_bytes * 70) / 100;
-    target.clamp(1, usize::MAX as u128) as usize
-}
 
 /// Calculates Load Imbalance Factor (LIF) for a set of values.
 ///
@@ -83,6 +77,7 @@ pub enum TableCopyResult {
 }
 
 /// Copies rows from a batched table-copy stream into the destination with prioritized shutdown handling.
+#[expect(clippy::too_many_arguments)]
 async fn copy_table_rows_from_stream<D, S>(
     mut table_copy_stream: Pin<&mut S>,
     mut shutdown_rx: ShutdownRx,
@@ -91,11 +86,13 @@ async fn copy_table_rows_from_stream<D, S>(
     pipeline_id: PipelineId,
     partitioning: &'static str,
     destination: D,
+    batch_budget: BatchBudgetController,
 ) -> EtlResult<ShutdownResult<u64, u64>>
 where
     D: Destination + Clone + Send + 'static,
     S: Stream<Item = Vec<EtlResult<TableRow>>> + ?Sized,
 {
+    let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let mut total_rows: u64 = 0;
 
     loop {
@@ -208,7 +205,8 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
-    memory_monitor: Option<MemoryMonitor>,
+    memory_monitor: MemoryMonitor,
+    batch_budget: BatchBudgetController,
 ) -> EtlResult<TableCopyResult> {
     if max_copy_connections > 1 {
         parallel_table_copy(
@@ -222,6 +220,7 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
             pipeline_id,
             destination,
             memory_monitor,
+            batch_budget,
         )
         .await
     } else {
@@ -235,6 +234,7 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
             pipeline_id,
             destination,
             memory_monitor,
+            batch_budget,
         )
         .await
     }
@@ -251,7 +251,8 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
-    memory_monitor: Option<MemoryMonitor>,
+    memory_monitor: MemoryMonitor,
+    batch_budget: BatchBudgetController,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
@@ -261,16 +262,12 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     let table_copy_stream =
         TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
     let connection_updates_rx = transaction.get_cloned_client().connection_updates_rx();
-    let max_batch_bytes = memory_monitor.as_ref().map(|memory_monitor| {
-        compute_static_max_batch_bytes(memory_monitor.total_memory_bytes() as usize)
-    });
+    let cached_batch_budget = batch_budget.cached();
     let table_copy_stream = BatchBackpressureStream::wrap(
         table_copy_stream,
         batch_config,
-        memory_monitor
-            .as_ref()
-            .map(|memory_monitor| memory_monitor.subscribe()),
-        max_batch_bytes,
+        memory_monitor.subscribe(),
+        cached_batch_budget,
     );
     pin!(table_copy_stream);
 
@@ -284,6 +281,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         pipeline_id,
         "false",
         destination,
+        batch_budget,
     )
     .await?
     {
@@ -335,7 +333,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
-    memory_monitor: Option<MemoryMonitor>,
+    memory_monitor: MemoryMonitor,
+    batch_budget: BatchBudgetController,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
@@ -416,6 +415,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         let shutdown_rx = shutdown_rx.clone();
         let destination = destination.clone();
         let memory_monitor = memory_monitor.clone();
+        let batch_budget = batch_budget.clone();
 
         join_set.spawn(async move {
             let child_replication_client = replication_client.fork_child().await?;
@@ -433,6 +433,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 pipeline_id,
                 destination,
                 memory_monitor,
+                batch_budget,
             )
             .await;
 
@@ -554,7 +555,8 @@ async fn copy_partition<D>(
     shutdown_rx: ShutdownRx,
     pipeline_id: PipelineId,
     destination: D,
-    memory_monitor: Option<MemoryMonitor>,
+    memory_monitor: MemoryMonitor,
+    batch_budget: BatchBudgetController,
 ) -> EtlResult<TableCopyResult>
 where
     D: Destination + Clone + Send + 'static,
@@ -617,16 +619,12 @@ where
     let connection_updates_rx = child_transaction
         .get_cloned_client()
         .connection_updates_rx();
-    let max_batch_bytes = memory_monitor.as_ref().map(|memory_monitor| {
-        compute_static_max_batch_bytes(memory_monitor.total_memory_bytes() as usize)
-    });
+    let cached_batch_budget = batch_budget.cached();
     let table_copy_stream = BatchBackpressureStream::wrap(
         table_copy_stream,
         batch_config,
-        memory_monitor
-            .as_ref()
-            .map(|memory_monitor| memory_monitor.subscribe()),
-        max_batch_bytes,
+        memory_monitor.subscribe(),
+        cached_batch_budget,
     );
     pin!(table_copy_stream);
 
@@ -638,6 +636,7 @@ where
         pipeline_id,
         "true",
         destination,
+        batch_budget,
     )
     .await?
     {

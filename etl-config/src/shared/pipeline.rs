@@ -9,6 +9,7 @@ use crate::shared::{PgConnectionConfig, PgConnectionConfigWithoutSecrets, Valida
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct BatchConfig {
+    // TODO: remove the max size once we are sure about the new approach.
     /// Maximum number of items in a batch for table copy and event streaming.
     #[serde(default = "default_batch_max_size")]
     #[cfg_attr(feature = "utoipa", schema(example = 10000))]
@@ -135,9 +136,6 @@ pub struct MemoryBackpressureConfig {
     /// Valid range is `[0.0, 1.0)`, and this value must be lower than
     /// [`Self::activate_threshold`].
     pub resume_threshold: f32,
-    /// Number of milliseconds between one memory usage refresh and another.
-    #[serde(default = "default_memory_refresh_interval_ms")]
-    pub memory_refresh_interval_ms: u64,
 }
 
 impl MemoryBackpressureConfig {
@@ -145,8 +143,6 @@ impl MemoryBackpressureConfig {
     pub const DEFAULT_ACTIVATE_THRESHOLD: f32 = 0.85;
     /// Default memory usage ratio to release backpressure.
     pub const DEFAULT_RESUME_THRESHOLD: f32 = 0.75;
-    /// Default interval in milliseconds between one memory refresh and another.
-    pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
 
     /// Validates memory backpressure thresholds.
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -171,13 +167,6 @@ impl MemoryBackpressureConfig {
             });
         }
 
-        if self.memory_refresh_interval_ms == 0 {
-            return Err(ValidationError::InvalidFieldValue {
-                field: "memory_backpressure.memory_refresh_interval_ms".to_string(),
-                constraint: "must be greater than 0".to_string(),
-            });
-        }
-
         Ok(())
     }
 }
@@ -187,13 +176,8 @@ impl Default for MemoryBackpressureConfig {
         Self {
             activate_threshold: Self::DEFAULT_ACTIVATE_THRESHOLD,
             resume_threshold: Self::DEFAULT_RESUME_THRESHOLD,
-            memory_refresh_interval_ms: Self::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
         }
     }
-}
-
-const fn default_memory_refresh_interval_ms() -> u64 {
-    MemoryBackpressureConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
 /// Configuration for an ETL pipeline.
@@ -242,6 +226,9 @@ pub struct PipelineConfig {
     /// `Some(MemoryBackpressureConfig::default())`.
     #[serde(default)]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
+    /// Number of milliseconds between one memory usage refresh and another.
+    #[serde(default = "default_memory_refresh_interval_ms")]
+    pub memory_refresh_interval_ms: u64,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
@@ -262,6 +249,8 @@ impl PipelineConfig {
 
     /// Default maximum parallel connections per table during initial copy.
     pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 2;
+    /// Default interval in milliseconds between one memory refresh and another.
+    pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
     /// Validates pipeline configuration settings.
     ///
     /// Checks batch configuration and ensures worker counts and retry attempts are non-zero.
@@ -293,6 +282,13 @@ impl PipelineConfig {
             memory_backpressure.validate()?;
         }
 
+        if self.memory_refresh_interval_ms == 0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "memory_refresh_interval_ms".to_string(),
+                constraint: "must be greater than 0".to_string(),
+            });
+        }
+
         Ok(())
     }
 }
@@ -311,6 +307,10 @@ const fn default_max_table_sync_workers() -> u16 {
 
 const fn default_max_copy_connections_per_table() -> u16 {
     PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE
+}
+
+const fn default_memory_refresh_interval_ms() -> u64 {
+    PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
 /// Same as [`PipelineConfig`] but without secrets. This type
@@ -355,6 +355,9 @@ pub struct PipelineConfigWithoutSecrets {
     /// `Some(MemoryBackpressureConfig::default())`.
     #[serde(default)]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
+    /// Number of milliseconds between one memory usage refresh and another.
+    #[serde(default = "default_memory_refresh_interval_ms")]
+    pub memory_refresh_interval_ms: u64,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
@@ -375,6 +378,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             max_table_sync_workers: value.max_table_sync_workers,
             max_copy_connections_per_table: value.max_copy_connections_per_table,
             memory_backpressure: value.memory_backpressure,
+            memory_refresh_interval_ms: value.memory_refresh_interval_ms,
             table_sync_copy: value.table_sync_copy,
             invalidated_slot_behavior: value.invalidated_slot_behavior,
         }

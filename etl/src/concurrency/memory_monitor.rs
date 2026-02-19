@@ -60,7 +60,8 @@ impl MemorySnapshot {
 struct MemoryMonitorInner {
     backpressure_active_tx: watch::Sender<bool>,
     total_memory_bytes: AtomicU64,
-    config: MemoryBackpressureConfig,
+    memory_backpressure_config: Option<MemoryBackpressureConfig>,
+    memory_refresh_interval_ms: u64,
 }
 
 /// Shared memory backpressure controller.
@@ -77,7 +78,8 @@ impl MemoryMonitor {
     pub fn new(
         pipeline_id: PipelineId,
         mut shutdown_rx: ShutdownRx,
-        config: MemoryBackpressureConfig,
+        memory_backpressure_config: Option<MemoryBackpressureConfig>,
+        memory_refresh_interval_ms: u64,
     ) -> Self {
         // sysinfo docs suggest to use a single instance of `System` across the program.
         let mut system = sysinfo::System::new();
@@ -85,26 +87,30 @@ impl MemoryMonitor {
         // Initialize from a real memory snapshot so startup state reflects current pressure.
         let startup_snapshot = MemorySnapshot::from_system(&mut system);
         let startup_used_percent = startup_snapshot.used_percent();
-        let startup_backpressure_active = compute_next_backpressure_active(
-            false,
-            startup_used_percent,
-            config.activate_threshold,
-            config.resume_threshold,
-        );
+        let startup_backpressure_active =
+            memory_backpressure_config.as_ref().is_some_and(|config| {
+                compute_next_backpressure_active(
+                    false,
+                    startup_used_percent,
+                    config.activate_threshold,
+                    config.resume_threshold,
+                )
+            });
         emit_backpressure_active_metric(pipeline_id, startup_backpressure_active);
 
         let this = Self {
             inner: Arc::new(MemoryMonitorInner {
                 backpressure_active_tx: watch::channel(startup_backpressure_active).0,
                 total_memory_bytes: AtomicU64::new(startup_snapshot.total),
-                config,
+                memory_backpressure_config,
+                memory_refresh_interval_ms,
             }),
         };
 
         let this_clone = this.clone();
         tokio::spawn(async move {
             let refresh_interval =
-                Duration::from_millis(this_clone.inner.config.memory_refresh_interval_ms);
+                Duration::from_millis(this_clone.inner.memory_refresh_interval_ms);
             let mut ticker = tokio::time::interval(refresh_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut currently_backpressure_active = startup_backpressure_active;
@@ -127,13 +133,14 @@ impl MemoryMonitor {
                             .inner
                             .total_memory_bytes
                             .store(snapshot.total, Ordering::Relaxed);
-                        let config = &this_clone.inner.config;
-                        let next_backpressure_active = compute_next_backpressure_active(
-                            currently_backpressure_active,
-                            used_percent,
-                            config.activate_threshold,
-                            config.resume_threshold,
-                        );
+                        let next_backpressure_active = this_clone.inner.memory_backpressure_config.as_ref().is_some_and(|config| {
+                            compute_next_backpressure_active(
+                                currently_backpressure_active,
+                                used_percent,
+                                config.activate_threshold,
+                                config.resume_threshold,
+                            )
+                        });
 
                         debug!(
                             used_memory_bytes = snapshot.used,
@@ -187,22 +194,34 @@ impl MemoryMonitor {
     }
 
     /// Creates a new subscription for polling backpressure updates.
-    pub fn subscribe(&self) -> MemoryMonitorSubscription {
+    ///
+    /// Returns [`None`] when memory backpressure is not configured.
+    pub fn subscribe(&self) -> Option<MemoryMonitorSubscription> {
+        self.inner.memory_backpressure_config.as_ref()?;
+
         // We snapshot the current state of the watch channel and create a stream out of it. The
         // stream will return the new values from this point onward, independently of when it will be
         // polled.
         let rx = self.inner.backpressure_active_tx.subscribe();
         let updates = WatchStream::from_changes(rx.clone());
 
-        MemoryMonitorSubscription {
+        Some(MemoryMonitorSubscription {
             current_rx: rx,
             updates,
-        }
+        })
     }
 
     /// Returns the shared atomic that stores total memory in bytes.
     pub fn total_memory_bytes(&self) -> u64 {
         self.inner.total_memory_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Returns the configured backpressure activation threshold, if available.
+    pub fn memory_backpressure_activate_threshold(&self) -> Option<f32> {
+        self.inner
+            .memory_backpressure_config
+            .as_ref()
+            .map(|config| config.activate_threshold)
     }
 
     /// Updates the backpressure active state and notifies subscribers when it changes.
@@ -269,7 +288,8 @@ impl MemoryMonitor {
             inner: Arc::new(MemoryMonitorInner {
                 backpressure_active_tx: watch::channel(false).0,
                 total_memory_bytes: AtomicU64::new(0),
-                config: MemoryBackpressureConfig::default(),
+                memory_backpressure_config: Some(MemoryBackpressureConfig::default()),
+                memory_refresh_interval_ms: 100,
             }),
         }
     }
@@ -277,6 +297,13 @@ impl MemoryMonitor {
     /// Updates the backpressure active state in tests.
     pub fn set_backpressure_active_for_test(&self, backpressure_active: bool) {
         self.set_backpressure_active(backpressure_active);
+    }
+
+    /// Updates the total memory snapshot in bytes for tests.
+    pub fn set_total_memory_bytes_for_test(&self, total_memory_bytes: u64) {
+        self.inner
+            .total_memory_bytes
+            .store(total_memory_bytes, Ordering::Relaxed);
     }
 }
 
@@ -366,7 +393,9 @@ mod tests {
     #[tokio::test]
     async fn subscription_receives_backpressure_transitions() {
         let signal = MemoryMonitor::new_for_test();
-        let mut sub = signal.subscribe();
+        let mut sub = signal
+            .subscribe()
+            .expect("backpressure subscription should exist in tests");
 
         signal.set_backpressure_active_for_test(true);
         let backpressure_active =

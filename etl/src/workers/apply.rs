@@ -9,6 +9,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, error, info, warn};
 
 use crate::bail;
+use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
@@ -82,7 +83,8 @@ pub struct ApplyWorker<S, D> {
     destination: D,
     shutdown_rx: ShutdownRx,
     table_sync_worker_permits: Arc<Semaphore>,
-    memory_monitor: Option<MemoryMonitor>,
+    memory_monitor: MemoryMonitor,
+    batch_budget: BatchBudgetController,
 }
 
 impl<S, D> ApplyWorker<S, D> {
@@ -99,8 +101,10 @@ impl<S, D> ApplyWorker<S, D> {
         destination: D,
         shutdown_rx: ShutdownRx,
         table_sync_worker_permits: Arc<Semaphore>,
-        memory_monitor: Option<MemoryMonitor>,
+        memory_monitor: MemoryMonitor,
     ) -> Self {
+        let batch_budget = BatchBudgetController::new(pipeline_id, memory_monitor.clone());
+
         Self {
             pipeline_id,
             config,
@@ -110,6 +114,7 @@ impl<S, D> ApplyWorker<S, D> {
             shutdown_rx,
             table_sync_worker_permits,
             memory_monitor,
+            batch_budget,
         }
     }
 }
@@ -230,6 +235,7 @@ where
                 shutdown_rx: shutdown_rx.clone(),
                 table_sync_worker_permits: table_sync_worker_permits.clone(),
                 memory_monitor: self.memory_monitor.clone(),
+                batch_budget: self.batch_budget.clone(),
             };
 
             let result = worker.run_apply_worker().await;
@@ -257,6 +263,7 @@ where
     async fn run_apply_worker(self) -> EtlResult<()> {
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
+        let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
 
         let start_lsn = get_start_lsn(
             self.pipeline_id,
@@ -275,6 +282,7 @@ where
             shutdown_rx: self.shutdown_rx.clone(),
             table_sync_worker_permits: self.table_sync_worker_permits,
             memory_monitor: self.memory_monitor.clone(),
+            batch_budget: self.batch_budget.clone(),
         });
 
         ApplyLoop::start(
@@ -287,6 +295,7 @@ where
             worker_context,
             self.shutdown_rx,
             self.memory_monitor,
+            self.batch_budget,
         )
         .await?;
 

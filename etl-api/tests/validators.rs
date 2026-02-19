@@ -71,6 +71,7 @@ fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
         table_error_retry_delay_ms: None,
         table_error_retry_max_attempts: None,
         max_table_sync_workers: Some(2),
+        memory_refresh_interval_ms: Some(100),
         max_copy_connections_per_table: None,
         memory_backpressure: None,
         table_sync_copy: None,

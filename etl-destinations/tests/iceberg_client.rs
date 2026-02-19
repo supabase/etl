@@ -518,6 +518,7 @@ async fn insert_nullable_scalars() {
 
     let mut table_rows = vec![
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I32(42),                                              // id
                 Cell::Bool(true),                                           // bool_col
@@ -553,6 +554,7 @@ async fn insert_nullable_scalars() {
             ],
         },
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I32(0),
                 Cell::Null,
@@ -689,6 +691,7 @@ async fn insert_non_nullable_scalars() {
         .unwrap();
 
     let mut table_rows = vec![TableRow {
+        size_hint_bytes: 0,
         values: vec![
             Cell::I32(42),                                              // id
             Cell::Bool(true),                                           // bool_col
@@ -950,6 +953,7 @@ async fn insert_nullable_array() {
 
     let table_rows = vec![
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I32(1),                                                            // id
                 Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), Some(true)])), // bool_array_col
@@ -1036,6 +1040,7 @@ async fn insert_nullable_array() {
             ],
         },
         TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I32(2), // id
                 Cell::Null,   // All other columns are null
@@ -1076,7 +1081,7 @@ async fn insert_nullable_array() {
     let mut expected_rows = table_rows.clone();
 
     // Convert array types that round-trip through different representations
-    let TableRow { values } = &mut expected_rows[0];
+    let TableRow { values, .. } = &mut expected_rows[0];
 
     // int2_array_col (index 7): Convert I16 to I32
     if let Cell::Array(ArrayCell::I16(vec)) = &values[7] {
@@ -1323,6 +1328,7 @@ async fn insert_non_nullable_array() {
         .unwrap();
 
     let table_rows = vec![TableRow {
+        size_hint_bytes: 0,
         values: vec![
             Cell::I32(1),                                                            // id
             Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), Some(true)])), // bool_array_col
@@ -1422,7 +1428,7 @@ async fn insert_non_nullable_array() {
     let mut expected_rows = table_rows.clone();
 
     // Convert array types that round-trip through different representations
-    let TableRow { values } = &mut expected_rows[0];
+    let TableRow { values, .. } = &mut expected_rows[0];
 
     // int2_array_col (index 7): Convert I16 to I32
     if let Cell::Array(ArrayCell::I16(vec)) = &values[7] {

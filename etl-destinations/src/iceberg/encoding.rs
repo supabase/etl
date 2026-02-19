@@ -1133,15 +1133,19 @@ mod tests {
     fn test_build_boolean_array() {
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Bool(true)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Bool(false)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::String("not bool".to_string())],
             },
         ];
@@ -1163,15 +1167,19 @@ mod tests {
     fn test_build_i32_array() {
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::I16(42)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::I32(-123)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::String("not int".to_string())],
             },
         ];
@@ -1193,18 +1201,23 @@ mod tests {
     fn test_build_i64_array() {
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::I64(123456789)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::I64(-987654321)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::U32(456)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::I32(42)],
             }, // Non-I64 becomes null
         ];
@@ -1227,15 +1240,19 @@ mod tests {
     fn test_build_f32_array() {
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::F32(2.5)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::F32(-1.25)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::F64(3.0)],
             }, // Non-F32 becomes null
         ];
@@ -1257,15 +1274,19 @@ mod tests {
     fn test_build_f64_array() {
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::F64(1.23456789)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::F64(-9.87654321)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::F32(2.5)],
             }, // Non-F64 becomes null
         ];
@@ -1287,15 +1308,19 @@ mod tests {
     fn test_build_string_array() {
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::String("hello".to_string())],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Bool(true)],
             }, // Converted to string
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::I32(42)],
             }, // Converted to string
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null],
             },
         ];
@@ -1318,15 +1343,19 @@ mod tests {
         let test_bytes = vec![1, 2, 3, 4, 5];
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Bytes(test_bytes.clone())],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Bytes(vec![])],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::String("not bytes".to_string())],
             },
         ];
@@ -1352,15 +1381,19 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Date(test_date)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Date(UNIX_EPOCH)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::String("2023-05-15".to_string())],
             },
         ];
@@ -1389,15 +1422,19 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Time(test_time)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Time(MIDNIGHT)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::String("12:30:45".to_string())],
             },
         ];
@@ -1423,12 +1460,15 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Timestamp(test_ts)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::String("2001-09-09 01:46:40".to_string())],
             },
         ];
@@ -1454,12 +1494,15 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::TimestampTz(test_ts)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::String("2001-09-09T01:46:40Z".to_string())],
             },
         ];
@@ -1489,12 +1532,15 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Uuid(test_uuid)],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::String(test_uuid.to_string())],
             },
         ];
@@ -1518,6 +1564,7 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![
                     Cell::I32(42),
                     Cell::String("hello".to_string()),
@@ -1525,6 +1572,7 @@ mod tests {
                 ],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![
                     Cell::I32(100),
                     Cell::String("world".to_string()),
@@ -1576,9 +1624,11 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::I32(42), Cell::Null],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null, Cell::String("test".to_string())],
             },
         ];
@@ -1621,6 +1671,7 @@ mod tests {
         let test_ts_tz = DateTime::from_timestamp(1000000000, 0).unwrap();
 
         let rows = vec![TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::Date(test_date),
                 Cell::Time(test_time),
@@ -1696,6 +1747,7 @@ mod tests {
         let test_uuid = Uuid::new_v4();
 
         let rows = vec![TableRow {
+            size_hint_bytes: 0,
             values: vec![Cell::Bytes(test_bytes.clone()), Cell::Uuid(test_uuid)],
         }];
 
@@ -1748,12 +1800,14 @@ mod tests {
         // This will test the fallback to string conversion behavior
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![
                     Cell::I32(42),
                     Cell::Json(serde_json::json!({"key": "value", "number": 123})),
                 ],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::I32(100), Cell::Null],
             },
         ];
@@ -1794,6 +1848,7 @@ mod tests {
 
         // Test what happens when row has different number of columns than schema
         let rows = vec![TableRow {
+            size_hint_bytes: 0,
             values: vec![
                 Cell::I32(1),
                 Cell::String("test".to_string()),
@@ -1862,6 +1917,7 @@ mod tests {
         // Test with boolean array cells
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Bool(vec![
                     Some(true),
                     Some(false),
@@ -1869,15 +1925,19 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Bool(vec![Some(true)]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Bool(vec![]))], // Empty array
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::String("not an array".to_string())], // Non-array cell
             },
         ];
@@ -1931,6 +1991,7 @@ mod tests {
 
         // Test with non-boolean array type - should fall back to string conversion
         let rows = vec![TableRow {
+            size_hint_bytes: 0,
             values: vec![Cell::Array(ArrayCell::I32(vec![Some(1), Some(0), None]))],
         }];
 
@@ -1953,15 +2014,19 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::I16(vec![Some(10), Some(20), None]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::I32(vec![Some(100), Some(-200)]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::I32(vec![]))], // Empty array
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
         ];
@@ -2013,6 +2078,7 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::I64(vec![
                     Some(123456789),
                     Some(-987654321),
@@ -2020,12 +2086,15 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::U32(vec![Some(456), Some(789)]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::I64(vec![]))], // Empty array
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
         ];
@@ -2077,6 +2146,7 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::F32(vec![
                     Some(1.5),
                     Some(-2.75),
@@ -2084,14 +2154,17 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::F32(vec![Some(
                     std::f32::consts::PI,
                 )]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::F32(vec![]))], // Empty array
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
         ];
@@ -2142,6 +2215,7 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::F64(vec![
                     Some(1.23456789),
                     Some(-9.87654321),
@@ -2149,14 +2223,17 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::F64(vec![Some(
                     std::f64::consts::PI,
                 )]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::F64(vec![]))], // Empty array
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
         ];
@@ -2208,6 +2285,7 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::String(vec![
                     Some("hello".to_string()),
                     Some("world".to_string()),
@@ -2215,6 +2293,7 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Numeric(vec![
                     Some("12345".parse::<PgNumeric>().unwrap()),
                     Some("-6789".parse::<PgNumeric>().unwrap()),
@@ -2222,6 +2301,7 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Json(vec![
                     Some(serde_json::json!({"key": "value"})),
                     Some(serde_json::json!([1, 2, 3])),
@@ -2229,9 +2309,11 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::String(vec![]))], // Empty array
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
         ];
@@ -2300,6 +2382,7 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Bytes(vec![
                     Some(test_bytes_1.clone()),
                     Some(test_bytes_2.clone()),
@@ -2307,14 +2390,17 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Bytes(vec![Some(
                     empty_bytes.clone(),
                 )]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Bytes(vec![]))], // Empty array
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
         ];
@@ -2370,6 +2456,7 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Date(vec![
                     Some(test_date_1),
                     Some(test_date_2),
@@ -2377,12 +2464,15 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Date(vec![Some(test_date_3)]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Date(vec![]))], // Empty array
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
         ];
@@ -2447,6 +2537,7 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Time(vec![
                     Some(test_time_1),
                     Some(test_time_2),
@@ -2454,12 +2545,15 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Time(vec![Some(test_time_3)]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Time(vec![]))], // Empty array
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
         ];
@@ -2537,6 +2631,7 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Timestamp(vec![
                     Some(test_ts_1),
                     Some(test_ts_2),
@@ -2544,12 +2639,15 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Timestamp(vec![Some(test_ts_3)]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Timestamp(vec![]))], // Empty array
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
         ];
@@ -2609,6 +2707,7 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::TimestampTz(vec![
                     Some(test_ts_1),
                     Some(test_ts_2),
@@ -2616,12 +2715,15 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::TimestampTz(vec![Some(test_ts_3)]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::TimestampTz(vec![]))], // Empty array
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
         ];
@@ -2680,6 +2782,7 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Uuid(vec![
                     Some(test_uuid_1),
                     Some(test_uuid_2),
@@ -2687,12 +2790,15 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Uuid(vec![Some(test_uuid_3)]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Uuid(vec![]))], // Empty array
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
         ];
@@ -2752,12 +2858,14 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::String(vec![
                     Some("hello".to_string()),
                     None,
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Bool(vec![
                     Some(true),
                     Some(false),
@@ -2765,51 +2873,62 @@ mod tests {
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::I32(vec![Some(42), None]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::F64(vec![
                     Some(std::f64::consts::PI),
                     None,
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Uuid(vec![Some(test_uuid), None]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Date(vec![Some(test_date), None]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Time(vec![Some(test_time), None]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Timestamp(vec![Some(test_ts), None]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::TimestampTz(vec![
                     Some(test_ts_tz),
                     None,
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Numeric(vec![
                     Some("123.45".parse::<PgNumeric>().unwrap()),
                     None,
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Json(vec![
                     Some(serde_json::json!({"key": "value"})),
                     None,
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Array(ArrayCell::Bytes(vec![
                     Some(vec![1, 2, 3]),
                     None,
                 ]))],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![Cell::Null], // Null cell
             },
         ];
@@ -3136,9 +3255,11 @@ mod tests {
 
             let rows = vec![
                 TableRow {
+                    size_hint_bytes: 0,
                     values: vec![Cell::Array(ArrayCell::Bool(vec![Some(true)]))],
                 },
                 TableRow {
+                    size_hint_bytes: 0,
                     values: vec![Cell::Null],
                 },
             ];
@@ -3164,6 +3285,7 @@ mod tests {
         let field_ref = Arc::new(field);
 
         let rows = vec![TableRow {
+            size_hint_bytes: 0,
             values: vec![Cell::Array(ArrayCell::I32(vec![Some(123), Some(456)]))],
         }];
 
@@ -3197,6 +3319,7 @@ mod tests {
 
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![
                     Cell::I32(1),
                     Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false)])),
@@ -3207,6 +3330,7 @@ mod tests {
                 ],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![
                     Cell::I32(2),
                     Cell::Array(ArrayCell::Bool(vec![])), // Empty array
@@ -3393,6 +3517,7 @@ mod tests {
         // Test mixing scalar and array columns in the same record batch
         let rows = vec![
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![
                     Cell::String("record1".to_string()),
                     Cell::I32(42),
@@ -3405,6 +3530,7 @@ mod tests {
                 ],
             },
             TableRow {
+                size_hint_bytes: 0,
                 values: vec![
                     Cell::String("record2".to_string()),
                     Cell::I32(84),
