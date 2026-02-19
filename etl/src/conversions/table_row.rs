@@ -184,10 +184,10 @@ mod tests {
 
         let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
-        assert_eq!(result.values.len(), 3);
-        assert_eq!(result.values[0], Cell::I32(123));
-        assert_eq!(result.values[1], Cell::String("John Doe".to_string()));
-        assert_eq!(result.values[2], Cell::Bool(true));
+        assert_eq!(result.values().len(), 3);
+        assert_eq!(result.values()[0], Cell::I32(123));
+        assert_eq!(result.values()[1], Cell::String("John Doe".to_string()));
+        assert_eq!(result.values()[2], Cell::Bool(true));
     }
 
     #[test]
@@ -197,10 +197,10 @@ mod tests {
 
         let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
-        assert_eq!(result.values.len(), 3);
-        assert_eq!(result.values[0], Cell::I32(456));
-        assert_eq!(result.values[1], Cell::Null);
-        assert_eq!(result.values[2], Cell::Bool(false));
+        assert_eq!(result.values().len(), 3);
+        assert_eq!(result.values()[0], Cell::I32(456));
+        assert_eq!(result.values()[1], Cell::Null);
+        assert_eq!(result.values()[2], Cell::Bool(false));
     }
 
     #[test]
@@ -210,10 +210,10 @@ mod tests {
 
         let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
-        assert_eq!(result.values.len(), 3);
-        assert_eq!(result.values[0], Cell::I32(0));
-        assert_eq!(result.values[1], Cell::String("".to_string()));
-        assert_eq!(result.values[2], Cell::Bool(false));
+        assert_eq!(result.values().len(), 3);
+        assert_eq!(result.values()[0], Cell::I32(0));
+        assert_eq!(result.values()[1], Cell::String("".to_string()));
+        assert_eq!(result.values()[2], Cell::Bool(false));
     }
 
     #[test]
@@ -223,8 +223,8 @@ mod tests {
 
         let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
-        assert_eq!(result.values.len(), 1);
-        assert_eq!(result.values[0], Cell::I32(42));
+        assert_eq!(result.values().len(), 1);
+        assert_eq!(result.values()[0], Cell::I32(42));
     }
 
     #[test]
@@ -240,11 +240,11 @@ mod tests {
 
         let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
-        assert_eq!(result.values.len(), 4);
-        assert_eq!(result.values[0], Cell::I32(123));
-        assert_eq!(result.values[1], Cell::F64(3.15));
-        assert_eq!(result.values[2], Cell::String("Hello World".to_string()));
-        assert_eq!(result.values[3], Cell::Bool(true));
+        assert_eq!(result.values().len(), 4);
+        assert_eq!(result.values()[0], Cell::I32(123));
+        assert_eq!(result.values()[1], Cell::F64(3.15));
+        assert_eq!(result.values()[2], Cell::String("Hello World".to_string()));
+        assert_eq!(result.values()[3], Cell::Bool(true));
     }
 
     #[test]
@@ -296,8 +296,8 @@ mod tests {
         let row_data = b"Text\\\\\n";
         let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
-        assert_eq!(result.values.len(), 1);
-        assert_eq!(result.values[0], Cell::String("Text\\".to_string()));
+        assert_eq!(result.values().len(), 1);
+        assert_eq!(result.values()[0], Cell::String("Text\\".to_string()));
     }
 
     #[test]
@@ -306,15 +306,15 @@ mod tests {
 
         let row_data = b"\\N\n";
         let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
-        assert_eq!(result.values[0], Cell::Null);
+        assert_eq!(result.values()[0], Cell::Null);
 
         let row_data = b"\\\\N\n";
         let result_test = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
-        assert_eq!(result_test.values[0], Cell::Null);
+        assert_eq!(result_test.values()[0], Cell::Null);
 
         let row_data = b"\\\\A\n";
         let result_test = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
-        assert_eq!(result_test.values[0], Cell::String("\\A".to_string()));
+        assert_eq!(result_test.values()[0], Cell::String("\\A".to_string()));
     }
 
     #[test]
@@ -324,10 +324,10 @@ mod tests {
         let row_data = b"123\t John Doe \tt\n";
         let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
-        assert_eq!(result.values.len(), 3);
-        assert_eq!(result.values[0], Cell::I32(123));
-        assert_eq!(result.values[1], Cell::String(" John Doe ".to_string())); // Spaces preserved
-        assert_eq!(result.values[2], Cell::Bool(true));
+        assert_eq!(result.values().len(), 3);
+        assert_eq!(result.values()[0], Cell::I32(123));
+        assert_eq!(result.values()[1], Cell::String(" John Doe ".to_string())); // Spaces preserved
+        assert_eq!(result.values()[2], Cell::Bool(true));
     }
 
     #[test]
@@ -353,9 +353,9 @@ mod tests {
         let result =
             parse_table_row_from_postgres_copy_bytes(expected_row.as_bytes(), &schema).unwrap();
 
-        assert_eq!(result.values.len(), 50);
+        assert_eq!(result.values().len(), 50);
         for i in 0..50 {
-            assert_eq!(result.values[i], Cell::I32(i as i32));
+            assert_eq!(result.values()[i], Cell::I32(i as i32));
         }
     }
 
@@ -381,10 +381,13 @@ mod tests {
         let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
         assert_eq!(
-            result.values[0],
+            result.values()[0],
             Cell::String("value\twith\ttabs".to_string())
         );
-        assert_eq!(result.values[1], Cell::String("normal\tvalue".to_string()));
+        assert_eq!(
+            result.values()[1],
+            Cell::String("normal\tvalue".to_string())
+        );
     }
 
     #[test]
@@ -399,9 +402,12 @@ mod tests {
         let row_data = b"\\tstart\tmiddle\\nvalue\tend\\r\n";
         let result = parse_table_row_from_postgres_copy_bytes(row_data, &schema).unwrap();
 
-        assert_eq!(result.values[0], Cell::String("\tstart".to_string()));
-        assert_eq!(result.values[1], Cell::String("middle\nvalue".to_string()));
-        assert_eq!(result.values[2], Cell::String("end\r".to_string()));
+        assert_eq!(result.values()[0], Cell::String("\tstart".to_string()));
+        assert_eq!(
+            result.values()[1],
+            Cell::String("middle\nvalue".to_string())
+        );
+        assert_eq!(result.values()[2], Cell::String("end\r".to_string()));
     }
 
     #[test]
@@ -416,7 +422,7 @@ mod tests {
         let result = parse_table_row_from_postgres_copy_bytes(&row_with_newline, &schema).unwrap();
 
         assert_eq!(
-            result.values[0],
+            result.values()[0],
             Cell::String("Hello\t🌍\nWorld\r测试".to_string())
         );
     }
@@ -466,7 +472,7 @@ mod tests {
         for (input, expected) in test_cases {
             let result = parse_table_row_from_postgres_copy_bytes(input, &schema).unwrap();
             assert_eq!(
-                result.values[0],
+                result.values()[0],
                 Cell::String(expected.to_string()),
                 "Failed for input: {:?}",
                 str::from_utf8(input).unwrap_or("<invalid UTF-8>")
@@ -488,7 +494,7 @@ mod tests {
         for (input, expected) in test_cases {
             let result = parse_table_row_from_postgres_copy_bytes(input, &schema).unwrap();
             assert_eq!(
-                result.values[0],
+                result.values()[0],
                 expected,
                 "Failed for input: {:?}",
                 str::from_utf8(input).unwrap_or("<invalid UTF-8>")

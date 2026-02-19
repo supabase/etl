@@ -267,7 +267,7 @@ pub async fn get_users_age_sum_from_rows<D>(
     let tables_rows = destination.get_table_rows().await;
     let table_rows = tables_rows.get(&table_id).unwrap();
     for table_row in table_rows {
-        if let Cell::I32(age) = &table_row.values[2] {
+        if let Cell::I32(age) = table_row.values()[2] {
             actual_sum += age;
         }
     }
@@ -287,6 +287,23 @@ pub fn assert_events_equal(left: &[Event], right: &[Event]) {
     }
 }
 
+fn table_rows_equal_ignoring_size(left: &TableRow, right: &TableRow) -> bool {
+    left.values() == right.values()
+}
+
+fn old_table_rows_equal_ignoring_size(
+    left: &Option<(bool, TableRow)>,
+    right: &Option<(bool, TableRow)>,
+) -> bool {
+    match (left, right) {
+        (Some((left_keys_only, left_row)), Some((right_keys_only, right_row))) => {
+            left_keys_only == right_keys_only && table_rows_equal_ignoring_size(left_row, right_row)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
     match (left, right) {
         (Event::Begin(left), Event::Begin(right)) => {
@@ -301,22 +318,24 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
                 && left.timestamp == right.timestamp
         }
         (Event::Insert(left), Event::Insert(right)) => {
-            left.table_id == right.table_id && left.table_row == right.table_row
+            left.table_id == right.table_id
+                && table_rows_equal_ignoring_size(&left.table_row, &right.table_row)
         }
         (Event::Update(left), Event::Update(right)) => {
             left.table_id == right.table_id
-                && left.table_row == right.table_row
-                && left.old_table_row == right.old_table_row
+                && table_rows_equal_ignoring_size(&left.table_row, &right.table_row)
+                && old_table_rows_equal_ignoring_size(&left.old_table_row, &right.old_table_row)
         }
         (Event::Delete(left), Event::Delete(right)) => {
-            left.table_id == right.table_id && left.old_table_row == right.old_table_row
+            left.table_id == right.table_id
+                && old_table_rows_equal_ignoring_size(&left.old_table_row, &right.old_table_row)
         }
         (Event::Relation(left), Event::Relation(right)) => left.table_schema == right.table_schema,
         (Event::Truncate(left), Event::Truncate(right)) => {
             left.options == right.options && left.rel_ids == right.rel_ids
         }
         (Event::Unsupported, Event::Unsupported) => true,
-        _ => false, // Different event types
+        _ => false,
     }
 }
 

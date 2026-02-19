@@ -1656,7 +1656,7 @@ async fn pipeline_respects_column_level_publication() {
         if let Event::Insert(InsertEvent { table_row, .. }) = event {
             // Verify exactly 3 columns (id, name, age).
             // If email was included, there would be 4 values.
-            assert_eq!(table_row.values.len(), 3);
+            assert_eq!(table_row.values().len(), 3);
         }
     }
 

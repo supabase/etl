@@ -9,9 +9,9 @@ use crate::types::cell::Cell;
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableRow {
     /// Approximate row size in bytes.
-    pub size_hint_bytes: usize,
+    size_hint_bytes: usize,
     /// Column values in table column order
-    pub values: Vec<Cell>,
+    values: Vec<Cell>,
 }
 
 impl TableRow {
@@ -29,6 +29,21 @@ impl TableRow {
             size_hint_bytes,
             values,
         }
+    }
+
+    /// Returns the row values in table column order.
+    pub fn values(&self) -> &[Cell] {
+        &self.values
+    }
+
+    /// Returns mutable access to row values in table column order.
+    pub fn values_mut(&mut self) -> &mut Vec<Cell> {
+        &mut self.values
+    }
+
+    /// Consumes the row and returns its values in table column order.
+    pub fn into_values(self) -> Vec<Cell> {
+        self.values
     }
 }
 

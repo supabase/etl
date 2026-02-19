@@ -28,9 +28,9 @@ impl TryFrom<TableRow> for BigQueryTableRow {
     /// The validation strategy fails fast on any unsupported value rather than clamping,
     /// ensuring users are aware when their data doesn't fit BigQuery's constraints.
     fn try_from(value: TableRow) -> Result<Self, Self::Error> {
-        let mut validated_cells = Vec::with_capacity(value.values.len());
+        let mut validated_cells = Vec::with_capacity(value.values().len());
 
-        for (index, cell) in value.values.into_iter().enumerate() {
+        for (index, cell) in value.into_values().into_iter().enumerate() {
             let cell_non_optional = CellNonOptional::try_from(cell).map_err(|err| {
                 etl_error!(
                     err.kind(),

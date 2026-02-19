@@ -107,40 +107,30 @@ where
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 2,
             max_table_sync_workers: 1,
-            table_sync_copy: TableSyncCopyConfig::default(),
-            invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
-            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
-            memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
-            memory_backpressure: MemoryBackpressureConfig::default(),
+            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
+            invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
+            max_copy_connections_per_table: 2,
+            memory_refresh_interval_ms: 100,
+            memory_backpressure: MemoryBackpressureConfig {
+                activate_threshold: 0.95,
+                resume_threshold: 0.85,
+            },
         }
     }
 
     /// Sets custom batch configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `batch` - Configuration controlling batch size and timing for processing events
     pub fn with_batch_config(mut self, batch: BatchConfig) -> Self {
         self.batch = batch;
         self
     }
 
     /// Sets custom table sync copy configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `table_sync_copy` - Configuration for how table syncs are performed
     pub fn with_table_sync_copy_config(mut self, table_sync_copy: TableSyncCopyConfig) -> Self {
         self.table_sync_copy = table_sync_copy;
         self
     }
 
     /// Sets custom retry configuration for table operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `delay_ms` - Delay in milliseconds before retrying a failed operation
-    /// * `max_attempts` - Maximum number of retry attempts before giving up
     pub fn with_retry_config(mut self, delay_ms: u64, max_attempts: u32) -> Self {
         self.table_error_retry_delay_ms = delay_ms;
         self.table_error_retry_max_attempts = max_attempts;
@@ -148,10 +138,6 @@ where
     }
 
     /// Sets the maximum number of concurrent table sync workers.
-    ///
-    /// # Arguments
-    ///
-    /// * `workers` - Number of workers to use for parallel table synchronization
     pub fn with_max_table_sync_workers(mut self, workers: u16) -> Self {
         self.max_table_sync_workers = workers;
         self

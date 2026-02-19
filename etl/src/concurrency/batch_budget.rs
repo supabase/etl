@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use metrics::gauge;
+use tracing::debug;
 
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::metrics::{ETL_IDEAL_BATCH_SIZE_BYTES, PIPELINE_ID_LABEL};
@@ -72,8 +73,17 @@ impl BatchBudgetController {
         let target_ratio = self.batch_fill_target_ratio();
         let target_bytes = (total_memory_bytes * target_ratio).max(1.0) as usize;
         let active_streams = self.active_streams.load(Ordering::Relaxed).max(1);
-        let denominator = active_streams;
-        let ideal_batch_size_bytes = (target_bytes / denominator).max(1);
+        let ideal_batch_size_bytes = (target_bytes / active_streams).max(1);
+
+        debug!(
+            pipeline_id = self.pipeline_id,
+            total_memory_bytes = total_memory_bytes as u64,
+            target_ratio,
+            target_bytes,
+            active_streams,
+            ideal_batch_size_bytes,
+            "computed ideal batch budget size"
+        );
 
         gauge!(
             ETL_IDEAL_BATCH_SIZE_BYTES,
