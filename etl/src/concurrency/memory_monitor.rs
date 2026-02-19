@@ -1,5 +1,6 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use std::time::Instant;
@@ -58,6 +59,7 @@ impl MemorySnapshot {
 #[derive(Debug)]
 struct MemoryMonitorInner {
     backpressure_active_tx: watch::Sender<bool>,
+    total_memory_bytes: AtomicU64,
     config: MemoryBackpressureConfig,
 }
 
@@ -94,6 +96,7 @@ impl MemoryMonitor {
         let this = Self {
             inner: Arc::new(MemoryMonitorInner {
                 backpressure_active_tx: watch::channel(startup_backpressure_active).0,
+                total_memory_bytes: AtomicU64::new(startup_snapshot.total),
                 config,
             }),
         };
@@ -120,6 +123,10 @@ impl MemoryMonitor {
                     _ = ticker.tick() => {
                         let snapshot = MemorySnapshot::from_system(&mut system);
                         let used_percent = snapshot.used_percent();
+                        this_clone
+                            .inner
+                            .total_memory_bytes
+                            .store(snapshot.total, Ordering::Relaxed);
                         let config = &this_clone.inner.config;
                         let next_backpressure_active = compute_next_backpressure_active(
                             currently_backpressure_active,
@@ -193,6 +200,11 @@ impl MemoryMonitor {
         }
     }
 
+    /// Returns the shared atomic that stores total memory in bytes.
+    pub fn total_memory_bytes(&self) -> u64 {
+        self.inner.total_memory_bytes.load(Ordering::Relaxed)
+    }
+
     /// Updates the backpressure active state and notifies subscribers when it changes.
     fn set_backpressure_active(&self, backpressure_active: bool) {
         let _ = self
@@ -256,6 +268,7 @@ impl MemoryMonitor {
         Self {
             inner: Arc::new(MemoryMonitorInner {
                 backpressure_active_tx: watch::channel(false).0,
+                total_memory_bytes: AtomicU64::new(0),
                 config: MemoryBackpressureConfig::default(),
             }),
         }

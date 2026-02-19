@@ -33,6 +33,13 @@ use crate::replication::client::{
 use crate::replication::stream::TableCopyStream;
 use crate::types::{PipelineId, TableRow};
 
+/// Computes the static size-aware batch threshold from current total memory.
+fn compute_static_max_batch_bytes(total_memory_bytes: usize) -> usize {
+    let total_memory_bytes = total_memory_bytes as u128;
+    let target = (total_memory_bytes * 70) / 100;
+    target.clamp(1, usize::MAX as u128) as usize
+}
+
 /// Calculates Load Imbalance Factor (LIF) for a set of values.
 ///
 /// LIF = max_value / mean_value
@@ -254,12 +261,16 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     let table_copy_stream =
         TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
     let connection_updates_rx = transaction.get_cloned_client().connection_updates_rx();
+    let max_batch_bytes = memory_monitor.as_ref().map(|memory_monitor| {
+        compute_static_max_batch_bytes(memory_monitor.total_memory_bytes() as usize)
+    });
     let table_copy_stream = BatchBackpressureStream::wrap(
         table_copy_stream,
         batch_config,
         memory_monitor
             .as_ref()
             .map(|memory_monitor| memory_monitor.subscribe()),
+        max_batch_bytes,
     );
     pin!(table_copy_stream);
 
@@ -606,12 +617,16 @@ where
     let connection_updates_rx = child_transaction
         .get_cloned_client()
         .connection_updates_rx();
+    let max_batch_bytes = memory_monitor.as_ref().map(|memory_monitor| {
+        compute_static_max_batch_bytes(memory_monitor.total_memory_bytes() as usize)
+    });
     let table_copy_stream = BatchBackpressureStream::wrap(
         table_copy_stream,
         batch_config,
         memory_monitor
             .as_ref()
             .map(|memory_monitor| memory_monitor.subscribe()),
+        max_batch_bytes,
     );
     pin!(table_copy_stream);
 

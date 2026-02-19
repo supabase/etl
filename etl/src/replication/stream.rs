@@ -20,7 +20,7 @@ use crate::metrics::{
     ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, PIPELINE_ID_LABEL,
     STATUS_UPDATE_TYPE_LABEL,
 };
-use crate::types::{PipelineId, TableRow};
+use crate::types::{PipelineId, SizeHint, TableRow};
 use metrics::{counter, histogram};
 
 /// The amount of milliseconds between two consecutive status updates in case no forced update
@@ -72,22 +72,26 @@ impl<'a> Stream for TableCopyStream<'a> {
         match ready!(this.stream.poll_next(cx)) {
             // Row copy received.
             Some(Ok(row)) => {
-                counter!(
-                    ETL_BYTES_PROCESSED_TOTAL,
-                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
-                    EVENT_TYPE_LABEL => "copy"
-                )
-                .increment(row.len() as u64);
-
-                histogram!(
-                    ETL_ROW_SIZE_BYTES,
-                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
-                    EVENT_TYPE_LABEL => "copy"
-                )
-                .record(row.len() as f64);
-
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas) {
-                    Ok(row) => Poll::Ready(Some(Ok(row))),
+                    Ok(row) => {
+                        let row_size_bytes = row.size_hint() as u64;
+
+                        counter!(
+                            ETL_BYTES_PROCESSED_TOTAL,
+                            PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
+                            EVENT_TYPE_LABEL => "copy"
+                        )
+                        .increment(row_size_bytes);
+
+                        histogram!(
+                            ETL_ROW_SIZE_BYTES,
+                            PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
+                            EVENT_TYPE_LABEL => "copy"
+                        )
+                        .record(row_size_bytes as f64);
+
+                        Poll::Ready(Some(Ok(row)))
+                    }
                     Err(err) => Poll::Ready(Some(Err(err))),
                 }
             }

@@ -1,3 +1,4 @@
+use crate::types::SizeHint;
 use crate::types::cell::Cell;
 
 /// Represents a complete row of data from a database table.
@@ -7,6 +8,8 @@ use crate::types::cell::Cell;
 /// and include proper type information for each cell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableRow {
+    /// Approximate row size in bytes.
+    pub size_hint_bytes: usize,
     /// Column values in table column order
     pub values: Vec<Cell>,
 }
@@ -17,6 +20,20 @@ impl TableRow {
     /// The values should be ordered to match the target table's column schema.
     /// Each [`Cell`] should contain properly typed data for its corresponding column.
     pub fn new(values: Vec<Cell>) -> Self {
-        Self { values }
+        Self::new_with_size_hint(values, 0)
+    }
+
+    /// Creates a new table row with an explicit approximate size hint in bytes.
+    pub fn new_with_size_hint(values: Vec<Cell>, size_hint_bytes: usize) -> Self {
+        Self {
+            size_hint_bytes,
+            values,
+        }
+    }
+}
+
+impl SizeHint for TableRow {
+    fn size_hint(&self) -> usize {
+        self.size_hint_bytes
     }
 }

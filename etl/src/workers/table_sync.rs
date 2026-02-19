@@ -402,7 +402,7 @@ where
         err: EtlError,
     ) -> EtlResult<bool> {
         error!(table_id = table_id.0, error = %err, "table sync worker failed");
-
+        
         // Build a retry policy from the shared classifier. The concrete retry timestamp is
         // computed in the worker from config so both table sync and apply worker use the
         // same retry timing settings.

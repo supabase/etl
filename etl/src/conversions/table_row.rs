@@ -155,7 +155,7 @@ pub fn parse_table_row_from_postgres_copy_bytes(
         );
     }
 
-    Ok(TableRow { values })
+    Ok(TableRow::new_with_size_hint(values, row.len().max(1)))
 }
 
 #[cfg(test)]

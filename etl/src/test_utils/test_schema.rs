@@ -332,13 +332,11 @@ pub fn build_expected_users_inserts(
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
             table_id: users_table_id,
-            table_row: TableRow {
-                values: vec![
-                    Cell::I64(starting_id),
-                    Cell::String(name.to_owned()),
-                    Cell::I32(age),
-                ],
-            },
+            table_row: TableRow::new(vec![
+                Cell::I64(starting_id),
+                Cell::String(name.to_owned()),
+                Cell::I32(age),
+            ]),
         }));
 
         starting_id += 1;
@@ -359,9 +357,7 @@ pub fn build_expected_orders_inserts(
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
             table_id: orders_table_id,
-            table_row: TableRow {
-                values: vec![Cell::I64(starting_id), Cell::String(name.to_owned())],
-            },
+            table_row: TableRow::new(vec![Cell::I64(starting_id), Cell::String(name.to_owned())]),
         }));
 
         starting_id += 1;
