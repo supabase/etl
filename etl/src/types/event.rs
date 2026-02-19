@@ -183,6 +183,39 @@ impl Event {
     }
 }
 
+impl SizeHint for Event {
+    fn size_hint(&self) -> usize {
+        match self {
+            Self::Begin(_) => size_of::<BeginEvent>(),
+            Self::Commit(_) => size_of::<CommitEvent>(),
+            Self::Insert(event) => size_of::<InsertEvent>() + event.table_row.size_hint(),
+            Self::Update(event) => {
+                let old_row_size = event
+                    .old_table_row
+                    .as_ref()
+                    .map(|(_, row)| row.size_hint())
+                    .unwrap_or(0);
+
+                size_of::<UpdateEvent>() + event.table_row.size_hint() + old_row_size
+            }
+            Self::Delete(event) => {
+                let old_row_size = event
+                    .old_table_row
+                    .as_ref()
+                    .map(|(_, row)| row.size_hint())
+                    .unwrap_or(0);
+
+                size_of::<DeleteEvent>() + old_row_size
+            }
+            Self::Relation(_) => size_of::<RelationEvent>(),
+            Self::Truncate(event) => {
+                size_of::<TruncateEvent>() + event.rel_ids.len() * size_of::<u32>()
+            }
+            Self::Unsupported => 0,
+        }
+    }
+}
+
 /// Classification of Postgres replication event types.
 ///
 /// [`EventType`] provides a lightweight enumeration of possible replication events
@@ -241,36 +274,5 @@ impl From<&Event> for EventType {
 impl From<Event> for EventType {
     fn from(event: Event) -> Self {
         (&event).into()
-    }
-}
-
-impl SizeHint for Event {
-    fn size_hint(&self) -> usize {
-        match self {
-            Self::Begin(_) => size_of::<BeginEvent>(),
-            Self::Commit(_) => size_of::<CommitEvent>(),
-            Self::Insert(event) => size_of::<InsertEvent>() + event.table_row.size_hint(),
-            Self::Update(event) => {
-                let old_row_size = event
-                    .old_table_row
-                    .as_ref()
-                    .map(|(_, row)| row.size_hint())
-                    .unwrap_or(0);
-                size_of::<UpdateEvent>() + event.table_row.size_hint() + old_row_size
-            }
-            Self::Delete(event) => {
-                let old_row_size = event
-                    .old_table_row
-                    .as_ref()
-                    .map(|(_, row)| row.size_hint())
-                    .unwrap_or(0);
-                size_of::<DeleteEvent>() + old_row_size
-            }
-            Self::Relation(_) => size_of::<RelationEvent>(),
-            Self::Truncate(event) => {
-                size_of::<TruncateEvent>() + event.rel_ids.len() * size_of::<u32>()
-            }
-            Self::Unsupported => 0,
-        }
     }
 }

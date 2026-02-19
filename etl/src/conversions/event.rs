@@ -14,8 +14,8 @@ use crate::metrics::{
 };
 use crate::store::schema::SchemaStore;
 use crate::types::{
-    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, PipelineId, RelationEvent, SizeHint,
-    TableRow, TruncateEvent, UpdateEvent,
+    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, PipelineId, RelationEvent, TableRow,
+    TruncateEvent, UpdateEvent,
 };
 use crate::{bail, etl_error};
 
@@ -133,7 +133,7 @@ where
         PIPELINE_ID_LABEL => pipeline_id.to_string(),
         EVENT_TYPE_LABEL => "insert"
     )
-    .record(table_row.size_hint() as f64);
+    .record(row_size_bytes as f64);
 
     Ok(InsertEvent {
         start_lsn,
@@ -198,13 +198,12 @@ where
         false,
     )?;
 
-    let histogram_row_size_bytes = table_row.size_hint() + old_table_row_mut.size_hint();
     histogram!(
         ETL_ROW_SIZE_BYTES,
         PIPELINE_ID_LABEL => pipeline_id.to_string(),
         EVENT_TYPE_LABEL => "update"
     )
-    .record(histogram_row_size_bytes as f64);
+    .record(total_bytes as f64);
 
     let old_table_row = old_table_row_mut.map(|row| (is_key, row));
 
@@ -241,8 +240,9 @@ where
     let is_key = delete_body.old_tuple().is_none();
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
 
+    let mut row_size_bytes = 0u64;
     if let Some(identity) = &old_tuple {
-        let row_size_bytes = calculate_tuple_bytes(identity.tuple_data());
+        row_size_bytes = calculate_tuple_bytes(identity.tuple_data());
 
         counter!(
             ETL_BYTES_PROCESSED_TOTAL,
@@ -261,13 +261,14 @@ where
         )?),
         None => None,
     };
-    if let Some(row) = old_table_row.as_ref() {
+    if old_table_row.is_some()
+    {
         histogram!(
             ETL_ROW_SIZE_BYTES,
             PIPELINE_ID_LABEL => pipeline_id.to_string(),
             EVENT_TYPE_LABEL => "delete"
         )
-        .record(row.size_hint() as f64);
+        .record(row_size_bytes as f64);
     }
     let old_table_row = old_table_row.map(|row| (is_key, row));
 
@@ -356,7 +357,6 @@ pub fn convert_tuple_to_row(
     use_default_for_missing_cols: bool,
 ) -> EtlResult<TableRow> {
     let mut values = Vec::with_capacity(column_schemas.len());
-    let mut size_hint_bytes = 0usize;
 
     for (i, column_schema) in column_schemas.iter().enumerate() {
         // We are expecting that for each column, there is corresponding tuple data, even for null
@@ -370,7 +370,6 @@ pub fn convert_tuple_to_row(
 
         let cell = match tuple_data {
             protocol::TupleData::Null => {
-                size_hint_bytes += 1;
                 if column_schema.nullable {
                     Cell::Null
                 } else if use_default_for_missing_cols {
@@ -385,7 +384,6 @@ pub fn convert_tuple_to_row(
                 }
             }
             protocol::TupleData::UnchangedToast => {
-                size_hint_bytes += 1;
                 // For unchanged toast values we try to use the value from the old row if it is present
                 // but only if it is not null. In all other cases we send the default value for
                 // consistency. As a bit of a practical hack we take the value out of the old row and
@@ -408,7 +406,6 @@ pub fn convert_tuple_to_row(
                 );
             }
             protocol::TupleData::Text(bytes) => {
-                size_hint_bytes += bytes.len();
                 let str = str::from_utf8(&bytes[..])?;
                 parse_cell_from_postgres_text(&column_schema.typ, str)?
             }
@@ -417,5 +414,5 @@ pub fn convert_tuple_to_row(
         values.push(cell);
     }
 
-    Ok(TableRow::new_with_size_hint(values, size_hint_bytes.max(1)))
+    Ok(TableRow::new(values))
 }
