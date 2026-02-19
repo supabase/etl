@@ -6,11 +6,11 @@ FullApiPipelineConfig {
     publication_name: "updated_publication",
     batch: Some(
         ApiBatchConfig {
-            max_size: Some(
-                2000,
-            ),
             max_fill_ms: Some(
                 10,
+            ),
+            memory_budget_ratio: Some(
+                0.2,
             ),
         },
     ),
