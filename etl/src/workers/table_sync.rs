@@ -690,10 +690,13 @@ where
         let start_lsn = match result {
             Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
             Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
+                info!(table_id = self.table_id.0, "table sync stopped");
+
                 return Ok(());
             }
             Err(err) => {
                 error!(table_id = self.table_id.0, error = %err, "table sync failed");
+
                 return Err(err);
             }
         };

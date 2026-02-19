@@ -41,7 +41,7 @@ impl BatchConfig {
     pub const DEFAULT_MAX_FILL_MS: u64 = 10000;
 
     /// Default percentage of total memory used for batch bytes budgeting.
-    pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.3;
+    pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.8;
 
     /// Validates batch configuration settings.
     ///

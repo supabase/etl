@@ -246,7 +246,7 @@ where
                     TableCopyResult::Shutdown => {
                         info!(
                             table_id = table_id.0,
-                            "table copy interrupted by shutdown, terminating table sync without rollback"
+                            "table copy interrupted by shutdown, terminating table sync"
                         );
 
                         return Ok(TableSyncResult::SyncStopped);
