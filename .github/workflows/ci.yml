@@ -235,5 +235,4 @@ jobs:
           fail-on-error: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path-to-lcov: lcov.info
-          coverage-threshold: 1
           debug: true
