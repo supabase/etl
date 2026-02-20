@@ -19,19 +19,19 @@ jobs:
     if: github.event_name == 'push'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Configure Git Credentials
         run: |
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: 3.x
       - name: Compute Cache Key
         run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
       - name: Restore Docs Cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           key: mkdocs-material-${{ env.cache_id }}
           path: ~/.cache
@@ -47,15 +47,15 @@ jobs:
     if: github.event_name == 'pull_request'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: 3.x
       - name: Compute Cache Key
         run: echo "cache_id=$(date --utc '+%V')" >> $GITHUB_ENV
       - name: Restore Docs Cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           key: mkdocs-material-${{ env.cache_id }}
           path: ~/.cache
