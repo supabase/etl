@@ -29,6 +29,8 @@ etl-replicator = { path = "etl-replicator", default-features = false }
 etl-telemetry = { path = "etl-telemetry", default-features = false }
 
 actix-web = { version = "4.11.0", default-features = false }
+duckdb = { version = "1", default-features = false }
+r2d2 = { version = "0.8", default-features = false }
 actix-web-httpauth = { version = "0.8.2", default-features = false }
 actix-web-metrics = { version = "0.3.0", default-features = false }
 anyhow = { version = "1.0.98", default-features = false }

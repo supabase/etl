@@ -5,6 +5,8 @@
 
 #[cfg(feature = "bigquery")]
 pub mod bigquery;
+#[cfg(feature = "duckdb")]
+pub mod duckdb;
 #[cfg(feature = "egress")]
 pub mod egress;
 #[cfg(feature = "iceberg")]

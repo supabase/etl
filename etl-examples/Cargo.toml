@@ -9,7 +9,7 @@ homepage.workspace = true
 
 [dependencies]
 etl = { workspace = true }
-etl-destinations = { workspace = true, features = ["bigquery"] }
+etl-destinations = { workspace = true, features = ["bigquery", "duckdb"] }
 
 clap = { workspace = true, default-features = true, features = [
     "std",

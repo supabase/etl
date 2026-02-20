@@ -8,6 +8,12 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
+duckdb = [
+    "dep:duckdb",
+    "dep:r2d2",
+    "dep:tracing",
+    "dep:tokio",
+]
 bigquery = [
     "dep:gcp-bigquery-client",
     "dep:prost",
@@ -40,6 +46,8 @@ test-utils = ["dep:uuid"]
 etl = { workspace = true }
 
 arrow = { workspace = true, optional = true }
+duckdb = { workspace = true, optional = true, features = ["bundled", "r2d2"] }
+r2d2 = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 chrono = { workspace = true }
@@ -64,6 +72,8 @@ uuid = { workspace = true, optional = true, features = ["v4"] }
 [dev-dependencies]
 etl = { workspace = true, features = ["test-utils"] }
 etl-telemetry = { workspace = true }
+duckdb = { workspace = true, features = ["bundled"] }
+tempfile = { workspace = true }
 
 chrono = { workspace = true }
 futures = { workspace = true }
