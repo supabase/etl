@@ -1,6 +1,7 @@
 use crate::types::cell::{ArrayCell, Cell};
 use crate::types::{PgNumeric, SizeHint};
 use std::mem::size_of;
+use tracing::warn;
 
 /// Represents a complete row of data from a database table.
 ///
@@ -55,10 +56,22 @@ impl SizeHint for TableRow {
 /// Returns an estimate of allocated bytes for a table row payload.
 fn estimate_table_row_allocated_bytes(values: &[Cell], values_capacity: usize) -> usize {
     let mut total = size_of::<TableRow>();
-    total = total.saturating_add(values_capacity.saturating_mul(size_of::<Cell>()));
+    total = checked_add_or_saturating(
+        total,
+        checked_mul_or_saturating(
+            values_capacity,
+            size_of::<Cell>(),
+            "table_row.values_capacity_mul_cell_size",
+        ),
+        "table_row.base_add_values_capacity",
+    );
 
     for cell in values {
-        total = total.saturating_add(estimate_cell_allocated_bytes(cell));
+        total = checked_add_or_saturating(
+            total,
+            estimate_cell_allocated_bytes(cell),
+            "table_row.add_cell_heap_bytes",
+        );
     }
 
     total
@@ -91,7 +104,11 @@ fn estimate_cell_allocated_bytes(cell: &Cell) -> usize {
 /// Returns an estimate of additional heap bytes owned by a [`PgNumeric`].
 fn estimated_pg_numeric_allocated_bytes(value: &PgNumeric) -> usize {
     match &value {
-        PgNumeric::Value { digits, .. } => digits.capacity().saturating_mul(size_of::<i16>()),
+        PgNumeric::Value { digits, .. } => checked_mul_or_saturating(
+            digits.capacity(),
+            size_of::<i16>(),
+            "pg_numeric.digits_capacity_mul_i16_size",
+        ),
         PgNumeric::NaN | PgNumeric::PositiveInfinity | PgNumeric::NegativeInfinity => 0,
     }
 }
@@ -102,17 +119,28 @@ fn estimate_json_allocated_bytes(value: &serde_json::Value) -> usize {
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
         serde_json::Value::String(value) => value.capacity(),
         serde_json::Value::Array(values) => {
-            let mut total = values
-                .capacity()
-                .saturating_mul(size_of::<serde_json::Value>());
+            let mut total = checked_mul_or_saturating(
+                values.capacity(),
+                size_of::<serde_json::Value>(),
+                "json.array_capacity_mul_value_size",
+            );
             for value in values {
-                total = total.saturating_add(estimate_json_allocated_bytes(value));
+                total = checked_add_or_saturating(
+                    total,
+                    estimate_json_allocated_bytes(value),
+                    "json.add_nested_value_bytes",
+                );
             }
             total
         }
         serde_json::Value::Object(values) => values.iter().fold(0usize, |acc, (key, value)| {
-            acc.saturating_add(key.capacity())
-                .saturating_add(estimate_json_allocated_bytes(value))
+            let with_key =
+                checked_add_or_saturating(acc, key.capacity(), "json.object_add_key_capacity");
+            checked_add_or_saturating(
+                with_key,
+                estimate_json_allocated_bytes(value),
+                "json.object_add_nested_value_bytes",
+            )
         }),
     }
 }
@@ -120,63 +148,155 @@ fn estimate_json_allocated_bytes(value: &serde_json::Value) -> usize {
 /// Returns an estimate of additional heap bytes owned by an [`ArrayCell`].
 fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
     match value {
-        ArrayCell::Bool(values) => values.capacity().saturating_mul(size_of::<Option<bool>>()),
-        ArrayCell::I16(values) => values.capacity().saturating_mul(size_of::<Option<i16>>()),
-        ArrayCell::I32(values) => values.capacity().saturating_mul(size_of::<Option<i32>>()),
-        ArrayCell::U32(values) => values.capacity().saturating_mul(size_of::<Option<u32>>()),
-        ArrayCell::I64(values) => values.capacity().saturating_mul(size_of::<Option<i64>>()),
-        ArrayCell::F32(values) => values.capacity().saturating_mul(size_of::<Option<f32>>()),
-        ArrayCell::F64(values) => values.capacity().saturating_mul(size_of::<Option<f64>>()),
+        ArrayCell::Bool(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<bool>>(),
+            "array.bool_capacity_mul_option_size",
+        ),
+        ArrayCell::I16(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<i16>>(),
+            "array.i16_capacity_mul_option_size",
+        ),
+        ArrayCell::I32(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<i32>>(),
+            "array.i32_capacity_mul_option_size",
+        ),
+        ArrayCell::U32(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<u32>>(),
+            "array.u32_capacity_mul_option_size",
+        ),
+        ArrayCell::I64(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<i64>>(),
+            "array.i64_capacity_mul_option_size",
+        ),
+        ArrayCell::F32(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<f32>>(),
+            "array.f32_capacity_mul_option_size",
+        ),
+        ArrayCell::F64(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<f64>>(),
+            "array.f64_capacity_mul_option_size",
+        ),
         ArrayCell::Numeric(values) => {
-            let mut total = values
-                .capacity()
-                .saturating_mul(size_of::<Option<PgNumeric>>());
+            let mut total = checked_mul_or_saturating(
+                values.capacity(),
+                size_of::<Option<PgNumeric>>(),
+                "array.numeric_capacity_mul_option_size",
+            );
             for value in values.iter().flatten() {
-                total = total.saturating_add(estimated_pg_numeric_allocated_bytes(value));
+                total = checked_add_or_saturating(
+                    total,
+                    estimated_pg_numeric_allocated_bytes(value),
+                    "array.numeric_add_element_heap_bytes",
+                );
             }
             total
         }
-        ArrayCell::Date(values) => values
-            .capacity()
-            .saturating_mul(size_of::<Option<chrono::NaiveDate>>()),
-        ArrayCell::Time(values) => values
-            .capacity()
-            .saturating_mul(size_of::<Option<chrono::NaiveTime>>()),
-        ArrayCell::Timestamp(values) => values
-            .capacity()
-            .saturating_mul(size_of::<Option<chrono::NaiveDateTime>>()),
-        ArrayCell::TimestampTz(values) => values
-            .capacity()
-            .saturating_mul(size_of::<Option<chrono::DateTime<chrono::Utc>>>()),
-        ArrayCell::Uuid(values) => values
-            .capacity()
-            .saturating_mul(size_of::<Option<uuid::Uuid>>()),
+        ArrayCell::Date(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<chrono::NaiveDate>>(),
+            "array.date_capacity_mul_option_size",
+        ),
+        ArrayCell::Time(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<chrono::NaiveTime>>(),
+            "array.time_capacity_mul_option_size",
+        ),
+        ArrayCell::Timestamp(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<chrono::NaiveDateTime>>(),
+            "array.timestamp_capacity_mul_option_size",
+        ),
+        ArrayCell::TimestampTz(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<chrono::DateTime<chrono::Utc>>>(),
+            "array.timestamptz_capacity_mul_option_size",
+        ),
+        ArrayCell::Uuid(values) => checked_mul_or_saturating(
+            values.capacity(),
+            size_of::<Option<uuid::Uuid>>(),
+            "array.uuid_capacity_mul_option_size",
+        ),
         ArrayCell::String(values) => {
-            let mut total = values
-                .capacity()
-                .saturating_mul(size_of::<Option<String>>());
+            let mut total = checked_mul_or_saturating(
+                values.capacity(),
+                size_of::<Option<String>>(),
+                "array.string_capacity_mul_option_size",
+            );
             for value in values.iter().flatten() {
-                total = total.saturating_add(value.capacity());
+                total = checked_add_or_saturating(
+                    total,
+                    value.capacity(),
+                    "array.string_add_element_capacity",
+                );
             }
             total
         }
         ArrayCell::Json(values) => {
-            let mut total = values
-                .capacity()
-                .saturating_mul(size_of::<Option<serde_json::Value>>());
+            let mut total = checked_mul_or_saturating(
+                values.capacity(),
+                size_of::<Option<serde_json::Value>>(),
+                "array.json_capacity_mul_option_size",
+            );
             for value in values.iter().flatten() {
-                total = total.saturating_add(estimate_json_allocated_bytes(value));
+                total = checked_add_or_saturating(
+                    total,
+                    estimate_json_allocated_bytes(value),
+                    "array.json_add_element_heap_bytes",
+                );
             }
             total
         }
         ArrayCell::Bytes(values) => {
-            let mut total = values
-                .capacity()
-                .saturating_mul(size_of::<Option<Vec<u8>>>());
+            let mut total = checked_mul_or_saturating(
+                values.capacity(),
+                size_of::<Option<Vec<u8>>>(),
+                "array.bytes_capacity_mul_option_size",
+            );
             for value in values.iter().flatten() {
-                total = total.saturating_add(value.capacity());
+                total = checked_add_or_saturating(
+                    total,
+                    value.capacity(),
+                    "array.bytes_add_element_capacity",
+                );
             }
             total
+        }
+    }
+}
+
+/// Returns `left + right`, saturating on overflow while emitting a warning.
+fn checked_add_or_saturating(left: usize, right: usize, context: &'static str) -> usize {
+    match left.checked_add(right) {
+        Some(value) => value,
+        None => {
+            warn!(
+                context,
+                left, right, "size hint addition overflowed, saturating to usize::MAX"
+            );
+
+            usize::MAX
+        }
+    }
+}
+
+/// Returns `left * right`, saturating on overflow while emitting a warning.
+fn checked_mul_or_saturating(left: usize, right: usize, context: &'static str) -> usize {
+    match left.checked_mul(right) {
+        Some(value) => value,
+        None => {
+            warn!(
+                context,
+                left, right, "size hint multiplication overflowed, saturating to usize::MAX"
+            );
+
+            usize::MAX
         }
     }
 }
