@@ -287,8 +287,16 @@ pub fn assert_events_equal(left: &[Event], right: &[Event]) {
     }
 }
 
-fn table_rows_equal_ignoring_size(left: &TableRow, right: &TableRow) -> bool {
+pub fn table_rows_equal_ignoring_size(left: &TableRow, right: &TableRow) -> bool {
     left.values() == right.values()
+}
+
+pub fn assert_table_rows_equal_ignoring_size(left: &[TableRow], right: &[TableRow]) {
+    assert_eq!(left.len(), right.len());
+
+    for (left_row, right_row) in left.iter().zip(right.iter()) {
+        assert!(table_rows_equal_ignoring_size(left_row, right_row));
+    }
 }
 
 fn old_table_rows_equal_ignoring_size(

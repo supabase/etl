@@ -27,31 +27,13 @@ const fn default_memory_refresh_interval_ms() -> u64 {
     PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
-/// Batch processing configuration for pipelines.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub struct ApiBatchConfig {
-    /// Maximum time, in milliseconds, to wait before flushing a partially filled batch.
-    ///
-    /// This is the latency bound in streams: after the first item is buffered, the batch is
-    /// flushed when this timeout elapses even if size-based targets are not reached.
-    #[schema(example = 1000)]
-    pub max_fill_ms: Option<u64>,
-    /// Ratio of process memory reserved for incoming stream batch bytes.
-    ///
-    /// The effective byte budget is divided by active streams at runtime, and flush happens on
-    /// the first trigger between this byte budget and [`Self::max_fill_ms`].
-    #[schema(example = 0.2)]
-    pub memory_budget_ratio: Option<f32>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FullApiPipelineConfig {
     #[schema(example = "my_publication")]
     #[serde(deserialize_with = "crate::utils::trim_string")]
     pub publication_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub batch: Option<ApiBatchConfig>,
+    pub batch: Option<BatchConfig>,
     #[schema(example = 1000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_error_retry_delay_ms: Option<u64>,
@@ -80,10 +62,7 @@ impl From<StoredPipelineConfig> for FullApiPipelineConfig {
     fn from(value: StoredPipelineConfig) -> Self {
         Self {
             publication_name: value.publication_name,
-            batch: Some(ApiBatchConfig {
-                max_fill_ms: Some(value.batch.max_fill_ms),
-                memory_budget_ratio: Some(value.batch.memory_budget_ratio),
-            }),
+            batch: Some(value.batch),
             table_error_retry_delay_ms: Some(value.table_error_retry_delay_ms),
             table_error_retry_max_attempts: Some(value.table_error_retry_max_attempts),
             max_table_sync_workers: Some(value.max_table_sync_workers),
@@ -148,18 +127,7 @@ impl Store for StoredPipelineConfig {}
 
 impl From<FullApiPipelineConfig> for StoredPipelineConfig {
     fn from(value: FullApiPipelineConfig) -> Self {
-        let batch = value
-            .batch
-            .map(|b| BatchConfig {
-                max_fill_ms: b.max_fill_ms.unwrap_or(BatchConfig::DEFAULT_MAX_FILL_MS),
-                memory_budget_ratio: b
-                    .memory_budget_ratio
-                    .unwrap_or(BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO),
-            })
-            .unwrap_or(BatchConfig {
-                max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
-                memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
-            });
+        let batch = value.batch.unwrap_or_default();
 
         Self {
             publication_name: value.publication_name,

@@ -1,10 +1,11 @@
 mod support;
 
 use etl_api::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
-use etl_api::configs::pipeline::{ApiBatchConfig, FullApiPipelineConfig};
+use etl_api::configs::pipeline::FullApiPipelineConfig;
 use etl_api::validation::{
     FailureType, ValidationContext, validate_destination, validate_pipeline,
 };
+use etl_config::shared::BatchConfig;
 use etl_config::{Environment, SerializableSecretString};
 use etl_destinations::bigquery::test_utils::{
     setup_bigquery_database, setup_bigquery_database_without_dataset,
@@ -66,9 +67,9 @@ fn create_bigquery_config(
 fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
     FullApiPipelineConfig {
         publication_name: publication_name.to_string(),
-        batch: Some(ApiBatchConfig {
-            max_fill_ms: None,
-            memory_budget_ratio: Some(0.2),
+        batch: Some(BatchConfig {
+            max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
+            memory_budget_ratio: 0.2,
         }),
         log_level: None,
         table_error_retry_delay_ms: None,

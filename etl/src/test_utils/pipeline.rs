@@ -59,7 +59,7 @@ pub struct PipelineBuilder<S, D> {
     invalidated_slot_behavior: InvalidatedSlotBehavior,
     /// Maximum parallel connections per table during initial copy. Default: 2.
     max_copy_connections_per_table: u16,
-    /// The time between memory refreshes of the memory monitor.
+    /// The time between memory refreshes of the memory monitor. Default: 0.2.
     memory_refresh_interval_ms: u64,
     /// Memory-based backpressure configuration. Default: enabled with defaults.
     memory_backpressure: MemoryBackpressureConfig,

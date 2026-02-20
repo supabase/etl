@@ -240,9 +240,8 @@ where
     let is_key = delete_body.old_tuple().is_none();
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
 
-    let mut row_size_bytes = 0u64;
     if let Some(identity) = &old_tuple {
-        row_size_bytes = calculate_tuple_bytes(identity.tuple_data());
+        let row_size_bytes = calculate_tuple_bytes(identity.tuple_data());
 
         counter!(
             ETL_BYTES_PROCESSED_TOTAL,
@@ -250,6 +249,13 @@ where
             EVENT_TYPE_LABEL => "delete"
         )
         .increment(row_size_bytes);
+
+        histogram!(
+            ETL_ROW_SIZE_BYTES,
+            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+            EVENT_TYPE_LABEL => "delete"
+        )
+        .record(row_size_bytes as f64);
     }
 
     let old_table_row = match old_tuple {
@@ -260,16 +266,8 @@ where
             true,
         )?),
         None => None,
-    };
-    if old_table_row.is_some() {
-        histogram!(
-            ETL_ROW_SIZE_BYTES,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-            EVENT_TYPE_LABEL => "delete"
-        )
-        .record(row_size_bytes as f64);
     }
-    let old_table_row = old_table_row.map(|row| (is_key, row));
+    .map(|row| (is_key, row));
 
     Ok(DeleteEvent {
         start_lsn,

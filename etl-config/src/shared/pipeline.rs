@@ -41,7 +41,10 @@ impl BatchConfig {
     pub const DEFAULT_MAX_FILL_MS: u64 = 10000;
 
     /// Default percentage of total memory used for batch bytes budgeting.
-    pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.8;
+    ///
+    /// This was empirically found to be a good value to avoid OOMs, but it's highly dependent on
+    /// how we measure the stream batches impacts on memory.
+    pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.2;
 
     /// Validates batch configuration settings.
     ///

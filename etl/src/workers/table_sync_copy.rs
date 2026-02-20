@@ -112,7 +112,7 @@ where
                     ));
                 }
 
-                let update = connection_updates_rx.borrow().clone();
+                let update = connection_updates_rx.borrow_and_update().clone();
                 match update {
                     PostgresConnectionUpdate::Running => {}
                     PostgresConnectionUpdate::Terminated => {

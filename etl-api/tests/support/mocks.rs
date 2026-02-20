@@ -224,16 +224,16 @@ pub mod tenants {
 /// Pipeline config helpers.
 pub mod pipelines {
     use super::*;
-    use etl_api::configs::{log::LogLevel, pipeline::ApiBatchConfig};
-    use etl_config::shared::{MemoryBackpressureConfig, TableSyncCopyConfig};
+    use etl_api::configs::log::LogLevel;
+    use etl_config::shared::{BatchConfig, MemoryBackpressureConfig, TableSyncCopyConfig};
 
     /// Returns a default pipeline config.
     pub fn new_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "publication".to_owned(),
-            batch: Some(ApiBatchConfig {
-                max_fill_ms: Some(5),
-                memory_budget_ratio: Some(0.2),
+            batch: Some(BatchConfig {
+                max_fill_ms: 5,
+                memory_budget_ratio: 0.2,
             }),
             table_error_retry_delay_ms: Some(10000),
             table_error_retry_max_attempts: Some(5),
@@ -251,9 +251,9 @@ pub mod pipelines {
     pub fn updated_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "updated_publication".to_owned(),
-            batch: Some(ApiBatchConfig {
-                max_fill_ms: Some(10),
-                memory_budget_ratio: Some(0.2),
+            batch: Some(BatchConfig {
+                max_fill_ms: 10,
+                memory_budget_ratio: 0.2,
             }),
             table_error_retry_delay_ms: Some(20000),
             table_error_retry_max_attempts: Some(10),

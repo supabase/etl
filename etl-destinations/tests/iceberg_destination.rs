@@ -6,7 +6,8 @@ use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{
-    TableSelection, TestDatabaseSchema, insert_mock_data, setup_test_database_schema,
+    TableSelection, TestDatabaseSchema, assert_table_rows_equal_ignoring_size, insert_mock_data,
+    setup_test_database_schema,
 };
 use etl::types::{Cell, EventType, PipelineId, TableRow};
 use etl_destinations::iceberg::test_utils::LakekeeperClient;
@@ -132,7 +133,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     // Sort deterministically by the debug representation as a simple stable key for tests.
     actual_users
         .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
-    assert_eq!(actual_users, expected_users);
+    assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
     let mut actual_orders =
         read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
@@ -155,7 +156,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     // Sort deterministically by the debug representation as a simple stable key for tests.
     actual_orders
         .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
-    assert_eq!(actual_orders, expected_orders);
+    assert_table_rows_equal_ignoring_size(&actual_orders, &expected_orders);
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
     // This feature is planned for future releases. We'll start to use it when it becomes available.
@@ -389,7 +390,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         ]),
     ];
 
-    assert_eq!(actual_users, expected_users);
+    assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
     let mut actual_orders =
         read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
@@ -439,7 +440,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         ]),
     ];
 
-    assert_eq!(actual_orders, expected_orders);
+    assert_table_rows_equal_ignoring_size(&actual_orders, &expected_orders);
 
     // Stop the pipeline to finalize writes.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -624,7 +625,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
             IcebergOperationType::Insert.into(),
         ]),
     ];
-    assert_eq!(actual_users, expected_users);
+    assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
     let mut actual_orders =
         read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
@@ -646,7 +647,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
             IcebergOperationType::Insert.into(),
         ]),
     ];
-    assert_eq!(actual_orders, expected_orders);
+    assert_table_rows_equal_ignoring_size(&actual_orders, &expected_orders);
 
     // Stop the pipeline to finalize writes.
     pipeline.shutdown_and_wait().await.unwrap();

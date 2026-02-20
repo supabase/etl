@@ -520,16 +520,16 @@ where
             .start_logical_replication(&self.config.publication_name, &slot_name, start_lsn)
             .await?;
 
-        let mut connection_updates_rx = replication_client.connection_updates_rx();
         let events_stream = EventsStream::wrap(logical_replication_stream, self.pipeline_id);
         let events_stream =
             BackpressureStream::wrap(events_stream, self.memory_monitor.subscribe());
         pin!(events_stream);
 
+        let mut connection_updates_rx = replication_client.connection_updates_rx();
+
         // If the loop produces a result while waiting for shutdown acknowledgement,
         // we store it here and return it once the keepalive is received.
         let mut pending_result: Option<ApplyLoopResult> = None;
-
         loop {
             // If waiting for shutdown acknowledgement, the loop is now just waiting for the keep alive
             // message before shutting off.
@@ -566,7 +566,10 @@ where
                         ));
                     }
 
-                    let update = connection_updates_rx.borrow().clone();
+                    // We use `borrow_and_update` to avoid the race condition in which there is a change
+                    // between the `changed()` notification and the borrow. So that if there was, we mark
+                    // the value as seen avoiding `changed()` to be called again in the next iteration.
+                    let update = connection_updates_rx.borrow_and_update().clone();
                     match update {
                         PostgresConnectionUpdate::Running => {}
                         PostgresConnectionUpdate::Terminated => {
