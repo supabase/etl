@@ -1,5 +1,5 @@
-use crate::types::SizeHint;
 use crate::types::cell::{ArrayCell, Cell};
+use crate::types::{PgNumeric, SizeHint};
 use std::mem::size_of;
 
 /// Represents a complete row of data from a database table.
@@ -22,9 +22,7 @@ impl TableRow {
     /// The values should be ordered to match the target table's column schema.
     /// Each [`Cell`] should contain properly typed data for its corresponding column.
     pub fn new(values: Vec<Cell>) -> Self {
-        let estimated_allocated_bytes =
-            estimate_table_row_allocated_bytes(&values, values.capacity());
-        let size_hint_bytes = estimated_allocated_bytes.max(1);
+        let size_hint_bytes = estimate_table_row_allocated_bytes(&values, values.capacity());
 
         Self {
             size_hint_bytes,
@@ -77,12 +75,12 @@ fn estimate_cell_allocated_bytes(cell: &Cell) -> usize {
         | Cell::I64(_)
         | Cell::F32(_)
         | Cell::F64(_)
-        | Cell::Numeric(_)
         | Cell::Date(_)
         | Cell::Time(_)
         | Cell::Timestamp(_)
         | Cell::TimestampTz(_)
         | Cell::Uuid(_) => 0,
+        Cell::Numeric(value) => estimated_pg_numeric_allocated_bytes(value),
         Cell::String(value) => value.capacity(),
         Cell::Bytes(value) => value.capacity(),
         Cell::Json(value) => estimate_json_allocated_bytes(value),
@@ -121,9 +119,15 @@ fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
         ArrayCell::I64(values) => values.capacity().saturating_mul(size_of::<Option<i64>>()),
         ArrayCell::F32(values) => values.capacity().saturating_mul(size_of::<Option<f32>>()),
         ArrayCell::F64(values) => values.capacity().saturating_mul(size_of::<Option<f64>>()),
-        ArrayCell::Numeric(values) => values
-            .capacity()
-            .saturating_mul(size_of::<Option<crate::conversions::numeric::PgNumeric>>()),
+        ArrayCell::Numeric(values) => {
+            let mut total = values
+                .capacity()
+                .saturating_mul(size_of::<Option<PgNumeric>>());
+            for value in values.iter().flatten() {
+                total = total.saturating_add(estimated_pg_numeric_allocated_bytes(value));
+            }
+            total
+        }
         ArrayCell::Date(values) => values
             .capacity()
             .saturating_mul(size_of::<Option<chrono::NaiveDate>>()),
@@ -166,5 +170,13 @@ fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
             }
             total
         }
+    }
+}
+
+/// Returns an estimate of additional heap bytes owned a PgNumeric.
+fn estimated_pg_numeric_allocated_bytes(value: &PgNumeric) -> usize {
+    match &value {
+        PgNumeric::Value { digits, .. } => digits.capacity().saturating_mul(size_of::<i16>()),
+        PgNumeric::NaN | PgNumeric::PositiveInfinity | PgNumeric::NegativeInfinity => 0,
     }
 }
