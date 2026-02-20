@@ -1,6 +1,6 @@
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
-use etl::types::{Cell, ColumnSchema, PipelineId, TableRow, Type, is_array_type};
+use etl::types::{Cell, ColumnSchema, PipelineId, Type, is_array_type};
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{BatchAppendResult, ColumnMode, StorageApiConfig};
@@ -973,13 +973,8 @@ impl BigQueryClient {
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         table_descriptor: TableDescriptor,
-        rows: Vec<TableRow>,
+        validated_rows: Vec<BigQueryTableRow>,
     ) -> EtlResult<TableBatch<BigQueryTableRow>> {
-        let validated_rows = rows
-            .into_iter()
-            .map(BigQueryTableRow::try_from)
-            .collect::<EtlResult<Vec<_>>>()?;
-
         // We want to use the default stream from BigQuery since it allows multiple connections to
         // send data to it. In addition, it's available by default for every table, so it also reduces
         // complexity.

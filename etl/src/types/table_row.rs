@@ -7,7 +7,8 @@ use std::mem::size_of;
 /// [`TableRow`] contains a vector of [`Cell`] values corresponding to the columns
 /// of a database table. The values are ordered to match the table's column order
 /// and include proper type information for each cell.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct TableRow {
     /// Approximate row size in bytes.
     size_hint_bytes: usize,
