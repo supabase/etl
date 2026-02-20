@@ -1,11 +1,8 @@
-use etl_api::configs::log::LogLevel;
-use etl_api::configs::pipeline::ApiBatchConfig;
 use etl_api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
     GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse, RollbackTablesRequest,
     RollbackTablesResponse, RollbackTablesTarget, RollbackType, SimpleTableReplicationState,
-    UpdatePipelineConfigRequest, UpdatePipelineConfigResponse, UpdatePipelineRequest,
-    UpdatePipelineVersionRequest,
+    UpdatePipelineRequest, UpdatePipelineVersionRequest,
 };
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::sqlx::test_utils::drop_pg_database;
@@ -19,9 +16,7 @@ use crate::support::database::{
 };
 use crate::support::mocks::create_image_with_name;
 use crate::support::mocks::pipelines::{
-    ConfigUpdateType, create_pipeline_with_config, new_pipeline_config,
-    partially_updated_optional_pipeline_config, updated_optional_pipeline_config,
-    updated_pipeline_config,
+    create_pipeline_with_config, new_pipeline_config, updated_pipeline_config,
 };
 use crate::{
     support::mocks::create_default_image,
@@ -776,156 +771,6 @@ async fn update_version_fails_when_version_is_not_default() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_config_can_be_updated() {
-    init_test_tracing();
-    let (app, tenant_id, _source_id, _destination_id, pipeline_id) = setup_basic_pipeline().await;
-
-    // Act
-    let update_request = UpdatePipelineConfigRequest {
-        config: partially_updated_optional_pipeline_config(ConfigUpdateType::Batch(
-            ApiBatchConfig {
-                max_size: Some(10_000),
-                max_fill_ms: Some(100),
-            },
-        )),
-    };
-    let response = app
-        .update_pipeline_config(&tenant_id, pipeline_id, &update_request)
-        .await;
-
-    // Assert
-    assert!(response.status().is_success());
-    let response: UpdatePipelineConfigResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    insta::assert_debug_snapshot!(response.config);
-
-    // Act
-    let update_request = UpdatePipelineConfigRequest {
-        config: partially_updated_optional_pipeline_config(
-            ConfigUpdateType::TableErrorRetryDelayMs(20000),
-        ),
-    };
-    let response = app
-        .update_pipeline_config(&tenant_id, pipeline_id, &update_request)
-        .await;
-
-    // Assert
-    assert!(response.status().is_success());
-    let response: UpdatePipelineConfigResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    insta::assert_debug_snapshot!(response.config);
-
-    // Act
-    let update_request = UpdatePipelineConfigRequest {
-        config: partially_updated_optional_pipeline_config(
-            ConfigUpdateType::TableErrorRetryMaxAttempts(12),
-        ),
-    };
-    let response = app
-        .update_pipeline_config(&tenant_id, pipeline_id, &update_request)
-        .await;
-
-    // Assert
-    assert!(response.status().is_success());
-    let response: UpdatePipelineConfigResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    insta::assert_debug_snapshot!(response.config);
-
-    // Act
-    let update_request = UpdatePipelineConfigRequest {
-        config: partially_updated_optional_pipeline_config(ConfigUpdateType::MaxTableSyncWorkers(
-            8,
-        )),
-    };
-    let response = app
-        .update_pipeline_config(&tenant_id, pipeline_id, &update_request)
-        .await;
-
-    // Assert
-    assert!(response.status().is_success());
-    let response: UpdatePipelineConfigResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    insta::assert_debug_snapshot!(response.config);
-
-    // Act
-    let update_request = UpdatePipelineConfigRequest {
-        config: partially_updated_optional_pipeline_config(ConfigUpdateType::LogLevel(Some(
-            LogLevel::Debug,
-        ))),
-    };
-    let response = app
-        .update_pipeline_config(&tenant_id, pipeline_id, &update_request)
-        .await;
-
-    // Assert
-    assert!(response.status().is_success());
-    let response: UpdatePipelineConfigResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    insta::assert_debug_snapshot!(response.config);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn update_config_fails_for_non_existing_pipeline() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-    let tenant_id = &create_tenant(&app).await;
-
-    // Act
-    let update_request = UpdatePipelineConfigRequest {
-        config: updated_optional_pipeline_config(),
-    };
-    let response = app
-        .update_pipeline_config(tenant_id, 42, &update_request)
-        .await;
-
-    // Assert
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn update_config_fails_for_pipeline_from_another_tenant() {
-    init_test_tracing();
-    // Arrange
-    let app = spawn_test_app().await;
-    create_default_image(&app).await;
-    let tenant1_id = &create_tenant(&app).await;
-
-    let source1_id = create_source(&app, tenant1_id).await;
-    let destination1_id = create_destination(&app, tenant1_id).await;
-
-    let pipeline_id = create_pipeline_with_config(
-        &app,
-        tenant1_id,
-        source1_id,
-        destination1_id,
-        new_pipeline_config(),
-    )
-    .await;
-
-    // Act - Try to update config using
-    let update_request = UpdatePipelineConfigRequest {
-        config: updated_optional_pipeline_config(),
-    };
-    let response = app
-        .update_pipeline_config("wrong-tenant-id", pipeline_id, &update_request)
-        .await;
-
-    // Assert
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn an_existing_pipeline_can_be_started() {
     init_test_tracing();
     let (app, tenant_id, _source_id, _destination_id, pipeline_id) = setup_basic_pipeline().await;
@@ -1187,7 +1032,7 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .unwrap();
     assert_eq!(count, 1);
 
-    // Verify table schema was deleted
+    // Verify table schema was preserved (schemas are no longer deleted during reset)
     let schema_count_after: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
     )
@@ -1196,9 +1041,9 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(schema_count_after, 0);
+    assert_eq!(schema_count_after, 1);
 
-    // Verify table mapping was NOT deleted (kept for truncation on restart)
+    // Verify table mapping was also preserved
     let mapping_count_after: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
     )
@@ -1213,7 +1058,7 @@ async fn rollback_tables_with_full_reset_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_to_init_cleans_up_schemas_but_keeps_mappings() {
+async fn rollback_to_init_keeps_schemas_and_mappings() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1274,7 +1119,7 @@ async fn rollback_to_init_cleans_up_schemas_but_keeps_mappings() {
         SimpleTableReplicationState::Queued
     ));
 
-    // Verify table schema was deleted (because we rolled back to init)
+    // Verify table schema was preserved (schemas are no longer deleted during rollback)
     let schema_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
     )
@@ -1283,9 +1128,9 @@ async fn rollback_to_init_cleans_up_schemas_but_keeps_mappings() {
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(schema_count, 0);
+    assert_eq!(schema_count, 1);
 
-    // Verify table mapping was NOT deleted (kept for truncation on restart)
+    // Verify table mapping was also preserved
     let mapping_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
     )

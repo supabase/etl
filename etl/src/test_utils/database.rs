@@ -1,4 +1,24 @@
-use etl_config::shared::{PgConnectionConfig, TlsConfig};
+//! Test database utilities for spawning isolated PostgreSQL instances.
+//!
+//! # PostgreSQL Configuration Requirements
+//!
+//! For tests to complete in a timely manner, the PostgreSQL instance must be configured
+//! with a low `wal_sender_timeout` value. PostgreSQL uses `wal_sender_timeout / 2` to
+//! determine the interval for sending status updates (keep-alive messages) during idle
+//! periods in logical replication.
+//!
+//! For example, with `wal_sender_timeout = 10s`, keep-alive messages are sent every 5
+//! seconds. This is important because the apply loop relies on these messages to trigger
+//! table synchronization state transitions when there is no WAL activity.
+//!
+//! The recommended configuration for tests is:
+//! ```text
+//! wal_sender_timeout = 10s
+//! ```
+//!
+//! See `scripts/docker-compose.yaml` for the test database configuration.
+
+use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
 use etl_postgres::replication::connect_to_source_database;
 use etl_postgres::tokio::test_utils::PgDatabase;
 use etl_postgres::types::TableName;
@@ -52,7 +72,7 @@ fn local_pg_connection_config() -> PgConnectionConfig {
             trusted_root_certs: String::new(),
             enabled: false,
         },
-        keepalive: None,
+        keepalive: TcpKeepaliveConfig::default(),
     }
 }
 

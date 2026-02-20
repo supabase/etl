@@ -49,9 +49,8 @@ use crate::{
             UpdatePipelineRequest, UpdatePipelineVersionRequest, ValidatePipelineRequest,
             ValidatePipelineResponse, create_pipeline, delete_pipeline,
             get_pipeline_replication_status, get_pipeline_status, get_pipeline_version,
-            read_all_pipelines, read_pipeline, rollback_table_state, rollback_tables,
-            start_pipeline, stop_all_pipelines, stop_pipeline, update_pipeline,
-            update_pipeline_config, update_pipeline_version, validate_pipeline,
+            read_all_pipelines, read_pipeline, rollback_tables, start_pipeline, stop_all_pipelines,
+            stop_pipeline, update_pipeline, update_pipeline_version, validate_pipeline,
         },
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
@@ -104,30 +103,41 @@ impl Application {
             key,
         };
 
-        let kube_client = match Environment::load()? {
-            Environment::Staging | Environment::Prod => kube::Client::try_default().await?,
-            Environment::Dev => {
-                let options = KubeConfigOptions {
-                    context: Some("orbstack".to_string()),
-                    cluster: Some("orbstack".to_string()),
-                    user: Some("orbstack".to_string()),
-                };
-                let kube_config = kube::config::Config::from_kubeconfig(&options).await?;
-                let kube_client: kube::Client = kube_config.try_into()?;
-
-                test_orbstack_connection(&kube_client).await?;
-
-                kube_client
+        // Try to create Kubernetes client, but continue without it if unavailable
+        let kube_client_result = match Environment::load() {
+            Ok(Environment::Staging) | Ok(Environment::Prod) => {
+                kube::Client::try_default().await.ok()
             }
+            Ok(Environment::Dev) => {
+                async {
+                    let options = KubeConfigOptions {
+                        context: Some("orbstack".to_string()),
+                        cluster: Some("orbstack".to_string()),
+                        user: Some("orbstack".to_string()),
+                    };
+                    let kube_config = kube::config::Config::from_kubeconfig(&options).await.ok()?;
+                    let kube_client: kube::Client = kube_config.try_into().ok()?;
+                    test_orbstack_connection(&kube_client).await.ok()?;
+                    Some(kube_client)
+                }
+                .await
+            }
+            Err(_) => None,
         };
 
-        let k8s_client = match HttpK8sClient::new(kube_client).await {
-            Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "failed to create kubernetes client, running without kubernetes support"
-                );
+        let k8s_client = match kube_client_result {
+            Some(client) => match HttpK8sClient::new(client).await {
+                Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "failed to create kubernetes client, running without kubernetes support"
+                    );
+                    None
+                }
+            },
+            None => {
+                warn!("kubernetes client unavailable, running without kubernetes support");
                 None
             }
         };
@@ -294,7 +304,6 @@ pub async fn run(
         crate::routes::pipelines::get_pipeline_status,
         crate::routes::pipelines::get_pipeline_version,
         crate::routes::pipelines::get_pipeline_replication_status,
-        crate::routes::pipelines::rollback_table_state,
         crate::routes::pipelines::update_pipeline_version,
         crate::routes::tenants::create_tenant,
         crate::routes::tenants::create_or_update_tenant,
@@ -383,10 +392,8 @@ pub async fn run(
                     .service(get_pipeline_status)
                     .service(get_pipeline_version)
                     .service(get_pipeline_replication_status)
-                    .service(rollback_table_state)
                     .service(rollback_tables)
                     .service(update_pipeline_version)
-                    .service(update_pipeline_config)
                     // tables
                     .service(read_table_names)
                     // publications

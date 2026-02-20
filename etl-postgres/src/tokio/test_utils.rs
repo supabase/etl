@@ -1,6 +1,6 @@
-use std::num::NonZeroI32;
-
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use std::num::NonZeroI32;
+use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio_postgres::types::{FromSql, ToSql, Type};
 use tokio_postgres::{Client, GenericClient, NoTls, Transaction};
@@ -30,6 +30,20 @@ pub enum TableModification<'a> {
     ReplicaIdentity {
         value: &'a str,
     },
+}
+
+/// State of a PostgreSQL replication slot.
+///
+/// Represents the combined existence, activity, and validity state of a replication slot
+/// as queried from `pg_replication_slots`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicationSlotState {
+    /// Slot exists and is currently active (being used by a replication connection).
+    Active,
+    /// Slot exists, is inactive, and is valid for replication.
+    Inactive,
+    /// Slot exists but has been invalidated (wal_status = 'lost').
+    Invalidated,
 }
 
 /// Postgres database wrapper for testing operations.
@@ -290,9 +304,10 @@ impl<G: GenericClient> PgDatabase<G> {
             .await
     }
 
-    /// Updates all rows in the table with new values.
+    /// Updates rows in the table with new values.
     ///
-    /// Sets the specified columns to new values across all rows in the table.
+    /// Sets the specified columns to new values for rows matching the WHERE clause.
+    /// If no WHERE clause is provided, updates all rows in the table.
     /// Returns the number of rows affected.
     pub async fn update_values(
         &self,
@@ -317,6 +332,83 @@ impl<G: GenericClient> PgDatabase<G> {
             .as_ref()
             .unwrap()
             .execute(&update_query, values)
+            .await
+    }
+
+    /// Updates rows in the table with new values that match a WHERE clause.
+    ///
+    /// Sets the specified columns to new values for rows matching the WHERE conditions.
+    /// Returns the number of rows affected.
+    pub async fn update_values_where(
+        &self,
+        table_name: TableName,
+        columns: &[&str],
+        values: &[&(dyn ToSql + Sync)],
+        where_columns: &[&str],
+        where_expressions: &[&str],
+        where_operator: &str,
+    ) -> Result<u64, tokio_postgres::Error> {
+        let set_clauses: Vec<String> = columns
+            .iter()
+            .enumerate()
+            .map(|(i, col)| format!("{col} = ${}", i + 1))
+            .collect();
+        let set_clause = set_clauses.join(", ");
+
+        let where_clauses: Vec<String> = where_columns
+            .iter()
+            .zip(where_expressions.iter())
+            .map(|(col, val)| format!("{col} = {val}"))
+            .collect();
+        let where_clause = where_clauses.join(where_operator);
+
+        let update_query = format!(
+            "update {} set {} where {}",
+            table_name.as_quoted_identifier(),
+            set_clause,
+            where_clause
+        );
+
+        self.client
+            .as_ref()
+            .unwrap()
+            .execute(&update_query, values)
+            .await
+    }
+
+    /// Updates rows in the table using raw SQL expressions.
+    ///
+    /// Sets columns using raw SQL expressions for rows matching the WHERE conditions.
+    /// This is useful for updates like `age = age + 100` or `description = description || '_updated'`.
+    /// Returns the number of rows affected.
+    pub async fn update_with_expressions(
+        &self,
+        table_name: TableName,
+        set_expressions: &[&str],
+        where_columns: &[&str],
+        where_expressions: &[&str],
+        where_operator: &str,
+    ) -> Result<u64, tokio_postgres::Error> {
+        let set_clause = set_expressions.join(", ");
+
+        let where_clauses: Vec<String> = where_columns
+            .iter()
+            .zip(where_expressions.iter())
+            .map(|(col, val)| format!("{col} = {val}"))
+            .collect();
+        let where_clause = where_clauses.join(where_operator);
+
+        let update_query = format!(
+            "update {} set {} where {}",
+            table_name.as_quoted_identifier(),
+            set_clause,
+            where_clause
+        );
+
+        self.client
+            .as_ref()
+            .unwrap()
+            .execute(&update_query, &[])
             .await
     }
 
@@ -387,48 +479,147 @@ impl<G: GenericClient> PgDatabase<G> {
         Ok(())
     }
 
-    /// Checks whether a Postgres replication slot exists.
+    /// Gets the state of a replication slot.
     ///
-    /// Queries the `pg_replication_slots` system catalog to determine
-    /// if a replication slot with the given name exists.
-    pub async fn replication_slot_exists(
+    /// Queries the `pg_replication_slots` system catalog to determine the slot's
+    /// existence, activity, and validity status in a single call.
+    ///
+    /// Returns `None` if the slot does not exist, otherwise returns the slot state.
+    pub async fn get_replication_slot_state(
         &self,
         slot_name: &str,
-    ) -> Result<bool, tokio_postgres::Error> {
-        let query = "select exists(select 1 from pg_replication_slots where slot_name = $1)";
+    ) -> Result<Option<ReplicationSlotState>, tokio_postgres::Error> {
+        let query = "select active, wal_status from pg_replication_slots where slot_name = $1";
         let row = self
             .client
             .as_ref()
             .unwrap()
-            .query_one(query, &[&slot_name])
+            .query_opt(query, &[&slot_name])
             .await?;
 
-        Ok(row.get(0))
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let active: bool = row.get(0);
+        if active {
+            return Ok(Some(ReplicationSlotState::Active));
+        }
+
+        // wal_status can be: 'reserved', 'extended', 'unreserved', or 'lost'
+        // A slot is invalidated when wal_status is 'lost'
+        let wal_status: Option<&str> = row.get(1);
+        if wal_status == Some("lost") {
+            Ok(Some(ReplicationSlotState::Invalidated))
+        } else {
+            Ok(Some(ReplicationSlotState::Inactive))
+        }
     }
 
-    /// Checks whether a Postgres replication slot is active.
+    /// Waits for a replication slot to become inactive.
     ///
-    /// Queries the `pg_replication_slots` system catalog to determine
-    /// if a replication slot with the given name is currently active.
-    /// Returns `false` if the slot does not exist.
-    pub async fn replication_slot_is_active(
-        &self,
-        slot_name: &str,
-    ) -> Result<bool, tokio_postgres::Error> {
-        let query = "select coalesce((select active from pg_replication_slots where slot_name = $1), false)";
-        let row = self
-            .client
-            .as_ref()
-            .unwrap()
-            .query_one(query, &[&slot_name])
-            .await?;
-
-        Ok(row.get(0))
+    /// Polls the slot status every 100ms until it becomes inactive, invalidated,
+    /// or no longer exists. This is useful in tests after shutting down a pipeline
+    /// to ensure the slot is released before performing operations on it.
+    pub async fn wait_for_slot_inactive(&self, slot_name: &str) {
+        while matches!(
+            self.get_replication_slot_state(slot_name).await,
+            Ok(Some(ReplicationSlotState::Active))
+        ) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Executes arbitrary SQL on the database.
     pub async fn run_sql(&self, sql: &str) -> Result<u64, tokio_postgres::Error> {
         self.client.as_ref().unwrap().execute(sql, &[]).await
+    }
+
+    /// Invalidates a replication slot by exceeding the WAL retention limit.
+    ///
+    /// This method temporarily sets `max_slot_wal_keep_size` to a small value (64kB),
+    /// generates WAL until the slot becomes invalidated, and forces checkpoints to trigger
+    /// WAL cleanup. The configuration is reset and temporary tables are cleaned up
+    /// after invalidation succeeds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the ALTER SYSTEM command fails (requires superuser privileges).
+    pub async fn invalidate_slot(&self, slot_name: &str) {
+        let client = self.client.as_ref().unwrap();
+
+        // Try to set max_slot_wal_keep_size very low, this requires superuser privileges.
+        if let Err(e) = client
+            .execute("ALTER SYSTEM SET max_slot_wal_keep_size = '64kB'", &[])
+            .await
+        {
+            panic!("invalidate_slot: ALTER SYSTEM failed (requires superuser privileges): {e}");
+        }
+
+        if let Err(e) = client.execute("SELECT pg_reload_conf()", &[]).await {
+            let _ = client
+                .execute("ALTER SYSTEM RESET max_slot_wal_keep_size", &[])
+                .await;
+            panic!("invalidate_slot: pg_reload_conf failed: {e}");
+        }
+
+        // Create a temp table to generate WAL.
+        let _ = client
+            .execute(
+                "CREATE TABLE IF NOT EXISTS _etl_wal_generator (id serial primary key, data text)",
+                &[],
+            )
+            .await;
+
+        // Helper closure to reset config and clean up.
+        let cleanup = || async {
+            let _ = client
+                .execute("DROP TABLE IF EXISTS _etl_wal_generator", &[])
+                .await;
+            let _ = client
+                .execute("ALTER SYSTEM RESET max_slot_wal_keep_size", &[])
+                .await;
+            let _ = client.execute("SELECT pg_reload_conf()", &[]).await;
+        };
+
+        let mut iteration = 0;
+
+        // Loop until the slot is invalidated.
+        loop {
+            // Generate WAL.
+            for _ in 0..20 {
+                let _ = client
+                    .execute(
+                        "INSERT INTO _etl_wal_generator (data) SELECT repeat('x', 10000) FROM generate_series(1, 100)",
+                        &[],
+                    )
+                    .await;
+            }
+
+            // Force checkpoint to trigger WAL cleanup.
+            let _ = client.execute("CHECKPOINT", &[]).await;
+
+            iteration += 1;
+
+            // Check if slot is invalidated.
+            if let Ok(Some(_)) = client
+                .query_opt(
+                    "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1 AND wal_status = 'lost'",
+                    &[&slot_name],
+                )
+                .await
+            {
+                info!(
+                    slot_name,
+                    iteration, "slot invalidated successfully"
+                );
+                break;
+            }
+        }
+
+        // IMPORTANT: Reset config BEFORE returning to avoid invalidating new slots
+        // when the pipeline restarts and creates table sync slots.
+        cleanup().await;
     }
 }
 

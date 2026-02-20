@@ -1,11 +1,17 @@
+use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_api::routes::sources::{
     CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
     UpdateSourceRequest,
 };
+use etl_config::SerializableSecretString;
+use etl_postgres::sqlx::test_utils::create_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
+use secrecy::ExposeSecret;
+use uuid::Uuid;
 
+use crate::support::database::get_test_db_config;
 use crate::support::mocks::create_default_image;
 use crate::support::mocks::destinations::create_destination;
 use crate::support::mocks::pipelines::new_pipeline_config;
@@ -14,7 +20,7 @@ use crate::support::mocks::sources::{
     updated_source_config,
 };
 use crate::support::mocks::tenants::create_tenant;
-use crate::support::test_app::spawn_test_app;
+use crate::support::test_app::{spawn_test_app, spawn_test_app_with_trusted_username};
 
 mod support;
 
@@ -257,4 +263,148 @@ async fn source_with_active_pipeline_cannot_be_deleted() {
     // Verify source still exists
     let source_response = app.read_source(tenant_id, source_id).await;
     assert!(source_response.status().is_success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_creation_with_matching_trusted_username_succeeds() {
+    init_test_tracing();
+
+    // Arrange
+    let mut source_db_config = get_test_db_config();
+    source_db_config.name = format!("test_source_db_{}", Uuid::new_v4());
+
+    let trusted_username = source_db_config.username.clone();
+    let app = spawn_test_app_with_trusted_username(Some(trusted_username)).await;
+    let tenant_id = &create_tenant(&app).await;
+
+    // Create the actual source database.
+    let _source_pool = create_pg_database(&source_db_config).await;
+
+    // Create a source config that connects to the test database with the trusted username.
+    let source_config = FullApiSourceConfig {
+        host: source_db_config.host.clone(),
+        port: source_db_config.port,
+        name: source_db_config.name.clone(),
+        username: source_db_config.username.clone(),
+        password: source_db_config
+            .password
+            .as_ref()
+            .map(|p| SerializableSecretString::from(p.expose_secret().to_string())),
+    };
+
+    let source = CreateSourceRequest {
+        name: new_name(),
+        config: source_config,
+    };
+
+    // Act
+    let response = app.create_source(tenant_id, &source).await;
+
+    // Assert
+    assert!(
+        response.status().is_success(),
+        "Expected successful source creation with matching trusted username, got status: {}",
+        response.status()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_creation_with_non_matching_trusted_username_fails() {
+    init_test_tracing();
+
+    // Arrange
+    let mut source_db_config = get_test_db_config();
+    source_db_config.name = format!("test_source_db_{}", Uuid::new_v4());
+
+    let different_username = "different_user".to_string();
+    let app = spawn_test_app_with_trusted_username(Some(different_username)).await;
+    let tenant_id = &create_tenant(&app).await;
+
+    // Create the actual source database.
+    let _source_pool = create_pg_database(&source_db_config).await;
+
+    // Create a source config that connects to the test database with the actual username.
+    let source_config = FullApiSourceConfig {
+        host: source_db_config.host.clone(),
+        port: source_db_config.port,
+        name: source_db_config.name.clone(),
+        username: source_db_config.username.clone(),
+        password: source_db_config
+            .password
+            .as_ref()
+            .map(|p| SerializableSecretString::from(p.expose_secret().to_string())),
+    };
+
+    let source = CreateSourceRequest {
+        name: new_name(),
+        config: source_config,
+    };
+
+    // Act
+    let response = app.create_source(tenant_id, &source).await;
+
+    // Assert
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "Expected FORBIDDEN status for non-matching trusted username"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_update_with_matching_trusted_username_succeeds() {
+    init_test_tracing();
+
+    // Arrange
+    let mut source_db_config = get_test_db_config();
+    source_db_config.name = format!("test_source_db_{}", Uuid::new_v4());
+
+    let trusted_username = source_db_config.username.clone();
+    let app = spawn_test_app_with_trusted_username(Some(trusted_username)).await;
+    let tenant_id = &create_tenant(&app).await;
+
+    // Create the actual source database.
+    let _source_pool = create_pg_database(&source_db_config).await;
+
+    // Create initial source.
+    let source_config = FullApiSourceConfig {
+        host: source_db_config.host.clone(),
+        port: source_db_config.port,
+        name: source_db_config.name.clone(),
+        username: source_db_config.username.clone(),
+        password: source_db_config
+            .password
+            .as_ref()
+            .map(|p| SerializableSecretString::from(p.expose_secret().to_string())),
+    };
+
+    let source = CreateSourceRequest {
+        name: new_name(),
+        config: source_config.clone(),
+    };
+
+    let create_response = app.create_source(tenant_id, &source).await;
+    assert!(create_response.status().is_success());
+    let create_response: CreateSourceResponse = create_response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    let source_id = create_response.id;
+
+    // Act - Update the source with the same config.
+    let updated_source = UpdateSourceRequest {
+        name: updated_name(),
+        config: source_config,
+    };
+
+    let response = app
+        .update_source(tenant_id, source_id, &updated_source)
+        .await;
+
+    // Assert
+    assert!(
+        response.status().is_success(),
+        "Expected successful source update with matching trusted username, got status: {}",
+        response.status()
+    );
 }

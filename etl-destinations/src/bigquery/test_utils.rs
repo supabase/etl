@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::bigquery::{BigQueryDestination, table_name_to_bigquery_table_id};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::TableName;
+use etl::types::{PipelineId, TableName};
 use gcp_bigquery_client::Client;
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::model::dataset::Dataset;
@@ -205,7 +205,11 @@ impl BigQueryDatabase {
     ///
     /// Returns a destination suitable for ETL operations, configured with
     /// zero staleness to ensure immediate consistency for testing.
-    pub async fn build_destination<S>(&self, schema_store: S) -> BigQueryDestination<S>
+    pub async fn build_destination<S>(
+        &self,
+        pipeline_id: PipelineId,
+        schema_store: S,
+    ) -> BigQueryDestination<S>
     where
         S: StateStore + SchemaStore + Send + Sync,
     {
@@ -215,6 +219,7 @@ impl BigQueryDatabase {
             &self.sa_key_path,
             Some(0), // Zero staleness for immediate consistency in tests
             10,      // Allow concurrent streams for testing
+            pipeline_id,
             schema_store,
         )
         .await

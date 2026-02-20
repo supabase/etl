@@ -78,10 +78,15 @@ const REPLICATOR_MEMORY_REQUEST_STAGING: i32 = 250;
 /// Replicator CPU request tuned for `c8gn.medium` instances in staging.
 const REPLICATOR_CPU_REQUEST_STAGING: i32 = 125;
 
-/// Vector memory request for init container.
-const VECTOR_MEMORY_REQUEST: i32 = 100;
-/// Vector CPU request for init container.
-const VECTOR_CPU_REQUEST: i32 = 50;
+/// Vector memory request tuned for staging environments.
+const VECTOR_MEMORY_REQUEST_STAGING: i32 = 192;
+/// Vector CPU request tuned for staging environments.
+const VECTOR_CPU_REQUEST_STAGING: i32 = 75;
+
+/// Vector memory request tuned for production environments.
+const VECTOR_MEMORY_REQUEST_PROD: i32 = 256;
+/// Vector CPU request tuned for production environments.
+const VECTOR_CPU_REQUEST_PROD: i32 = 100;
 
 /// Memory limit multiplier (request × 1.2 = limit).
 ///
@@ -119,13 +124,18 @@ impl ReplicatorResourceConfig {
             ),
         };
 
+        let (vector_memory_request, vector_cpu_request) = match environment {
+            Environment::Prod => (VECTOR_MEMORY_REQUEST_PROD, VECTOR_CPU_REQUEST_PROD),
+            _ => (VECTOR_MEMORY_REQUEST_STAGING, VECTOR_CPU_REQUEST_STAGING),
+        };
+
         let replicator_memory_limit =
             ((replicator_memory_request as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
         let replicator_cpu_limit =
             ((replicator_cpu_request as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
         let vector_memory_limit =
-            ((VECTOR_MEMORY_REQUEST as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
-        let vector_cpu_limit = ((VECTOR_CPU_REQUEST as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
+            ((vector_memory_request as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
+        let vector_cpu_limit = ((vector_cpu_request as f32) * CPU_LIMIT_MULTIPLIER).round() as i32;
 
         Ok(Self {
             replicator_memory_limit: format!("{replicator_memory_limit}Mi"),
@@ -133,9 +143,9 @@ impl ReplicatorResourceConfig {
             replicator_cpu_limit: format!("{replicator_cpu_limit}m"),
             replicator_cpu_request: format!("{replicator_cpu_request}m"),
             vector_memory_limit: format!("{vector_memory_limit}Mi"),
-            vector_memory_request: format!("{VECTOR_MEMORY_REQUEST}Mi"),
+            vector_memory_request: format!("{vector_memory_request}Mi"),
             vector_cpu_limit: format!("{vector_cpu_limit}m"),
-            vector_cpu_request: format!("{VECTOR_CPU_REQUEST}m"),
+            vector_cpu_request: format!("{vector_cpu_request}m"),
         })
     }
 }
@@ -213,26 +223,26 @@ impl HttpK8sClient {
         }
 
         // Waiting state, we want to distinguish normal waiting reasons from abnormal ones.
-        if let Some(waiting) = &state.waiting {
-            if let Some(reason) = &waiting.reason {
-                match reason.as_str() {
-                    // Crash/restart errors
-                    "CrashLoopBackOff" => return true,
+        if let Some(waiting) = &state.waiting
+            && let Some(reason) = &waiting.reason
+        {
+            match reason.as_str() {
+                // Crash/restart errors
+                "CrashLoopBackOff" => return true,
 
-                    // Image-related errors (6 predefined in kubelet)
-                    "ImagePullBackOff"
-                    | "ErrImagePull"
-                    | "ErrImageNeverPull"
-                    | "InvalidImageName"
-                    | "ImageInspectError"
-                    | "RegistryUnavailable" => return true,
+                // Image-related errors (6 predefined in kubelet)
+                "ImagePullBackOff"
+                | "ErrImagePull"
+                | "ErrImageNeverPull"
+                | "InvalidImageName"
+                | "ImageInspectError"
+                | "RegistryUnavailable" => return true,
 
-                    // Container creation errors
-                    "CreateContainerConfigError" | "CreateContainerError" | "RunContainerError" => {
-                        return true;
-                    }
-                    _ => {}
+                // Container creation errors
+                "CreateContainerConfigError" | "CreateContainerError" | "RunContainerError" => {
+                    return true;
                 }
+                _ => {}
             }
         }
 
@@ -733,7 +743,6 @@ fn create_container_environment_json(
     }
 
     match destination_type {
-        DestinationType::Memory => {}
         DestinationType::BigQuery => {
             let postgres_secret_name = create_postgres_secret_name(prefix);
             let postgres_secret_env_var_json =
@@ -1052,8 +1061,9 @@ mod tests {
     use super::*;
 
     use etl_config::shared::{
-        BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
-        ReplicatorConfigWithoutSecrets, TableSyncCopyConfig, TlsConfig,
+        BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
+        PgConnectionConfig, PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
+        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     };
     use insta::assert_json_snapshot;
 
@@ -1134,7 +1144,7 @@ mod tests {
                 dataset_id: "dataset-id".to_string(),
                 service_account_key: "sa-key".into(),
                 max_staleness_mins: None,
-                max_concurrent_streams: 4,
+                connection_pool_size: 4,
             },
             pipeline: PipelineConfig {
                 id: 42,
@@ -1146,16 +1156,23 @@ mod tests {
                     username: "postgres".to_string(),
                     password: Some("password".into()),
                     tls: TlsConfig::disabled(),
-                    keepalive: None,
+                    keepalive: TcpKeepaliveConfig::default(),
                 },
                 batch: BatchConfig {
-                    max_size: 10_000,
                     max_fill_ms: 1_000,
+                    memory_budget_ratio: 0.2,
                 },
                 table_error_retry_delay_ms: 500,
                 table_error_retry_max_attempts: 3,
                 max_table_sync_workers: 4,
+                memory_refresh_interval_ms: 100,
+                memory_backpressure: Some(MemoryBackpressureConfig {
+                    activate_threshold: 1.0,
+                    resume_threshold: 0.99,
+                }),
                 table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
+                invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
+                max_copy_connections_per_table: 2,
             },
             sentry: None,
             supabase: None,

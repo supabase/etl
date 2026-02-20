@@ -24,9 +24,9 @@
 //! to a destination. It manages the replication stream, applies transformations,
 //! and handles failures gracefully.
 //!
-//! ## Destinations  
+//! ## Destinations
 //! [`destination::Destination`] trait implementations define where replicated data should be sent.
-//! Built-in destinations include in-memory storage for testing and external integrations.
+//! Destinations are pluggable and can integrate with external systems.
 //!
 //! ## Store
 //! The [`store::schema::SchemaStore`] and [`store::state::StateStore`] traits define where the
@@ -49,11 +49,24 @@
 //!
 //! ```rust,no_run
 //! use etl::{
-//!     config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig, TableSyncCopyConfig},
-//!     destination::memory::MemoryDestination,
+//!     config::{BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TcpKeepaliveConfig, TlsConfig, TableSyncCopyConfig},
+//!     destination::Destination,
+//!     error::EtlResult,
 //!     pipeline::Pipeline,
 //!     store::both::memory::MemoryStore,
+//!     types::{Event, TableRow},
 //! };
+//! use etl_postgres::types::TableId;
+//!
+//! #[derive(Clone)]
+//! struct NoopDestination;
+//!
+//! impl Destination for NoopDestination {
+//!     fn name() -> &'static str { "noop" }
+//!     async fn truncate_table(&self, _table_id: TableId) -> EtlResult<()> { Ok(()) }
+//!     async fn write_table_rows(&self, _table_id: TableId, _table_rows: Vec<TableRow>) -> EtlResult<()> { Ok(()) }
+//!     async fn write_events(&self, _events: Vec<Event>) -> EtlResult<()> { Ok(()) }
+//! }
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -65,23 +78,27 @@
 //!         username: "postgres".to_string(),
 //!         password: Some("password".to_string().into()),
 //!         tls: TlsConfig { enabled: false, trusted_root_certs: String::new() },
-//!         keepalive: None
+//!         keepalive: TcpKeepaliveConfig::default()
 //!     };
 //!
 //!     // Create memory-based store and destination for testing
 //!     let store = MemoryStore::new();
-//!     let destination = MemoryDestination::new();
+//!     let destination = NoopDestination;
 //!
 //!     // Configure the pipeline
 //!     let config = PipelineConfig {
 //!         id: 1,
 //!         publication_name: "my_publication".to_string(),
 //!         pg_connection: pg_config,
-//!         batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
+//!         batch: BatchConfig { max_fill_ms: 5000, memory_budget_ratio: 0.2 },
 //!         table_error_retry_delay_ms: 10000,
 //!         table_error_retry_max_attempts: 5,
 //!         max_table_sync_workers: 4,
+//!         max_copy_connections_per_table: 1,
+//!         memory_refresh_interval_ms: 100,
+//!         memory_backpressure: Some(MemoryBackpressureConfig::default()),
 //!         table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
+//!         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
 //!     };
 //!
 //!     // Create and start the pipeline

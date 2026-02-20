@@ -64,6 +64,16 @@ jobs:
     strategy:
       matrix:
         postgres_version: [18, 17, 16, 15, 14]
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PORT: 5430
+      POSTGRES_HOST: localhost
+      TESTS_DATABASE_HOST: localhost
+      TESTS_DATABASE_PORT: 5430
+      TESTS_DATABASE_USERNAME: postgres
+      TESTS_DATABASE_PASSWORD: postgres
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -88,22 +98,15 @@ jobs:
             --locked
 
       - name: Migrate Database
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-          POSTGRES_PORT: 5430
-          POSTGRES_HOST: localhost
         run: |
           sudo apt-get install libpq-dev -y
           ./etl-api/scripts/run_migrations.sh
 
-      - name: Run Tests
-        env:
-          TESTS_DATABASE_HOST: localhost
-          TESTS_DATABASE_PORT: 5430
-          TESTS_DATABASE_USERNAME: postgres
-          TESTS_DATABASE_PASSWORD: postgres
+      - name: Run Doctests
+        run: |
+          cargo test --doc --workspace --all-features --no-fail-fast
+
+      - name: Run Unit and Integration Tests
         run: |
           cargo test \
             --workspace \
@@ -117,6 +120,13 @@ jobs:
             --no-fail-fast \
             --features iceberg
 
+      - name: Run Exclusive Tests Sequentially
+        run: |
+          cargo test \
+            --workspace \
+            --all-features \
+            -- --ignored exclusive_ --test-threads=1
+
   test-full:
     name: Tests (Full)
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -128,6 +138,16 @@ jobs:
     strategy:
       matrix:
         postgres_version: [18, 17, 16, 15, 14]
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PORT: 5430
+      POSTGRES_HOST: localhost
+      TESTS_DATABASE_HOST: localhost
+      TESTS_DATABASE_PORT: 5430
+      TESTS_DATABASE_USERNAME: postgres
+      TESTS_DATABASE_PASSWORD: postgres
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -152,18 +172,9 @@ jobs:
             --locked
 
       - name: Migrate Database
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-          POSTGRES_PORT: 5430
-          POSTGRES_HOST: localhost
         run: |
           sudo apt-get install libpq-dev -y
           ./etl-api/scripts/run_migrations.sh
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Set up BigQuery Credentials
         run: |
@@ -171,20 +182,54 @@ jobs:
           echo "TESTS_BIGQUERY_PROJECT_ID=${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}" >> $GITHUB_ENV
           echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json" >> $GITHUB_ENV
 
-      - name: Generate Code Coverage
-        id: coverage
-        env:
-          TESTS_DATABASE_HOST: localhost
-          TESTS_DATABASE_PORT: 5430
-          TESTS_DATABASE_USERNAME: postgres
-          TESTS_DATABASE_PASSWORD: postgres
+      - name: Run Unit and Integration Tests
+        if: matrix.postgres_version != 18
+        run: |
+          cargo test \
+            --workspace \
+            --all-features \
+            --no-fail-fast
+
+      - name: Run Exclusive Tests Sequentially
+        if: matrix.postgres_version != 18
+        run: |
+          cargo test \
+            --workspace \
+            --all-features \
+            -- --ignored exclusive_ --test-threads=1
+
+      - name: Install cargo-llvm-cov
+        if: matrix.postgres_version == 18
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run Doctests
+        run: |
+          cargo test --doc --workspace --all-features --no-fail-fast
+
+      - name: Run Unit and Integration Tests with Coverage
+        if: matrix.postgres_version == 18
         run: |
           cargo llvm-cov test \
             --workspace --no-fail-fast \
             --all-features \
-            --lcov --output-path lcov.info
+            --no-report
+
+      - name: Run Exclusive Tests Sequentially with Coverage
+        if: matrix.postgres_version == 18
+        run: |
+          cargo llvm-cov test \
+            --workspace \
+            --all-features \
+            --no-report \
+            -- --ignored exclusive_ --test-threads=1
+
+      - name: Merge Coverage Data
+        if: matrix.postgres_version == 18
+        run: |
+          cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload Coverage to Coveralls
+        if: matrix.postgres_version == 18
         uses: coverallsapp/github-action@v2
         with:
           fail-on-error: false

@@ -14,6 +14,8 @@ use rustls::pki_types::{CertificateDer, pem::PemObject};
 use std::fmt;
 use std::num::NonZeroI32;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::watch;
 
 use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
@@ -23,19 +25,38 @@ use tokio_postgres::{
 };
 use tracing::{Instrument, error, info, warn};
 
+/// Maximum time to wait for a replication slot deletion to complete.
+///
+/// Slot deletion uses `WAIT`, which can block until the slot is no longer in use.
+/// This timeout ensures calls are bounded and cannot wait forever.
+const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Spawns a background task to monitor a Postgres connection until it terminates.
-fn spawn_postgres_connection<T>(connection: Connection<Socket, T::Stream>)
+fn spawn_postgres_connection<T>(
+    connection: Connection<Socket, T::Stream>,
+) -> watch::Receiver<PostgresConnectionUpdate>
 where
     T: MakeTlsConnect<Socket>,
     T::Stream: Send + 'static,
 {
+    // We use this watch channel to send connection updates without relying on the errors/terminations
+    // propagated by the active connection consumers.
+    let (updates_tx, updates_rx) = watch::channel(PostgresConnectionUpdate::Running);
+
     let span = tracing::Span::current();
     let task = async move {
         let result = connection.await;
 
         match result {
-            Err(err) => error!(error = %err, "postgres connection error"),
-            Ok(()) => info!("postgres connection terminated"),
+            Err(err) => {
+                let error_message = err.to_string();
+                let _ = updates_tx.send(PostgresConnectionUpdate::errored(error_message.clone()));
+                error!(error = %error_message, "postgres connection error");
+            }
+            Ok(()) => {
+                let _ = updates_tx.send(PostgresConnectionUpdate::Terminated);
+                info!("postgres connection terminated");
+            }
         }
     }
     .instrument(span);
@@ -43,6 +64,52 @@ where
     // There is no need to track the connection task via the `JoinHandle` since the `Client`, which
     // returned the connection, will automatically terminate the connection when dropped.
     tokio::spawn(task);
+
+    updates_rx
+}
+
+/// Updates emitted by the background task driving the PostgreSQL connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostgresConnectionUpdate {
+    /// The connection task is running.
+    Running,
+    /// The connection task terminated cleanly.
+    Terminated,
+    /// The connection task exited due to an error.
+    Errored { error: Arc<str> },
+}
+
+impl PostgresConnectionUpdate {
+    /// Creates an error update from an error message.
+    pub fn errored(error: impl Into<Arc<str>>) -> Self {
+        Self::Errored {
+            error: error.into(),
+        }
+    }
+
+    /// Returns `true` when this update indicates that the connection has been closed.
+    pub fn signals_connection_closed(&self) -> bool {
+        matches!(self, Self::Terminated | Self::Errored { .. })
+    }
+}
+
+impl fmt::Display for PostgresConnectionUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Running => write!(f, "running"),
+            Self::Terminated => write!(f, "terminated"),
+            Self::Errored { .. } => write!(f, "errored"),
+        }
+    }
+}
+
+/// Internal snapshot action for `CREATE_REPLICATION_SLOT`.
+#[derive(Debug)]
+enum SnapshotAction {
+    /// `USE_SNAPSHOT` - uses the snapshot in the current transaction.
+    Use,
+    /// `NOEXPORT_SNAPSHOT` - neither exports nor uses the snapshot.
+    NoExport,
 }
 
 /// Result returned when creating a new replication slot.
@@ -62,6 +129,21 @@ pub struct CreateSlotResult {
 pub struct GetSlotResult {
     /// The LSN up to which changes have been confirmed as processed by ETL.
     pub confirmed_flush_lsn: PgLsn,
+}
+
+/// The current state of a replication slot.
+///
+/// Represents whether a slot is valid and can be used for replication, or has been
+/// invalidated by PostgreSQL (e.g., due to exceeding `max_slot_wal_keep_size`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotState {
+    /// The slot is valid and can be used for replication.
+    Valid,
+    /// The slot has been invalidated and cannot be used for replication.
+    ///
+    /// This typically occurs when the slot falls too far behind the current WAL position
+    /// and PostgreSQL removes the required WAL segments.
+    Invalidated,
 }
 
 /// Result type for operations that either get an existing slot or create a new one.
@@ -86,6 +168,32 @@ impl GetOrCreateSlotResult {
     }
 }
 
+/// A ctid-based partition range for parallel copy.
+#[derive(Debug)]
+pub enum CtidPartition {
+    /// A range with an open lower bound and an exclusive upper bound.
+    ///
+    /// Matches rows where `ctid < end_tid`.
+    OpenStart { end_tid: String },
+    /// A range with an inclusive lower bound and an exclusive upper bound.
+    ///
+    /// Matches rows where `ctid >= start_tid and ctid < end_tid`.
+    Closed { start_tid: String, end_tid: String },
+    /// A range with an inclusive lower bound and an open upper bound.
+    ///
+    /// Matches rows where `ctid >= start_tid`.
+    OpenEnd { start_tid: String },
+}
+
+/// Result of building publication filter SQL components.
+#[derive(Debug)]
+struct PublicationFilter {
+    /// CTEs to include in the WITH clause (empty string if no publication filtering).
+    ctes: String,
+    /// Predicate to include in the WHERE clause (empty string if no publication filtering).
+    predicate: String,
+}
+
 /// A transaction that operates within the context of a replication slot.
 ///
 /// This type ensures that the parent connection remains active for the duration of any
@@ -94,11 +202,11 @@ impl GetOrCreateSlotResult {
 /// The `client` is the client that created the slot and must be active for the duration of
 /// the transaction for the snapshot of the slot to be consistent.
 #[derive(Debug)]
-pub struct PgReplicationSlotTransaction {
+pub struct PgReplicationTransaction {
     client: PgReplicationClient,
 }
 
-impl PgReplicationSlotTransaction {
+impl PgReplicationTransaction {
     /// Creates a new transaction within the context of a replication slot.
     ///
     /// The transaction is started with a repeatable read isolation level and uses the
@@ -135,23 +243,133 @@ impl PgReplicationSlotTransaction {
             .await
     }
 
+    /// Exports the current transaction snapshot so child connections can share it.
+    ///
+    /// Calls `pg_export_snapshot()` within the slot's `REPEATABLE READ` transaction.
+    pub async fn export_snapshot(&self) -> EtlResult<String> {
+        self.client.export_snapshot().await
+    }
+
+    /// Computes balanced ctid partition ranges using page-based estimation.
+    ///
+    /// Returns one [`CtidPartition`] per partition, or an empty vec if the table has no rows.
+    pub async fn plan_ctid_partitions(
+        &self,
+        table_id: TableId,
+        num_partitions: u16,
+    ) -> EtlResult<Vec<CtidPartition>> {
+        self.client
+            .plan_ctid_partitions(table_id, num_partitions)
+            .await
+    }
+
+    /// Checks whether the given table is a partitioned parent (`relkind = 'p'`).
+    pub async fn is_partitioned_table(&self, table_id: TableId) -> EtlResult<bool> {
+        self.client.is_partitioned_table(table_id).await
+    }
+
+    /// Returns the OIDs of all leaf partitions for a partitioned table.
+    ///
+    /// Walks `pg_inherits` recursively and returns only leaf nodes (`relkind = 'r'`).
+    /// For a non-partitioned table this returns an empty vec.
+    pub async fn get_leaf_partitions(&self, table_id: TableId) -> EtlResult<Vec<TableId>> {
+        self.client.get_leaf_partitions(table_id).await
+    }
+
+    /// Returns the cloned connection that is used in this transaction.
+    pub fn get_cloned_client(&self) -> PgReplicationClient {
+        self.client.clone()
+    }
+
     /// Commits the current transaction.
     pub async fn commit(self) -> EtlResult<()> {
         self.client.commit_tx().await
     }
+}
 
-    /// Rolls back the current transaction.
-    pub async fn rollback(self) -> EtlResult<()> {
-        self.client.rollback_tx().await
+/// A transaction on a child connection pinned to an exported snapshot.
+///
+/// Created via [`PgReplicationChildTransaction::new`], which begins a read-only
+/// repeatable-read transaction and sets it to the supplied snapshot. The child
+/// connection shares the same snapshot as the parent, ensuring consistent reads
+/// across parallel operations. Catalog queries performed through this transaction
+/// see the same database state as the parent connection.
+#[derive(Debug)]
+pub struct PgReplicationChildTransaction {
+    client: ChildPgReplicationClient,
+}
+
+impl PgReplicationChildTransaction {
+    /// Creates a new child transaction pinned to the given exported snapshot.
+    ///
+    /// Begins a read-only repeatable-read transaction and sets it to `snapshot_id`,
+    /// ensuring reads are consistent with the parent connection's slot snapshot.
+    pub async fn new(client: ChildPgReplicationClient, snapshot_id: &str) -> EtlResult<Self> {
+        client.client.begin_tx().await?;
+        client.client.set_tx_snapshot(snapshot_id).await?;
+
+        Ok(Self { client })
+    }
+
+    /// Creates a COPY stream for reading all data from the specified table.
+    ///
+    /// Resolves the table name and row filter internally. Used for copying leaf
+    /// partitions of a partitioned table.
+    pub async fn get_table_copy_stream(
+        &self,
+        table_id: TableId,
+        column_schemas: &[ColumnSchema],
+        publication_name: Option<&str>,
+    ) -> EtlResult<CopyOutStream> {
+        self.client
+            .client
+            .get_table_copy_stream(table_id, column_schemas, publication_name)
+            .await
+    }
+
+    /// Creates a COPY stream for a ctid partition range of the specified table.
+    ///
+    /// Resolves the table name and row filter internally, then streams rows whose ctid
+    /// falls within the given partition bounds.
+    pub async fn get_table_copy_stream_with_ctid_partition(
+        &self,
+        table_id: TableId,
+        column_schemas: &[ColumnSchema],
+        publication_name: Option<&str>,
+        partition: &CtidPartition,
+    ) -> EtlResult<CopyOutStream> {
+        self.client
+            .client
+            .get_table_copy_stream_with_ctid_partition(
+                table_id,
+                column_schemas,
+                publication_name,
+                partition,
+            )
+            .await
+    }
+
+    /// Returns the cloned connection that is used in this child transaction.
+    pub fn get_cloned_client(&self) -> PgReplicationClient {
+        self.client.client.clone()
+    }
+
+    /// Commits the current transaction.
+    pub async fn commit(self) -> EtlResult<()> {
+        self.client.client.commit_tx().await
     }
 }
 
-/// Result of building publication filter SQL components.
-struct PublicationFilter {
-    /// CTEs to include in the WITH clause (empty string if no publication filtering).
-    ctes: String,
-    /// Predicate to include in the WHERE clause (empty string if no publication filtering).
-    predicate: String,
+/// A non-replication child connection that keeps the parent [`PgReplicationClient`] alive.
+///
+/// Holding a clone of the parent ensures the main replication connection cannot be dropped
+/// while any child exists, providing a compile-time lifetime guarantee via the inner [`Arc`].
+#[derive(Debug)]
+pub struct ChildPgReplicationClient {
+    /// Clone of the parent kept solely to prevent the main connection from being dropped.
+    _parent: PgReplicationClient,
+    /// The actual child connection used for queries.
+    client: PgReplicationClient,
 }
 
 /// A client for interacting with Postgres's logical replication features.
@@ -161,7 +379,9 @@ struct PublicationFilter {
 #[derive(Debug, Clone)]
 pub struct PgReplicationClient {
     client: Arc<Client>,
+    pg_connection_config: Arc<PgConnectionConfig>,
     server_version: Option<NonZeroI32>,
+    connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
 }
 
 impl PgReplicationClient {
@@ -191,13 +411,15 @@ impl PgReplicationClient {
             .parameter("server_version")
             .and_then(extract_server_version);
 
-        spawn_postgres_connection::<NoTls>(connection);
+        let connection_updates_rx = spawn_postgres_connection::<NoTls>(connection);
 
         info!("connected to postgres without tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
+            pg_connection_config: Arc::new(pg_connection_config),
             server_version,
+            connection_updates_rx,
         })
     }
 
@@ -230,14 +452,88 @@ impl PgReplicationClient {
             .parameter("server_version")
             .and_then(extract_server_version);
 
-        spawn_postgres_connection::<MakeRustlsConnect>(connection);
+        let connection_updates_rx = spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
         info!("connected to postgres with tls");
 
         Ok(PgReplicationClient {
             client: Arc::new(client),
+            pg_connection_config: Arc::new(pg_connection_config),
             server_version,
+            connection_updates_rx,
         })
+    }
+
+    /// Creates a non-replication, non-TLS child connection.
+    async fn connect_child_no_tls(&self) -> EtlResult<ChildPgReplicationClient> {
+        let config: Config = self
+            .pg_connection_config
+            .as_ref()
+            .clone()
+            .with_db(Some(&ETL_REPLICATION_OPTIONS));
+
+        let (client, connection) = config.connect(NoTls).await?;
+        let connection_updates_rx = spawn_postgres_connection::<NoTls>(connection);
+
+        let client = PgReplicationClient {
+            client: Arc::new(client),
+            pg_connection_config: self.pg_connection_config.clone(),
+            server_version: self.server_version,
+            connection_updates_rx,
+        };
+
+        Ok(ChildPgReplicationClient {
+            _parent: self.clone(),
+            client,
+        })
+    }
+
+    /// Creates a non-replication, TLS-encrypted child connection.
+    async fn connect_child_tls(&self) -> EtlResult<ChildPgReplicationClient> {
+        let config: Config = self
+            .pg_connection_config
+            .as_ref()
+            .clone()
+            .with_db(Some(&ETL_REPLICATION_OPTIONS));
+
+        let mut root_store = rustls::RootCertStore::empty();
+        for cert in CertificateDer::pem_slice_iter(
+            self.pg_connection_config.tls.trusted_root_certs.as_bytes(),
+        ) {
+            let cert = cert?;
+            root_store.add(cert)?;
+        }
+
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
+        let connection_updates_rx = spawn_postgres_connection::<MakeRustlsConnect>(connection);
+
+        let client = PgReplicationClient {
+            client: Arc::new(client),
+            pg_connection_config: self.pg_connection_config.clone(),
+            server_version: self.server_version,
+            connection_updates_rx,
+        };
+
+        Ok(ChildPgReplicationClient {
+            _parent: self.clone(),
+            client,
+        })
+    }
+
+    /// Creates a non-replication child connection that inherits this client's connection settings.
+    ///
+    /// The child does not set `ReplicationMode::Logical`, so it does not consume a
+    /// `max_wal_senders` slot. It holds a clone of the parent to ensure the main connection
+    /// stays alive while any child exists.
+    pub async fn fork_child(&self) -> EtlResult<ChildPgReplicationClient> {
+        match self.pg_connection_config.tls.enabled {
+            true => self.connect_child_tls().await,
+            false => self.connect_child_no_tls().await,
+        }
     }
 
     /// Checks if the underlying connection is closed.
@@ -245,23 +541,81 @@ impl PgReplicationClient {
         self.client.is_closed()
     }
 
-    /// Creates a new logical replication slot with the specified name and a transaction which is set
-    /// on the snapshot exported by the slot creation.
+    /// Returns a receiver for background connection task updates.
+    pub fn connection_updates_rx(&self) -> watch::Receiver<PostgresConnectionUpdate> {
+        self.connection_updates_rx.clone()
+    }
+
+    /// Executes a simple query on the underlying connection and returns all result messages.
+    pub async fn simple_query(&self, query: &str) -> EtlResult<Vec<SimpleQueryMessage>> {
+        Ok(self.client.simple_query(query).await?)
+    }
+
+    /// Creates a new logical replication slot with the specified name and a transaction pinned
+    /// to the slot's snapshot.
+    ///
+    /// A `REPEATABLE READ` transaction is begun first, then the slot is created with
+    /// `USE_SNAPSHOT` which pins the transaction to the slot's consistent snapshot. The
+    /// transaction must be kept open for the duration of any operations that depend on
+    /// this snapshot (e.g. schema fetches, table copies, or `pg_export_snapshot()` calls
+    /// for child connections).
     pub async fn create_slot_with_transaction(
         &self,
         slot_name: &str,
-    ) -> EtlResult<(PgReplicationSlotTransaction, CreateSlotResult)> {
+    ) -> EtlResult<(PgReplicationTransaction, CreateSlotResult)> {
         // TODO: check if we want to consume the client and return it on commit to avoid any other
         //  operations on a connection that has started a transaction.
-        let transaction = PgReplicationSlotTransaction::new(self.clone()).await?;
-        let slot = self.create_slot_internal(slot_name, true).await?;
+
+        // USE_SNAPSHOT requires being inside a transaction.
+        let transaction = PgReplicationTransaction::new(self.clone()).await?;
+        let slot = self
+            .create_slot_internal(slot_name, SnapshotAction::Use)
+            .await?;
 
         Ok((transaction, slot))
     }
 
     /// Creates a new logical replication slot with the specified name and no snapshot.
     pub async fn create_slot(&self, slot_name: &str) -> EtlResult<CreateSlotResult> {
-        self.create_slot_internal(slot_name, false).await
+        self.create_slot_internal(slot_name, SnapshotAction::NoExport)
+            .await
+    }
+
+    /// Gets the state of a replication slot by name.
+    ///
+    /// Queries the `pg_replication_slots` system catalog to determine if the slot exists
+    /// and whether it's valid or invalidated. A slot is considered invalidated when its
+    /// `wal_status` is 'lost', indicating that required WAL segments have been removed.
+    ///
+    /// Returns an error if the slot doesn't exist.
+    pub async fn get_slot_state(&self, slot_name: &str) -> EtlResult<SlotState> {
+        let query = format!(
+            r#"select wal_status from pg_replication_slots where slot_name = {};"#,
+            quote_literal(slot_name)
+        );
+
+        let results = self.client.simple_query(&query).await?;
+        for result in results {
+            if let SimpleQueryMessage::Row(row) = result {
+                // wal_status can be: 'reserved', 'extended', 'unreserved', or 'lost'
+                // A slot is invalidated when wal_status is 'lost'
+                let wal_status: Option<String> = row.try_get("wal_status")?.map(String::from);
+
+                return match wal_status.as_deref() {
+                    Some("lost") => Ok(SlotState::Invalidated),
+                    Some(_) => Ok(SlotState::Valid),
+                    // If wal_status is NULL, assume the slot is valid
+                    // (this can happen on very old PostgreSQL versions)
+                    None => Ok(SlotState::Valid),
+                };
+            }
+        }
+
+        bail!(
+            ErrorKind::ReplicationSlotNotFound,
+            "Replication slot not found",
+            format!("Replication slot '{}' not found in database", slot_name)
+        );
     }
 
     /// Gets the slot by `slot_name`.
@@ -312,7 +666,7 @@ impl PgReplicationClient {
             Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
                 info!(slot_name, "creating new replication slot");
 
-                let create_result = self.create_slot_internal(slot_name, false).await?;
+                let create_result = self.create_slot(slot_name).await?;
 
                 Ok(GetOrCreateSlotResult::CreateSlot(create_result))
             }
@@ -324,14 +678,51 @@ impl PgReplicationClient {
     ///
     /// Returns an error if the slot doesn't exist or if there are any issues with the deletion.
     pub async fn delete_slot(&self, slot_name: &str) -> EtlResult<()> {
+        self.delete_slot_internal(slot_name, true).await
+    }
+
+    /// Deletes a replication slot with the specified name if it exists.
+    ///
+    /// This method returns [`Ok(())`] when the slot is missing and propagates any other
+    /// error from [`PgReplicationClient::delete_slot`].
+    pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
+        self.delete_slot_internal(slot_name, false).await
+    }
+
+    /// Deletes a replication slot, optionally failing when the slot does not exist.
+    async fn delete_slot_internal(&self, slot_name: &str, fail_if_missing: bool) -> EtlResult<()> {
         info!(slot_name, "deleting replication slot");
+
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let query = format!(
             r#"DROP_REPLICATION_SLOT {} WAIT;"#,
             quote_identifier(slot_name)
         );
 
-        match self.client.simple_query(&query).await {
+        let delete_result =
+            match tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    error!(
+                        slot_name,
+                        timeout_secs = DELETE_SLOT_TIMEOUT.as_secs(),
+                        "timed out while deleting replication slot"
+                    );
+
+                    bail!(
+                        ErrorKind::ReplicationSlotDeletionTimeout,
+                        "Replication slot deletion timed out",
+                        format!(
+                            "Timed out after {:?} while deleting replication slot '{}'",
+                            DELETE_SLOT_TIMEOUT, slot_name
+                        ),
+                        source: err
+                    );
+                }
+            };
+
+        match delete_result {
             Ok(_) => {
                 info!(slot_name, "deleted replication slot");
 
@@ -339,19 +730,25 @@ impl PgReplicationClient {
             }
             Err(err) => {
                 if let Some(&SqlState::UNDEFINED_OBJECT) = err.code() {
-                    warn!(
-                        slot_name,
-                        "attempted to delete non-existent replication slot"
-                    );
+                    if fail_if_missing {
+                        warn!(
+                            slot_name,
+                            "attempted to delete non-existent replication slot"
+                        );
 
-                    bail!(
-                        ErrorKind::ReplicationSlotNotFound,
-                        "Replication slot not found",
-                        format!(
-                            "Replication slot '{}' not found in database while attempting its deletion",
-                            slot_name
-                        )
-                    );
+                        bail!(
+                            ErrorKind::ReplicationSlotNotFound,
+                            "Replication slot not found",
+                            format!(
+                                "Replication slot '{}' not found in database while attempting its deletion",
+                                slot_name
+                            )
+                        );
+                    }
+
+                    info!(slot_name, "replication slot not found, skipping deletion");
+
+                    return Ok(());
                 }
 
                 error!(slot_name, error = %err, "failed to delete replication slot");
@@ -399,6 +796,34 @@ impl PgReplicationClient {
             "Publication not found",
             format!("Publication '{}' not found in database", publication)
         );
+    }
+
+    /// Checks whether a single table is a partitioned parent (`relkind = 'p'`).
+    async fn is_partitioned_table(&self, table_id: TableId) -> EtlResult<bool> {
+        self.has_partitioned_tables(&[table_id]).await
+    }
+
+    /// Returns the OIDs of all leaf partitions for a partitioned table.
+    ///
+    /// Uses `pg_partition_tree()` (available since PostgreSQL 12) to efficiently walk the
+    /// partition hierarchy and return only leaf nodes. For a non-partitioned table this
+    /// returns an empty vec.
+    async fn get_leaf_partitions(&self, table_id: TableId) -> EtlResult<Vec<TableId>> {
+        let query = format!(
+            "select relid::oid as oid from pg_partition_tree({table_id}::regclass) \
+             where isleaf and relid != {table_id}::regclass \
+             order by relid::oid;"
+        );
+
+        let mut leaves = Vec::new();
+        for msg in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let oid = Self::get_row_value::<TableId>(&row, "oid", "pg_class")?;
+                leaves.push(oid);
+            }
+        }
+
+        Ok(leaves)
     }
 
     /// Checks if any of the provided table IDs are partitioned tables.
@@ -548,6 +973,18 @@ impl PgReplicationClient {
         Ok(())
     }
 
+    /// Sets the snapshot id on the running transaction.
+    async fn set_tx_snapshot(&self, snapshot_id: &str) -> EtlResult<()> {
+        self.client
+            .simple_query(&format!(
+                "set transaction snapshot {};",
+                quote_literal(snapshot_id)
+            ))
+            .await?;
+
+        Ok(())
+    }
+
     /// Commits the current transaction.
     async fn commit_tx(&self) -> EtlResult<()> {
         self.client.simple_query("commit;").await?;
@@ -555,29 +992,21 @@ impl PgReplicationClient {
         Ok(())
     }
 
-    /// Rolls back the current transaction.
-    async fn rollback_tx(&self) -> EtlResult<()> {
-        self.client.simple_query("rollback;").await?;
-
-        Ok(())
-    }
-
     /// Internal helper method to create a replication slot.
     ///
-    /// The `use_snapshot` parameter determines whether to use a snapshot for the slot creation.
+    /// The `snapshot_action` controls how the slot's snapshot is handled during creation.
     async fn create_slot_internal(
         &self,
         slot_name: &str,
-        use_snapshot: bool,
+        snapshot_action: SnapshotAction,
     ) -> EtlResult<CreateSlotResult> {
         // Do not convert the query or the options to lowercase, since the lexer for
         // replication commands (repl_scanner.l) in Postgres code expects the commands
         // in uppercase. This probably should be fixed in upstream, but for now we will
         // keep the commands in uppercase.
-        let snapshot_option = if use_snapshot {
-            "USE_SNAPSHOT"
-        } else {
-            "NOEXPORT_SNAPSHOT"
+        let snapshot_option = match snapshot_action {
+            SnapshotAction::Use => "USE_SNAPSHOT",
+            SnapshotAction::NoExport => "NOEXPORT_SNAPSHOT",
         };
         let query = format!(
             r#"CREATE_REPLICATION_SLOT {} LOGICAL pgoutput {}"#,
@@ -935,15 +1364,15 @@ impl PgReplicationClient {
             .join(", ");
 
         let table_name = self.get_table_name(table_id).await?;
-        let filter = self.get_row_filter(table_id, publication).await?;
+        let row_filter = self.get_row_filter(table_id, publication).await?;
 
-        let copy_query = if let Some(pred) = filter {
+        let copy_query = if let Some(row_filter) = row_filter {
             // Use select-form so we can add where.
             format!(
                 r#"copy (select {} from {} where {}) to stdout with (format text);"#,
                 column_list,
                 table_name.as_quoted_identifier(),
-                pred,
+                row_filter,
             )
         } else {
             format!(
@@ -956,6 +1385,195 @@ impl PgReplicationClient {
         let stream = self.client.copy_out_simple(&copy_query).await?;
 
         Ok(stream)
+    }
+
+    /// Creates a COPY stream for a ctid partition range of the specified table.
+    ///
+    /// Resolves the table name and row filter internally, then streams rows whose ctid
+    /// falls within the given partition bounds.
+    async fn get_table_copy_stream_with_ctid_partition(
+        &self,
+        table_id: TableId,
+        column_schemas: &[ColumnSchema],
+        publication_name: Option<&str>,
+        partition: &CtidPartition,
+    ) -> EtlResult<CopyOutStream> {
+        let table_name = self.get_table_name(table_id).await?;
+        let row_filter = self.get_row_filter(table_id, publication_name).await?;
+
+        let column_list = column_schemas
+            .iter()
+            .map(|col| quote_identifier(&col.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let query = Self::build_ctid_copy_query(
+            &table_name,
+            &column_list,
+            row_filter.as_deref(),
+            partition,
+        );
+
+        let stream = self.client.copy_out_simple(&query).await?;
+
+        Ok(stream)
+    }
+
+    /// Builds a `COPY ... TO STDOUT` query that selects rows within a ctid range.
+    ///
+    /// The query applies an optional publication row filter in addition to the ctid bounds.
+    fn build_ctid_copy_query(
+        table_name: &TableName,
+        column_list: &str,
+        row_filter: Option<&str>,
+        partition: &CtidPartition,
+    ) -> String {
+        let ctid_predicate = match partition {
+            CtidPartition::OpenStart { end_tid } => {
+                format!("ctid < {}::tid", quote_literal(end_tid))
+            }
+            CtidPartition::Closed { start_tid, end_tid } => {
+                format!(
+                    "ctid >= {}::tid and ctid < {}::tid",
+                    quote_literal(start_tid),
+                    quote_literal(end_tid),
+                )
+            }
+            CtidPartition::OpenEnd { start_tid } => {
+                format!("ctid >= {}::tid", quote_literal(start_tid))
+            }
+        };
+
+        if let Some(row_filter) = row_filter {
+            format!(
+                "copy (select {column_list} from {table_name} where {ctid_predicate} and ({row_filter})) to stdout with (format text);",
+            )
+        } else {
+            format!(
+                "copy (select {column_list} from {table_name} where {ctid_predicate}) to stdout with (format text);",
+            )
+        }
+    }
+
+    /// Exports the current transaction snapshot.
+    ///
+    /// Calls `pg_export_snapshot()` so that child connections can use
+    /// `SET TRANSACTION SNAPSHOT` to read from the same consistent point.
+    async fn export_snapshot(&self) -> EtlResult<String> {
+        let results = self
+            .client
+            .simple_query("select pg_export_snapshot();")
+            .await?;
+
+        for msg in results {
+            if let SimpleQueryMessage::Row(row) = msg {
+                let snapshot_id = row
+                    .try_get(0)?
+                    .ok_or_else(|| {
+                        etl_error!(ErrorKind::InvalidState, "pg_export_snapshot returned NULL")
+                    })?
+                    .to_string();
+                return Ok(snapshot_id);
+            }
+        }
+
+        Err(etl_error!(
+            ErrorKind::InvalidState,
+            "pg_export_snapshot returned no rows"
+        ))
+    }
+
+    /// Computes balanced ctid partition ranges using relation-size-based blocks.
+    ///
+    /// Returns one [`CtidPartition`] per partition, or an empty vec if the table has no rows.
+    ///
+    /// This method divides the table into roughly equal physical ranges based on block
+    /// numbers to avoid a full table scan and sort.
+    /// The approach:
+    /// 1. Queries `pg_relation_size(table)` and divides by `current_setting('block_size')`
+    /// 2. Divides blocks evenly across `num_partitions`
+    /// 3. Generates half-open ctid ranges on block boundaries
+    ///
+    /// The final partition uses an open upper bound to include all blocks at or above its
+    /// lower boundary, which keeps coverage correct when the table grows after size sampling.
+    ///
+    /// The size calculation is not snapshot based, which is why we have open intervals since we want
+    /// to be sure to be able to capture all tuples and not miss anything.
+    async fn plan_ctid_partitions(
+        &self,
+        table_id: TableId,
+        num_partitions: u16,
+    ) -> EtlResult<Vec<CtidPartition>> {
+        if num_partitions == 0 {
+            return Err(etl_error!(
+                ErrorKind::ConfigError,
+                "Number of ctid partitions must be greater than zero"
+            ));
+        }
+
+        // We query how many blocks the table has at this point in time. Note that this query doesn't
+        // use MVCC, so it's a real-time snapshot.
+        let size_query = format!(
+            "select \
+                 pg_relation_size({table_id}::regclass)::bigint / current_setting('block_size')::bigint as table_blocks"
+        );
+        let size_results = self.client.simple_query(&size_query).await?;
+        let table_blocks: i64 = size_results
+            .iter()
+            .find_map(|msg| {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    row.try_get("table_blocks").ok()??.parse().ok()
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::SourceSchemaError,
+                    "Could not retrieve table block count for partition planning",
+                    format!("table_id: {table_id}")
+                )
+            })?;
+
+        if table_blocks == 0 {
+            return Ok(vec![]);
+        }
+
+        let requested_partitions = i64::from(num_partitions);
+        let effective_partitions = requested_partitions.min(table_blocks);
+        // We perform ceil-division with the classic formula to avoid having undersized partitions.
+        let blocks_per_partition = (table_blocks + effective_partitions - 1) / effective_partitions;
+
+        let mut partitions = Vec::with_capacity(effective_partitions as usize);
+        for i in 0..effective_partitions {
+            let start_block = i * blocks_per_partition;
+            // We use the next block as exclusive delimiter for the query to avoid possible issues
+            // in the way we determine boundaries.
+            let end_block_exclusive = ((i + 1) * blocks_per_partition).min(table_blocks);
+
+            let partition = if effective_partitions == 1 {
+                CtidPartition::OpenEnd {
+                    start_tid: "(0,1)".to_string(),
+                }
+            } else if i == 0 {
+                CtidPartition::OpenStart {
+                    end_tid: format!("({end_block_exclusive},1)"),
+                }
+            } else if i == effective_partitions - 1 {
+                CtidPartition::OpenEnd {
+                    start_tid: format!("({start_block},1)"),
+                }
+            } else {
+                CtidPartition::Closed {
+                    start_tid: format!("({start_block},1)"),
+                    end_tid: format!("({end_block_exclusive},1)"),
+                }
+            };
+
+            partitions.push(partition);
+        }
+
+        Ok(partitions)
     }
 
     /// Helper function to extract a value from a SimpleQueryMessage::Row

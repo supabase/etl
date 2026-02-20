@@ -1,14 +1,15 @@
 use anyhow::{Context, anyhow};
 use etl_api::{config::ApiConfig, startup::Application};
-use etl_config::{Environment, load_config, shared::PgConnectionConfig};
+use etl_config::{load_config, shared::PgConnectionConfig};
 use etl_telemetry::tracing::init_tracing;
-use secrecy::ExposeSecret;
 use std::env;
-use std::sync::{Arc, Once};
+use std::sync::Once;
 use tracing::{error, info};
 
 /// Ensures crypto provider is only initialized once.
 static INIT_CRYPTO: Once = Once::new();
+
+mod sentry;
 
 /// Installs the default cryptographic provider for rustls.
 ///
@@ -38,7 +39,7 @@ fn main() -> anyhow::Result<()> {
     let _log_flusher = init_tracing(env!("CARGO_BIN_NAME"))?;
 
     // Initialize Sentry before the async runtime starts
-    let _sentry_guard = init_sentry()?;
+    let _sentry_guard = sentry::init()?;
 
     // We start the runtime.
     actix_web::rt::System::new().block_on(async_main())?;
@@ -84,62 +85,6 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-/// Initializes Sentry error tracking and performance monitoring.
-///
-/// Configures Sentry with environment-specific settings, service tagging, and a custom
-/// traces sampler that reduces sampling for high-frequency endpoints like `/metrics` and
-/// `/health_check`.
-/// Returns `None` if Sentry configuration is not provided.
-fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
-    if let Ok(config) = load_config::<ApiConfig>()
-        && let Some(sentry_config) = &config.sentry
-    {
-        info!("initializing sentry with supplied dsn");
-
-        let environment = Environment::load()?;
-        let guard = sentry::init(sentry::ClientOptions {
-            dsn: Some(sentry_config.dsn.expose_secret().parse()?),
-            environment: Some(environment.to_string().into()),
-            traces_sampler: Some(Arc::new(|ctx: &sentry::TransactionContext| {
-                let transaction_name = ctx.name();
-                let endpoint = transaction_name
-                    .split_once(' ')
-                    .and_then(|(method, path)| {
-                        if path.starts_with('/') && method.chars().all(|c| c.is_ascii_uppercase()) {
-                            Some(path)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(transaction_name);
-
-                // Sample verbose endpoints at a much lower rate (0.1%)
-                match endpoint {
-                    "/metrics" | "/health_check" => 0.001,
-                    // All other endpoints sampled at 1%
-                    _ => 0.01,
-                }
-            })),
-            max_request_body_size: sentry::MaxRequestBodySize::Always,
-            integrations: vec![Arc::new(
-                sentry::integrations::panic::PanicIntegration::new(),
-            )],
-            ..Default::default()
-        });
-
-        // Set service tag to differentiate API from other services
-        sentry::configure_scope(|scope| {
-            scope.set_tag("service", "api");
-        });
-
-        return Ok(Some(guard));
-    }
-
-    info!("sentry not configured for api, skipping initialization");
-
-    Ok(None)
 }
 
 fn log_pg_connection_config(config: &PgConnectionConfig) {

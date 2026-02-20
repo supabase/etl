@@ -2,12 +2,13 @@ use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, TableId, TableName, TableRow, generate_sequence_number};
+use etl::types::{Cell, Event, PipelineId, TableId, TableName, TableRow, generate_sequence_number};
 use etl::{bail, etl_error};
 
 #[cfg(feature = "egress")]
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
-use gcp_bigquery_client::storage::TableDescriptor;
+use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
+use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::iter;
@@ -16,7 +17,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use crate::bigquery::encoding::BigQueryTableRow;
+
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use crate::bigquery::metrics::register_metrics;
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
@@ -173,7 +177,7 @@ pub struct BigQueryDestination<S> {
     client: BigQueryClient,
     dataset_id: BigQueryDatasetId,
     max_staleness_mins: Option<u16>,
-    max_concurrent_streams: usize,
+    pipeline_id: PipelineId,
     store: S,
     inner: Arc<Mutex<Inner>>,
 }
@@ -191,9 +195,11 @@ where
         client: BigQueryClient,
         dataset_id: BigQueryDatasetId,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: usize,
+        pipeline_id: PipelineId,
         store: S,
     ) -> Self {
+        register_metrics();
+
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -203,7 +209,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams,
+            pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
         }
@@ -213,17 +219,20 @@ where
     ///
     /// Initializes the BigQuery client with the provided credentials and project settings.
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
-    /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
-    /// and determines how table rows are split into batches for concurrent processing.
+    /// The `connection_pool_size` parameter controls the connection pool size.
     pub async fn new_with_key_path(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: usize,
+        connection_pool_size: usize,
+        pipeline_id: PipelineId,
         store: S,
     ) -> EtlResult<Self> {
-        let client = BigQueryClient::new_with_key_path(project_id, sa_key).await?;
+        register_metrics();
+
+        let client =
+            BigQueryClient::new_with_key_path(project_id, sa_key, connection_pool_size).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -233,7 +242,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams,
+            pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -243,17 +252,19 @@ where
     ///
     /// Similar to [`BigQueryDestination::new_with_key_path`] but accepts the key content directly
     /// rather than a file path. Useful when credentials are stored in environment variables.
-    /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
-    /// and determines how table rows are split into batches for concurrent processing.
+    /// The `connection_pool_size` parameter controls the connection pool size.
     pub async fn new_with_key(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         sa_key: &str,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: usize,
+        connection_pool_size: usize,
+        pipeline_id: PipelineId,
         store: S,
     ) -> EtlResult<Self> {
-        let client = BigQueryClient::new_with_key(project_id, sa_key).await?;
+        register_metrics();
+
+        let client = BigQueryClient::new_with_key(project_id, sa_key, connection_pool_size).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -263,7 +274,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams,
+            pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -272,16 +283,18 @@ where
     ///
     /// Initializes the BigQuery client with the default credentials and project settings.
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
-    /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
-    /// and determines how table rows are split into batches for concurrent processing.
+    /// The `connection_pool_size` parameter controls the connection pool size.
     pub async fn new_with_adc(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: usize,
+        connection_pool_size: usize,
+        pipeline_id: PipelineId,
         store: S,
     ) -> EtlResult<Self> {
-        let client = BigQueryClient::new_with_adc(project_id).await?;
+        register_metrics();
+
+        let client = BigQueryClient::new_with_adc(project_id, connection_pool_size).await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -291,7 +304,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams,
+            pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -301,24 +314,31 @@ where
     ///
     /// Initializes the BigQuery client with a flow authenticator using the provided secret and persistent file path.
     /// The `max_staleness_mins` parameter controls table metadata cache freshness.
-    /// The `max_concurrent_streams` parameter controls parallelism for streaming operations
-    /// and determines how table rows are split into batches for concurrent processing.
+    /// The `connection_pool_size` parameter controls the connection pool size.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new_with_flow_authenticator<Secret, Path>(
         project_id: String,
         dataset_id: BigQueryDatasetId,
         secret: Secret,
         persistent_file_path: Path,
         max_staleness_mins: Option<u16>,
-        max_concurrent_streams: usize,
+        connection_pool_size: usize,
+        pipeline_id: PipelineId,
         store: S,
     ) -> EtlResult<Self>
     where
         Secret: AsRef<[u8]>,
         Path: Into<std::path::PathBuf>,
     {
-        let client =
-            BigQueryClient::new_with_flow_authenticator(project_id, secret, persistent_file_path)
-                .await?;
+        register_metrics();
+
+        let client = BigQueryClient::new_with_flow_authenticator(
+            project_id,
+            secret,
+            persistent_file_path,
+            connection_pool_size,
+        )
+        .await?;
         let inner = Inner {
             created_tables: HashSet::new(),
             created_views: HashMap::new(),
@@ -328,7 +348,7 @@ where
             client,
             dataset_id,
             max_staleness_mins,
-            max_concurrent_streams,
+            pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
         })
@@ -343,7 +363,7 @@ where
         &self,
         table_id: &TableId,
         use_cdc_sequence_column: bool,
-    ) -> EtlResult<(SequencedBigQueryTableId, Arc<TableDescriptor>)> {
+    ) -> EtlResult<(SequencedBigQueryTableId, TableDescriptor)> {
         // We hold the lock for the entire preparation to avoid race conditions since the consistency
         // of this code path is critical.
         let mut inner = self.inner.lock().await;
@@ -409,7 +429,7 @@ where
             use_cdc_sequence_column,
         );
 
-        Ok((sequenced_bigquery_table_id, Arc::new(table_descriptor)))
+        Ok((sequenced_bigquery_table_id, table_descriptor))
     }
 
     /// Adds a table to the creation cache to avoid redundant existence checks.
@@ -498,25 +518,33 @@ where
     /// Writes table rows with CDC metadata for non-event streaming operations.
     ///
     /// Adds an `Upsert` operation type to each row, splits them into optimal batches based on
-    /// `max_concurrent_streams`, and streams to BigQuery using concurrent processing.
+    /// estimated row size to maximize the 10MB per request limit, and streams to BigQuery
+    /// using concurrent processing.
     async fn write_table_rows(
         &self,
         table_id: TableId,
-        mut table_rows: Vec<TableRow>,
+        table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        // Prepare table for streaming.
         let (sequenced_bigquery_table_id, table_descriptor) =
             self.prepare_table_for_streaming(&table_id, false).await?;
 
         // Add CDC operation type to all rows (no lock needed).
-        for table_row in table_rows.iter_mut() {
-            table_row
-                .values
-                .push(BigQueryOperationType::Upsert.into_cell());
-        }
+        let table_rows = table_rows
+            .into_iter()
+            .map(|mut table_row| {
+                table_row
+                    .values_mut()
+                    .push(BigQueryOperationType::Upsert.into_cell());
+
+                BigQueryTableRow::try_from(table_row)
+            })
+            .collect::<EtlResult<Vec<BigQueryTableRow>>>()?;
+
+        // Calculate optimal target batches based on estimated row size.
+        let target_batches = calculate_target_batches_for_table_copy(&table_rows)?;
 
         // Split table rows into optimal batches for parallel execution.
-        let table_rows_batches = split_table_rows(table_rows, self.max_concurrent_streams);
+        let table_rows_batches = split_table_rows(table_rows, target_batches);
 
         // Create table batches from the split rows.
         let mut table_batches = Vec::with_capacity(table_rows_batches.len());
@@ -532,12 +560,11 @@ where
             }
         }
 
-        // Stream all the batches concurrently.
         if !table_batches.is_empty() {
             #[allow(unused_variables)]
             let (bytes_sent, bytes_received) = self
                 .client
-                .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
+                .append_table_batches(self.pipeline_id, table_batches)
                 .await?;
 
             #[cfg(feature = "egress")]
@@ -575,26 +602,32 @@ where
                             generate_sequence_number(insert.start_lsn, insert.commit_lsn);
                         insert
                             .table_row
-                            .values
+                            .values_mut()
                             .push(BigQueryOperationType::Upsert.into_cell());
-                        insert.table_row.values.push(Cell::String(sequence_number));
+                        insert
+                            .table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
-                        let table_rows: &mut Vec<TableRow> =
+                        let table_rows: &mut Vec<BigQueryTableRow> =
                             table_id_to_table_rows.entry(insert.table_id).or_default();
-                        table_rows.push(insert.table_row);
+                        table_rows.push(BigQueryTableRow::try_from(insert.table_row)?);
                     }
                     Event::Update(mut update) => {
                         let sequence_number =
                             generate_sequence_number(update.start_lsn, update.commit_lsn);
                         update
                             .table_row
-                            .values
+                            .values_mut()
                             .push(BigQueryOperationType::Upsert.into_cell());
-                        update.table_row.values.push(Cell::String(sequence_number));
+                        update
+                            .table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
-                        let table_rows: &mut Vec<TableRow> =
+                        let table_rows: &mut Vec<BigQueryTableRow> =
                             table_id_to_table_rows.entry(update.table_id).or_default();
-                        table_rows.push(update.table_row);
+                        table_rows.push(BigQueryTableRow::try_from(update.table_row)?);
                     }
                     Event::Delete(delete) => {
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
@@ -605,13 +638,15 @@ where
                         let sequence_number =
                             generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
-                            .values
+                            .values_mut()
                             .push(BigQueryOperationType::Delete.into_cell());
-                        old_table_row.values.push(Cell::String(sequence_number));
+                        old_table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
-                        let table_rows: &mut Vec<TableRow> =
+                        let table_rows: &mut Vec<BigQueryTableRow> =
                             table_id_to_table_rows.entry(delete.table_id).or_default();
-                        table_rows.push(old_table_row);
+                        table_rows.push(BigQueryTableRow::try_from(old_table_row)?);
                     }
                     event => {
                         // Every other event type is currently not supported.
@@ -641,7 +676,7 @@ where
                     #[allow(unused_variables)]
                     let (bytes_sent, bytes_received) = self
                         .client
-                        .stream_table_batches_concurrent(table_batches, self.max_concurrent_streams)
+                        .append_table_batches(self.pipeline_id, table_batches)
                         .await?;
 
                     #[cfg(feature = "egress")]
@@ -670,7 +705,7 @@ where
             }
 
             if !truncate_table_ids.is_empty() {
-                self.process_truncate_for_table_ids(truncate_table_ids.into_iter(), true)
+                self.process_truncate_for_table_ids(truncate_table_ids.into_iter())
                     .await?;
             }
         }
@@ -686,36 +721,23 @@ where
     async fn process_truncate_for_table_ids(
         &self,
         table_ids: impl IntoIterator<Item = TableId>,
-        is_cdc_truncate: bool,
     ) -> EtlResult<()> {
         // We want to lock for the entire processing to ensure that we don't have any race conditions
         // and possible errors are easier to reason about.
         let mut inner = self.inner.lock().await;
 
         for table_id in table_ids {
-            let table_schema = self.store.get_table_schema(&table_id).await?;
-            // If we are not doing CDC, it means that this truncation has been issued while recovering
-            // from a failed data sync operation. In that case, we could have failed before table schemas
-            // were stored in the schema store, so we just continue and emit a warning. If we are doing
-            // CDC, it's a problem if the schema disappears while streaming, so we error out.
-            if !is_cdc_truncate {
-                warn!(
-                    %table_id,
-                    "table schema not found in schema store while processing truncate events for bigquery"
-                );
+            let table_schema = self.store
+                .get_table_schema(&table_id)
+                .await?
+                .ok_or_else(|| etl_error!(
+                    ErrorKind::MissingTableSchema,
+                        "Table not found in the schema store",
+                        format!(
+                            "The table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery"
+                        )
+                ))?;
 
-                continue;
-            }
-
-            let table_schema = table_schema.ok_or_else(|| etl_error!(
-                ErrorKind::MissingTableSchema,
-                    "Table not found in the schema store",
-                    format!(
-                        "The table schema for table {table_id} was not found in the schema store while processing truncate events for BigQuery"
-                    )
-            ))?;
-
-            // We need to determine the current sequenced table ID for this table.
             let sequenced_bigquery_table_id =
                 self.get_sequenced_bigquery_table_id(&table_id)
                     .await?
@@ -731,7 +753,7 @@ where
             let next_sequenced_bigquery_table_id = sequenced_bigquery_table_id.next();
 
             info!(
-                %table_id,
+                table_id = table_id.0,
                 %next_sequenced_bigquery_table_id,
                 "processing truncate, creating new version"
             );
@@ -778,7 +800,7 @@ where
             //   is successfully processed, the system should be consistent.
 
             info!(
-                %table_id,
+                table_id = table_id.0,
                 %next_sequenced_bigquery_table_id,
                 "successfully processed truncate, view updated"
             );
@@ -823,7 +845,7 @@ where
     }
 
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.process_truncate_for_table_ids(iter::once(table_id), false)
+        self.process_truncate_for_table_ids(iter::once(table_id))
             .await
     }
 
@@ -844,27 +866,64 @@ where
     }
 }
 
+/// Calculates the optimal number of batches for table copy operations.
+///
+/// Estimates the size of a single row by encoding the first row, then calculates how many
+/// rows would fit in approximately 10MB per batch.
+fn calculate_target_batches_for_table_copy(table_rows: &[BigQueryTableRow]) -> EtlResult<usize> {
+    let Some(encoded_row) = table_rows.first() else {
+        return Ok(0);
+    };
+    let total_rows = table_rows.len();
+
+    let estimated_row_size = encoded_row.encoded_len();
+
+    // Calculate how many rows would fit in target batch size.
+    let rows_per_batch = if estimated_row_size > 0 {
+        MAX_BATCH_SIZE_BYTES / estimated_row_size
+    } else {
+        total_rows
+    };
+
+    // Calculate target number of batches, ensuring at least 1. We don't care about the limit of
+    // inflight requests since that is enforced by the client.
+    let target_batches = if rows_per_batch > 0 {
+        total_rows.div_ceil(rows_per_batch)
+    } else {
+        1
+    };
+
+    debug!(
+        total_rows,
+        estimated_row_size,
+        rows_per_batch,
+        target_batches,
+        "calculated target batches for table copy"
+    );
+
+    Ok(target_batches)
+}
+
 /// Splits table rows into optimal sub-batches for parallel execution.
 ///
-/// Calculates the optimal distribution of rows across batches to maximize
-/// utilization of available concurrent streams. Creates approximately equal-sized
-/// sub-batches when splitting is beneficial for parallelism.
+/// Calculates the optimal distribution of rows across batches to produce the target amount of
+/// batches.
 fn split_table_rows(
-    table_rows: Vec<TableRow>,
-    max_concurrent_streams: usize,
-) -> Vec<Vec<TableRow>> {
+    table_rows: Vec<BigQueryTableRow>,
+    target_batches: usize,
+) -> Vec<Vec<BigQueryTableRow>> {
     let total_rows = table_rows.len();
 
     if total_rows == 0 {
         return vec![];
     }
 
-    if total_rows <= 1 || max_concurrent_streams == 1 || total_rows <= max_concurrent_streams {
+    if total_rows <= 1 || target_batches == 1 || total_rows <= target_batches {
         return vec![table_rows];
     }
 
     // Calculate optimal rows per batch to maximize parallelism.
-    let optimal_rows_per_batch = total_rows.div_ceil(max_concurrent_streams);
+    let optimal_rows_per_batch = total_rows.div_ceil(target_batches);
 
     if optimal_rows_per_batch == 0 {
         return vec![table_rows];
@@ -876,18 +935,13 @@ fn split_table_rows(
     let extra_rows = total_rows % num_sub_batches;
 
     let mut batches = Vec::with_capacity(num_sub_batches);
-    let mut start_idx = 0;
+    let mut remaining = table_rows;
     for i in 0..num_sub_batches {
-        let mut end_idx = start_idx + rows_per_sub_batch;
-
-        // Distribute extra rows evenly across the first few batches
-        if i < extra_rows {
-            end_idx += 1;
-        }
-
-        let sub_batch_rows = table_rows[start_idx..end_idx].to_vec();
-        batches.push(sub_batch_rows);
-        start_idx = end_idx;
+        // Distribute extra rows evenly across the first few batches.
+        let batch_size = rows_per_sub_batch + if i < extra_rows { 1 } else { 0 };
+        let rest = remaining.split_off(batch_size);
+        batches.push(remaining);
+        remaining = rest;
     }
 
     batches
@@ -1178,40 +1232,46 @@ mod tests {
 
     #[test]
     fn test_split_table_rows_empty_input() {
-        let rows = vec![];
+        let rows: Vec<BigQueryTableRow> = vec![];
         let result = split_table_rows(rows, 4);
-        assert_eq!(result, Vec::<Vec<TableRow>>::new());
+        assert!(result.is_empty());
     }
 
     #[test]
     fn test_split_table_rows_zero_concurrent_streams() {
-        let rows = vec![TableRow::new(vec![])];
-        let result = split_table_rows(rows.clone(), 0);
-        assert_eq!(result, vec![rows]);
+        let rows = vec![BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()];
+        let result = split_table_rows(rows, 0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 1);
     }
 
     #[test]
     fn test_split_table_rows_single_concurrent_stream() {
-        let rows = vec![TableRow::new(vec![]), TableRow::new(vec![])];
-        let result = split_table_rows(rows.clone(), 1);
-        assert_eq!(result, vec![rows]);
+        let rows = vec![
+            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+        ];
+        let result = split_table_rows(rows, 1);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 2);
     }
 
     #[test]
     fn test_split_table_rows_fewer_rows_than_streams() {
-        let rows = vec![TableRow::new(vec![]), TableRow::new(vec![])];
-        let result = split_table_rows(rows.clone(), 5);
-        assert_eq!(result, vec![rows]);
+        let rows = vec![
+            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+        ];
+        let result = split_table_rows(rows, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 2);
     }
 
     #[test]
     fn test_split_table_rows_equal_distribution() {
-        let rows = vec![
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-        ];
+        let rows = (0..4)
+            .map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap())
+            .collect();
         let result = split_table_rows(rows, 2);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].len(), 2);
@@ -1220,13 +1280,9 @@ mod tests {
 
     #[test]
     fn test_split_table_rows_uneven_distribution() {
-        let rows = vec![
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-        ];
+        let rows = (0..5)
+            .map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap())
+            .collect();
         let result = split_table_rows(rows, 3);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].len(), 2); // Gets extra row
@@ -1236,18 +1292,9 @@ mod tests {
 
     #[test]
     fn test_split_table_rows_many_streams() {
-        let rows = vec![
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-        ];
+        let rows = (0..10)
+            .map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap())
+            .collect();
         let result = split_table_rows(rows, 4);
         assert_eq!(result.len(), 4);
 
@@ -1264,8 +1311,70 @@ mod tests {
 
     #[test]
     fn test_split_table_rows_single_row() {
-        let rows = vec![TableRow::new(vec![])];
-        let result = split_table_rows(rows.clone(), 5);
-        assert_eq!(result, vec![rows]);
+        let rows = vec![BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()];
+        let result = split_table_rows(rows, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 1);
+    }
+
+    #[test]
+    fn test_calculate_target_batches_empty_rows() {
+        let rows: Vec<BigQueryTableRow> = vec![];
+        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_calculate_target_batches_single_small_row() {
+        // Create a single row with one small string value
+        let rows = vec![
+            BigQueryTableRow::try_from(TableRow::new(vec![Cell::String("test".to_string())]))
+                .unwrap(),
+        ];
+        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn test_calculate_target_batches_many_small_rows() {
+        // Create many rows with small values (estimated ~50 bytes each when encoded)
+        let rows: Vec<BigQueryTableRow> = (0..100_000)
+            .map(|i| {
+                BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(format!("value_{i}"))]))
+                    .unwrap()
+            })
+            .collect();
+
+        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn test_calculate_target_batches_large_rows() {
+        // Create rows with large string values (each ~1MB)
+        let large_string = "x".repeat(1024 * 1024); // 1MB string
+        let rows: Vec<BigQueryTableRow> = (0..50)
+            .map(|_| {
+                BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(large_string.clone())]))
+                    .unwrap()
+            })
+            .collect();
+
+        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
+        assert_eq!(result, 7);
+    }
+
+    #[test]
+    fn test_calculate_target_batches_very_large_single_row() {
+        // Create a row larger than max batch size (>10MB)
+        let huge_string = "x".repeat(15 * 1024 * 1024); // 15MB string
+        let rows = vec![
+            BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(huge_string)])).unwrap(),
+        ];
+
+        let result = calculate_target_batches_for_table_copy(&rows).unwrap();
+        // Even though the row is too large, we should still get 1 batch
+        // (the actual send will fail, but batching logic should handle it)
+        assert_eq!(result, 1);
     }
 }

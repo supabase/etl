@@ -1,11 +1,11 @@
 use chrono::{DateTime, Duration, Utc};
-use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::state;
 use etl_postgres::types::TableId;
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 
 use crate::error::{ErrorKind, EtlError};
+use crate::workers::policy::ErrorHandlingPolicy;
 use crate::{bail, etl_error};
 
 /// Represents an error that occurred during table replication.
@@ -66,124 +66,16 @@ impl TableReplicationError {
         self
     }
 
-    /// Converts an [`EtlError`] to a [`TableReplicationError`] for a specific table.
-    ///
-    /// Determines appropriate retry policies based on the error kind.
-    ///
-    /// Note that this conversion is constantly improving since during testing and operation of ETL
-    /// we might notice edge cases that could be manually handled.
-    pub fn from_etl_error(config: &PipelineConfig, table_id: TableId, error: &EtlError) -> Self {
-        let retry_duration = Duration::milliseconds(config.table_error_retry_delay_ms as i64);
-        match error.kind() {
-            // Errors that can be retried automatically
-            ErrorKind::SourceConnectionFailed => {
-                Self::without_solution(table_id, error, RetryPolicy::retry_in(retry_duration))
-            }
-            ErrorKind::DestinationConnectionFailed => {
-                Self::without_solution(table_id, error, RetryPolicy::retry_in(retry_duration))
-            }
-            ErrorKind::SourceOperationCanceled => {
-                Self::without_solution(table_id, error, RetryPolicy::retry_in(retry_duration))
-            }
-            ErrorKind::SourceDatabaseShutdown => {
-                Self::without_solution(table_id, error, RetryPolicy::retry_in(retry_duration))
-            }
-            ErrorKind::SourceLockTimeout => {
-                Self::without_solution(table_id, error, RetryPolicy::retry_in(retry_duration))
-            }
-            ErrorKind::SourceDatabaseInRecovery => {
-                Self::without_solution(table_id, error, RetryPolicy::retry_in(retry_duration))
-            }
-
-            // Errors with manual retry and explicit solution
-            ErrorKind::AuthenticationError => Self::with_solution(
-                table_id,
-                error,
-                "Verify database credentials and authentication token validity.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::SourceSchemaError => Self::with_solution(
-                table_id,
-                error,
-                "Update the Postgres database schema to resolve compatibility issues.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::ConfigError => Self::with_solution(
-                table_id,
-                error,
-                "Update the application or service configuration settings.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::ReplicationSlotAlreadyExists => Self::with_solution(
-                table_id,
-                error,
-                "Remove the existing replication slot from the Postgres database.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::ReplicationSlotNotCreated => Self::with_solution(
-                table_id,
-                error,
-                "Verify the Postgres database allows creation of new replication slots.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::SourceConfigurationLimitExceeded => Self::with_solution(
-                table_id,
-                error,
-                "Verify the configured limits for Postgres, for example, the maximum number of replication slots.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::NullValuesNotSupportedInArrayInDestination => Self::with_solution(
-                table_id,
-                error,
-                "Remove NULL values from array columns in the Postgres tables.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::UnsupportedValueInDestination => Self::with_solution(
-                table_id,
-                error,
-                "Update the value in the Postgres table.",
-                RetryPolicy::ManualRetry,
-            ),
-            ErrorKind::SourceSnapshotTooOld => Self::with_solution(
-                table_id,
-                error,
-                "Check replication slot status and database configuration.",
-                RetryPolicy::ManualRetry,
-            ),
-
-            // Special handling for error kinds used during failure injection.
-            #[cfg(feature = "failpoints")]
-            ErrorKind::WithNoRetry => Self::with_solution(
-                table_id,
-                error,
-                "Cannot retry this error.",
-                RetryPolicy::NoRetry,
-            ),
-            #[cfg(feature = "failpoints")]
-            ErrorKind::WithManualRetry => Self::with_solution(
-                table_id,
-                error,
-                "Manually trigger retry after resolving the issue.",
-                RetryPolicy::ManualRetry,
-            ),
-            #[cfg(feature = "failpoints")]
-            ErrorKind::WithTimedRetry => Self::with_solution(
-                table_id,
-                error,
-                "Will automatically retry after the configured delay.",
-                RetryPolicy::retry_in(retry_duration),
-            ),
-
-            // By default, all errors are retriable but without a solution. The reason for why we do
-            // this is to let customers fix the system on their own, since right now we don't have
-            // a clean understanding of all possible recoverable cases of the system (since we can't
-            // infer that only by looking at the statically defined errors).
-            _ => Self::with_solution(
-                table_id,
-                error,
-                "There is no explicit solution for this error, if the issue persists after rollback, please contact support.",
-                RetryPolicy::ManualRetry,
-            ),
+    /// Builds a [`TableReplicationError`] from a shared handling policy and worker retry policy.
+    pub fn from_error_policy(
+        table_id: TableId,
+        error: &EtlError,
+        policy: &ErrorHandlingPolicy,
+        retry_policy: RetryPolicy,
+    ) -> Self {
+        match policy.solution() {
+            Some(solution) => Self::with_solution(table_id, error, solution, retry_policy),
+            None => Self::without_solution(table_id, error, retry_policy),
         }
     }
 }
@@ -221,14 +113,22 @@ pub enum TableReplicationPhase {
     /// worker is in the `SyncWait` state and pauses itself if it finds any. It resumes
     /// only when the table sync worker has caught up with the `Catchup`'s LSN.
     ///
-    /// This phase is stored in memory only and not persisted to the state store
-    SyncWait,
+    /// This phase is stored in memory only and not persisted to the state store.
+    SyncWait {
+        /// The LSN of the snapshot used for the initial table copy.
+        ///
+        /// This LSN represents the consistent point from which the table sync worker
+        /// will start streaming changes. The apply worker will use `max(this lsn, current_lsn)`
+        /// when setting the Catchup LSN to ensure no data loss, following PostgreSQL's pattern.
+        lsn: PgLsn,
+    },
     /// Set by the apply worker when it is paused. The table-sync worker waits
     /// for the apply worker to set this state after setting the state to `SyncWait`.
     ///
     /// This phase is stored in memory only and not persisted to the state store
     Catchup {
-        /// The lsn to catch up to. This is the location where the apply worker is paused.
+        /// The lsn to catch up before shutting down the table sync worker and handing over streaming
+        /// to the apply worker.
         lsn: PgLsn,
     },
 
@@ -272,7 +172,7 @@ impl fmt::Display for TableReplicationPhase {
             Self::Init => write!(f, "init"),
             Self::DataSync => write!(f, "data_sync"),
             Self::FinishedCopy => write!(f, "finished_copy"),
-            Self::SyncWait => write!(f, "sync_wait"),
+            Self::SyncWait { lsn } => write!(f, "sync_wait({lsn})"),
             Self::Catchup { lsn } => write!(f, "catchup({lsn})"),
             Self::SyncDone { lsn } => write!(f, "sync_done({lsn})"),
             Self::Ready => write!(f, "ready"),
@@ -423,7 +323,7 @@ impl<'a> From<&'a TableReplicationPhase> for TableReplicationPhaseType {
             TableReplicationPhase::Init => Self::Init,
             TableReplicationPhase::DataSync => Self::DataSync,
             TableReplicationPhase::FinishedCopy => Self::FinishedCopy,
-            TableReplicationPhase::SyncWait => Self::SyncWait,
+            TableReplicationPhase::SyncWait { .. } => Self::SyncWait,
             TableReplicationPhase::Catchup { .. } => Self::Catchup,
             TableReplicationPhase::SyncDone { .. } => Self::SyncDone,
             TableReplicationPhase::Ready => Self::Ready,

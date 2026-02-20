@@ -59,7 +59,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true, default-features = false }
 tracing-actix-web = { workspace = true, features = ["emit_event_on_error"] }
 utoipa = { workspace = true, features = ["actix_extras"] }
-utoipa-swagger-ui = { workspace = true, features = ["actix-web", "reqwest"] }
+utoipa-swagger-ui = { workspace = true, features = ["actix-web"] }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]

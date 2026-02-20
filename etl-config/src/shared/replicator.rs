@@ -24,12 +24,10 @@ pub struct ReplicatorConfig {
     /// Optional Sentry configuration for error tracking.
     ///
     /// If provided, enables Sentry error reporting and performance monitoring. If `None`, the replicator operates without Sentry integration.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub sentry: Option<SentryConfig>,
     /// Optional Supabase-specific configuration.
     ///
     /// If provided, enables Supabase-specific features or reporting. If `None`, the replicator operates independently of Supabase.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub supabase: Option<SupabaseConfig>,
 }
 

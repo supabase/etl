@@ -3,7 +3,9 @@
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use aws_lc_rs::rand::fill;
 use base64::prelude::*;
-use etl_api::config::{ApiConfig, ApplicationSettings, EncryptionKey as ConfigEncryptionKey};
+use etl_api::config::{
+    ApiConfig, ApplicationSettings, EncryptionKey as ConfigEncryptionKey, SourceConfig,
+};
 use etl_api::k8s::{K8sClient, TrustedRootCertsCache};
 use etl_api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
 use etl_api::routes::destinations_pipelines::{
@@ -11,8 +13,8 @@ use etl_api::routes::destinations_pipelines::{
 };
 use etl_api::routes::images::{CreateImageRequest, UpdateImageRequest};
 use etl_api::routes::pipelines::{
-    CreatePipelineRequest, RollbackTablesRequest, UpdatePipelineConfigRequest,
-    UpdatePipelineRequest, UpdatePipelineVersionRequest,
+    CreatePipelineRequest, RollbackTablesRequest, UpdatePipelineRequest,
+    UpdatePipelineVersionRequest,
 };
 use etl_api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
 use etl_api::routes::tenants::{
@@ -431,23 +433,6 @@ impl TestApp {
         .expect("Failed to execute request.")
     }
 
-    pub async fn update_pipeline_config(
-        &self,
-        tenant_id: &str,
-        pipeline_id: i64,
-        update_request: &UpdatePipelineConfigRequest,
-    ) -> reqwest::Response {
-        self.post_authenticated(format!(
-            "{}/v1/pipelines/{pipeline_id}/update-config",
-            &self.address
-        ))
-        .header("tenant_id", tenant_id)
-        .json(update_request)
-        .send()
-        .await
-        .expect("Failed to execute request.")
-    }
-
     pub async fn get_pipeline_replication_status(
         &self,
         tenant_id: &str,
@@ -523,6 +508,12 @@ fn generate_random_bytes<const N: usize>() -> [u8; N] {
 }
 
 pub async fn spawn_test_app() -> TestApp {
+    spawn_test_app_with_trusted_username(None).await
+}
+
+pub async fn spawn_test_app_with_trusted_username(
+    trusted_source_username: Option<String>,
+) -> TestApp {
     Environment::Dev.set();
 
     let base_address = "127.0.0.1";
@@ -557,7 +548,10 @@ pub async fn spawn_test_app() -> TestApp {
         sentry: None,
         supabase_api_url: None,
         configcat_sdk_key: None,
-        source_tls_enabled: false,
+        source: SourceConfig {
+            tls_enabled: false,
+            trusted_username: trusted_source_username,
+        },
     };
 
     let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient);

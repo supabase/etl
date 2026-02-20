@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 
 use etl::error::ErrorKind;
-use etl::replication::client::PgReplicationClient;
+use etl::replication::client::{
+    CtidPartition, PgReplicationChildTransaction, PgReplicationClient, SlotState,
+};
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::pipeline::test_slot_name;
 use etl::test_utils::table::assert_table_schema;
@@ -144,6 +146,37 @@ async fn test_delete_nonexistent_slot() {
     // Attempt to delete a slot that doesn't exist
     let result = client.delete_slot(&slot_name).await;
     assert!(matches!(result, Err(ref err) if err.kind() == ErrorKind::ReplicationSlotNotFound));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_slot_if_exists_deletes_existing_slot() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let slot_name = test_slot_name("delete_if_exists_slot");
+    client.create_slot(&slot_name).await.unwrap();
+
+    client.delete_slot_if_exists(&slot_name).await.unwrap();
+
+    let result = client.get_slot(&slot_name).await;
+    assert!(matches!(result, Err(ref err) if err.kind() == ErrorKind::ReplicationSlotNotFound));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_slot_if_exists_on_nonexistent_slot() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let slot_name = test_slot_name("delete_if_exists_nonexistent_slot");
+    client.delete_slot_if_exists(&slot_name).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -759,4 +792,258 @@ async fn test_start_logical_replication() {
         .unwrap();
     let counts = count_stream_components(stream, |counts| counts.insert_count == 10).await;
     assert_eq!(counts.insert_count, 10);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_slot_state_returns_valid_for_healthy_slot() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    // Create a slot
+    let slot_name = test_slot_name("healthy_slot");
+    client.create_slot(&slot_name).await.unwrap();
+
+    // Check the slot state - it should be valid
+    let slot_state = client.get_slot_state(&slot_name).await.unwrap();
+    assert_eq!(slot_state, SlotState::Valid);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_slot_state_returns_error_for_nonexistent_slot() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    // Try to get state for a slot that doesn't exist
+    let slot_name = test_slot_name("nonexistent_slot");
+    let result = client.get_slot_state(&slot_name).await;
+
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().kind(),
+        ErrorKind::ReplicationSlotNotFound
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "modifies cluster-wide PG settings; run independently with: cargo test -- --ignored exclusive_ --test-threads=1"]
+async fn exclusive_get_slot_state_returns_invalidated_for_lost_slot() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    // Create a slot
+    let slot_name = test_slot_name("invalidated_slot");
+    client.create_slot(&slot_name).await.unwrap();
+
+    // Verify the slot is initially valid
+    let slot_state = client.get_slot_state(&slot_name).await.unwrap();
+    assert_eq!(
+        slot_state,
+        SlotState::Valid,
+        "Slot should be valid initially"
+    );
+
+    // Try to invalidate the slot using the database helper
+    database.invalidate_slot(&slot_name).await;
+
+    // Verify the slot state is now Invalidated
+    let slot_state = client.get_slot_state(&slot_name).await.unwrap();
+    assert_eq!(
+        slot_state,
+        SlotState::Invalidated,
+        "Slot should be invalidated after exceeding WAL limit"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_plan_ctid_partitions_returns_correct_partitions() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let table_id = database
+        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
+        .await
+        .unwrap();
+
+    let expected_rows: i64 = 100;
+    database
+        .insert_generate_series(test_table_name("table_1"), &["age"], 1, expected_rows, 1)
+        .await
+        .unwrap();
+
+    let (transaction, _) = client
+        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .await
+        .unwrap();
+
+    let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
+
+    assert!(
+        !partitions.is_empty(),
+        "expected at least one partition for non-empty table"
+    );
+    assert!(
+        partitions.len() <= 4,
+        "planner should not exceed requested partitions"
+    );
+
+    if partitions.len() == 1 {
+        assert!(matches!(
+            partitions.first(),
+            Some(CtidPartition::OpenEnd { .. })
+        ));
+    } else {
+        assert!(matches!(
+            partitions.first(),
+            Some(CtidPartition::OpenStart { .. })
+        ));
+        assert!(matches!(
+            partitions.last(),
+            Some(CtidPartition::OpenEnd { .. })
+        ));
+    }
+
+    for partition in &partitions {
+        match partition {
+            CtidPartition::OpenStart { end_tid } => {
+                assert!(
+                    end_tid.starts_with('(') && end_tid.ends_with(')'),
+                    "end_tid should be a valid tid format: {end_tid}"
+                );
+            }
+            CtidPartition::Closed { start_tid, end_tid } => {
+                assert!(
+                    start_tid.starts_with('(') && start_tid.ends_with(')'),
+                    "start_tid should be a valid tid format: {start_tid}"
+                );
+                assert!(
+                    end_tid.starts_with('(') && end_tid.ends_with(')'),
+                    "end_tid should be a valid tid format: {end_tid}"
+                );
+            }
+            CtidPartition::OpenEnd { start_tid } => {
+                assert!(
+                    start_tid.starts_with('(') && start_tid.ends_with(')'),
+                    "start_tid should be a valid tid format: {start_tid}"
+                );
+            }
+        }
+    }
+
+    transaction.commit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_plan_ctid_partitions_returns_empty_for_empty_table() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let table_id = database
+        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
+        .await
+        .unwrap();
+
+    let (transaction, _) = client
+        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .await
+        .unwrap();
+
+    let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
+
+    assert!(
+        partitions.is_empty(),
+        "expected no partitions for empty table"
+    );
+
+    transaction.commit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_table_copy_stream_with_ctid_partition() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let table_id = database
+        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
+        .await
+        .unwrap();
+
+    let expected_rows: i64 = 100;
+    database
+        .insert_generate_series(test_table_name("table_1"), &["age"], 1, expected_rows, 1)
+        .await
+        .unwrap();
+
+    let (transaction, _) = client
+        .create_slot_with_transaction(&test_slot_name("my_slot"))
+        .await
+        .unwrap();
+
+    let column_schemas = &[ColumnSchema {
+        name: "age".to_string(),
+        typ: Type::INT4,
+        modifier: -1,
+        nullable: true,
+        primary: false,
+    }];
+
+    let partitions = transaction.plan_ctid_partitions(table_id, 4).await.unwrap();
+    assert!(
+        !partitions.is_empty(),
+        "expected at least one partition for non-empty table"
+    );
+    assert!(
+        partitions.len() <= 4,
+        "planner should not exceed requested partitions"
+    );
+
+    // Export the snapshot so child connections can share it.
+    let snapshot_id = transaction.export_snapshot().await.unwrap();
+    assert!(!snapshot_id.is_empty(), "snapshot id should not be empty");
+
+    let mut total_rows: u64 = 0;
+    for partition in &partitions {
+        let child = transaction.get_cloned_client().fork_child().await.unwrap();
+        let child_tx = PgReplicationChildTransaction::new(child, &snapshot_id)
+            .await
+            .unwrap();
+
+        let stream = child_tx
+            .get_table_copy_stream_with_ctid_partition(table_id, column_schemas, None, partition)
+            .await
+            .unwrap();
+
+        total_rows += count_stream_rows(stream).await;
+        child_tx.commit().await.unwrap();
+    }
+
+    transaction.commit().await.unwrap();
+
+    assert_eq!(
+        total_rows, expected_rows as u64,
+        "total rows across all partitions should match inserted rows"
+    );
 }

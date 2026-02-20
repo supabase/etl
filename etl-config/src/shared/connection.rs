@@ -6,7 +6,6 @@ use std::time::Duration;
 use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPgSslMode};
 
 use crate::Config;
-use crate::shared::ValidationError;
 
 /// Common Postgres settings shared across all ETL connection types.
 ///
@@ -69,8 +68,12 @@ pub static ETL_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
 
 /// Connection options for logical replication streams.
 ///
-/// Disables statement and idle timeouts to allow large COPY operations and long-running
+/// Disables statement, lock, and idle timeouts to allow large COPY operations and long-running
 /// transactions during initial table synchronization and WAL streaming.
+///
+/// Lock timeout is disabled because `CREATE_REPLICATION_SLOT` must wait for all in-progress
+/// write transactions to reach a consistent snapshot point. On heavily-loaded databases this
+/// can take minutes, and a timeout would only cause retries that will also fail.
 pub static ETL_REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions {
         datestyle: COMMON_DATESTYLE.to_string(),
@@ -79,7 +82,7 @@ pub static ETL_REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> =
         client_encoding: COMMON_CLIENT_ENCODING.to_string(),
         timezone: COMMON_TIMEZONE.to_string(),
         statement_timeout: 0,
-        lock_timeout: 30_000,
+        lock_timeout: 0,
         idle_in_transaction_session_timeout: 0,
         application_name: APP_NAME_REPLICATOR_STREAMING.to_string(),
     });
@@ -198,9 +201,8 @@ pub struct PgConnectionConfig {
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
-    /// When `None`, TCP keepalives are disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keepalive: Option<TcpKeepaliveConfig>,
+    #[serde(default)]
+    pub keepalive: TcpKeepaliveConfig,
 }
 
 impl Config for PgConnectionConfig {
@@ -223,9 +225,8 @@ pub struct PgConnectionConfigWithoutSecrets {
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
     /// TCP keepalive configuration for connection health monitoring.
-    /// When `None`, TCP keepalives are disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keepalive: Option<TcpKeepaliveConfig>,
+    #[serde(default)]
+    pub keepalive: TcpKeepaliveConfig,
 }
 
 impl From<PgConnectionConfig> for PgConnectionConfigWithoutSecrets {
@@ -258,21 +259,6 @@ impl TlsConfig {
             enabled: false,
         }
     }
-
-    /// Validates TLS configuration consistency.
-    ///
-    /// Ensures that when TLS is enabled, trusted root certificates are provided.
-    /// This validation is required because the TLS implementation uses `rustls`,
-    /// which does not automatically fall back to system CA certificates. An empty
-    /// root certificate store would cause all TLS handshakes to fail since no
-    /// server certificates would be trusted.
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.enabled && self.trusted_root_certs.is_empty() {
-            return Err(ValidationError::MissingTrustedRootCerts);
-        }
-
-        Ok(())
-    }
 }
 
 /// TCP keepalive configuration for Postgres connections.
@@ -290,7 +276,7 @@ impl Default for TcpKeepaliveConfig {
     fn default() -> Self {
         Self {
             idle_secs: 30,
-            interval_secs: 30,
+            interval_secs: 10,
             retries: 3,
         }
     }
@@ -339,6 +325,14 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
             connect_options = connect_options.password(password.expose_secret());
         }
 
+        // TODO: Enable TCP keepalive once available in sqlx.
+        // The tcp_keepalive_time() method was added in PR #3559 but may not be
+        // available in the current sqlx version (0.8.6). When upgrading sqlx,
+        // uncomment the following to enable keepalive for API/state connections:
+        //
+        // connect_options = connect_options
+        //     .tcp_keepalive_time(Duration::from_secs(self.keepalive.idle_secs));
+
         // Apply options if provided
         if let Some(opts) = options {
             connect_options = connect_options.options(opts.to_key_value_pairs());
@@ -382,13 +376,15 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
             config.password(password.expose_secret());
         }
 
-        if let Some(keepalive) = &self.keepalive {
-            config
-                .keepalives(true)
-                .keepalives_idle(Duration::from_secs(keepalive.idle_secs))
-                .keepalives_interval(Duration::from_secs(keepalive.interval_secs))
-                .keepalives_retries(keepalive.retries);
-        }
+        // Always enable TCP keepalive to prevent idle connection timeouts,
+        // especially on managed Postgres services like Supabase. This is critical
+        // during parallel table copies where the main connection holds an exported
+        // snapshot but sits idle while child connections perform the actual data copy.
+        config
+            .keepalives(true)
+            .keepalives_idle(Duration::from_secs(self.keepalive.idle_secs))
+            .keepalives_interval(Duration::from_secs(self.keepalive.interval_secs))
+            .keepalives_retries(self.keepalive.retries);
 
         // Apply options if provided
         if let Some(opts) = options {
@@ -416,7 +412,7 @@ mod tests {
 
         assert_eq!(
             options_string,
-            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=30000 -c idle_in_transaction_session_timeout=0 -c application_name=supabase_etl_replicator_streaming"
+            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=0 -c idle_in_transaction_session_timeout=0 -c application_name=supabase_etl_replicator_streaming"
         );
     }
 

@@ -33,7 +33,8 @@ The pipeline will automatically:
 
 use clap::{Args, Parser};
 use etl::config::{
-    BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig, TlsConfig,
+    BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+    PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
 };
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
@@ -103,9 +104,6 @@ struct BqArgs {
     /// BigQuery dataset ID (must exist in the specified project)
     #[arg(long)]
     bq_dataset_id: String,
-    /// Maximum batch size for processing events (higher values = better throughput, more memory usage)
-    #[arg(long, default_value = "1000")]
-    max_batch_size: usize,
     /// Maximum time to wait for a batch to fill in milliseconds (lower values = lower latency, less throughput)
     #[arg(long, default_value = "5000")]
     max_batch_fill_duration_ms: u64,
@@ -169,7 +167,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
             trusted_root_certs: String::new(),
             enabled: false, // Set to true and provide certs for production
         },
-        keepalive: None,
+        keepalive: TcpKeepaliveConfig::default(),
     };
 
     // Create in-memory store for tracking table replication states and table schemas
@@ -182,13 +180,17 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         publication_name: args.publication,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
-            max_size: args.bq_args.max_batch_size,
             max_fill_ms: args.bq_args.max_batch_fill_duration_ms,
+            memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.bq_args.max_table_sync_workers,
+        memory_refresh_interval_ms: 100,
+        memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
+        invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
+        max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
     };
 
     // Initialize BigQuery destination with service account authentication
@@ -199,6 +201,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         &args.bq_args.bq_sa_key_file,
         None,
         1,
+        pipeline_config.id,
         store.clone(),
     )
     .await?;

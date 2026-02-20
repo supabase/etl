@@ -58,7 +58,7 @@ ETL is a Rust framework by [Supabase](https://supabase.com) for building high‑
   - Row-level filtering with `WHERE` clauses
   - `FOR ALL TABLES IN SCHEMA` syntax
 
-For detailed configuration instructions, see the [Configure Postgres documentation](https://supabase.github.io/etl/how-to/configure-postgres/).
+For detailed configuration instructions, see the [Configure Postgres documentation](https://supabase.github.io/etl/guides/configure-postgres/).
 
 ## Get Started
 
@@ -69,15 +69,15 @@ Install via Git while we prepare for a crates.io release:
 etl = { git = "https://github.com/supabase/etl" }
 ```
 
-Quick example using the in‑memory destination:
+Quick example using the BigQuery destination:
 
 ```rust
 use etl::{
     config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig},
-    destination::memory::MemoryDestination,
     pipeline::Pipeline,
     store::both::memory::MemoryStore,
 };
+use etl_destinations::bigquery::BigQueryDestination;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -91,7 +91,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let store = MemoryStore::new();
-    let destination = MemoryDestination::new();
+    let destination = BigQueryDestination::new_with_key_path(
+        "my-gcp-project".into(),
+        "my_dataset".into(),
+        "/path/to/service-account-key.json",
+        None,
+        1,
+        1,
+        store.clone(),
+    )
+    .await?;
 
     let config = PipelineConfig {
         id: 1,

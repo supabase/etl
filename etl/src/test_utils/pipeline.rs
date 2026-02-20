@@ -1,4 +1,7 @@
-use etl_config::shared::{BatchConfig, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig};
+use etl_config::shared::{
+    BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+    PipelineConfig, TableSyncCopyConfig,
+};
 use uuid::Uuid;
 
 use crate::destination::Destination;
@@ -25,14 +28,14 @@ pub fn test_slot_name(slot_name: &str) -> String {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// // Create a pipeline with default settings
 /// let pipeline = PipelineBuilder::new(pg_config, id, pub_name, store, dest)
 ///     .build();
 ///
 /// // Create a pipeline with custom batch and retry configurations
 /// let pipeline = PipelineBuilder::new(pg_config, id, pub_name, store, dest)
-///     .with_batch_config(BatchConfig { max_size: 100, max_fill_ms: 5000 })
+///     .with_batch_config(BatchConfig { max_fill_ms: 5000, memory_budget_ratio: 0.2 })
 ///     .with_retry_config(2000, 10)
 ///     .build();
 /// ```
@@ -42,8 +45,8 @@ pub struct PipelineBuilder<S, D> {
     publication_name: String,
     store: S,
     destination: D,
-    /// Batch configuration. Defaults to max_size=1, max_fill_ms=1000 if not specified.
-    batch: Option<BatchConfig>,
+    /// Batch configuration.
+    batch: BatchConfig,
     /// Delay in milliseconds before retrying a failed table operation. Default: 1000ms.
     table_error_retry_delay_ms: u64,
     /// Maximum number of retry attempts for table operations. Default: 2.
@@ -51,7 +54,15 @@ pub struct PipelineBuilder<S, D> {
     /// Maximum number of concurrent table sync workers. Default: 1.
     max_table_sync_workers: u16,
     /// Table sync copy configuration. Uses default if not specified.
-    table_sync_copy: Option<TableSyncCopyConfig>,
+    table_sync_copy: TableSyncCopyConfig,
+    /// Behavior when the main replication slot is found to be invalidated.
+    invalidated_slot_behavior: InvalidatedSlotBehavior,
+    /// Maximum parallel connections per table during initial copy. Default: 2.
+    max_copy_connections_per_table: u16,
+    /// The time between memory refreshes of the memory monitor. Default: 0.2.
+    memory_refresh_interval_ms: u64,
+    /// Memory-based backpressure configuration. Default: enabled with defaults.
+    memory_backpressure: MemoryBackpressureConfig,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -71,7 +82,7 @@ where
     ///
     /// # Default Settings
     ///
-    /// * Batch: max_size=1, max_fill_ms=1000
+    /// * Batch: max_fill_ms=1000
     /// * Retry delay: 1000ms
     /// * Max retry attempts: 2
     /// * Max table sync workers: 1
@@ -89,40 +100,37 @@ where
             publication_name,
             store,
             destination,
-            batch: None,
+            batch: BatchConfig {
+                max_fill_ms: 1000,
+                memory_budget_ratio: 0.2,
+            },
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 2,
             max_table_sync_workers: 1,
-            table_sync_copy: None,
+            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
+            invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
+            max_copy_connections_per_table: 2,
+            memory_refresh_interval_ms: 100,
+            memory_backpressure: MemoryBackpressureConfig {
+                activate_threshold: 0.95,
+                resume_threshold: 0.85,
+            },
         }
     }
 
     /// Sets custom batch configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `batch` - Configuration controlling batch size and timing for processing events
     pub fn with_batch_config(mut self, batch: BatchConfig) -> Self {
-        self.batch = Some(batch);
+        self.batch = batch;
         self
     }
 
     /// Sets custom table sync copy configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `table_sync_copy` - Configuration for how table syncs are performed
     pub fn with_table_sync_copy_config(mut self, table_sync_copy: TableSyncCopyConfig) -> Self {
-        self.table_sync_copy = Some(table_sync_copy);
+        self.table_sync_copy = table_sync_copy;
         self
     }
 
     /// Sets custom retry configuration for table operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `delay_ms` - Delay in milliseconds before retrying a failed operation
-    /// * `max_attempts` - Maximum number of retry attempts before giving up
     pub fn with_retry_config(mut self, delay_ms: u64, max_attempts: u32) -> Self {
         self.table_error_retry_delay_ms = delay_ms;
         self.table_error_retry_max_attempts = max_attempts;
@@ -130,12 +138,20 @@ where
     }
 
     /// Sets the maximum number of concurrent table sync workers.
-    ///
-    /// # Arguments
-    ///
-    /// * `workers` - Number of workers to use for parallel table synchronization
     pub fn with_max_table_sync_workers(mut self, workers: u16) -> Self {
         self.max_table_sync_workers = workers;
+        self
+    }
+
+    /// Sets the behavior when the main replication slot is found to be invalidated.
+    pub fn with_invalidated_slot_behavior(mut self, behavior: InvalidatedSlotBehavior) -> Self {
+        self.invalidated_slot_behavior = behavior;
+        self
+    }
+
+    /// Sets the maximum number of parallel connections per table during initial copy.
+    pub fn with_max_copy_connections_per_table(mut self, connections: u16) -> Self {
+        self.max_copy_connections_per_table = connections;
         self
     }
 
@@ -149,14 +165,15 @@ where
             id: self.pipeline_id,
             publication_name: self.publication_name,
             pg_connection: self.pg_connection_config,
-            batch: self.batch.unwrap_or(BatchConfig {
-                max_size: 1,
-                max_fill_ms: 1000,
-            }),
+            batch: self.batch,
             table_error_retry_delay_ms: self.table_error_retry_delay_ms,
             table_error_retry_max_attempts: self.table_error_retry_max_attempts,
             max_table_sync_workers: self.max_table_sync_workers,
-            table_sync_copy: self.table_sync_copy.unwrap_or_default(),
+            table_sync_copy: self.table_sync_copy,
+            invalidated_slot_behavior: self.invalidated_slot_behavior,
+            max_copy_connections_per_table: self.max_copy_connections_per_table,
+            memory_refresh_interval_ms: self.memory_refresh_interval_ms,
+            memory_backpressure: Some(self.memory_backpressure),
         };
 
         Pipeline::new(config, self.store, self.destination)

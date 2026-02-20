@@ -2,11 +2,12 @@
 
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::spawn_source_database;
-use etl::test_utils::notify::NotifyingStore;
+use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{
-    TableSelection, TestDatabaseSchema, insert_mock_data, setup_test_database_schema,
+    TableSelection, TestDatabaseSchema, assert_table_rows_equal_ignoring_size, insert_mock_data,
+    setup_test_database_schema,
 };
 use etl::types::{Cell, EventType, PipelineId, TableRow};
 use etl_destinations::iceberg::test_utils::LakekeeperClient;
@@ -113,55 +114,49 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
 
     let expected_users = vec![
-        TableRow {
-            values: vec![
-                Cell::I64(1),
-                Cell::String("user_1".to_string()),
-                Cell::I32(1),
-                IcebergOperationType::Insert.into(),
-                Cell::String("0000000000000000/0000000000000000".to_string()),
-            ],
-        },
-        TableRow {
-            values: vec![
-                Cell::I64(2),
-                Cell::String("user_2".to_string()),
-                Cell::I32(2),
-                IcebergOperationType::Insert.into(),
-                Cell::String("0000000000000000/0000000000000000".to_string()),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(1),
+            Cell::String("user_1".to_string()),
+            Cell::I32(1),
+            IcebergOperationType::Insert.into(),
+            Cell::String("0000000000000000/0000000000000000".to_string()),
+        ]),
+        TableRow::new(vec![
+            Cell::I64(2),
+            Cell::String("user_2".to_string()),
+            Cell::I32(2),
+            IcebergOperationType::Insert.into(),
+            Cell::String("0000000000000000/0000000000000000".to_string()),
+        ]),
     ];
 
     // Sort deterministically by the debug representation as a simple stable key for tests.
-    actual_users.sort_by(|a, b| format!("{:?}", a.values[0]).cmp(&format!("{:?}", b.values[0])));
-    assert_eq!(actual_users, expected_users);
+    actual_users
+        .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
+    assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
     let mut actual_orders =
         read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
 
     let expected_orders = vec![
-        TableRow {
-            values: vec![
-                Cell::I64(1),
-                Cell::String("description_1".to_string()),
-                IcebergOperationType::Insert.into(),
-                Cell::String("0000000000000000/0000000000000000".to_string()),
-            ],
-        },
-        TableRow {
-            values: vec![
-                Cell::I64(2),
-                Cell::String("description_2".to_string()),
-                IcebergOperationType::Insert.into(),
-                Cell::String("0000000000000000/0000000000000000".to_string()),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(1),
+            Cell::String("description_1".to_string()),
+            IcebergOperationType::Insert.into(),
+            Cell::String("0000000000000000/0000000000000000".to_string()),
+        ]),
+        TableRow::new(vec![
+            Cell::I64(2),
+            Cell::String("description_2".to_string()),
+            IcebergOperationType::Insert.into(),
+            Cell::String("0000000000000000/0000000000000000".to_string()),
+        ]),
     ];
 
     // Sort deterministically by the debug representation as a simple stable key for tests.
-    actual_orders.sort_by(|a, b| format!("{:?}", a.values[0]).cmp(&format!("{:?}", b.values[0])));
-    assert_eq!(actual_orders, expected_orders);
+    actual_orders
+        .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
+    assert_table_rows_equal_ignoring_size(&actual_orders, &expected_orders);
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
     // This feature is planned for future releases. We'll start to use it when it becomes available.
@@ -344,14 +339,14 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
 
     // Sort deterministically by the sequence number for stable assertions
     actual_users.sort_by(|a, b| {
-        let a_key = format!("{:?}", a.values[4]);
-        let b_key = format!("{:?}", b.values[4]);
+        let a_key = format!("{:?}", a.values()[4]);
+        let b_key = format!("{:?}", b.values()[4]);
         a_key.cmp(&b_key)
     });
 
     // Drop the last column (non-deterministic sequence number) before comparison.
     for row in &mut actual_users {
-        let _ = row.values.pop();
+        let _ = row.values_mut().pop();
     }
 
     // Expected CDC rows: 2 inserts (UPSERT), 2 updates (UPSERT), 1 delete (DELETE)
@@ -359,113 +354,93 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     // by id and cdc operation columns
     let expected_users = vec![
         // Initial insert of user 1
-        TableRow {
-            values: vec![
-                Cell::I64(1),
-                Cell::String("user_1".to_string()),
-                Cell::I32(1),
-                IcebergOperationType::Insert.into(),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(1),
+            Cell::String("user_1".to_string()),
+            Cell::I32(1),
+            IcebergOperationType::Insert.into(),
+        ]),
         // Initial insert of user 2
-        TableRow {
-            values: vec![
-                Cell::I64(2),
-                Cell::String("user_2".to_string()),
-                Cell::I32(2),
-                IcebergOperationType::Insert.into(),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(2),
+            Cell::String("user_2".to_string()),
+            Cell::I32(2),
+            IcebergOperationType::Insert.into(),
+        ]),
         // Update of user 1
-        TableRow {
-            values: vec![
-                Cell::I64(1),
-                Cell::String("updated_name".to_string()),
-                Cell::I32(42),
-                IcebergOperationType::Update.into(),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(1),
+            Cell::String("updated_name".to_string()),
+            Cell::I32(42),
+            IcebergOperationType::Update.into(),
+        ]),
         // Update of user 2
-        TableRow {
-            values: vec![
-                Cell::I64(2),
-                Cell::String("updated_name".to_string()),
-                Cell::I32(42),
-                IcebergOperationType::Update.into(),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(2),
+            Cell::String("updated_name".to_string()),
+            Cell::I32(42),
+            IcebergOperationType::Update.into(),
+        ]),
         // Delete of user with id 1
-        TableRow {
-            values: vec![
-                Cell::I64(1),
-                Cell::String("".to_string()),
-                Cell::I32(0),
-                IcebergOperationType::Delete.into(),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(1),
+            Cell::String("".to_string()),
+            Cell::I32(0),
+            IcebergOperationType::Delete.into(),
+        ]),
     ];
 
-    assert_eq!(actual_users, expected_users);
+    assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
     let mut actual_orders =
         read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
 
     // Sort deterministically by the primary key (id) and sequence number for stable assertions
     actual_orders.sort_by(|a, b| {
-        let a_key = format!("{:?}", a.values[3]);
-        let b_key = format!("{:?}", b.values[3]);
+        let a_key = format!("{:?}", a.values()[3]);
+        let b_key = format!("{:?}", b.values()[3]);
         a_key.cmp(&b_key)
     });
 
     // Drop the last column (non-deterministic sequence number) before comparison.
     for row in &mut actual_orders {
-        let _ = row.values.pop();
+        let _ = row.values_mut().pop();
     }
 
     let expected_orders = vec![
         // Initial insert of order 1
-        TableRow {
-            values: vec![
-                Cell::I64(1),
-                Cell::String("description_1".to_string()),
-                IcebergOperationType::Insert.into(),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(1),
+            Cell::String("description_1".to_string()),
+            IcebergOperationType::Insert.into(),
+        ]),
         // Initial insert of order 2
-        TableRow {
-            values: vec![
-                Cell::I64(2),
-                Cell::String("description_2".to_string()),
-                IcebergOperationType::Insert.into(),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(2),
+            Cell::String("description_2".to_string()),
+            IcebergOperationType::Insert.into(),
+        ]),
         // Update of order 1
-        TableRow {
-            values: vec![
-                Cell::I64(1),
-                Cell::String("updated_description".to_string()),
-                IcebergOperationType::Update.into(),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(1),
+            Cell::String("updated_description".to_string()),
+            IcebergOperationType::Update.into(),
+        ]),
         // Update of order 2
-        TableRow {
-            values: vec![
-                Cell::I64(2),
-                Cell::String("updated_description".to_string()),
-                IcebergOperationType::Update.into(),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(2),
+            Cell::String("updated_description".to_string()),
+            IcebergOperationType::Update.into(),
+        ]),
         // Delete of order 2
-        TableRow {
-            values: vec![
-                Cell::I64(2),
-                Cell::String("".to_string()),
-                IcebergOperationType::Delete.into(),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(2),
+            Cell::String("".to_string()),
+            IcebergOperationType::Delete.into(),
+        ]),
     ];
 
-    assert_eq!(actual_orders, expected_orders);
+    assert_table_rows_equal_ignoring_size(&actual_orders, &expected_orders);
 
     // Stop the pipeline to finalize writes.
     pipeline.shutdown_and_wait().await.unwrap();
@@ -631,54 +606,48 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     // After truncate, pre-truncate CDC rows should be gone (tables were dropped). Only post-truncate rows remain.
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
     for row in &mut actual_users {
-        let _ = row.values.pop(); // drop sequence_number
+        let _ = row.values_mut().pop(); // drop sequence_number
     }
-    actual_users.sort_by(|a, b| format!("{:?}", a.values[0]).cmp(&format!("{:?}", b.values[0])));
+    actual_users
+        .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
 
     let expected_users = vec![
-        TableRow {
-            values: vec![
-                Cell::I64(3),
-                Cell::String("user_3".to_string()),
-                Cell::I32(3),
-                IcebergOperationType::Insert.into(),
-            ],
-        },
-        TableRow {
-            values: vec![
-                Cell::I64(4),
-                Cell::String("user_4".to_string()),
-                Cell::I32(4),
-                IcebergOperationType::Insert.into(),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(3),
+            Cell::String("user_3".to_string()),
+            Cell::I32(3),
+            IcebergOperationType::Insert.into(),
+        ]),
+        TableRow::new(vec![
+            Cell::I64(4),
+            Cell::String("user_4".to_string()),
+            Cell::I32(4),
+            IcebergOperationType::Insert.into(),
+        ]),
     ];
-    assert_eq!(actual_users, expected_users);
+    assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
     let mut actual_orders =
         read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
     for row in &mut actual_orders {
-        let _ = row.values.pop(); // drop sequence_number
+        let _ = row.values_mut().pop(); // drop sequence_number
     }
-    actual_orders.sort_by(|a, b| format!("{:?}", a.values[0]).cmp(&format!("{:?}", b.values[0])));
+    actual_orders
+        .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
 
     let expected_orders = vec![
-        TableRow {
-            values: vec![
-                Cell::I64(3),
-                Cell::String("description_3".to_string()),
-                IcebergOperationType::Insert.into(),
-            ],
-        },
-        TableRow {
-            values: vec![
-                Cell::I64(4),
-                Cell::String("description_4".to_string()),
-                IcebergOperationType::Insert.into(),
-            ],
-        },
+        TableRow::new(vec![
+            Cell::I64(3),
+            Cell::String("description_3".to_string()),
+            IcebergOperationType::Insert.into(),
+        ]),
+        TableRow::new(vec![
+            Cell::I64(4),
+            Cell::String("description_4".to_string()),
+            IcebergOperationType::Insert.into(),
+        ]),
     ];
-    assert_eq!(actual_orders, expected_orders);
+    assert_table_rows_equal_ignoring_size(&actual_orders, &expected_orders);
 
     // Stop the pipeline to finalize writes.
     pipeline.shutdown_and_wait().await.unwrap();

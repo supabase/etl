@@ -1,5 +1,5 @@
 use etl_config::SerializableSecretString;
-use etl_config::shared::{PgConnectionConfig, TlsConfig};
+use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -65,7 +65,7 @@ impl From<StoredSourceConfig> for StrippedApiSourceConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone)]
 pub struct StoredSourceConfig {
     pub host: String,
     pub port: u16,
@@ -84,7 +84,7 @@ impl StoredSourceConfig {
             username: self.username,
             password: self.password.map(|p| p.into()),
             tls: tls_config,
-            keepalive: None,
+            keepalive: TcpKeepaliveConfig::default(),
         }
     }
 }
@@ -160,25 +160,6 @@ impl Decrypt<StoredSourceConfig> for EncryptedStoredSourceConfig {
 mod tests {
     use super::*;
     use crate::configs::encryption::{EncryptionKey, generate_random_key};
-
-    #[test]
-    fn test_stored_source_config_serialization() {
-        let config = StoredSourceConfig {
-            host: "localhost".to_string(),
-            port: 5432,
-            name: "testdb".to_string(),
-            username: "user".to_string(),
-            password: Some(SerializableSecretString::from("password".to_string())),
-        };
-
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: StoredSourceConfig = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(config.host, deserialized.host);
-        assert_eq!(config.port, deserialized.port);
-        assert_eq!(config.name, deserialized.name);
-        assert_eq!(config.username, deserialized.username);
-    }
 
     #[test]
     fn test_stored_source_config_encryption_decryption() {

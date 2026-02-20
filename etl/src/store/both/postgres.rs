@@ -97,7 +97,7 @@ impl TryFrom<TableReplicationPhase> for state::TableReplicationState {
                     retry_policy: db_retry_policy,
                 })
             }
-            TableReplicationPhase::SyncWait | TableReplicationPhase::Catchup { .. } => {
+            TableReplicationPhase::SyncWait { .. } | TableReplicationPhase::Catchup { .. } => {
                 bail!(
                     ErrorKind::InvalidState,
                     "In-memory replication phase cannot be persisted",
@@ -193,7 +193,6 @@ impl Inner {
 pub struct PostgresStore {
     pipeline_id: PipelineId,
     pool: PgPool,
-    // TODO: I think this mutex can also be replaced by RwLock, I think it's often called to read the data but not to write
     inner: Arc<Mutex<Inner>>,
 }
 
@@ -284,19 +283,38 @@ impl StateStore for PostgresStore {
         Ok(table_states_len)
     }
 
-    /// Updates a table's replication state in both database and cache.
-    async fn update_table_replication_state(
+    /// Updates multiple table replication states atomically in both database and cache.
+    async fn update_table_replication_states(
         &self,
-        table_id: TableId,
-        state: TableReplicationPhase,
+        updates: Vec<(TableId, TableReplicationPhase)>,
     ) -> EtlResult<()> {
-        let db_state: state::TableReplicationState = state.clone().try_into()?;
+        // Convert all states upfront to catch any conversion errors before starting the transaction
+        let db_updates: Vec<(TableId, state::TableReplicationState)> = updates
+            .iter()
+            .map(|(table_id, state)| {
+                let db_state: state::TableReplicationState = state.clone().try_into()?;
+                Ok((*table_id, db_state))
+            })
+            .collect::<EtlResult<Vec<_>>>()?;
 
-        state::update_replication_state(&self.pool, self.pipeline_id as i64, table_id, db_state)
+        // Perform all database updates in a single transaction
+        let mut tx = self.pool.begin().await?;
+        for (table_id, db_state) in &db_updates {
+            state::update_replication_state(
+                &mut *tx,
+                self.pipeline_id as i64,
+                *table_id,
+                db_state.clone(),
+            )
             .await?;
+        }
+        tx.commit().await?;
 
+        // Update the cache
         let mut inner = self.inner.lock().await;
-        inner.set_table_state(table_id, state);
+        for (table_id, state) in updates {
+            inner.set_table_state(table_id, state);
+        }
         emit_table_metrics(self.pipeline_id, &inner.phase_counts);
 
         Ok(())

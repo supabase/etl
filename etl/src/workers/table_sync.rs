@@ -1,21 +1,26 @@
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::replication::worker::WorkerType;
 use etl_postgres::types::TableId;
+use metrics::counter;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
-use tokio::task::JoinHandle;
-use tokio_postgres::types::PgLsn;
-use tracing::{Instrument, debug, error, info, warn};
+use tokio::task::AbortHandle;
+use tracing::{Instrument, debug, error, info};
 
+use crate::bail;
+use crate::concurrency::batch_budget::BatchBudgetController;
+use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::metrics::{
+    ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+};
 use crate::replication::apply::{
-    ApplyLoopAction, ApplyLoopHook, ApplyLoopResult, start_apply_loop,
+    ApplyLoop, ApplyLoopResult, TableSyncWorkerContext, WorkerContext,
 };
 use crate::replication::client::PgReplicationClient;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
@@ -25,27 +30,15 @@ use crate::state::table::{
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
-use crate::workers::base::{Worker, WorkerHandle};
-use crate::workers::pool::{TableSyncWorkerPool, TableSyncWorkerPoolInner};
-use crate::{bail, etl_error};
-
-/// Maximum time to wait for a phase change before trying again.
-const PHASE_CHANGE_REFRESH_FREQUENCY: Duration = Duration::from_millis(100);
-
-/// Maximum time to wait for the slot deletion call to complete.
-///
-/// The reason for setting a timer on deletion is that we wait for the slot to become unused before
-/// deleting it. We want to avoid an infinite wait in case the slot fails to be released,
-/// as this could result in a connection being held indefinitely, potentially stalling the processing
-/// of new tables.
-const MAX_DELETE_SLOT_WAIT: Duration = Duration::from_secs(30);
+use crate::workers::policy::{RetryDirective, build_error_handling_policy};
+use crate::workers::pool::{TableSyncWorkerId, TableSyncWorkerPool};
 
 /// Internal state of [`TableSyncWorkerState`].
 #[derive(Debug)]
 pub struct TableSyncWorkerStateInner {
     /// Unique identifier for the table whose state this structure tracks.
     table_id: TableId,
-    /// Current replication phase - this is the authoritative in-memory state.
+    /// Current replication phase, this is the authoritative in-memory state.
     table_replication_phase: TableReplicationPhase,
     /// Notification mechanism for notifying state changes to waiting workers.
     phase_change: Arc<Notify>,
@@ -61,7 +54,7 @@ impl TableSyncWorkerStateInner {
     /// that may be waiting for state transitions.
     pub fn set(&mut self, phase: TableReplicationPhase) {
         info!(
-            table_id = %self.table_id,
+            table_id = self.table_id.0,
             from_phase = %self.table_replication_phase,
             to_phase = %phase,
             "table phase changing",
@@ -109,7 +102,7 @@ impl TableSyncWorkerStateInner {
         // Conditionally persist based on phase type requirements
         if phase.as_type().should_store() {
             info!(
-                table_id = %self.table_id,
+                table_id = self.table_id.0,
                 %phase,
                 "storing phase change",
             );
@@ -159,7 +152,6 @@ impl TableSyncWorkerStateInner {
 /// specific phase transitions, making it suitable for complex multi-worker scenarios.
 #[derive(Debug, Clone)]
 pub struct TableSyncWorkerState {
-    // TODO: regarding the usage of inner it might be interesting to use a RwLock instead of a Mutex
     inner: Arc<Mutex<TableSyncWorkerStateInner>>,
 }
 
@@ -186,20 +178,27 @@ impl TableSyncWorkerState {
     ///
     /// This static method provides a unified interface for updating table state
     /// regardless of whether the table has an active worker in the pool.
-    pub async fn set_and_store<P, S>(
-        pool: &P,
+    pub async fn set_and_store<S>(
+        pool: &TableSyncWorkerPool,
         state_store: &S,
         table_id: TableId,
         table_replication_phase: TableReplicationPhase,
     ) -> EtlResult<()>
     where
-        P: Deref<Target = TableSyncWorkerPoolInner>,
         S: StateStore,
     {
-        let table_sync_worker_state = pool.get_active_worker_state(table_id);
+        let table_sync_worker_state = pool.get_active_worker_state(table_id).await;
 
         // In case we have the state in memory, we will atomically update the memory and state store
         // states. Otherwise, we just update the state store.
+        //
+        // Note: There is a potential race condition here where `get_active_worker_state` returns
+        // `None` (worker finished), then a new worker starts and loads old state from the store,
+        // and finally we update the store with the new state, leaving the new worker with stale
+        // in-memory state. However, this is not a problem in practice because if we are calling
+        // this from the table sync worker, the apply worker sees this worker as active and will not
+        // launch any new worker and if we are the apply worker, no one can start a table sync worker
+        // besides the apply worker itself, which is running this code.
         if let Some(table_sync_worker_state) = table_sync_worker_state {
             let mut inner = table_sync_worker_state.lock().await;
             inner
@@ -219,88 +218,55 @@ impl TableSyncWorkerState {
     /// This method blocks until either the table reaches one of the desired phases or
     /// a shutdown signal is received. It uses an efficient notification system
     /// to avoid polling and provides immediate response to state changes.
-    ///
-    /// The method returns a `ShutdownResult` that indicates whether the wait
-    /// completed successfully or was interrupted by shutdown.
     pub async fn wait_for_phase_type(
         &self,
         phase_types: &[TableReplicationPhaseType],
         mut shutdown_rx: ShutdownRx,
     ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
-        let table_id = {
-            let inner = self.inner.lock().await;
-            inner.table_id
-        };
-        info!(
-            %table_id,
-            phase_types = ?phase_types,
-            "waiting for table replication phase",
-        );
-
         loop {
+            let inner = self.inner.lock().await;
+
+            let current_phase = inner.table_replication_phase.as_type();
+            if phase_types.contains(&current_phase) {
+                info!(
+                    table_id = inner.table_id.0,
+                    %current_phase,
+                    "table replication phase reached",
+                );
+
+                return ShutdownResult::Ok(inner);
+            }
+
+            info!(
+                table_id = inner.table_id.0,
+                %current_phase,
+                phase_types = ?phase_types,
+                "waiting for table replication phase",
+            );
+
+            // We listen for the phase change while holding the lock to avoid the race condition which
+            // occurs when we release the lock, the value changes, and then we wait for a value change,
+            // in that case, we will miss the notification and the system will stall.
+            let phase_change = inner.phase_change.clone();
+            let phase_change_notified = phase_change.notified();
+
+            // We must drop the lock here so that state changes can actually happen.
+            drop(inner);
+
             tokio::select! {
                 biased;
 
-                // Shutdown signal received, exit loop.
                 _ = shutdown_rx.changed() => {
-                    info!(phase_types = ?phase_types, "shutdown signal received, cancelling wait for phase types");
+                    info!(phase_types = ?phase_types, "shutdown signal received, cancelling wait for phase");
 
                     return ShutdownResult::Shutdown(());
                 }
 
-                // Try to wait for the phase type.
-                acquired = self.wait(phase_types) => {
-                    if let Some(acquired) = acquired {
-                        return ShutdownResult::Ok(acquired);
-                    }
+                _ = phase_change_notified => {
+                    // Phase changed, loop to check if it's the desired phase.
                 }
             }
         }
-    }
-
-    /// Internal wait implementation with timeout-based retry logic.
-    ///
-    /// This method implements the core waiting mechanism with built-in timeout
-    /// protection to handle potential missed notifications. It combines immediate
-    /// state checking with notification-based waiting to provide reliable phase
-    /// transition detection.
-    async fn wait(
-        &self,
-        phase_types: &[TableReplicationPhaseType],
-    ) -> Option<MutexGuard<'_, TableSyncWorkerStateInner>> {
-        // We grab hold of the phase change notify in case we don't immediately have the state
-        // that we want.
-        let phase_change = {
-            let inner = self.inner.lock().await;
-            let current_phase = inner.table_replication_phase.as_type();
-            if phase_types.contains(&current_phase) {
-                info!(
-                    %current_phase,
-                    "table replication phase already set, no wait needed",
-                );
-                return Some(inner);
-            }
-
-            inner.phase_change.clone()
-        };
-
-        // We wait for a state change within a timeout. This is done since it might be that a
-        // notification is missed and in that case we want to avoid blocking indefinitely.
-        let _ = tokio::time::timeout(PHASE_CHANGE_REFRESH_FREQUENCY, phase_change.notified()).await;
-
-        // We read the state and return the lock to the state.
-        let inner = self.inner.lock().await;
-        let current_phase = inner.table_replication_phase.as_type();
-        if phase_types.contains(&current_phase) {
-            info!(
-                table_id = %inner.table_id,
-                %current_phase,
-                "table replication phase was reached",
-            );
-            return Some(inner);
-        }
-
-        None
     }
 }
 
@@ -319,39 +285,38 @@ impl Deref for TableSyncWorkerState {
 /// status, enabling coordination with other parts of the system.
 #[derive(Debug)]
 pub struct TableSyncWorkerHandle {
+    worker_id: TableSyncWorkerId,
     state: TableSyncWorkerState,
-    handle: Option<JoinHandle<EtlResult<()>>>,
+    abort_handle: AbortHandle,
 }
 
-impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
-    /// Returns a handle to the table sync worker's state.
-    ///
-    /// This method provides access to the worker's state management structure,
-    /// enabling external coordination and monitoring of the worker's progress
-    /// through different synchronization phases.
-    fn state(&self) -> TableSyncWorkerState {
+impl TableSyncWorkerHandle {
+    /// Creates a new handle with the given worker ID, state, and abort handle.
+    pub fn new(
+        worker_id: TableSyncWorkerId,
+        state: TableSyncWorkerState,
+        abort_handle: AbortHandle,
+    ) -> Self {
+        Self {
+            worker_id,
+            state,
+            abort_handle,
+        }
+    }
+
+    /// Returns the unique identifier for this worker run.
+    pub fn worker_id(&self) -> TableSyncWorkerId {
+        self.worker_id
+    }
+
+    /// Returns the worker's state.
+    pub fn state(&self) -> TableSyncWorkerState {
         self.state.clone()
     }
 
-    /// Waits for the table sync worker to complete execution.
-    ///
-    /// This method blocks until the worker finishes processing, either due to
-    /// successful synchronization completion, shutdown signal, or error. It
-    /// properly handles panics that might occur within the worker task.
-    async fn wait(mut self) -> EtlResult<()> {
-        let Some(handle) = self.handle.take() else {
-            return Ok(());
-        };
-
-        handle.await.map_err(|err| {
-            etl_error!(
-                ErrorKind::TableSyncWorkerPanic,
-                "Table sync worker panicked",
-                err
-            )
-        })??;
-
-        Ok(())
+    /// Checks if the worker task has finished.
+    pub fn is_finished(&self) -> bool {
+        self.abort_handle.is_finished()
     }
 }
 
@@ -367,12 +332,14 @@ impl WorkerHandle<TableSyncWorkerState> for TableSyncWorkerHandle {
 pub struct TableSyncWorker<S, D> {
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
-    pool: TableSyncWorkerPool,
+    pool: Arc<TableSyncWorkerPool>,
     table_id: TableId,
     store: S,
     destination: D,
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
+    memory_monitor: MemoryMonitor,
+    batch_budget: BatchBudgetController,
 }
 
 impl<S, D> TableSyncWorker<S, D> {
@@ -385,12 +352,14 @@ impl<S, D> TableSyncWorker<S, D> {
     pub fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
-        pool: TableSyncWorkerPool,
+        pool: Arc<TableSyncWorkerPool>,
         table_id: TableId,
         store: S,
         destination: D,
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
+        memory_monitor: MemoryMonitor,
+        batch_budget: BatchBudgetController,
     ) -> Self {
         Self {
             pipeline_id,
@@ -401,6 +370,8 @@ impl<S, D> TableSyncWorker<S, D> {
             destination,
             shutdown_rx,
             run_permit,
+            memory_monitor,
+            batch_budget,
         }
     }
 
@@ -419,6 +390,191 @@ where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
+    /// Handles table sync worker errors using policy-based retry and backoff.
+    ///
+    /// Returns `Ok(true)` if shutdown was requested while waiting to retry, `Ok(false)` if
+    /// execution should continue retrying, or `Err` when the failure should be propagated.
+    ///
+    /// Errors that happen while handling the worker error in this function are immediately propagated.
+    async fn handle_table_sync_worker_error(
+        pipeline_id: PipelineId,
+        table_id: TableId,
+        config: &PipelineConfig,
+        state: &TableSyncWorkerState,
+        store: &S,
+        shutdown_rx: &mut ShutdownRx,
+        err: EtlError,
+    ) -> EtlResult<bool> {
+        error!(table_id = table_id.0, error = %err, "table sync worker failed");
+
+        // Build a retry policy from the shared classifier. The concrete retry timestamp is
+        // computed in the worker from config so both table sync and apply worker use the
+        // same retry timing settings.
+        let policy = build_error_handling_policy(&err);
+        counter!(
+            ETL_WORKER_ERRORS_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+            WORKER_TYPE_LABEL => "table_sync",
+            ERROR_TYPE_LABEL => policy.retry_directive().to_string(),
+        )
+        .increment(1);
+
+        let mut retry_policy = match policy.retry_directive() {
+            RetryDirective::Timed => RetryPolicy::retry_in(ChronoDuration::milliseconds(
+                config.table_error_retry_delay_ms as i64,
+            )),
+            RetryDirective::Manual => RetryPolicy::ManualRetry,
+            RetryDirective::NoRetry => RetryPolicy::NoRetry,
+        };
+        let mut table_error =
+            TableReplicationError::from_error_policy(table_id, &err, &policy, retry_policy.clone());
+
+        let mut state_guard = state.lock().await;
+
+        // If we should retry this error, we want to see if we reached the maximum number of attempts
+        // before trying again. If we did, we switch to a manual retry policy.
+        if policy.should_retry()
+            && state_guard.retry_attempts() >= config.table_error_retry_max_attempts
+        {
+            info!(
+                table_id = table_id.0,
+                max_attempts = config.table_error_retry_max_attempts,
+                "max automatic retry attempts reached, switching to manual retry"
+            );
+
+            table_error = table_error.with_retry_policy(RetryPolicy::ManualRetry);
+            retry_policy = table_error.retry_policy().clone();
+        }
+
+        // Update the state and store with the error. This way the user is notified about
+        // the current error state.
+        state_guard.set_and_store(table_error.into(), store).await?;
+
+        match retry_policy {
+            RetryPolicy::TimedRetry { next_retry } => {
+                let now = Utc::now();
+                let mut should_shutdown = false;
+
+                if now < next_retry {
+                    let sleep_duration = (next_retry - now)
+                        .to_std()
+                        .unwrap_or(Duration::from_secs(0));
+
+                    info!(
+                        table_id = table_id.0,
+                        sleep_duration = ?sleep_duration,
+                        "retrying table sync worker",
+                    );
+
+                    // We drop the state guard lock before sleeping to avoid stalling
+                    // the apply worker while the worker is waiting to retry.
+                    drop(state_guard);
+
+                    // Stop retrying immediately on shutdown instead of sleeping through it.
+                    tokio::select! {
+                        biased;
+
+                        _ = shutdown_rx.changed() => {
+                            info!(table_id = table_id.0, "shutting down table sync worker while waiting to retry");
+                            should_shutdown = true;
+                        }
+
+                        _ = tokio::time::sleep(sleep_duration) => {}
+                    }
+
+                    // We lock the state again after sleeping.
+                    state_guard = state.lock().await;
+                } else {
+                    info!(table_id = table_id.0, "retrying table sync worker");
+                }
+
+                // If we should shutdown because we got a shutdown request during retry we
+                // just want to immediately return.
+                if should_shutdown {
+                    state_guard.reset_retry_attempts();
+
+                    return Ok(true);
+                }
+
+                // We mark that we attempted a retry.
+                state_guard.increment_retry_attempts();
+
+                // After sleeping, we rollback to the previous state and retry.
+                //
+                // Note that this rollback is one state before which works only if we are
+                // in a table sync worker, this is why it's not in the apply worker:
+                // - Errored -> Init: okay since it will restart from scratch.
+                // - Errored -> DataSync: okay since it will restart the copy from a new slot.
+                // - Errored -> FinishedCopy: okay since the table was already copied, so it resumes
+                //   streaming from the `confirmed_flush_lsn`.
+                // - Errored -> SyncDone: okay since the table sync will immediately stop.
+                // - Errored -> Ready: same as SyncDone.
+                //
+                // The in-memory states like SyncWait and Catchup won't ever be in a rollback
+                // since they are just states used for synchronization and never saved in the
+                // state store.
+                state_guard.rollback(store).await?;
+
+                Ok(false)
+            }
+            RetryPolicy::NoRetry | RetryPolicy::ManualRetry => {
+                state_guard.reset_retry_attempts();
+
+                Err(err)
+            }
+        }
+    }
+
+    /// Spawns the table sync worker into the pool.
+    ///
+    /// This method initializes the worker by loading its replication state from
+    /// storage, creating the state management structure, and spawning the
+    /// synchronization process into the pool.
+    pub async fn spawn_into_pool(self, pool: &TableSyncWorkerPool) -> EtlResult<()> {
+        info!(table_id = self.table_id.0, "starting table sync worker");
+
+        let Some(table_replication_phase) = self
+            .store
+            .get_table_replication_state(self.table_id)
+            .await?
+        else {
+            error!(
+                table_id = self.table_id.0,
+                "no replication state found, cannot start sync worker"
+            );
+
+            bail!(
+                ErrorKind::InvalidState,
+                "Table replication state not found",
+                format!("Replication state missing for table {}", self.table_id)
+            );
+        };
+
+        info!(
+            table_id = self.table_id.0,
+            %table_replication_phase,
+            "loaded table sync worker state",
+        );
+
+        let state = TableSyncWorkerState::new(self.table_id, table_replication_phase);
+        let table_id = self.table_id;
+
+        let table_sync_worker_span = tracing::info_span!(
+            "table_sync_worker",
+            pipeline_id = self.pipeline_id,
+            publication_name = self.config.publication_name,
+            table_id = self.table_id.0,
+        );
+
+        let fut = self
+            .guarded_run_table_sync_worker(state.clone())
+            .instrument(table_sync_worker_span);
+
+        pool.spawn(table_id, state, fut).await;
+
+        Ok(())
+    }
+
     /// Runs the table sync worker with retry logic and error handling.
     ///
     /// This method implements the retry loop for table synchronization, handling
@@ -430,15 +586,12 @@ where
         let pool = self.pool.clone();
         let store = self.store.clone();
         let config = self.config.clone();
-
-        // Clone all the fields we need for retries.
         let pipeline_id = self.pipeline_id;
         let destination = self.destination.clone();
-        let shutdown_rx = self.shutdown_rx.clone();
+        let mut shutdown_rx = self.shutdown_rx.clone();
         let run_permit = self.run_permit.clone();
 
         loop {
-            // Recreate the worker for each attempt.
             let worker = TableSyncWorker {
                 pipeline_id,
                 config: config.clone(),
@@ -448,129 +601,32 @@ where
                 destination: destination.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 run_permit: run_permit.clone(),
+                memory_monitor: self.memory_monitor.clone(),
+                batch_budget: self.batch_budget.clone(),
             };
 
             let result = worker.run_table_sync_worker(state.clone()).await;
-
             match result {
                 Ok(_) => {
-                    // Worker completed successfully, mark as finished.
-                    let mut pool = pool.lock().await;
-                    {
-                        let mut state_guard = state.lock().await;
-                        state_guard.reset_retry_attempts();
-                    }
-                    pool.mark_worker_finished(table_id);
+                    let mut state_guard = state.lock().await;
+                    state_guard.reset_retry_attempts();
 
                     return Ok(());
                 }
                 Err(err) => {
-                    error!(%table_id, error = %err, "table sync worker failed");
+                    let should_shutdown = Self::handle_table_sync_worker_error(
+                        pipeline_id,
+                        table_id,
+                        config.as_ref(),
+                        &state,
+                        &store,
+                        &mut shutdown_rx,
+                        err,
+                    )
+                    .await?;
 
-                    // Convert error to table replication error to determine retry policy.
-                    let mut table_error =
-                        TableReplicationError::from_etl_error(&config, table_id, &err);
-                    let mut retry_policy = table_error.retry_policy().clone();
-
-                    // We lock both the pool and the table sync worker state to be consistent.
-                    let mut pool_guard = pool.lock().await;
-                    let mut state_guard = state.lock().await;
-
-                    // If it's a timed retry, we want to see if we reached the maximum number of attempts
-                    // before trying again. If we did, we switch to a manual retry policy.
-                    if let RetryPolicy::TimedRetry { .. } = retry_policy
-                        && state_guard.retry_attempts() >= config.table_error_retry_max_attempts
-                    {
-                        info!(
-                            %table_id,
-                            max_attempts = config.table_error_retry_max_attempts,
-                            "max automatic retry attempts reached, switching to manual retry"
-                        );
-
-                        table_error = table_error.with_retry_policy(RetryPolicy::ManualRetry);
-                        retry_policy = table_error.retry_policy().clone();
-
-                        state_guard.reset_retry_attempts();
-                    }
-
-                    // Update the state and store with the error.
-                    if let Err(err) = state_guard.set_and_store(table_error.into(), &store).await {
-                        error!(
-                            %table_id,
-                            error = %err,
-                            "failed to update table sync worker state",
-                        );
-
-                        pool_guard.mark_worker_finished(table_id);
-
-                        return Err(err);
-                    };
-
-                    match retry_policy {
-                        RetryPolicy::TimedRetry { next_retry } => {
-                            let now = Utc::now();
-                            if now < next_retry {
-                                let sleep_duration = (next_retry - now)
-                                    .to_std()
-                                    .unwrap_or(Duration::from_secs(0));
-
-                                info!(
-                                    %table_id,
-                                    sleep_duration = ?sleep_duration,
-                                    "retrying table sync worker",
-                                );
-
-                                // We drop the lock on the pool while waiting. We do not do the same
-                                // for the state guard since we want to hold the lock for that state
-                                // since when we are waiting to retry, nobody should be allowed to
-                                // modify it.
-                                drop(pool_guard);
-
-                                tokio::time::sleep(sleep_duration).await;
-                            } else {
-                                info!(%table_id, "retrying table sync worker");
-                            }
-
-                            // We mark that we attempted a retry.
-                            state_guard.increment_retry_attempts();
-
-                            // Before rolling back, we acquire the pool lock again for consistency.
-                            let mut pool_guard = pool.lock().await;
-
-                            // After sleeping, we rollback to the previous state and retry.
-                            //
-                            // Note that this rollback is one state before which works only if we are
-                            // in a table sync worker, this is why it's not in the apply worker:
-                            // - Errored -> Init: okay since it will restart from scratch.
-                            // - Errored -> DataSync: okay since it will restart the copy from a new slot.
-                            // - Errored -> FinishedCopy: okay since the table was already copied, so it resumes
-                            //   streaming from the `confirmed_flush_lsn`.
-                            // - Errored -> SyncDone: okay since the table sync will immediately stop.
-                            // - Errored -> Ready: same as SyncDone.
-                            //
-                            // The in-memory states like SyncWait and Catchup won't ever be in a rollback
-                            // since they are just states used for synchronization and never saved in the
-                            // state store.
-                            if let Err(err) = state_guard.rollback(&store).await {
-                                error!(
-                                    %table_id,
-                                    error = %err,
-                                    "failed to rollback table sync worker state",
-                                );
-
-                                pool_guard.mark_worker_finished(table_id);
-
-                                return Err(err);
-                            };
-
-                            continue;
-                        }
-                        RetryPolicy::NoRetry | RetryPolicy::ManualRetry => {
-                            state_guard.reset_retry_attempts();
-                            pool_guard.mark_worker_finished(table_id);
-
-                            return Err(err);
-                        }
+                    if should_shutdown {
+                        return Ok(());
                     }
                 }
             }
@@ -584,14 +640,19 @@ where
     /// running catchup replication, and cleaning up resources. It handles both
     /// the bulk data copy phase and the incremental replication phase.
     async fn run_table_sync_worker(mut self, state: TableSyncWorkerState) -> EtlResult<()> {
-        debug!(table_id = %self.table_id, "waiting to acquire a running permit for table sync worker");
+        debug!(
+            table_id = self.table_id.0,
+            "waiting to acquire a running permit for table sync worker"
+        );
 
         // We acquire a permit to run the table sync worker. This helps us limit the number
         // of table sync workers running in parallel which in turn helps limit the max
         // number of concurrent connections to the source database.
         let permit = tokio::select! {
+            biased;
+
             _ = self.shutdown_rx.changed() => {
-                info!(table_id = %self.table_id, "shutting down table sync worker while waiting for a run permit");
+                info!(table_id = self.table_id.0, "shutting down table sync worker while waiting for a run permit");
                 return Ok(());
             }
 
@@ -600,7 +661,10 @@ where
             }
         };
 
-        info!(table_id = %self.table_id, "acquired running permit for table sync worker");
+        info!(
+            table_id = self.table_id.0,
+            "acquired running permit for table sync worker"
+        );
 
         // We create a new replication connection specifically for this table sync worker.
         //
@@ -618,29 +682,43 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.shutdown_rx.clone(),
+            self.memory_monitor.clone(),
+            self.batch_budget.clone(),
         )
         .await;
 
         let start_lsn = match result {
             Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
             Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
+                info!(table_id = self.table_id.0, "table sync stopped");
+
                 return Ok(());
             }
             Err(err) => {
-                error!(table_id = %self.table_id, error = %err, "table sync failed");
+                error!(table_id = self.table_id.0, error = %err, "table sync failed");
+
                 return Err(err);
             }
         };
 
-        let result = start_apply_loop(
+        let worker_context = WorkerContext::TableSync(TableSyncWorkerContext {
+            table_id: self.table_id,
+            table_sync_worker_state: state,
+            state_store: self.store.clone(),
+        });
+
+        let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
+        let result = ApplyLoop::start(
             self.pipeline_id,
             start_lsn,
             self.config,
             replication_client.clone(),
-            self.store.clone(),
+            self.store,
             self.destination,
-            TableSyncWorkerHook::new(self.table_id, state, self.store),
+            worker_context,
             self.shutdown_rx,
+            self.memory_monitor.clone(),
+            self.batch_budget.clone(),
         )
         .await?;
 
@@ -655,18 +733,7 @@ where
             let slot_name: String =
                 EtlReplicationSlot::for_table_sync_worker(self.pipeline_id, self.table_id)
                     .try_into()?;
-            let result = tokio::time::timeout(
-                MAX_DELETE_SLOT_WAIT,
-                replication_client.delete_slot(&slot_name),
-            )
-            .await;
-            if result.is_err() {
-                warn!(
-                    table_id = %self.table_id,
-                    %slot_name,
-                    "failed to delete the replication slot of the table sync worker due to timeout",
-                );
-            }
+            replication_client.delete_slot_if_exists(&slot_name).await?;
         }
 
         // This explicit drop is not strictly necessary but is added to make it extra clear
@@ -674,248 +741,11 @@ where
         // connections.
         drop(permit);
 
-        info!(table_id = %self.table_id, "table sync worker completed successfully");
+        info!(
+            table_id = self.table_id.0,
+            "table sync worker completed successfully"
+        );
 
         Ok(())
-    }
-}
-
-impl<S, D> Worker<TableSyncWorkerHandle, TableSyncWorkerState> for TableSyncWorker<S, D>
-where
-    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
-{
-    type Error = EtlError;
-
-    /// Starts the table sync worker and returns a handle for monitoring.
-    ///
-    /// This method initializes the worker by loading its replication state from
-    /// storage, creating the state management structure, and launching the
-    /// synchronization process in a background task.
-    async fn start(self) -> EtlResult<TableSyncWorkerHandle> {
-        info!(table_id = %self.table_id, "starting table sync worker");
-
-        let Some(table_replication_phase) = self
-            .store
-            .get_table_replication_state(self.table_id)
-            .await?
-        else {
-            error!(table_id = %self.table_id, "no replication state found, cannot start sync worker");
-
-            bail!(
-                ErrorKind::InvalidState,
-                "Table replication state not found",
-                format!("Replication state missing for table {}", self.table_id)
-            );
-        };
-
-        info!(
-            table_id = %self.table_id,
-            %table_replication_phase,
-            "loaded table sync worker state",
-        );
-
-        let state = TableSyncWorkerState::new(self.table_id, table_replication_phase);
-
-        let table_sync_worker_span = tracing::info_span!(
-            "table_sync_worker",
-            pipeline_id = self.pipeline_id,
-            publication_name = self.config.publication_name,
-            table_id = %self.table_id,
-        );
-        let table_sync_worker = self.guarded_run_table_sync_worker(state.clone());
-
-        let fut = table_sync_worker.instrument(table_sync_worker_span);
-        let handle = tokio::spawn(fut);
-
-        Ok(TableSyncWorkerHandle {
-            state,
-            handle: Some(handle),
-        })
-    }
-}
-
-/// Internal hook for table sync worker integration with apply loop operations.
-///
-/// [`TableSyncWorkerHook`] implements the coordination logic between table sync
-/// workers and the apply loop that processes replication events. This hook enables
-/// table sync workers to participate in the apply loop lifecycle while maintaining
-/// their specific synchronization behavior.
-#[derive(Debug)]
-struct TableSyncWorkerHook<S> {
-    table_id: TableId,
-    table_sync_worker_state: TableSyncWorkerState,
-    state_store: S,
-}
-
-impl<S> TableSyncWorkerHook<S> {
-    /// Creates a new table sync worker hook with the given dependencies.
-    ///
-    /// This constructor initializes the hook with the table ID, state management
-    /// structure, and state store implementation.
-    fn new(
-        table_id: TableId,
-        table_sync_worker_state: TableSyncWorkerState,
-        state_store: S,
-    ) -> Self {
-        Self {
-            table_id,
-            table_sync_worker_state,
-            state_store,
-        }
-    }
-}
-
-impl<S> TableSyncWorkerHook<S>
-where
-    S: StateStore + Clone,
-{
-    /// Tries to advance the [`TableReplicationPhase`] of this table based on the current lsn.
-    ///
-    /// Returns `ApplyLoopAction::Complete` when the worker is done with its work, signaling the caller that the apply
-    /// loop should be stopped.
-    async fn try_advance_phase(
-        &self,
-        current_lsn: PgLsn,
-        update_state: bool,
-    ) -> EtlResult<ApplyLoopAction> {
-        let mut inner = self.table_sync_worker_state.lock().await;
-
-        // If we caught up with the lsn, we mark this table as `SyncDone` and stop the worker.
-        if let TableReplicationPhase::Catchup { lsn } = inner.replication_phase()
-            && current_lsn >= lsn
-        {
-            // If we are told to update the state, we mark the phase as actually changes. We do
-            // this because we want to update the actual state only when we are sure that the
-            // progress has been persisted to the destination. When `update_state` is `false` this
-            // function is used as a lookahead, to determine whether the worker should be stopped.
-            if update_state {
-                inner
-                    .set_and_store(
-                        TableReplicationPhase::SyncDone { lsn: current_lsn },
-                        &self.state_store,
-                    )
-                    .await?;
-
-                info!(
-                    table_id = %self.table_id,
-                    "table sync worker is in sync with apply worker, terminating",
-                );
-            }
-
-            // If we caught up, we want to complete the apply loop.
-            //
-            // Note that completion is different from stopping, when completion is returned, the loop
-            // is expected to never be run again.
-            return Ok(ApplyLoopAction::Complete);
-        }
-
-        Ok(ApplyLoopAction::Continue)
-    }
-}
-
-impl<S> ApplyLoopHook for TableSyncWorkerHook<S>
-where
-    S: StateStore + Clone + Send + Sync + 'static,
-{
-    /// This function compares `current_lsn` against the table's catch up lsn
-    /// and if it is greater than or equal to the `Catchup` `lsn`:
-    ///
-    /// * Marks the table as sync done in state store if `update_state` is true.
-    /// * Returns ApplyLoopAction::Complete to indicate to the callers that this table has been marked sync done,
-    ///   meaning that the apply loop should not continue.
-    ///
-    /// In all other cases it returns ApplyLoopAction::Continue
-    /// Processes the table's synchronization state based on current LSN progress.
-    ///
-    /// This method compares the current LSN against the table's catchup LSN and
-    /// transitions the table to `SyncDone` state when synchronization is complete.
-    /// If `update_state` is true, it persists the state change; otherwise, it
-    /// performs a lookahead check.
-    ///
-    /// Returns `ApplyLoopAction::Complete` when the table sync is complete and the worker should
-    /// terminate, `ApplyLoopAction::Continue` otherwise.
-    async fn process_syncing_tables(
-        &self,
-        current_lsn: PgLsn,
-        update_state: bool,
-    ) -> EtlResult<ApplyLoopAction> {
-        debug!(
-            table_id = %self.table_id,
-            %current_lsn,
-            "processing syncing tables for table sync worker",
-        );
-
-        self.try_advance_phase(current_lsn, update_state).await
-    }
-
-    /// Handles table replication errors for the table sync worker.
-    ///
-    /// This method processes errors specific to the table this worker manages.
-    /// If the error relates to this worker's table, it updates the state and
-    /// signals the worker to terminate. Errors for other tables are ignored.
-    async fn mark_table_errored(
-        &self,
-        table_replication_error: TableReplicationError,
-    ) -> EtlResult<ApplyLoopAction> {
-        if self.table_id != table_replication_error.table_id() {
-            // If the table is different from the one handled by this table sync worker, marking
-            // the table will be a noop, and we want to continue the loop.
-            return Ok(ApplyLoopAction::Continue);
-        }
-
-        // Since we already have access to the table sync worker state, we can avoid going through
-        // the pool, and we just modify the state here and also update the state store.
-        let mut inner = self.table_sync_worker_state.lock().await;
-        inner
-            .set_and_store(table_replication_error.into(), &self.state_store)
-            .await?;
-
-        // If a table is marked as errored, this worker should stop processing immediately since there
-        // is no need to continue, and for this we mark the loop as completed.
-        Ok(ApplyLoopAction::Complete)
-    }
-
-    /// Determines whether changes should be applied for the given table.
-    ///
-    /// For table sync workers, changes are only applied if the table matches
-    /// the worker's assigned table and the table is not in an error state.
-    /// This ensures that table sync workers only process events for their
-    /// specific table during the catchup phase.
-    ///
-    /// This method assumes that it is called when the table is in `Catchup` phase for this
-    /// reason it doesn't check it.
-    async fn should_apply_changes(
-        &self,
-        table_id: TableId,
-        _remote_final_lsn: PgLsn,
-    ) -> EtlResult<bool> {
-        let inner = self.table_sync_worker_state.lock().await;
-        let is_errored = matches!(
-            inner.table_replication_phase.as_type(),
-            TableReplicationPhaseType::Errored
-        );
-
-        let should_apply_changes = !is_errored && self.table_id == table_id;
-
-        debug!(
-            %table_id,
-            worker_type = %self.worker_type(),
-            should_apply_changes = should_apply_changes,
-            "evaluated whether table should apply changes",
-        );
-
-        Ok(should_apply_changes)
-    }
-
-    /// Returns the worker type for this hook.
-    ///
-    /// This method identifies this hook as belonging to a table sync worker
-    /// for the specific table, which is used for coordination, logging, and
-    /// replication slot management throughout the system.
-    fn worker_type(&self) -> WorkerType {
-        WorkerType::TableSync {
-            table_id: self.table_id,
-        }
     }
 }

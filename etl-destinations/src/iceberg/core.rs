@@ -19,7 +19,7 @@ use etl::types::{
 use etl::{bail, etl_error};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// CDC operation types for Iceberg changelog tables.
 ///
@@ -188,22 +188,10 @@ where
     /// Removes all data from the target table by dropping the existing Iceberg table
     /// and creating a fresh empty table with the same schema. Updates the internal
     /// table creation cache to reflect the new table state.
-    async fn truncate_table(&self, table_id: TableId, is_cdc_truncate: bool) -> EtlResult<()> {
+    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
         let Some(table_schema) = self.store.get_table_schema(&table_id).await? else {
-            // If this is not a cdc truncate event, we just raise a warning since it could be that the
-            // table schema is not there.
-            if !is_cdc_truncate {
-                warn!(
-                    %table_id,
-                    "table schema not found in schema store while processing truncate events for iceberg"
-                );
-
-                return Ok(());
-            }
-
-            // If this is a cdc truncate event, the table schema must be there, so we raise an error.
             bail!(
                 ErrorKind::MissingTableSchema,
                 "Table not found in the schema store",
@@ -214,18 +202,6 @@ where
         };
 
         let Some(iceberg_table_name) = self.store.get_table_mapping(&table_id).await? else {
-            // If this is not a cdc truncate event, we just raise a warning since it could be that the
-            // table mapping is not there.
-            if !is_cdc_truncate {
-                warn!(
-                    %table_id,
-                    "table mapping not found in state store while processing truncate events for iceberg"
-                );
-
-                return Ok(());
-            }
-
-            // If this is a cdc truncate event, the table mapping must be there, so we raise an error.
             bail!(
                 ErrorKind::MissingTableMapping,
                 "Table mapping not found",
@@ -271,8 +247,8 @@ where
 
         for row in &mut table_rows {
             let sequence_number = generate_sequence_number(0.into(), 0.into());
-            row.values.push(IcebergOperationType::Insert.into());
-            row.values.push(Cell::String(sequence_number));
+            row.values_mut().push(IcebergOperationType::Insert.into());
+            row.values_mut().push(Cell::String(sequence_number));
         }
 
         if !table_rows.is_empty() {
@@ -314,9 +290,12 @@ where
                             generate_sequence_number(insert.start_lsn, insert.commit_lsn);
                         insert
                             .table_row
-                            .values
+                            .values_mut()
                             .push(IcebergOperationType::Insert.into());
-                        insert.table_row.values.push(Cell::String(sequence_number));
+                        insert
+                            .table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(insert.table_id).or_default();
@@ -327,9 +306,12 @@ where
                             generate_sequence_number(update.start_lsn, update.commit_lsn);
                         update
                             .table_row
-                            .values
+                            .values_mut()
                             .push(IcebergOperationType::Update.into());
-                        update.table_row.values.push(Cell::String(sequence_number));
+                        update
+                            .table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(update.table_id).or_default();
@@ -344,9 +326,11 @@ where
                         let sequence_number =
                             generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
-                            .values
+                            .values_mut()
                             .push(IcebergOperationType::Delete.into());
-                        old_table_row.values.push(Cell::String(sequence_number));
+                        old_table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(delete.table_id).or_default();
@@ -409,7 +393,7 @@ where
             }
 
             for table_id in truncate_table_ids {
-                self.truncate_table(table_id, true).await?;
+                self.truncate_table(table_id).await?;
             }
         }
 
@@ -582,7 +566,7 @@ where
     /// Removes all data from the target Iceberg table while preserving
     /// the table schema structure for continued CDC operations.
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table(table_id, false).await?;
+        self.truncate_table(table_id).await?;
 
         Ok(())
     }

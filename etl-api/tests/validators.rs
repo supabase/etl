@@ -5,6 +5,7 @@ use etl_api::configs::pipeline::FullApiPipelineConfig;
 use etl_api::validation::{
     FailureType, ValidationContext, validate_destination, validate_pipeline,
 };
+use etl_config::shared::BatchConfig;
 use etl_config::{Environment, SerializableSecretString};
 use etl_destinations::bigquery::test_utils::{
     setup_bigquery_database, setup_bigquery_database_without_dataset,
@@ -59,19 +60,26 @@ fn create_bigquery_config(
         dataset_id: dataset_id.to_string(),
         service_account_key: SerializableSecretString::from(sa_key.to_string()),
         max_staleness_mins: None,
-        max_concurrent_streams: None,
+        connection_pool_size: None,
     }
 }
 
 fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
     FullApiPipelineConfig {
         publication_name: publication_name.to_string(),
-        max_table_sync_workers: Some(2),
-        batch: None,
+        batch: Some(BatchConfig {
+            max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
+            memory_budget_ratio: 0.2,
+        }),
         log_level: None,
         table_error_retry_delay_ms: None,
         table_error_retry_max_attempts: None,
+        max_table_sync_workers: Some(2),
+        memory_refresh_interval_ms: Some(100),
+        max_copy_connections_per_table: None,
+        memory_backpressure: None,
         table_sync_copy: None,
+        invalidated_slot_behavior: None,
     }
 }
 
@@ -138,15 +146,6 @@ async fn validate_bigquery_invalid_credentials() {
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "BigQuery Authentication Failed");
     assert_eq!(failures[0].failure_type, FailureType::Critical);
-}
-
-#[tokio::test]
-async fn validate_memory_destination_always_passes() {
-    let ctx = create_validation_context();
-    let config = FullApiDestinationConfig::Memory;
-    let failures = validate_destination(&ctx, &config).await.unwrap();
-
-    assert!(failures.is_empty());
 }
 
 #[tokio::test]
