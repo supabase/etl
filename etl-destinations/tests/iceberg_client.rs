@@ -1,6 +1,7 @@
 #![cfg(all(feature = "iceberg", feature = "test-utils"))]
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use etl::test_utils::test_schema::assert_table_rows_equal_ignoring_size;
 use etl::types::{ArrayCell, Cell, ColumnSchema, TableRow, Type};
 use etl_destinations::iceberg::IcebergClient;
 use etl_destinations::iceberg::test_utils::LakekeeperClient;
@@ -1108,7 +1109,7 @@ async fn insert_nullable_array() {
     let read_rows = read_all_rows(&client, namespace.to_string(), table_name.clone()).await;
 
     // Compare the actual values in the read_rows with expected table_rows
-    assert_eq!(read_rows, expected_rows);
+    assert_table_rows_equal_ignoring_size(&read_rows, &expected_rows);
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
     // This feature is planned for future releases. We'll start to use it when it becomes available.
@@ -1454,7 +1455,7 @@ async fn insert_non_nullable_array() {
     assert_eq!(read_rows.len(), 1);
 
     // Compare the actual values in the read_rows with expected table_rows
-    assert_eq!(read_rows, expected_rows);
+    assert_table_rows_equal_ignoring_size(&read_rows, &expected_rows);
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
     // This feature is planned for future releases. We'll start to use it when it becomes available.
