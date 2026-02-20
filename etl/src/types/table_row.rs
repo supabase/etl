@@ -88,6 +88,14 @@ fn estimate_cell_allocated_bytes(cell: &Cell) -> usize {
     }
 }
 
+/// Returns an estimate of additional heap bytes owned by a [`PgNumeric`].
+fn estimated_pg_numeric_allocated_bytes(value: &PgNumeric) -> usize {
+    match &value {
+        PgNumeric::Value { digits, .. } => digits.capacity().saturating_mul(size_of::<i16>()),
+        PgNumeric::NaN | PgNumeric::PositiveInfinity | PgNumeric::NegativeInfinity => 0,
+    }
+}
+
 /// Returns an estimate of additional heap bytes owned by a JSON value.
 fn estimate_json_allocated_bytes(value: &serde_json::Value) -> usize {
     match value {
@@ -170,13 +178,5 @@ fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
             }
             total
         }
-    }
-}
-
-/// Returns an estimate of additional heap bytes owned a PgNumeric.
-fn estimated_pg_numeric_allocated_bytes(value: &PgNumeric) -> usize {
-    match &value {
-        PgNumeric::Value { digits, .. } => digits.capacity().saturating_mul(size_of::<i16>()),
-        PgNumeric::NaN | PgNumeric::PositiveInfinity | PgNumeric::NegativeInfinity => 0,
     }
 }
