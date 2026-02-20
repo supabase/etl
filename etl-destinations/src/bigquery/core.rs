@@ -528,11 +528,12 @@ where
         let (sequenced_bigquery_table_id, table_descriptor) =
             self.prepare_table_for_streaming(&table_id, false).await?;
 
+        // Add CDC operation type to all rows (no lock needed).
         let table_rows = table_rows
             .into_iter()
             .map(|mut table_row| {
                 table_row
-                    .values
+                    .values_mut()
                     .push(BigQueryOperationType::Upsert.into_cell());
 
                 BigQueryTableRow::try_from(table_row)
@@ -601,9 +602,12 @@ where
                             generate_sequence_number(insert.start_lsn, insert.commit_lsn);
                         insert
                             .table_row
-                            .values
+                            .values_mut()
                             .push(BigQueryOperationType::Upsert.into_cell());
-                        insert.table_row.values.push(Cell::String(sequence_number));
+                        insert
+                            .table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<BigQueryTableRow> =
                             table_id_to_table_rows.entry(insert.table_id).or_default();
@@ -614,9 +618,12 @@ where
                             generate_sequence_number(update.start_lsn, update.commit_lsn);
                         update
                             .table_row
-                            .values
+                            .values_mut()
                             .push(BigQueryOperationType::Upsert.into_cell());
-                        update.table_row.values.push(Cell::String(sequence_number));
+                        update
+                            .table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<BigQueryTableRow> =
                             table_id_to_table_rows.entry(update.table_id).or_default();
@@ -631,9 +638,11 @@ where
                         let sequence_number =
                             generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
-                            .values
+                            .values_mut()
                             .push(BigQueryOperationType::Delete.into_cell());
-                        old_table_row.values.push(Cell::String(sequence_number));
+                        old_table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<BigQueryTableRow> =
                             table_id_to_table_rows.entry(delete.table_id).or_default();

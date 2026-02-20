@@ -23,6 +23,7 @@ use tokio::sync::Semaphore;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
 
+use crate::concurrency::batch_budget::{BatchBudgetController, CachedBatchBudget};
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::stream::BackpressureStream;
@@ -46,7 +47,7 @@ use crate::state::table::{
 };
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
-use crate::types::{Event, PipelineId};
+use crate::types::{Event, PipelineId, SizeHint};
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 use crate::{bail, etl_error};
@@ -199,7 +200,9 @@ pub struct ApplyWorkerContext<S, D> {
     /// Semaphore controlling maximum concurrent table sync workers.
     pub table_sync_worker_permits: Arc<Semaphore>,
     /// Shared memory backpressure controller.
-    pub memory_monitor: Option<MemoryMonitor>,
+    pub memory_monitor: MemoryMonitor,
+    /// Shared batch budget controller.
+    pub batch_budget: BatchBudgetController,
 }
 
 /// Resources for the table sync worker during the apply loop.
@@ -331,6 +334,8 @@ struct ApplyLoopState {
     replication_progress: ReplicationProgress,
     /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
+    /// Approximate total size in bytes of events currently in the batch.
+    events_batch_bytes: usize,
     /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
@@ -345,16 +350,13 @@ struct ApplyLoopState {
 
 impl ApplyLoopState {
     /// Creates a new [`ApplyLoopState`] with initial replication progress and event batch.
-    fn new(
-        replication_progress: ReplicationProgress,
-        max_batch_size: usize,
-        max_batch_fill_duration: Duration,
-    ) -> Self {
+    fn new(replication_progress: ReplicationProgress, max_batch_fill_duration: Duration) -> Self {
         Self {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
             replication_progress,
-            events_batch: Vec::with_capacity(max_batch_size),
+            events_batch: Vec::new(),
+            events_batch_bytes: 0,
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_state: ShutdownState::NoShutdown,
@@ -441,7 +443,9 @@ pub struct ApplyLoop<S, D> {
     /// Worker context for worker-specific behavior.
     worker_context: WorkerContext<S, D>,
     /// Shared memory backpressure controller.
-    memory_monitor: Option<MemoryMonitor>,
+    memory_monitor: MemoryMonitor,
+    /// Cached dynamic batch budget used to decide flushes by bytes.
+    cached_batch_budget: CachedBatchBudget,
     /// Internal loop state.
     state: ApplyLoopState,
 }
@@ -464,7 +468,8 @@ where
         destination: D,
         worker_context: WorkerContext<S, D>,
         shutdown_rx: ShutdownRx,
-        memory_monitor: Option<MemoryMonitor>,
+        memory_monitor: MemoryMonitor,
+        batch_budget: BatchBudgetController,
     ) -> EtlResult<ApplyLoopResult> {
         info!(
             worker_type = %worker_context.worker_type(),
@@ -479,9 +484,10 @@ where
 
         let state = ApplyLoopState::new(
             initial_progress,
-            config.batch.max_size,
             Duration::from_millis(config.batch.max_fill_ms),
         );
+
+        let cached_batch_budget = batch_budget.cached();
 
         let mut apply_loop = Self {
             pipeline_id,
@@ -491,6 +497,7 @@ where
             shutdown_rx,
             worker_context,
             memory_monitor,
+            cached_batch_budget,
             state,
         };
 
@@ -513,20 +520,16 @@ where
             .start_logical_replication(&self.config.publication_name, &slot_name, start_lsn)
             .await?;
 
-        let mut connection_updates_rx = replication_client.connection_updates_rx();
         let events_stream = EventsStream::wrap(logical_replication_stream, self.pipeline_id);
-        let events_stream = BackpressureStream::wrap(
-            events_stream,
-            self.memory_monitor
-                .as_ref()
-                .map(|memory_monitor| memory_monitor.subscribe()),
-        );
+        let events_stream =
+            BackpressureStream::wrap(events_stream, self.memory_monitor.subscribe());
         pin!(events_stream);
+
+        let mut connection_updates_rx = replication_client.connection_updates_rx();
 
         // If the loop produces a result while waiting for shutdown acknowledgement,
         // we store it here and return it once the keepalive is received.
         let mut pending_result: Option<ApplyLoopResult> = None;
-
         loop {
             // If waiting for shutdown acknowledgement, the loop is now just waiting for the keep alive
             // message before shutting off.
@@ -563,7 +566,10 @@ where
                         ));
                     }
 
-                    let update = connection_updates_rx.borrow().clone();
+                    // We use `borrow_and_update` to avoid the race condition in which there is a change
+                    // between the `changed()` notification and the borrow. So that if there was, we mark
+                    // the value as seen avoiding `changed()` to be called again in the next iteration.
+                    let update = connection_updates_rx.borrow_and_update().clone();
                     match update {
                         PostgresConnectionUpdate::Running => {}
                         PostgresConnectionUpdate::Terminated => {
@@ -846,24 +852,30 @@ where
         if let Some(event) = result.event
             && should_include_event
         {
+            self.state.events_batch_bytes = self
+                .state
+                .events_batch_bytes
+                .saturating_add(event.size_hint());
             self.state.events_batch.push(event);
             self.state.update_last_commit_end_lsn(result.end_lsn);
         }
 
         let mut action = result.action;
 
-        let batch_size_reached = self.state.events_batch.len() >= self.config.batch.max_size;
+        let batch_size_reached =
+            self.state.events_batch_bytes >= self.cached_batch_budget.current_batch_size_bytes();
         let early_flush_requested = result.end_batch.is_some();
         let should_flush = batch_size_reached || early_flush_requested;
         if should_flush && !self.state.events_batch.is_empty() {
             let reason = if batch_size_reached {
-                "max batch size reached"
+                "max batch bytes reached"
             } else {
                 "early flush requested"
             };
             info!(
                 worker_type = %self.worker_context.worker_type(),
                 batch_size = self.state.events_batch.len(),
+                batch_size_bytes = self.state.events_batch_bytes,
                 %reason,
                 "flushing batch",
             );
@@ -918,13 +930,16 @@ where
             return Ok(());
         }
 
-        let events_batch = std::mem::replace(
-            &mut self.state.events_batch,
-            Vec::with_capacity(self.config.batch.max_size),
-        );
+        // We replace the existing vector with a new one and reset the accumulated batch bytes size.
+        let events_batch = std::mem::take(&mut self.state.events_batch);
+        let events_batch_bytes = self.state.events_batch_bytes;
+        self.state.events_batch_bytes = 0;
 
-        let batch_size = events_batch.len();
-        info!(batch_size = batch_size, "sending batch to destination");
+        let events_batch_size = events_batch.len();
+        info!(
+            events_batch_size,
+            events_batch_bytes, "sending batch to destination"
+        );
 
         let before_sending = Instant::now();
 
@@ -939,7 +954,7 @@ where
             PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             DESTINATION_LABEL => D::name(),
         )
-        .increment(batch_size as u64);
+        .increment(events_batch_size as u64);
 
         let send_duration_seconds = before_sending.elapsed().as_secs_f64();
         histogram!(
@@ -2099,6 +2114,7 @@ mod apply_worker {
             ctx.shutdown_rx.clone(),
             ctx.table_sync_worker_permits.clone(),
             ctx.memory_monitor.clone(),
+            ctx.batch_budget.clone(),
         )
     }
 

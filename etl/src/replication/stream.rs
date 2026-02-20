@@ -72,19 +72,21 @@ impl<'a> Stream for TableCopyStream<'a> {
         match ready!(this.stream.poll_next(cx)) {
             // Row copy received.
             Some(Ok(row)) => {
+                let row_size_bytes = row.len() as u64;
+
                 counter!(
                     ETL_BYTES_PROCESSED_TOTAL,
                     PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
                     EVENT_TYPE_LABEL => "copy"
                 )
-                .increment(row.len() as u64);
+                .increment(row_size_bytes);
 
                 histogram!(
                     ETL_ROW_SIZE_BYTES,
                     PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
                     EVENT_TYPE_LABEL => "copy"
                 )
-                .record(row.len() as f64);
+                .record(row_size_bytes as f64);
 
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas) {
                     Ok(row) => Poll::Ready(Some(Ok(row))),

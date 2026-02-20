@@ -5,6 +5,7 @@ use etl_api::configs::pipeline::FullApiPipelineConfig;
 use etl_api::validation::{
     FailureType, ValidationContext, validate_destination, validate_pipeline,
 };
+use etl_config::shared::BatchConfig;
 use etl_config::{Environment, SerializableSecretString};
 use etl_destinations::bigquery::test_utils::{
     setup_bigquery_database, setup_bigquery_database_without_dataset,
@@ -66,11 +67,15 @@ fn create_bigquery_config(
 fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
     FullApiPipelineConfig {
         publication_name: publication_name.to_string(),
-        batch: None,
+        batch: Some(BatchConfig {
+            max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
+            memory_budget_ratio: 0.2,
+        }),
         log_level: None,
         table_error_retry_delay_ms: None,
         table_error_retry_max_attempts: None,
         max_table_sync_workers: Some(2),
+        memory_refresh_interval_ms: Some(100),
         max_copy_connections_per_table: None,
         memory_backpressure: None,
         table_sync_copy: None,

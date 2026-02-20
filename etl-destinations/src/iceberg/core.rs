@@ -247,8 +247,8 @@ where
 
         for row in &mut table_rows {
             let sequence_number = generate_sequence_number(0.into(), 0.into());
-            row.values.push(IcebergOperationType::Insert.into());
-            row.values.push(Cell::String(sequence_number));
+            row.values_mut().push(IcebergOperationType::Insert.into());
+            row.values_mut().push(Cell::String(sequence_number));
         }
 
         if !table_rows.is_empty() {
@@ -290,9 +290,12 @@ where
                             generate_sequence_number(insert.start_lsn, insert.commit_lsn);
                         insert
                             .table_row
-                            .values
+                            .values_mut()
                             .push(IcebergOperationType::Insert.into());
-                        insert.table_row.values.push(Cell::String(sequence_number));
+                        insert
+                            .table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(insert.table_id).or_default();
@@ -303,9 +306,12 @@ where
                             generate_sequence_number(update.start_lsn, update.commit_lsn);
                         update
                             .table_row
-                            .values
+                            .values_mut()
                             .push(IcebergOperationType::Update.into());
-                        update.table_row.values.push(Cell::String(sequence_number));
+                        update
+                            .table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(update.table_id).or_default();
@@ -320,9 +326,11 @@ where
                         let sequence_number =
                             generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
-                            .values
+                            .values_mut()
                             .push(IcebergOperationType::Delete.into());
-                        old_table_row.values.push(Cell::String(sequence_number));
+                        old_table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(delete.table_id).or_default();

@@ -99,9 +99,6 @@ enum Commands {
         /// Publication name
         #[arg(long, default_value = "bench_pub")]
         publication_name: String,
-        /// Maximum batch size
-        #[arg(long, default_value = "100000")]
-        batch_max_size: usize,
         /// Maximum batch fill time in milliseconds
         #[arg(long, default_value = "10000")]
         batch_max_fill_ms: u64,
@@ -162,7 +159,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             tls_enabled,
             tls_certs,
             publication_name,
-            batch_max_size,
             batch_max_fill_ms,
             max_table_sync_workers,
             max_copy_connections_per_table,
@@ -184,7 +180,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tls_enabled,
                 tls_certs,
                 publication_name,
-                batch_max_size,
                 batch_max_fill_ms,
                 max_table_sync_workers,
                 max_copy_connections_per_table,
@@ -212,7 +207,6 @@ struct RunArgs {
     tls_enabled: bool,
     tls_certs: String,
     publication_name: String,
-    batch_max_size: usize,
     batch_max_fill_ms: u64,
     max_table_sync_workers: u16,
     max_copy_connections_per_table: u16,
@@ -327,12 +321,13 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         publication_name: args.publication_name,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
-            max_size: args.batch_max_size,
             max_fill_ms: args.batch_max_fill_ms,
+            memory_budget_ratio: 0.2,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.max_table_sync_workers,
+        memory_refresh_interval_ms: 100,
         memory_backpressure: None,
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,

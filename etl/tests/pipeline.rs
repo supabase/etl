@@ -374,8 +374,8 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
     )
     .with_max_copy_connections_per_table(100)
     .with_batch_config(BatchConfig {
-        max_size: 10_000,
         max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
     })
     .build();
 
@@ -451,8 +451,8 @@ async fn table_copy_with_row_filter_and_parallel_connections() {
     )
     .with_max_copy_connections_per_table(100)
     .with_batch_config(BatchConfig {
-        max_size: 10_000,
         max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
     })
     .build();
 
@@ -1244,8 +1244,8 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     // We set a batch of 1000 elements to check if after 1000ms we still get the batch which is <
     // 1000 elements.
     let batch_config = BatchConfig {
-        max_size: 1000,
         max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
     };
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
@@ -1329,8 +1329,8 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     // We set a batch of 1000 elements to still check that even with batching we are getting all the
     // data.
     let batch_config = BatchConfig {
-        max_size: 1000,
         max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
     };
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
@@ -1656,7 +1656,7 @@ async fn pipeline_respects_column_level_publication() {
         if let Event::Insert(InsertEvent { table_row, .. }) = event {
             // Verify exactly 3 columns (id, name, age).
             // If email was included, there would be 4 values.
-            assert_eq!(table_row.values.len(), 3);
+            assert_eq!(table_row.values().len(), 3);
         }
     }
 

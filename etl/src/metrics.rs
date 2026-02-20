@@ -25,6 +25,7 @@ pub const ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL: &str =
     "etl_memory_backpressure_transitions_total";
 pub const ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS: &str =
     "etl_memory_backpressure_activation_duration_seconds";
+pub const ETL_IDEAL_BATCH_SIZE_BYTES: &str = "etl_ideal_batch_size_bytes";
 
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
@@ -164,6 +165,12 @@ pub(crate) fn register_metrics() {
             ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
             Unit::Seconds,
             "Duration in seconds of each memory backpressure active period, labeled by pipeline_id"
+        );
+
+        describe_gauge!(
+            ETL_IDEAL_BATCH_SIZE_BYTES,
+            Unit::Bytes,
+            "Current ideal batch size in bytes, labeled by pipeline_id"
         );
     });
 }

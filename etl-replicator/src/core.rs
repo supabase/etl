@@ -237,8 +237,8 @@ fn log_pg_connection_config(config: &PgConnectionConfig) {
 
 fn log_batch_config(config: &BatchConfig) {
     debug!(
-        max_size = config.max_size,
         max_fill_ms = config.max_fill_ms,
+        memory_budget_ratio = config.memory_budget_ratio,
         "batch config"
     );
 }

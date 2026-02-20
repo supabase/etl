@@ -11,6 +11,7 @@ use tokio::task::AbortHandle;
 use tracing::{Instrument, debug, error, info};
 
 use crate::bail;
+use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::destination::Destination;
@@ -337,7 +338,8 @@ pub struct TableSyncWorker<S, D> {
     destination: D,
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
-    memory_monitor: Option<MemoryMonitor>,
+    memory_monitor: MemoryMonitor,
+    batch_budget: BatchBudgetController,
 }
 
 impl<S, D> TableSyncWorker<S, D> {
@@ -356,7 +358,8 @@ impl<S, D> TableSyncWorker<S, D> {
         destination: D,
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
-        memory_monitor: Option<MemoryMonitor>,
+        memory_monitor: MemoryMonitor,
+        batch_budget: BatchBudgetController,
     ) -> Self {
         Self {
             pipeline_id,
@@ -368,6 +371,7 @@ impl<S, D> TableSyncWorker<S, D> {
             shutdown_rx,
             run_permit,
             memory_monitor,
+            batch_budget,
         }
     }
 
@@ -598,6 +602,7 @@ where
                 shutdown_rx: shutdown_rx.clone(),
                 run_permit: run_permit.clone(),
                 memory_monitor: self.memory_monitor.clone(),
+                batch_budget: self.batch_budget.clone(),
             };
 
             let result = worker.run_table_sync_worker(state.clone()).await;
@@ -678,16 +683,20 @@ where
             self.destination.clone(),
             self.shutdown_rx.clone(),
             self.memory_monitor.clone(),
+            self.batch_budget.clone(),
         )
         .await;
 
         let start_lsn = match result {
             Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
             Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
+                info!(table_id = self.table_id.0, "table sync stopped");
+
                 return Ok(());
             }
             Err(err) => {
                 error!(table_id = self.table_id.0, error = %err, "table sync failed");
+
                 return Err(err);
             }
         };
@@ -698,6 +707,7 @@ where
             state_store: self.store.clone(),
         });
 
+        let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
         let result = ApplyLoop::start(
             self.pipeline_id,
             start_lsn,
@@ -708,6 +718,7 @@ where
             worker_context,
             self.shutdown_rx,
             self.memory_monitor.clone(),
+            self.batch_budget.clone(),
         )
         .await?;
 

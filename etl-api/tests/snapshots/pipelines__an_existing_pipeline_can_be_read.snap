@@ -5,13 +5,9 @@ expression: response.config
 FullApiPipelineConfig {
     publication_name: "publication",
     batch: Some(
-        ApiBatchConfig {
-            max_size: Some(
-                1000,
-            ),
-            max_fill_ms: Some(
-                5,
-            ),
+        BatchConfig {
+            max_fill_ms: 5,
+            memory_budget_ratio: 0.2,
         },
     ),
     table_error_retry_delay_ms: Some(
@@ -26,11 +22,13 @@ FullApiPipelineConfig {
     max_copy_connections_per_table: Some(
         2,
     ),
+    memory_refresh_interval_ms: Some(
+        100,
+    ),
     memory_backpressure: Some(
         MemoryBackpressureConfig {
             activate_threshold: 0.85,
             resume_threshold: 0.75,
-            memory_refresh_interval_ms: 100,
         },
     ),
     table_sync_copy: Some(

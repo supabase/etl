@@ -9,31 +9,51 @@ use crate::shared::{PgConnectionConfig, PgConnectionConfigWithoutSecrets, Valida
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub struct BatchConfig {
-    /// Maximum number of items in a batch for table copy and event streaming.
-    #[serde(default = "default_batch_max_size")]
-    #[cfg_attr(feature = "utoipa", schema(example = 10000))]
-    pub max_size: usize,
-    /// Maximum time, in milliseconds, to wait for a batch to fill before processing.
+    /// Maximum time, in milliseconds, to wait before flushing a partially filled batch.
+    ///
+    /// This is the latency bound for stream batching: once the first item enters a batch,
+    /// the batch is flushed when this timer elapses, even if byte/row targets were not met.
+    ///
+    /// In practice, flush happens on the first trigger between this timeout and the
+    /// memory-based byte budget driven by [`Self::memory_budget_ratio`].
     #[serde(default = "default_batch_max_fill_ms")]
     #[cfg_attr(feature = "utoipa", schema(example = 0))]
     pub max_fill_ms: u64,
+    /// Ratio of process memory reserved for incoming stream batch bytes.
+    ///
+    /// This value is expressed as a ratio in the `(0.0, 1.0]` interval.
+    /// The configured memory is divided by the number of active streams at runtime, so each
+    /// stream gets only a per-stream share of the global memory budget.
+    ///
+    /// Together with [`Self::max_fill_ms`], this controls stream flushes: batches flush either
+    /// when their accumulated size estimate reaches the per-stream byte budget or when the
+    /// fill timeout elapses, whichever happens first.
+    ///
+    /// The goal is to preserve headroom for allocations beyond incoming rows, such as
+    /// destination batch building and serialization buffers.
+    #[serde(default = "default_memory_budget_ratio")]
+    #[cfg_attr(feature = "utoipa", schema(example = 0.2))]
+    pub memory_budget_ratio: f32,
 }
 
 impl BatchConfig {
-    /// Default maximum batch size for table copy and event streaming.
-    pub const DEFAULT_MAX_SIZE: usize = 100000;
-
     /// Default maximum fill time in milliseconds.
     pub const DEFAULT_MAX_FILL_MS: u64 = 10000;
 
+    /// Default percentage of total memory used for batch bytes budgeting.
+    ///
+    /// This was empirically found to be a good value to avoid OOMs, but it's highly dependent on
+    /// how we measure the stream batches impacts on memory.
+    pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.2;
+
     /// Validates batch configuration settings.
     ///
-    /// Ensures max_size is non-zero.
+    /// Ensures memory budget ratio is in range.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.max_size == 0 {
+        if !(0.0..=1.0).contains(&self.memory_budget_ratio) || self.memory_budget_ratio == 0.0 {
             return Err(ValidationError::InvalidFieldValue {
-                field: "batch.max_size".to_string(),
-                constraint: "must be greater than 0".to_string(),
+                field: "batch.memory_budget_ratio".to_string(),
+                constraint: "must be in the (0.0, 1.0] interval".to_string(),
             });
         }
 
@@ -44,18 +64,18 @@ impl BatchConfig {
 impl Default for BatchConfig {
     fn default() -> Self {
         Self {
-            max_size: default_batch_max_size(),
             max_fill_ms: default_batch_max_fill_ms(),
+            memory_budget_ratio: default_memory_budget_ratio(),
         }
     }
 }
 
-const fn default_batch_max_size() -> usize {
-    BatchConfig::DEFAULT_MAX_SIZE
-}
-
 const fn default_batch_max_fill_ms() -> u64 {
     BatchConfig::DEFAULT_MAX_FILL_MS
+}
+
+const fn default_memory_budget_ratio() -> f32 {
+    BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO
 }
 
 /// Behavior when the main replication slot is found to be invalidated.
@@ -135,9 +155,6 @@ pub struct MemoryBackpressureConfig {
     /// Valid range is `[0.0, 1.0)`, and this value must be lower than
     /// [`Self::activate_threshold`].
     pub resume_threshold: f32,
-    /// Number of milliseconds between one memory usage refresh and another.
-    #[serde(default = "default_memory_refresh_interval_ms")]
-    pub memory_refresh_interval_ms: u64,
 }
 
 impl MemoryBackpressureConfig {
@@ -145,8 +162,6 @@ impl MemoryBackpressureConfig {
     pub const DEFAULT_ACTIVATE_THRESHOLD: f32 = 0.85;
     /// Default memory usage ratio to release backpressure.
     pub const DEFAULT_RESUME_THRESHOLD: f32 = 0.75;
-    /// Default interval in milliseconds between one memory refresh and another.
-    pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
 
     /// Validates memory backpressure thresholds.
     pub fn validate(&self) -> Result<(), ValidationError> {
@@ -171,13 +186,6 @@ impl MemoryBackpressureConfig {
             });
         }
 
-        if self.memory_refresh_interval_ms == 0 {
-            return Err(ValidationError::InvalidFieldValue {
-                field: "memory_backpressure.memory_refresh_interval_ms".to_string(),
-                constraint: "must be greater than 0".to_string(),
-            });
-        }
-
         Ok(())
     }
 }
@@ -187,13 +195,8 @@ impl Default for MemoryBackpressureConfig {
         Self {
             activate_threshold: Self::DEFAULT_ACTIVATE_THRESHOLD,
             resume_threshold: Self::DEFAULT_RESUME_THRESHOLD,
-            memory_refresh_interval_ms: Self::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
         }
     }
-}
-
-const fn default_memory_refresh_interval_ms() -> u64 {
-    MemoryBackpressureConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
 /// Configuration for an ETL pipeline.
@@ -236,6 +239,9 @@ pub struct PipelineConfig {
     /// When >1 (default), ctid-based partitioning splits the table across N connections.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
+    /// Number of milliseconds between one memory usage refresh and another.
+    #[serde(default = "default_memory_refresh_interval_ms")]
+    pub memory_refresh_interval_ms: u64,
     /// Optional memory-based backpressure configuration.
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
@@ -262,6 +268,9 @@ impl PipelineConfig {
 
     /// Default maximum parallel connections per table during initial copy.
     pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 2;
+    /// Default interval in milliseconds between one memory refresh and another.
+    pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
+
     /// Validates pipeline configuration settings.
     ///
     /// Checks batch configuration and ensures worker counts and retry attempts are non-zero.
@@ -293,6 +302,13 @@ impl PipelineConfig {
             memory_backpressure.validate()?;
         }
 
+        if self.memory_refresh_interval_ms == 0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "memory_refresh_interval_ms".to_string(),
+                constraint: "must be greater than 0".to_string(),
+            });
+        }
+
         Ok(())
     }
 }
@@ -311,6 +327,10 @@ const fn default_max_table_sync_workers() -> u16 {
 
 const fn default_max_copy_connections_per_table() -> u16 {
     PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE
+}
+
+const fn default_memory_refresh_interval_ms() -> u64 {
+    PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
 /// Same as [`PipelineConfig`] but without secrets. This type
@@ -349,6 +369,9 @@ pub struct PipelineConfigWithoutSecrets {
     /// When >1 (default), ctid-based partitioning splits the table across N connections.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
+    /// Number of milliseconds between one memory usage refresh and another.
+    #[serde(default = "default_memory_refresh_interval_ms")]
+    pub memory_refresh_interval_ms: u64,
     /// Optional memory-based backpressure configuration.
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
@@ -374,6 +397,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
             max_table_sync_workers: value.max_table_sync_workers,
             max_copy_connections_per_table: value.max_copy_connections_per_table,
+            memory_refresh_interval_ms: value.memory_refresh_interval_ms,
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: value.table_sync_copy,
             invalidated_slot_behavior: value.invalidated_slot_behavior,

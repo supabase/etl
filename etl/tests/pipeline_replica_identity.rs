@@ -35,7 +35,7 @@ impl FromTableRow for ToastTable {
     type Id = i64;
 
     fn from_table_row(table_row: &etl::types::TableRow) -> Option<Self> {
-        let values = &table_row.values;
+        let values = table_row.values();
         if values.len() == 3 {
             let id = match &values[0] {
                 Cell::I64(i) => *i,

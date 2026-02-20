@@ -35,7 +35,7 @@ pub fn test_slot_name(slot_name: &str) -> String {
 ///
 /// // Create a pipeline with custom batch and retry configurations
 /// let pipeline = PipelineBuilder::new(pg_config, id, pub_name, store, dest)
-///     .with_batch_config(BatchConfig { max_size: 100, max_fill_ms: 5000 })
+///     .with_batch_config(BatchConfig { max_fill_ms: 5000, memory_budget_ratio: 0.2 })
 ///     .with_retry_config(2000, 10)
 ///     .build();
 /// ```
@@ -45,7 +45,7 @@ pub struct PipelineBuilder<S, D> {
     publication_name: String,
     store: S,
     destination: D,
-    /// Batch configuration. Defaults to max_size=1, max_fill_ms=1000 if not specified.
+    /// Batch configuration.
     batch: BatchConfig,
     /// Delay in milliseconds before retrying a failed table operation. Default: 1000ms.
     table_error_retry_delay_ms: u64,
@@ -59,8 +59,10 @@ pub struct PipelineBuilder<S, D> {
     invalidated_slot_behavior: InvalidatedSlotBehavior,
     /// Maximum parallel connections per table during initial copy. Default: 2.
     max_copy_connections_per_table: u16,
-    /// Optional memory-based backpressure configuration. Default: enabled with defaults.
-    memory_backpressure: Option<MemoryBackpressureConfig>,
+    /// The time between memory refreshes of the memory monitor. Default: 0.2.
+    memory_refresh_interval_ms: u64,
+    /// Memory-based backpressure configuration. Default: enabled with defaults.
+    memory_backpressure: MemoryBackpressureConfig,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -80,7 +82,7 @@ where
     ///
     /// # Default Settings
     ///
-    /// * Batch: max_size=1, max_fill_ms=1000
+    /// * Batch: max_fill_ms=1000
     /// * Retry delay: 1000ms
     /// * Max retry attempts: 2
     /// * Max table sync workers: 1
@@ -99,45 +101,36 @@ where
             store,
             destination,
             batch: BatchConfig {
-                max_size: 1,
                 max_fill_ms: 1000,
+                memory_budget_ratio: 0.2,
             },
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 2,
             max_table_sync_workers: 1,
-            table_sync_copy: TableSyncCopyConfig::default(),
-            invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
-            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
-            memory_backpressure: Some(MemoryBackpressureConfig::default()),
+            table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
+            invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
+            max_copy_connections_per_table: 2,
+            memory_refresh_interval_ms: 100,
+            memory_backpressure: MemoryBackpressureConfig {
+                activate_threshold: 0.95,
+                resume_threshold: 0.85,
+            },
         }
     }
 
     /// Sets custom batch configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `batch` - Configuration controlling batch size and timing for processing events
     pub fn with_batch_config(mut self, batch: BatchConfig) -> Self {
         self.batch = batch;
         self
     }
 
     /// Sets custom table sync copy configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `table_sync_copy` - Configuration for how table syncs are performed
     pub fn with_table_sync_copy_config(mut self, table_sync_copy: TableSyncCopyConfig) -> Self {
         self.table_sync_copy = table_sync_copy;
         self
     }
 
     /// Sets custom retry configuration for table operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `delay_ms` - Delay in milliseconds before retrying a failed operation
-    /// * `max_attempts` - Maximum number of retry attempts before giving up
     pub fn with_retry_config(mut self, delay_ms: u64, max_attempts: u32) -> Self {
         self.table_error_retry_delay_ms = delay_ms;
         self.table_error_retry_max_attempts = max_attempts;
@@ -145,10 +138,6 @@ where
     }
 
     /// Sets the maximum number of concurrent table sync workers.
-    ///
-    /// # Arguments
-    ///
-    /// * `workers` - Number of workers to use for parallel table synchronization
     pub fn with_max_table_sync_workers(mut self, workers: u16) -> Self {
         self.max_table_sync_workers = workers;
         self
@@ -183,7 +172,8 @@ where
             table_sync_copy: self.table_sync_copy,
             invalidated_slot_behavior: self.invalidated_slot_behavior,
             max_copy_connections_per_table: self.max_copy_connections_per_table,
-            memory_backpressure: self.memory_backpressure,
+            memory_refresh_interval_ms: self.memory_refresh_interval_ms,
+            memory_backpressure: Some(self.memory_backpressure),
         };
 
         Pipeline::new(config, self.store, self.destination)

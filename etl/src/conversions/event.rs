@@ -126,15 +126,14 @@ where
     )
     .increment(row_size_bytes);
 
+    let table_row =
+        convert_tuple_to_row(&table_schema.column_schemas, tuple_data, &mut None, false)?;
     histogram!(
         ETL_ROW_SIZE_BYTES,
         PIPELINE_ID_LABEL => pipeline_id.to_string(),
         EVENT_TYPE_LABEL => "insert"
     )
     .record(row_size_bytes as f64);
-
-    let table_row =
-        convert_tuple_to_row(&table_schema.column_schemas, tuple_data, &mut None, false)?;
 
     Ok(InsertEvent {
         start_lsn,
@@ -181,13 +180,6 @@ where
     )
     .increment(total_bytes);
 
-    histogram!(
-        ETL_ROW_SIZE_BYTES,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-        EVENT_TYPE_LABEL => "update"
-    )
-    .record(total_bytes as f64);
-
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
             &table_schema.column_schemas,
@@ -205,6 +197,13 @@ where
         &mut old_table_row_mut,
         false,
     )?;
+
+    histogram!(
+        ETL_ROW_SIZE_BYTES,
+        PIPELINE_ID_LABEL => pipeline_id.to_string(),
+        EVENT_TYPE_LABEL => "update"
+    )
+    .record(total_bytes as f64);
 
     let old_table_row = old_table_row_mut.map(|row| (is_key, row));
 
@@ -387,7 +386,7 @@ pub fn convert_tuple_to_row(
                 // consistency. As a bit of a practical hack we take the value out of the old row and
                 // move a null value in its place to avoid a clone because toast values tend to be large.
                 if let Some(row) = old_table_row {
-                    let old_row_value = std::mem::replace(&mut row.values[i], Cell::Null);
+                    let old_row_value = std::mem::replace(&mut row.values_mut()[i], Cell::Null);
                     if old_row_value == Cell::Null {
                         default_value_for_type(&column_schema.typ)?
                     } else {
@@ -412,5 +411,5 @@ pub fn convert_tuple_to_row(
         values.push(cell);
     }
 
-    Ok(TableRow { values })
+    Ok(TableRow::new(values))
 }
