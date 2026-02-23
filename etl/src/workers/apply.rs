@@ -21,7 +21,7 @@ use crate::metrics::{
 };
 use crate::replication::apply::{ApplyLoop, ApplyWorkerContext, WorkerContext};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState};
-use crate::replication::masks::ReplicationMasks;
+use crate::replication::masks::ReplicationMasksCache;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
@@ -82,7 +82,7 @@ pub struct ApplyWorker<S, D> {
     pool: Arc<TableSyncWorkerPool>,
     store: S,
     destination: D,
-    replication_masks: ReplicationMasks,
+    replication_masks: ReplicationMasksCache,
     shutdown_rx: ShutdownRx,
     table_sync_worker_permits: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
@@ -101,7 +101,7 @@ impl<S, D> ApplyWorker<S, D> {
         pool: Arc<TableSyncWorkerPool>,
         store: S,
         destination: D,
-        replication_masks: ReplicationMasks,
+        replication_masks: ReplicationMasksCache,
         shutdown_rx: ShutdownRx,
         table_sync_worker_permits: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,

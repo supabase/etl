@@ -11,7 +11,8 @@ use crate::iceberg::error::iceberg_error_to_etl_error;
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
-use etl::store::state::{DestinationTableMetadata, StateStore};
+use etl::state::destination_metadata::DestinationTableMetadata;
+use etl::store::state::StateStore;
 use etl::types::{
     Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow, Type,
     generate_sequence_number,

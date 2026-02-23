@@ -11,7 +11,7 @@ use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
 use crate::migrations::apply_etl_migrations;
 use crate::replication::client::PgReplicationClient;
-use crate::replication::masks::ReplicationMasks;
+use crate::replication::masks::ReplicationMasksCache;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
@@ -168,7 +168,7 @@ where
 
         // We create the shared replication masks container that will be used by both the apply
         // worker and table sync workers to track which columns are being replicated for each table.
-        let replication_masks = ReplicationMasks::new();
+        let replication_masks = ReplicationMasksCache::new();
 
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
@@ -330,12 +330,6 @@ where
             table_count = publication_table_ids.len(),
             "publication tables loaded"
         );
-
-        // We notify the user that if there are no tables in the publication, the system will start but
-        // the pipeline will be hanging idle forever.
-        if publication_table_ids.is_empty() {
-            warn!(publication_name = %self.config.publication_name, "the publication has no tables, the pipeline will not receive any data");
-        }
 
         // Validate that the publication is configured correctly for partitioned tables.
         //

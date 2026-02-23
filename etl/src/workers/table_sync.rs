@@ -23,7 +23,7 @@ use crate::replication::apply::{
     ApplyLoop, ApplyLoopResult, TableSyncWorkerContext, WorkerContext,
 };
 use crate::replication::client::PgReplicationClient;
-use crate::replication::masks::ReplicationMasks;
+use crate::replication::masks::ReplicationMasksCache;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::state::table::{
     RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -337,7 +337,7 @@ pub struct TableSyncWorker<S, D> {
     table_id: TableId,
     store: S,
     destination: D,
-    replication_masks: ReplicationMasks,
+    replication_masks: ReplicationMasksCache,
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
@@ -358,7 +358,7 @@ impl<S, D> TableSyncWorker<S, D> {
         table_id: TableId,
         store: S,
         destination: D,
-        replication_masks: ReplicationMasks,
+        replication_masks: ReplicationMasksCache,
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,

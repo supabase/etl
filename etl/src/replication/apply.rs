@@ -47,7 +47,7 @@ use crate::metrics::{
     ETL_TRANSACTIONS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::{PgReplicationClient, PostgresConnectionUpdate};
-use crate::replication::masks::ReplicationMasks;
+use crate::replication::masks::ReplicationMasksCache;
 use crate::replication::stream::{EventsStream, StatusUpdateType};
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
@@ -201,7 +201,7 @@ pub struct ApplyWorkerContext<S, D> {
     /// Destination where replicated data is written.
     pub destination: D,
     /// Shared replication masks container for tracking column replication status.
-    pub replication_masks: ReplicationMasks,
+    pub replication_masks: ReplicationMasksCache,
     /// Shutdown signal receiver for graceful termination.
     pub shutdown_rx: ShutdownRx,
     /// Semaphore controlling maximum concurrent table sync workers.
@@ -447,7 +447,7 @@ pub struct ApplyLoop<S, D> {
     /// Destination where replicated data is written.
     destination: D,
     /// Shared replication masks container for tracking column replication status.
-    replication_masks: ReplicationMasks,
+    replication_masks: ReplicationMasksCache,
     /// Shutdown signal receiver.
     shutdown_rx: ShutdownRx,
     /// Worker context for worker-specific behavior.
@@ -476,7 +476,7 @@ where
         replication_client: PgReplicationClient,
         schema_store: S,
         destination: D,
-        replication_masks: ReplicationMasks,
+        replication_masks: ReplicationMasksCache,
         worker_context: WorkerContext<S, D>,
         shutdown_rx: ShutdownRx,
         memory_monitor: MemoryMonitor,
@@ -2426,12 +2426,12 @@ where
 /// Retrieves a [`ReplicatedTableSchema`] for the given table at the specified snapshot.
 ///
 /// This function combines the table schema from the schema store with the replication mask
-/// from the shared [`ReplicationMasks`] to create a [`ReplicatedTableSchema`].
+/// from the shared [`ReplicationMasksCache`] to create a [`ReplicatedTableSchema`].
 async fn get_replicated_table_schema<S>(
     table_id: &TableId,
     snapshot_id: SnapshotId,
     schema_store: &S,
-    replication_masks: &ReplicationMasks,
+    replication_masks: &ReplicationMasksCache,
 ) -> EtlResult<ReplicatedTableSchema>
 where
     S: SchemaStore + Clone + Send + 'static,

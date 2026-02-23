@@ -210,7 +210,10 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     let users_schemas = table_schemas
         .get(&database_schema.users_schema().id)
         .unwrap();
-    assert_eq!(users_schemas.last().unwrap().1, database_schema.users_schema());
+    assert_eq!(
+        users_schemas.last().unwrap().1,
+        database_schema.users_schema()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -271,5 +274,8 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     let users_schemas = table_schemas
         .get(&database_schema.users_schema().id)
         .unwrap();
-    assert_eq!(users_schemas.last().unwrap().1, database_schema.users_schema());
+    assert_eq!(
+        users_schemas.last().unwrap().1,
+        database_schema.users_schema()
+    );
 }

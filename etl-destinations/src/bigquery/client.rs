@@ -1,8 +1,6 @@
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
-use etl::types::{
-    Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type,
-};
+use etl::types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type};
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{BatchAppendResult, ColumnMode, StorageApiConfig};
@@ -1113,15 +1111,6 @@ impl BigQueryClient {
             .map_err(bq_error_to_etl_error)?;
 
         Ok(ResultSet::new_from_query_response(query_response))
-    }
-
-    /// Releases all connections currently held in the connection pool.
-    ///
-    /// Removes all idle connections, forcing new requests to create fresh connections.
-    /// This is useful after DDL operations (e.g., ALTER TABLE) when BigQuery's Storage
-    /// Write API may have stale schema information cached in existing connections.
-    pub async fn release_all_connections(&self) {
-        self.client.storage().invalidate_all_connections().await;
     }
 
     /// Sanitizes a BigQuery identifier for safe backtick quoting.

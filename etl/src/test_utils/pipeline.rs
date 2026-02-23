@@ -1,8 +1,3 @@
-use etl_config::shared::{
-    BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig,
-};
-use uuid::Uuid;
 use crate::destination::Destination;
 use crate::pipeline::Pipeline;
 use crate::state::table::TableReplicationPhaseType;
@@ -14,10 +9,15 @@ use crate::test_utils::memory_destination::MemoryDestination;
 use crate::test_utils::notifying_store::NotifyingStore;
 use crate::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use crate::types::PipelineId;
+use etl_config::shared::{
+    BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+    PipelineConfig, TableSyncCopyConfig,
+};
 use etl_postgres::tokio::test_utils::PgDatabase;
 use etl_postgres::types::{TableId, TableName};
 use rand::random;
 use tokio_postgres::Client;
+use uuid::Uuid;
 
 /// Generates a test-specific replication slot name with a random component.
 ///

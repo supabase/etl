@@ -255,12 +255,18 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
-    let replicated_column_schemas = replicated_table_schema.column_schemas().cloned().collect::<Vec<_>>();
+    let replicated_column_schemas = replicated_table_schema
+        .column_schemas()
+        .cloned()
+        .collect::<Vec<_>>();
     let table_copy_stream = transaction
         .get_table_copy_stream(table_id, &replicated_column_schemas, publication_name)
         .await?;
-    let table_copy_stream =
-        TableCopyStream::wrap(table_copy_stream, replicated_column_schemas.iter(), pipeline_id);
+    let table_copy_stream = TableCopyStream::wrap(
+        table_copy_stream,
+        replicated_column_schemas.iter(),
+        pipeline_id,
+    );
     let connection_updates_rx = transaction.get_cloned_client().connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
@@ -563,7 +569,10 @@ where
     D: Destination + Clone + Send + 'static,
 {
     let start_time = Instant::now();
-    let replicated_column_schemas = replicated_table_schema.column_schemas().cloned().collect::<Vec<_>>();
+    let replicated_column_schemas = replicated_table_schema
+        .column_schemas()
+        .cloned()
+        .collect::<Vec<_>>();
 
     match &partition {
         CopyPartition::CtidRange(ctid) => match ctid {

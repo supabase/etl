@@ -989,6 +989,11 @@ impl PgReplicationClient {
     /// For partitioned tables with `publish_via_partition_root=true`, this returns only the parent
     /// table OID. The query uses a recursive CTE to walk up the partition inheritance hierarchy
     /// and identify root tables that have no parent themselves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::ConfigError`] if the publication contains no tables. This typically
+    /// indicates a misconfigured publication that won't replicate any data.
     pub async fn get_publication_table_ids(
         &self,
         publication_name: &str,
@@ -1025,15 +1030,28 @@ impl PgReplicationClient {
             pub = quote_literal(publication_name)
         );
 
-        let mut roots = vec![];
-        for msg in self.client.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = msg {
+        let mut root_tables = vec![];
+        for row in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = row {
                 let table_id = Self::get_row_value::<TableId>(&row, "oid", "pg_class")?;
-                roots.push(table_id);
+                root_tables.push(table_id);
             }
         }
 
-        Ok(roots)
+        if root_tables.is_empty() {
+            bail!(
+                ErrorKind::ConfigError,
+                "Publication has no tables",
+                format!(
+                    "Publication '{}' does not contain any tables. Ensure the publication \
+                     is configured with tables using FOR TABLE, FOR ALL TABLES, or \
+                     FOR TABLES IN SCHEMA.",
+                    publication_name
+                )
+            );
+        }
+
+        Ok(root_tables)
     }
 
     /// Starts a logical replication stream from the specified publication and slot.
@@ -1049,7 +1067,7 @@ impl PgReplicationClient {
 
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let options = format!(
-            r#"("proto_version" '1', "publication_names" {})"#,
+            r#"("proto_version" '1', "publication_names" {}, "messages" 'true')"#,
             quote_literal(quote_identifier(publication_name).as_ref()),
         );
 
@@ -1392,8 +1410,8 @@ impl PgReplicationClient {
                     Self::get_row_value::<i32>(&row, "ordinal_position", "pg_attribute")?;
                 let is_primary =
                     Self::get_row_value::<String>(&row, "is_primary", "pg_index")? == "t";
-                let nullable = Self::get_row_value::<String>(&row, "nullable", "pg_attribute")?
-                    == "t";
+                let nullable =
+                    Self::get_row_value::<String>(&row, "nullable", "pg_attribute")? == "t";
 
                 let typ = convert_type_oid_to_type(type_oid);
                 let primary_key_ordinal_position = if is_primary {

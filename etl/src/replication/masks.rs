@@ -26,12 +26,12 @@ use tokio::sync::RwLock;
 
 /// Thread-safe container for replication masks shared across workers.
 #[derive(Debug, Clone, Default)]
-pub struct ReplicationMasks {
+pub struct ReplicationMasksCache {
     inner: Arc<RwLock<HashMap<TableId, ReplicationMask>>>,
 }
 
-impl ReplicationMasks {
-    /// Creates a new empty [`ReplicationMasks`] container.
+impl ReplicationMasksCache {
+    /// Creates a new empty [`ReplicationMasksCache`] container.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
@@ -92,7 +92,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_and_get() {
-        let masks = ReplicationMasks::new();
+        let masks = ReplicationMasksCache::new();
         let table_id = TableId::new(123);
         let mask = create_test_mask();
 
@@ -105,7 +105,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_nonexistent() {
-        let masks = ReplicationMasks::new();
+        let masks = ReplicationMasksCache::new();
         let table_id = TableId::new(123);
 
         let retrieved = masks.get(&table_id).await;
@@ -114,7 +114,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clone_shares_state() {
-        let masks1 = ReplicationMasks::new();
+        let masks1 = ReplicationMasksCache::new();
         let masks2 = masks1.clone();
         let table_id = TableId::new(123);
         let mask = create_test_mask();

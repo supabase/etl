@@ -6,25 +6,23 @@ use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
 
-use crate::{bail, etl_error};
 use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{
-    START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, etl_fail_point,
-};
+use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, etl_fail_point};
 use crate::metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL, PIPELINE_ID_LABEL};
 use crate::replication::client::PgReplicationClient;
-use crate::replication::masks::ReplicationMasks;
+use crate::replication::masks::ReplicationMasksCache;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::table_sync::TableSyncWorkerState;
 use crate::workers::table_sync_copy::{TableCopyResult, table_copy};
+use crate::{bail, etl_error};
 
 /// Result type for table synchronization operations.
 ///
@@ -57,7 +55,7 @@ pub async fn start_table_sync<S, D>(
     table_sync_worker_state: TableSyncWorkerState,
     store: S,
     destination: D,
-    replication_masks: &ReplicationMasks,
+    replication_masks: &ReplicationMasksCache,
     shutdown_rx: ShutdownRx,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -162,7 +160,7 @@ where
                         current_metadata.replication_mask,
                     );
                     destination.truncate_table(&replicated_table_schema).await?;
-                    
+
                     info!(%table_id, "truncated destination table before starting copy");
                 } else {
                     bail!(

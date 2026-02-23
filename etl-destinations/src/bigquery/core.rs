@@ -1,7 +1,14 @@
+use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use crate::bigquery::encoding::BigQueryTableRow;
+use crate::bigquery::metrics::register_metrics;
+use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
+#[cfg(feature = "egress")]
+use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus};
 use etl::store::schema::SchemaStore;
-use etl::store::state::{DestinationTableMetadata, DestinationTableSchemaStatus, StateStore};
+use etl::store::state::StateStore;
 use etl::types::{
     Cell, Event, PipelineId, ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow,
     generate_sequence_number,
@@ -16,13 +23,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
-
-use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
-use crate::bigquery::encoding::BigQueryTableRow;
-use crate::bigquery::metrics::register_metrics;
-use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
-#[cfg(feature = "egress")]
-use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
@@ -793,13 +793,8 @@ where
                 .await?;
         }
 
-        // Release all connections in the pool after DDL operations.
-        // BigQuery's Storage Write API may cache stale schema information in existing connections,
-        // so we clear them to force fresh connections with updated schema metadata.
-        self.client.release_all_connections().await;
-
         info!(
-            "schema changes applied successfully to table {}, connection pool cleared",
+            "schema changes applied successfully to table {}",
             bigquery_table_id
         );
 
