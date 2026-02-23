@@ -210,7 +210,7 @@ where
 
             // We store the table schema in the schema store to be able to retrieve it even when the
             // pipeline is restarted, since it's outside the lifecycle of the pipeline.
-            store.store_table_schema(table_schema.clone()).await?;
+            let table_schema = store.store_table_schema(table_schema).await?;
 
             let mut total_table_copy_rows = 0;
             let mut total_table_copy_duration_secs = 0.0;
@@ -223,7 +223,7 @@ where
                 let result = table_copy(
                     &transaction,
                     table_id,
-                    &table_schema,
+                    table_schema.clone(),
                     Some(&config.publication_name),
                     config.max_copy_connections_per_table,
                     config.batch.clone(),
