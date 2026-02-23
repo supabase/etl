@@ -8,7 +8,7 @@ Postgres to various destinations using the ETL pipeline.
 | Example | Binary | Destination |
 |---------|--------|-------------|
 | [BigQuery](#bigquery) | `etl-examples` | Google BigQuery (cloud data warehouse) |
-| [DuckDB](#duckdb) | `duckdb` | DuckDB (embedded local database) |
+| [DuckLake](#ducklake) | `ducklake` | DuckLake (open data lake format) |
 
 ---
 
@@ -39,11 +39,20 @@ ALTER USER my_user REPLICATION;
 
 ---
 
-## DuckDB
+## DuckLake
 
-Replicates a Postgres publication into a local **DuckDB** `.db` file. No cloud
-account or external service is required — DuckDB is compiled directly into the
-binary via the `bundled` feature.
+Replicates a Postgres publication into a **DuckLake** data lake.
+
+DuckLake separates storage into two components:
+
+| Component | Role | Example |
+|-----------|------|---------|
+| **Catalog** | Metadata (tables, snapshots, stats) | PostgreSQL database |
+| **Data** | Row data as Parquet files | Local directory or S3/GCS/Azure |
+
+The `ducklake` DuckDB extension (a core extension, autoloaded) handles reads
+and writes. Each batch of rows is committed as a single Parquet snapshot so
+the lake stays consistent and queryable at all times.
 
 ### How it works
 
@@ -51,30 +60,54 @@ binary via the `bundled` feature.
    table covered by the publication.
 2. It then streams real-time INSERT / UPDATE / DELETE changes using logical
    replication.
-3. Every Postgres table becomes a DuckDB table. The table name is derived from
-   the source schema and table name:
+3. Every Postgres table becomes a DuckLake table. The name is derived from the
+   source schema and table name:
 
-   | Postgres | DuckDB |
-   |----------|--------|
+   | Postgres | DuckLake |
+   |----------|----------|
    | `public.orders` | `public_orders` |
    | `my_schema.events` | `my__schema_events` |
 
+### Prerequisites
 
-### Run
+1. A **PostgreSQL database** to act as the DuckLake catalog — create one if
+   you don't have one already:
+   ```sql
+   CREATE DATABASE ducklake_catalog;
+   ```
+2. A **data directory** (local) or an object-storage bucket (S3/GCS/Azure)
+   where Parquet files will be written.
+
+### Run (local data)
 
 ```bash
-cargo run --bin duckdb -p etl-examples -- \
+cargo run --bin ducklake -p etl-examples -- \
     --db-host localhost \
     --db-port 5432 \
     --db-name mydb \
     --db-username postgres \
     --db-password mypassword \
-    --duckdb-path ./replication.db \
+    --catalog-url postgres://user:pass@localhost:5432/ducklake_catalog \
+    --data-path ./lake_data/ \
     --publication my_pub
 ```
 
-The database file is created automatically if it does not exist. The pipeline
-runs until you press **Ctrl+C**.
+### Run (S3 data)
+
+```bash
+cargo run --bin ducklake -p etl-examples -- \
+    --db-host localhost \
+    --db-port 5432 \
+    --db-name mydb \
+    --db-username postgres \
+    --db-password mypassword \
+    --catalog-url postgres://user:pass@localhost:5432/ducklake_catalog \
+    --data-path s3://my-bucket/lake/ \
+    --publication my_pub
+```
+
+When the `--data-path` starts with `s3://`, `gs://`, or `az://` the pipeline
+automatically loads the `httpfs` DuckDB extension for cloud storage access.
 
 ### All flags
 
@@ -85,36 +118,32 @@ runs until you press **Ctrl+C**.
 | `--db-name` | *(required)* | Postgres database name |
 | `--db-username` | *(required)* | Postgres user (must have REPLICATION) |
 | `--db-password` | — | Postgres password (omit for trust auth) |
-| `--duckdb-path` | *(required)* | Path to the DuckDB `.db` file |
-| `--duckdb-pool-size` | `4` | DuckDB connection pool size |
+| `--catalog-url` | *(required)* | PostgreSQL connection string for the DuckLake catalog |
+| `--data-path` | *(required)* | Local directory or cloud URI for Parquet files |
+| `--pool-size` | `4` | DuckDB connection pool size |
 | `--max-batch-fill-duration-ms` | `5000` | Max time to wait before flushing a batch |
 | `--max-table-sync-workers` | `4` | Concurrent workers during initial copy |
 | `--publication` | *(required)* | Postgres publication name |
 
 ### Query the replicated data
 
-Once the pipeline is running you can open the `.db` file at any time with the
-DuckDB CLI (install with `brew install duckdb` on macOS):
+Use the DuckDB CLI (install with `brew install duckdb` on macOS) to query the
+lake at any time — even while the pipeline is running:
 
 ```bash
-duckdb ./replication.db
-```
-
-```sql
--- List replicated tables
-SHOW TABLES;
-
--- Query a replicated table
-SELECT * FROM public_orders;
-
--- Count rows per table
-SELECT COUNT(*) FROM public_orders;
+duckdb :memory: -c "
+  INSTALL ducklake; LOAD ducklake;
+  ATTACH 'ducklake:postgres://user:pass@localhost:5432/ducklake_catalog'
+    AS lake (DATA_PATH './lake_data/');
+  SELECT * FROM lake.public_orders;
+  SELECT COUNT(*) FROM lake.public_customers;
+"
 ```
 
 ### Verbose logging
 
 ```bash
-RUST_LOG=debug cargo run --bin duckdb -p etl-examples -- [flags]
+RUST_LOG=debug cargo run --bin ducklake -p etl-examples -- [flags]
 ```
 
 ---
