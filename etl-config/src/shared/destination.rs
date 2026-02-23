@@ -46,6 +46,45 @@ pub enum DestinationConfig {
         #[serde(flatten)]
         config: IcebergConfig,
     },
+    Realtime {
+        /// WebSocket URL, e.g. wss://project.supabase.co/realtime/v1/websocket
+        url: String,
+        /// API key (anon key) for authenticating with Realtime.
+        api_key: SecretString,
+        /// Channel topic prefix. Channels are named `<prefix>:<schema>.<table>`.
+        /// Defaults to `"etl"`.
+        #[serde(default = "default_channel_prefix")]
+        channel_prefix: String,
+        /// Whether to use private channels (prefixes topic with `"private:"`).
+        /// Defaults to `false`.
+        #[serde(default)]
+        private_channels: bool,
+        /// Broadcast event name for INSERT operations. Defaults to `"insert"`.
+        #[serde(default = "default_insert_event")]
+        insert_event: String,
+        /// Broadcast event name for UPDATE operations. Defaults to `"update"`.
+        #[serde(default = "default_update_event")]
+        update_event: String,
+        /// Broadcast event name for DELETE operations. Defaults to `"delete"`.
+        #[serde(default = "default_delete_event")]
+        delete_event: String,
+    },
+}
+
+fn default_channel_prefix() -> String {
+    "etl".to_string()
+}
+
+fn default_insert_event() -> String {
+    "insert".to_string()
+}
+
+fn default_update_event() -> String {
+    "update".to_string()
+}
+
+fn default_delete_event() -> String {
+    "delete".to_string()
 }
 
 impl DestinationConfig {
@@ -199,6 +238,14 @@ pub enum DestinationConfigWithoutSecrets {
         #[serde(flatten)]
         config: IcebergConfigWithoutSecrets,
     },
+    Realtime {
+        url: String,
+        channel_prefix: String,
+        private_channels: bool,
+        insert_event: String,
+        update_event: String,
+        delete_event: String,
+    },
 }
 
 impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
@@ -218,6 +265,22 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
             },
             DestinationConfig::Iceberg { config } => DestinationConfigWithoutSecrets::Iceberg {
                 config: config.into(),
+            },
+            DestinationConfig::Realtime {
+                url,
+                api_key: _,
+                channel_prefix,
+                private_channels,
+                insert_event,
+                update_event,
+                delete_event,
+            } => DestinationConfigWithoutSecrets::Realtime {
+                url,
+                channel_prefix,
+                private_channels,
+                insert_event,
+                update_event,
+                delete_event,
             },
         }
     }
