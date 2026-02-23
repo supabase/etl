@@ -195,9 +195,9 @@ where
             }
 
             if !was_paused && *this.paused_for_memory {
-                info!("backpressure active, try batch stream paused");
+                info!("backpressure active, batch stream paused");
             } else if was_paused && !*this.paused_for_memory {
-                info!("backpressure released, try batch stream resumed");
+                info!("backpressure released, batch stream resumed");
             }
 
             if *this.paused_for_memory {
@@ -205,7 +205,7 @@ where
                     info!(
                         buffered_items = this.items.len(),
                         buffered_bytes = *this.current_batch_bytes,
-                        "backpressure active, flushing buffered try batch"
+                        "backpressure active, flushing buffered batch"
                     );
                     *this.reset_timer = true;
                     *this.current_batch_bytes = 0;
