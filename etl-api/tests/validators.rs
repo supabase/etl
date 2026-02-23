@@ -9,6 +9,7 @@ use etl_config::shared::BatchConfig;
 use etl_config::{Environment, SerializableSecretString};
 use etl_destinations::bigquery::test_utils::{
     setup_bigquery_database, setup_bigquery_database_without_dataset,
+    skip_if_missing_bigquery_env_vars,
 };
 use etl_destinations::iceberg::test_utils::{
     LAKEKEEPER_URL, LakekeeperClient, MINIO_PASSWORD, MINIO_URL, MINIO_USERNAME,
@@ -113,6 +114,10 @@ async fn validate_iceberg_connection_failure() {
 
 #[tokio::test]
 async fn validate_bigquery_connection_success() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     let db = setup_bigquery_database().await;
 
     let ctx = create_validation_context();
@@ -125,6 +130,10 @@ async fn validate_bigquery_connection_success() {
 
 #[tokio::test]
 async fn validate_bigquery_dataset_not_found() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     let db = setup_bigquery_database_without_dataset().await;
 
     let ctx = create_validation_context();
@@ -139,6 +148,10 @@ async fn validate_bigquery_dataset_not_found() {
 
 #[tokio::test]
 async fn validate_bigquery_invalid_credentials() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     let ctx = create_validation_context();
     let config = create_bigquery_config("fake-project", "fake-dataset", "{}");
     let failures = validate_destination(&ctx, &config).await.unwrap();

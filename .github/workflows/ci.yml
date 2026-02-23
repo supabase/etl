@@ -112,17 +112,6 @@ jobs:
             --workspace \
             --all-features \
             --no-fail-fast \
-            --exclude etl-destinations \
-            -- \
-            --skip validate_bigquery_connection_success \
-            --skip validate_bigquery_dataset_not_found \
-            --skip validate_bigquery_invalid_credentials \
-          && \
-          cargo test \
-            -p etl-destinations \
-            --no-default-features \
-            --no-fail-fast \
-            --features iceberg
 
       - name: Run Exclusive Tests Sequentially
         run: |
