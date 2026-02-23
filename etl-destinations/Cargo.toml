@@ -31,6 +31,13 @@ iceberg = [
     "dep:serde",
     "dep:serde_json",
 ]
+clickhouse = [
+    "dep:clickhouse",
+    "dep:metrics",
+    "dep:tracing",
+    "dep:tokio",
+    "dep:serde",
+]
 egress = ["etl/egress"]
 # We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only
 # put here the extra dependencies needed.
@@ -43,6 +50,10 @@ arrow = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 chrono = { workspace = true }
+clickhouse = { workspace = true, optional = true, features = [
+    "inserter",
+    "rustls-tls",
+] }
 gcp-bigquery-client = { workspace = true, optional = true, features = [
     "rust-tls",
     "aws-lc-rs",
