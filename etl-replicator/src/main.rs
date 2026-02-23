@@ -36,22 +36,24 @@ pub static malloc_conf: &[u8] =
 
 use crate::config::load_replicator_config;
 use crate::core::start_replicator_with_config;
+use crate::error::{ReplicatorError, ReplicatorResult};
 use crate::notification::ErrorNotificationClient;
-use etl::error::EtlError;
-use etl_config::Environment;
 use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
 use secrecy::ExposeSecret;
-use std::sync::{Arc, Once};
+use std::process::ExitCode;
+use std::sync::Once;
 use tracing::{error, info, warn};
 
 mod config;
 mod core;
+mod error;
 mod feature_flags;
 #[cfg(not(target_env = "msvc"))]
 mod jemalloc_metrics;
 mod notification;
+mod sentry;
 
 /// The name of the environment variable which contains version information for this replicator.
 const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
@@ -78,7 +80,18 @@ fn install_crypto_provider() {
 /// Loads configuration, initializes tracing and Sentry, starts the async runtime,
 /// and launches the replicator pipeline. Handles all errors and ensures proper
 /// service initialization sequence.
-fn main() -> anyhow::Result<()> {
+fn main() -> ExitCode {
+    match try_main() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("{}", err.render_report());
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Runs the replicator service and propagates typed errors.
+fn try_main() -> ReplicatorResult<()> {
     // Install rustls crypto provider before any TLS operations
     install_crypto_provider();
 
@@ -90,13 +103,14 @@ fn main() -> anyhow::Result<()> {
         env!("CARGO_BIN_NAME"),
         replicator_config.project_ref(),
         Some(replicator_config.pipeline.id),
-    )?;
+    )
+    .map_err(ReplicatorError::config)?;
 
     // Initialize Sentry before the async runtime starts
-    let _sentry_guard = init_sentry()?;
+    let _sentry_guard = sentry::init()?;
 
     // Initialize metrics collection
-    init_metrics(replicator_config.project_ref())?;
+    init_metrics(replicator_config.project_ref()).map_err(ReplicatorError::config)?;
 
     // We start the runtime.
     tokio::runtime::Builder::new_multi_thread()
@@ -111,7 +125,7 @@ fn main() -> anyhow::Result<()> {
 ///
 /// Launches the replicator with the provided configuration and captures any errors
 /// to Sentry and optionally sends notifications to the Supabase API.
-async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
+async fn async_main(replicator_config: ReplicatorConfig) -> ReplicatorResult<()> {
     // Start the jemalloc metrics collection background task.
     #[cfg(not(target_env = "msvc"))]
     jemalloc_metrics::spawn_jemalloc_metrics_task(replicator_config.pipeline.id);
@@ -150,66 +164,26 @@ async fn async_main(replicator_config: ReplicatorConfig) -> anyhow::Result<()> {
 
     // We start the replicator and catch any errors.
     if let Err(err) = start_replicator_with_config(replicator_config).await {
-        sentry::capture_error(&*err);
-        error!(%err, "an error occurred in the replicator");
+        sentry::capture_error(&err);
+        error!("{err}");
 
         // Send an error notification if a client is available.
         if let Some(client) = notification_client {
             let error_message = format!("{err}");
-            match err.downcast_ref::<EtlError>() {
-                Some(err) => {
-                    client.notify_error(error_message.clone(), err).await;
+            match &err {
+                ReplicatorError::Etl(etl_err) => {
+                    client.notify_error(error_message.clone(), etl_err).await;
                 }
-                None => {
+                _ => {
                     client
                         .notify_error(error_message.clone(), error_message)
                         .await;
                 }
-            };
+            }
         }
 
         return Err(err);
     }
 
     Ok(())
-}
-
-/// Initializes Sentry with replicator-specific configuration.
-///
-/// Loads configuration and sets up Sentry if a DSN is provided in the config.
-/// Tags all errors with the "replicator" service identifier and configures
-/// panic handling to automatically capture and send panics to Sentry.
-fn init_sentry() -> anyhow::Result<Option<sentry::ClientInitGuard>> {
-    if let Ok(config) = load_replicator_config()
-        && let Some(sentry_config) = &config.sentry
-    {
-        info!("initializing sentry with supplied dsn");
-
-        let environment = Environment::load()?;
-        let guard = sentry::init(sentry::ClientOptions {
-            dsn: Some(sentry_config.dsn.expose_secret().parse()?),
-            environment: Some(environment.to_string().into()),
-            integrations: vec![Arc::new(
-                sentry::integrations::panic::PanicIntegration::new(),
-            )],
-            ..Default::default()
-        });
-
-        // We load the version of the replicator which is specified via environment variable.
-        let version = std::env::var(APP_VERSION_ENV_NAME);
-
-        // Set service tag to differentiate replicator from other services
-        sentry::configure_scope(|scope| {
-            scope.set_tag("service", "replicator");
-            if let Ok(version) = version {
-                scope.set_tag("version", version);
-            }
-        });
-
-        return Ok(Some(guard));
-    }
-
-    info!("sentry not configured for replicator, skipping initialization");
-
-    Ok(None)
 }

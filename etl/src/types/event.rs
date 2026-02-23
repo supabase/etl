@@ -1,8 +1,9 @@
 use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use std::fmt;
+use std::mem::size_of;
 use tokio_postgres::types::PgLsn;
 
-use crate::types::TableRow;
+use crate::types::{SizeHint, TableRow};
 
 /// Transaction begin event from Postgres logical replication.
 ///
@@ -44,7 +45,8 @@ pub struct CommitEvent {
 ///
 /// [`InsertEvent`] represents a new row being added to a table. It contains
 /// the complete row data for insertion into the destination system.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct InsertEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
@@ -61,7 +63,8 @@ pub struct InsertEvent {
 /// [`UpdateEvent`] represents an existing row being modified. It contains
 /// both the new row data and optionally the old row data for comparison
 /// and conflict resolution in the destination system.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct UpdateEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
@@ -83,7 +86,8 @@ pub struct UpdateEvent {
 ///
 /// [`DeleteEvent`] represents a row being removed from a table. It contains
 /// information about the deleted row for proper cleanup in the destination system.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct DeleteEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
@@ -104,7 +108,8 @@ pub struct DeleteEvent {
 /// [`TruncateEvent`] represents one or more tables being truncated (all rows deleted).
 /// This is a bulk operation that clears entire tables and may affect multiple tables
 /// in a single operation when using cascading truncates.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct TruncateEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
@@ -122,7 +127,8 @@ pub struct TruncateEvent {
 /// It is emitted when a RELATION message is received, containing the current
 /// replication mask for the table. This event notifies downstream consumers
 /// about which columns are being replicated for a table.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct RelationEvent {
     /// LSN position where the event started.
     pub start_lsn: PgLsn,
@@ -137,7 +143,8 @@ pub struct RelationEvent {
 /// [`Event`] encapsulates all possible events that can occur in a Postgres replication
 /// stream, including data modification events and transaction control events. Each event
 /// type corresponds to specific operations in the source database.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum Event {
     /// Transaction begin event marking the start of a new transaction.
     Begin(BeginEvent),
@@ -179,6 +186,37 @@ impl Event {
             Event::Truncate(e) => e.truncated_tables.iter().any(|s| s.id() == *table_id),
             Event::Relation(e) => e.replicated_table_schema.id() == *table_id,
             _ => false,
+        }
+    }
+}
+
+impl SizeHint for Event {
+    fn size_hint(&self) -> usize {
+        match self {
+            Self::Begin(_) => size_of::<BeginEvent>(),
+            Self::Commit(_) => size_of::<CommitEvent>(),
+            Self::Insert(event) => size_of::<InsertEvent>() + event.table_row.size_hint(),
+            Self::Update(event) => {
+                let old_row_size = event
+                    .old_table_row
+                    .as_ref()
+                    .map(|(_, row)| row.size_hint())
+                    .unwrap_or_default();
+                size_of::<UpdateEvent>() + event.table_row.size_hint() + old_row_size
+            }
+            Self::Delete(event) => {
+                let old_row_size = event
+                    .old_table_row
+                    .as_ref()
+                    .map(|(_, row)| row.size_hint())
+                    .unwrap_or_default();
+                size_of::<DeleteEvent>() + old_row_size
+            }
+            Self::Truncate(event) => {
+                size_of::<TruncateEvent>() + event.truncated_tables.len() * size_of::<u64>()
+            }
+            Self::Relation(_) => size_of::<RelationEvent>(),
+            Self::Unsupported => 0,
         }
     }
 }

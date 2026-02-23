@@ -6,11 +6,13 @@
 mod cell;
 mod event;
 mod pipeline;
+mod sized;
 mod table_row;
 
 pub use cell::*;
 pub use event::*;
 pub use pipeline::*;
+pub use sized::*;
 pub use table_row::*;
 
 pub use crate::conversions::numeric::{PgNumeric, Sign};

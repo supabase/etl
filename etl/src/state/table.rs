@@ -5,6 +5,7 @@ use std::fmt;
 use tokio_postgres::types::PgLsn;
 
 use crate::error::{ErrorKind, EtlError};
+use crate::workers::policy::ErrorHandlingPolicy;
 
 /// Represents an error that occurred during table replication.
 ///
@@ -94,7 +95,7 @@ impl TableReplicationError {
             }
 
             // Errors with manual retry and explicit solution
-            ErrorKind::AuthenticationError => Self::with_solution(
+            ErrorKind::SourceAuthenticationError => Self::with_solution(
                 table_id,
                 error,
                 "Verify database credentials and authentication token validity.",
@@ -188,6 +189,19 @@ impl TableReplicationError {
                 "There is no explicit solution for this error, if the issue persists after rollback, please contact support.",
                 RetryPolicy::ManualRetry,
             ),
+        }
+    }
+
+    /// Builds a [`TableReplicationError`] from a shared handling policy and worker retry policy.
+    pub fn from_error_policy(
+        table_id: TableId,
+        error: &EtlError,
+        policy: &ErrorHandlingPolicy,
+        retry_policy: RetryPolicy,
+    ) -> Self {
+        match policy.solution() {
+            Some(solution) => Self::with_solution(table_id, error, solution, retry_policy),
+            None => Self::without_solution(table_id, error, retry_policy),
         }
     }
 }

@@ -4,6 +4,7 @@
 //! with destination systems. Manages worker lifecycles, shutdown coordination, and error handling.
 
 use crate::bail;
+use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
@@ -133,6 +134,14 @@ where
                 )
             })?;
 
+        // We always start memory monitoring to keep total memory snapshots available.
+        let memory_monitor = MemoryMonitor::new(
+            self.config.id,
+            self.shutdown_tx.subscribe(),
+            self.config.memory_backpressure.clone(),
+            self.config.memory_refresh_interval_ms,
+        );
+
         // We create the first connection to Postgres.
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
@@ -165,13 +174,13 @@ where
         let apply_worker = ApplyWorker::new(
             self.config.id,
             self.config.clone(),
-            replication_client,
             pool.clone(),
             self.store.clone(),
             self.destination.clone(),
             replication_masks,
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
+            memory_monitor,
         )
         .spawn()
         .await?;

@@ -32,6 +32,32 @@ pub const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
 /// Environment variable name for the BigQuery service account key path.
 pub const BIGQUERY_SA_KEY_PATH_ENV: &str = "TESTS_BIGQUERY_SA_KEY_PATH";
 
+/// Returns whether BigQuery integration tests should be skipped.
+///
+/// Prints a warning and returns `true` when credentials are unavailable.
+pub fn skip_if_missing_bigquery_env_vars() -> bool {
+    let has_sa_key_path = std::env::var_os(BIGQUERY_SA_KEY_PATH_ENV).is_some();
+    let has_project_id = std::env::var_os(BIGQUERY_PROJECT_ID_ENV).is_some();
+    if has_sa_key_path && has_project_id {
+        return false;
+    }
+
+    let mut missing_env_vars = Vec::new();
+    if !has_sa_key_path {
+        missing_env_vars.push(BIGQUERY_SA_KEY_PATH_ENV);
+    }
+    if !has_project_id {
+        missing_env_vars.push(BIGQUERY_PROJECT_ID_ENV);
+    }
+
+    eprintln!(
+        "skipping bigquery integration test: missing {}",
+        missing_env_vars.join(", ")
+    );
+
+    true
+}
+
 /// Returns the BigQuery project ID from the environment.
 ///
 /// # Panics

@@ -1,6 +1,5 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
-use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::failpoints::{
     SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
@@ -9,6 +8,7 @@ use etl::failpoints::{
 use etl::state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType};
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
+use etl::test_utils::memory_destination::MemoryDestination;
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{create_database_and_pipeline_with_table, create_pipeline};
 use etl::test_utils::schema::{
@@ -787,7 +787,7 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
             .iter()
             .filter_map(|event| {
                 if let Event::Insert(InsertEvent { table_row, .. }) = event {
-                    Some(table_row.values.len())
+                    Some(table_row.values().len())
                 } else {
                     None
                 }

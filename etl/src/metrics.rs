@@ -10,12 +10,22 @@ pub const ETL_TRANSACTION_DURATION_SECONDS: &str = "etl_transaction_duration_sec
 pub const ETL_TRANSACTIONS_TOTAL: &str = "etl_transactions_total";
 pub const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
+pub const ETL_TABLE_COPY_ROWS: &str = "etl_table_copy_rows";
+pub const ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE: &str = "etl_parallel_table_copy_time_imbalance";
+pub const ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE: &str = "etl_parallel_table_copy_rows_imbalance";
 pub const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
 pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
 pub const ETL_ROW_SIZE_BYTES: &str = "etl_row_size_bytes";
 pub const ETL_SLOT_INVALIDATIONS_TOTAL: &str = "etl_slot_invalidations_total";
+pub const ETL_WORKER_ERRORS_TOTAL: &str = "etl_worker_errors_total";
+pub const ETL_MEMORY_BACKPRESSURE_ACTIVE: &str = "etl_memory_backpressure_active";
+pub const ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL: &str =
+    "etl_memory_backpressure_transitions_total";
+pub const ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS: &str =
+    "etl_memory_backpressure_activation_duration_seconds";
+pub const ETL_IDEAL_BATCH_SIZE_BYTES: &str = "etl_ideal_batch_size_bytes";
 
 /// Label key for replication phase (used by table state metrics).
 pub const PHASE_LABEL: &str = "phase";
@@ -27,12 +37,18 @@ pub const ACTION_LABEL: &str = "action";
 pub const DESTINATION_LABEL: &str = "destination";
 /// Label key for pipeline id.
 pub const PIPELINE_ID_LABEL: &str = "pipeline_id";
+/// Label to tag the table copy metric if it was using partitioning.
+pub const PARTITIONING_LABEL: &str = "partitioning";
 /// Label key for event type (copy, insert, update, delete).
 pub const EVENT_TYPE_LABEL: &str = "event_type";
 /// Label key for whether the status update was forced.
 pub const FORCED_LABEL: &str = "forced";
 /// Label key for the status update type.
 pub const STATUS_UPDATE_TYPE_LABEL: &str = "status_update_type";
+/// Label key for worker error classification ("timed", "manual", "no_retry").
+pub const ERROR_TYPE_LABEL: &str = "error_type";
+/// Label key for transition direction ("activate" or "resume").
+pub const DIRECTION_LABEL: &str = "direction";
 
 /// Register metrics emitted by etl. This should be called before starting a pipeline.
 /// It is safe to call this method multiple times. It is guaranteed to register the
@@ -75,6 +91,22 @@ pub(crate) fn register_metrics() {
             "Duration in seconds to complete initial table copy from DataSync to FinishedCopy phase"
         );
 
+        describe_histogram!(
+            ETL_TABLE_COPY_ROWS,
+            Unit::Count,
+            "Number of rows copied per table copy partition, labeled by pipeline_id, destination, and partitioning"
+        );
+
+        describe_histogram!(
+            ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
+            "Load Imbalance Factor for parallel table copy duration (max_time / avg_time), labeled by pipeline_id and destination. Value of 1.0 indicates perfect balance, higher values indicate more imbalance."
+        );
+
+        describe_histogram!(
+            ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
+            "Load Imbalance Factor for parallel table copy row distribution (max_rows / avg_rows), labeled by pipeline_id and destination. Value of 1.0 indicates perfect balance, higher values indicate more imbalance."
+        );
+
         describe_counter!(
             ETL_EVENTS_PROCESSED_TOTAL,
             Unit::Count,
@@ -109,6 +141,36 @@ pub(crate) fn register_metrics() {
             ETL_SLOT_INVALIDATIONS_TOTAL,
             Unit::Count,
             "Total number of times a replication slot was found invalidated on pipeline start, labeled by pipeline_id"
+        );
+
+        describe_counter!(
+            ETL_WORKER_ERRORS_TOTAL,
+            Unit::Count,
+            "Total number of worker errors, labeled by pipeline_id, worker_type, and error_type"
+        );
+
+        describe_gauge!(
+            ETL_MEMORY_BACKPRESSURE_ACTIVE,
+            Unit::Count,
+            "Memory backpressure current state (0 or 1), labeled by pipeline_id"
+        );
+
+        describe_counter!(
+            ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
+            Unit::Count,
+            "Total memory backpressure state transitions, labeled by pipeline_id and direction"
+        );
+
+        describe_histogram!(
+            ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
+            Unit::Seconds,
+            "Duration in seconds of each memory backpressure active period, labeled by pipeline_id"
+        );
+
+        describe_gauge!(
+            ETL_IDEAL_BATCH_SIZE_BYTES,
+            Unit::Bytes,
+            "Current ideal batch size in bytes, labeled by pipeline_id"
         );
     });
 }

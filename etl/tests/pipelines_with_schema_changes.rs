@@ -2,10 +2,10 @@
 
 use std::time::Duration;
 
-use etl::destination::memory::MemoryDestination;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
+use etl::test_utils::memory_destination::MemoryDestination;
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{create_database_and_pipeline_with_table, create_pipeline};
 use etl::test_utils::schema::{
@@ -102,7 +102,7 @@ async fn relation_message_updates_when_column_added() {
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
-    assert_eq!(i.table_row.values.len(), 4);
+    assert_eq!(i.table_row.values().len(), 4);
 
     // Verify schema snapshots are stored in order.
     let table_schemas = store.get_table_schemas().await;
@@ -185,7 +185,7 @@ async fn relation_message_updates_when_column_removed() {
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
-    assert_eq!(i.table_row.values.len(), 2);
+    assert_eq!(i.table_row.values().len(), 2);
 
     // Verify schema snapshots are stored in order.
     let table_schemas = store.get_table_schemas().await;
@@ -270,7 +270,7 @@ async fn relation_message_updates_when_column_renamed() {
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
-    assert_eq!(i.table_row.values.len(), 3);
+    assert_eq!(i.table_row.values().len(), 3);
 
     // Verify schema snapshots are stored in order.
     let table_schemas = store.get_table_schemas().await;
@@ -359,7 +359,7 @@ async fn relation_message_updates_when_column_type_changes() {
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
-    assert_eq!(i.table_row.values.len(), 3);
+    assert_eq!(i.table_row.values().len(), 3);
 
     // Verify schema snapshots are stored in order.
     let table_schemas = store.get_table_schemas().await;
@@ -587,7 +587,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
-    assert_eq!(i.table_row.values.len(), 5);
+    assert_eq!(i.table_row.values().len(), 5);
 
     // Verify all schema snapshots are stored in order.
     // We have 7 snapshots:
@@ -807,7 +807,7 @@ async fn partitioned_table_schema_change_updates_relation_message() {
     let Event::Insert(i) = get_last_insert_event(&events, parent_table_id) else {
         panic!("expected insert event");
     };
-    assert_eq!(i.table_row.values.len(), 4);
+    assert_eq!(i.table_row.values().len(), 4);
 
     // Verify schema snapshots are stored in order.
     let table_schemas = state_store.get_table_schemas().await;

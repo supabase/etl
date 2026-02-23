@@ -1,10 +1,10 @@
 #![cfg(feature = "test-utils")]
 
-use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
+use etl::test_utils::memory_destination::MemoryDestination;
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
@@ -1203,16 +1203,65 @@ async fn nested_partitioned_table_copy_and_cdc() {
         .await
         .unwrap();
 
-    // Insert initial data into different partitions:
-    // - event_p1 goes to the simple leaf partition p1
-    // - event_p2_sub1 goes to nested partition p2 -> p2_sub1
-    // - event_p2_sub2 goes to nested partition p2 -> p2_sub2
+    // Create third partition that is itself partitioned (Level 2c).
+    let p3_name = format!("{}_{}", table_name.name, "p3");
+    let p3_qualified = format!("{}.{}", table_name.schema, p3_name);
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (200) to (300) partition by range (sub_partition_key)",
+            p3_qualified,
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Create sub-partitions of p3 (Level 3).
+    let p3_sub1_name = format!("{}_{}", p3_name, "sub1");
+    let p3_sub1_qualified = format!("{}.{}", table_name.schema, p3_sub1_name);
+    database
+        .run_sql(&format!(
+            "create table {p3_sub1_qualified} partition of {p3_qualified} for values from (1) to (50)"
+        ))
+        .await
+        .unwrap();
+
+    let p3_sub2_name = format!("{}_{}", p3_name, "sub2");
+    let p3_sub2_qualified = format!("{}.{}", table_name.schema, p3_sub2_name);
+    database
+        .run_sql(&format!(
+            "create table {p3_sub2_qualified} partition of {p3_qualified} for values from (50) to (100)"
+        ))
+        .await
+        .unwrap();
+
+    // Create fourth partition (simple leaf partition) (Level 2d).
+    let p4_name = format!("{}_{}", table_name.name, "p4");
+    let p4_qualified = format!("{}.{}", table_name.schema, p4_name);
+    database
+        .run_sql(&format!(
+            "create table {} partition of {} for values from (300) to (400)",
+            p4_qualified,
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Insert initial data into all 6 leaf partitions:
+    // - p1: partition_key=50
+    // - p2_sub1: partition_key=150, sub_partition_key=25
+    // - p2_sub2: partition_key=150, sub_partition_key=75
+    // - p3_sub1: partition_key=250, sub_partition_key=25
+    // - p3_sub2: partition_key=250, sub_partition_key=75
+    // - p4: partition_key=350
     database
         .run_sql(&format!(
             "insert into {} (data, partition_key, sub_partition_key) values
              ('event_p1', 50, 25),
              ('event_p2_sub1', 150, 25),
-             ('event_p2_sub2', 150, 75)",
+             ('event_p2_sub2', 150, 75),
+             ('event_p3_sub1', 250, 25),
+             ('event_p3_sub2', 250, 75),
+             ('event_p4', 350, 25)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1284,10 +1333,10 @@ async fn nested_partitioned_table_copy_and_cdc() {
     assert!(!sub_partition_key_column.nullable);
     assert!(sub_partition_key_column.primary_key());
 
-    // Verify initial COPY replicated all 3 rows.
+    // Verify initial COPY replicated all 6 rows (one per leaf partition).
     let table_rows = destination.get_table_rows().await;
     let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
-    assert_eq!(total_rows, 3);
+    assert_eq!(total_rows, 6);
 
     // Verify only the parent table is tracked (not intermediate or leaf partitions).
     let table_states = state_store.get_table_replication_states().await;
@@ -1300,11 +1349,11 @@ async fn nested_partitioned_table_copy_and_cdc() {
         .filter(|(table_id, _)| **table_id == parent_table_id)
         .map(|(_, rows)| rows.len())
         .sum::<usize>();
-    assert_eq!(parent_table_rows, 3);
+    assert_eq!(parent_table_rows, 6);
 
-    // Insert new rows into different nested partitions.
+    // Insert new rows into all 6 leaf partitions via CDC.
     let inserts_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 3)])
+        .wait_for_events_count(vec![(EventType::Insert, 6)])
         .await;
 
     database
@@ -1312,7 +1361,10 @@ async fn nested_partitioned_table_copy_and_cdc() {
             "insert into {} (data, partition_key, sub_partition_key) values
              ('new_event_p1', 75, 30),
              ('new_event_p2_sub1', 125, 40),
-             ('new_event_p2_sub2', 175, 60)",
+             ('new_event_p2_sub2', 175, 60),
+             ('new_event_p3_sub1', 225, 40),
+             ('new_event_p3_sub2', 275, 60),
+             ('new_event_p4', 350, 30)",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1322,14 +1374,14 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     let _ = pipeline.shutdown_and_wait().await;
 
-    // Verify that events were captured for all nested partitions.
+    // Verify that CDC events were captured for all 6 leaf partitions.
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
     let parent_inserts = grouped
         .get(&(EventType::Insert, parent_table_id))
         .cloned()
         .unwrap_or_default();
-    assert_eq!(parent_inserts.len(), 3);
+    assert_eq!(parent_inserts.len(), 6);
 }
 
 /// Tests that the pipeline throws an error during startup when `publish_via_partition_root`

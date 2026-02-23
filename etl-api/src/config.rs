@@ -19,6 +19,9 @@ pub struct ApiConfig {
     pub database: PgConnectionConfig,
     /// Application server settings.
     pub application: ApplicationSettings,
+    /// Source database configuration and validation settings.
+    #[serde(default)]
+    pub source: SourceConfig,
     /// Encryption key configuration.
     pub encryption_key: EncryptionKey,
     /// List of base64-encoded API keys.
@@ -38,18 +41,41 @@ pub struct ApiConfig {
     /// If provided, enables ConfigCat feature flag evaluation.
     /// If `None`, the API operates without feature flag support.
     pub configcat_sdk_key: Option<String>,
+}
+
+/// Configuration for source database connections and behavior.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SourceConfig {
     /// Whether TLS is enabled for source database connections.
     ///
     /// When `true`, the API fetches trusted root certificates from Kubernetes
     /// and uses them to establish TLS connections to source databases. This
     /// applies both to direct API connections (e.g., listing tables, managing
     /// publications) and to replicator pods deployed in Kubernetes.
-    /// Defaults to `true` for production environments.
+    ///
+    /// Defaults to `true`.
     #[serde(default = "default_source_tls_enabled")]
-    pub source_tls_enabled: bool,
+    pub tls_enabled: bool,
+    /// Optional trusted username for validation.
+    ///
+    /// When provided, source validation will check that the connected database
+    /// username matches this value. This is useful in production environments
+    /// where a standard username is used with pre-configured permissions.
+    ///
+    /// If `None`, username validation is skipped.
+    pub trusted_username: Option<String>,
 }
 
-fn default_source_tls_enabled() -> bool {
+impl Default for SourceConfig {
+    fn default() -> Self {
+        Self {
+            tls_enabled: default_source_tls_enabled(),
+            trusted_username: None,
+        }
+    }
+}
+
+const fn default_source_tls_enabled() -> bool {
     true
 }
 

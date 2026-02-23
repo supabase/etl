@@ -1,10 +1,10 @@
 #![cfg(feature = "test-utils")]
 
-use etl::destination::memory::MemoryDestination;
 use etl::error::ErrorKind;
 use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::{EventCondition, group_events_by_type_and_table_id};
+use etl::test_utils::memory_destination::MemoryDestination;
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{
     PipelineBuilder, create_pipeline, create_pipeline_with_batch_config,
@@ -21,7 +21,7 @@ use etl::types::{Event, EventType, InsertEvent, PipelineId, Type};
 use etl_config::shared::{BatchConfig, InvalidatedSlotBehavior, TableSyncCopyConfig};
 use etl_postgres::below_version;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::tokio::test_utils::{ReplicationSlotState, id_column_schema};
+use etl_postgres::tokio::test_utils::{ReplicationSlotState, TableModification, id_column_schema};
 use etl_postgres::types::{ColumnSchema, TableId};
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
@@ -348,6 +348,147 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
     assert_eq!(slot_state, Some(ReplicationSlotState::Active));
 
     pipeline.shutdown_and_wait().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_replicates_many_rows_with_parallel_connections() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+
+    // Create a table with a primary key and a value column.
+    let table_name = test_table_name("large_table");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+
+    // Create a publication for the table.
+    let publication_name = format!("pub_{}", random::<u32>());
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    // Insert 100k rows using generate_series.
+    let total_rows: i64 = 100000;
+    let rows_affected = database
+        .insert_generate_series(table_name.clone(), &["value"], 1, total_rows, 1)
+        .await
+        .unwrap();
+    assert_eq!(rows_affected, total_rows as u64);
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    // Create a pipeline with many parallel copy connections.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    )
+    .with_max_copy_connections_per_table(100)
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
+    })
+    .build();
+
+    // Wait for the table to be ready.
+    let table_ready_notify = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify that all 100k rows were copied.
+    let table_rows = destination.get_table_rows().await;
+    let copied_rows = table_rows.get(&table_id).map(|r| r.len()).unwrap_or(0);
+    assert_eq!(copied_rows, total_rows as usize);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_with_row_filter_and_parallel_connections() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+
+    // Row filters in publications are only available from Postgres 15+.
+    if below_version!(database.server_version(), POSTGRES_15) {
+        eprintln!("Skipping test: PostgreSQL 15+ required for row filters");
+        return;
+    }
+
+    // Create a table with a primary key and an age column.
+    let table_name = test_table_name("filtered_table");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("age", "int4 not null")])
+        .await
+        .unwrap();
+
+    // Create a publication with a row filter (age >= 18).
+    let publication_name = format!("pub_{}", random::<u32>());
+    database
+        .run_sql(&format!(
+            "create publication {} for table {} where (age >= 18)",
+            publication_name,
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // Insert 10000 rows: age 1..=10000.
+    let total_rows: i64 = 10000;
+    let rows_affected = database
+        .insert_generate_series(table_name.clone(), &["age"], 1, total_rows, 1)
+        .await
+        .unwrap();
+    assert_eq!(rows_affected, total_rows as u64);
+
+    // Only rows with age >= 18 should be replicated (18..=10000 = 9983 rows).
+    let expected_rows = (total_rows - 18 + 1) as usize;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    // Create a pipeline with parallel copy connections.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    )
+    .with_max_copy_connections_per_table(100)
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
+    })
+    .build();
+
+    // Wait for the table to be ready.
+    let table_ready_notify = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    table_ready_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify that only rows matching the filter were copied.
+    let table_rows = destination.get_table_rows().await;
+    let copied_rows = table_rows.get(&table_id).map(|r| r.len()).unwrap_or(0);
+    assert_eq!(copied_rows, expected_rows);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1173,8 +1314,8 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
     // We set a batch of 1000 elements to check if after 1000ms we still get the batch which is <
     // 1000 elements.
     let batch_config = BatchConfig {
-        max_size: 1000,
         max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
     };
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
@@ -1258,8 +1399,8 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     // We set a batch of 1000 elements to still check that even with batching we are getting all the
     // data.
     let batch_config = BatchConfig {
-        max_size: 1000,
         max_fill_ms: 1000,
+        memory_budget_ratio: 0.2,
     };
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
@@ -1294,6 +1435,144 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
     let age_sum =
         get_users_age_sum_from_rows(&destination, database_schema.users_schema().id).await;
     assert_eq!(age_sum, expected_age_sum);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_processing_with_schema_change_errors_table() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::OrdersOnly).await;
+
+    // Insert data in the table.
+    database
+        .insert_values(
+            database_schema.orders_schema().name.clone(),
+            &["description"],
+            &[&"description_1"],
+        )
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    // Start pipeline from scratch.
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    // Register notifications for initial table copy completion.
+    let orders_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.orders_schema().id,
+            TableReplicationPhaseType::FinishedCopy,
+        )
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    orders_state_notify.notified().await;
+
+    // Register notification for the sync done state.
+    let orders_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.orders_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    // Insert new data in the table.
+    database
+        .insert_values(
+            database_schema.orders_schema().name.clone(),
+            &["description"],
+            &[&"description_2"],
+        )
+        .await
+        .unwrap();
+
+    orders_state_notify.notified().await;
+
+    // Register notification for the ready state.
+    let orders_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.orders_schema().id,
+            TableReplicationPhaseType::Ready,
+        )
+        .await;
+
+    // Insert new data in the table.
+    database
+        .insert_values(
+            database_schema.orders_schema().name.clone(),
+            &["description"],
+            &[&"description_3"],
+        )
+        .await
+        .unwrap();
+
+    orders_state_notify.notified().await;
+
+    // Register notification for the errored state.
+    let orders_state_notify = store
+        .notify_on_table_state_type(
+            database_schema.orders_schema().id,
+            TableReplicationPhaseType::Errored,
+        )
+        .await;
+
+    // Change the schema of orders by adding a new column.
+    database
+        .alter_table(
+            database_schema.orders_schema().name.clone(),
+            &[TableModification::AddColumn {
+                name: "date",
+                data_type: "integer",
+            }],
+        )
+        .await
+        .unwrap();
+
+    // Insert new data in the table.
+    database
+        .insert_values(
+            database_schema.orders_schema().name.clone(),
+            &["description", "date"],
+            &[&"description_with_date", &10],
+        )
+        .await
+        .unwrap();
+
+    orders_state_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // We assert that the schema is the initial one.
+    let table_schemas = store.get_table_schemas().await;
+    assert_eq!(table_schemas.len(), 1);
+    let orders_schemas = table_schemas
+        .get(&database_schema.orders_schema().id)
+        .unwrap();
+    assert_eq!(orders_schemas.last().unwrap().1, database_schema.orders_schema());
+
+    // We check that we got the insert events after the first data of the table has been copied.
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    let orders_inserts = grouped_events
+        .get(&(EventType::Insert, database_schema.orders_schema().id))
+        .unwrap();
+
+    let expected_orders_inserts = build_expected_orders_inserts(
+        2,
+        &database_schema.orders_schema(),
+        vec!["description_2", "description_3"],
+    );
+    assert_events_equal(orders_inserts, &expected_orders_inserts);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1481,7 +1760,7 @@ async fn pipeline_respects_column_level_publication() {
         }) = event
         {
             // Verify exactly 3 columns (id, name, age).
-            assert_eq!(table_row.values.len(), 3);
+            assert_eq!(table_row.values().len(), 3);
 
             // Get only the replicated column names from the schema
             let replicated_column_names: Vec<&str> = replicated_table_schema
@@ -1546,7 +1825,7 @@ async fn pipeline_respects_column_level_publication() {
         ..
     }) = &inserts[0]
     {
-        assert_eq!(table_row.values.len(), 4);
+        assert_eq!(table_row.values().len(), 4);
         let col_names: Vec<&str> = replicated_table_schema
             .column_schemas()
             .map(|c| c.name.as_str())
@@ -1630,7 +1909,7 @@ async fn pipeline_respects_column_level_publication() {
         ..
     }) = &inserts[0]
     {
-        assert_eq!(table_row.values.len(), 3);
+        assert_eq!(table_row.values().len(), 3);
         let col_names: Vec<&str> = replicated_table_schema
             .column_schemas()
             .map(|c| c.name.as_str())

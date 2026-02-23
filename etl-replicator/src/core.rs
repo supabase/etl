@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use etl::destination::memory::MemoryDestination;
+use crate::error::{ReplicatorError, ReplicatorResult};
 use etl::pipeline::Pipeline;
 use etl::store::both::postgres::PostgresStore;
 use etl::store::cleanup::CleanupStore;
@@ -26,11 +26,10 @@ use tracing::{debug, info, warn};
 /// Starts the replicator service with the provided configuration.
 ///
 /// Initializes the state store, creates the appropriate destination based on
-/// configuration, and starts the pipeline. Handles both memory and BigQuery
-/// destinations with proper initialization and error handling.
+/// configuration, and starts the pipeline.
 pub async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
-) -> anyhow::Result<()> {
+) -> ReplicatorResult<()> {
     info!("starting replicator service");
 
     log_config(&replicator_config);
@@ -45,12 +44,6 @@ pub async fn start_replicator_with_config(
     // For each destination, we start the pipeline. This is more verbose due to static dispatch, but
     // we prefer more performance at the cost of ergonomics.
     match &replicator_config.destination {
-        DestinationConfig::Memory => {
-            let destination = MemoryDestination::new(state_store.clone());
-
-            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
-            start_pipeline(pipeline).await?;
-        }
         DestinationConfig::BigQuery {
             project_id,
             dataset_id,
@@ -84,7 +77,7 @@ pub async fn start_replicator_with_config(
                     s3_region,
                 },
         } => {
-            let env = Environment::load()?;
+            let env = Environment::load().map_err(ReplicatorError::config)?;
             let client = IcebergClient::new_with_supabase_catalog(
                 project_ref,
                 env.get_supabase_domain(),
@@ -94,7 +87,8 @@ pub async fn start_replicator_with_config(
                 s3_secret_access_key.expose_secret().to_string(),
                 s3_region.clone(),
             )
-            .await?;
+            .await
+            .map_err(ReplicatorError::config)?;
             let namespace = match namespace {
                 Some(ns) => DestinationNamespace::Single(ns.to_string()),
                 None => DestinationNamespace::OnePerSchema,
@@ -124,7 +118,8 @@ pub async fn start_replicator_with_config(
                     s3_endpoint.clone(),
                 ),
             )
-            .await?;
+            .await
+            .map_err(ReplicatorError::config)?;
             let namespace = match namespace {
                 Some(ns) => DestinationNamespace::Single(ns.to_string()),
                 None => DestinationNamespace::OnePerSchema,
@@ -162,9 +157,6 @@ fn log_config(config: &ReplicatorConfig) {
 
 fn log_destination_config(config: &DestinationConfig) {
     match config {
-        DestinationConfig::Memory => {
-            debug!("using memory destination config");
-        }
         DestinationConfig::BigQuery {
             project_id,
             dataset_id,
@@ -244,8 +236,8 @@ fn log_pg_connection_config(config: &PgConnectionConfig) {
 
 fn log_batch_config(config: &BatchConfig) {
     debug!(
-        max_size = config.max_size,
         max_fill_ms = config.max_fill_ms,
+        memory_budget_ratio = config.memory_budget_ratio,
         "batch config"
     );
 }
@@ -267,7 +259,7 @@ fn init_store(
 /// and ensures proper cleanup on shutdown. The pipeline will attempt to
 /// finish processing current batches before terminating.
 #[tracing::instrument(skip(pipeline))]
-async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> anyhow::Result<()>
+async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> ReplicatorResult<()>
 where
     S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
@@ -312,7 +304,7 @@ where
     shutdown_handle.abort();
     let _ = shutdown_handle.await;
 
-    // Propagate any pipeline error as anyhow error.
+    // Propagate any pipeline error.
     result?;
 
     Ok(())

@@ -3,7 +3,7 @@
 use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use etl_config::SerializableSecretString;
-use etl_config::shared::{PgConnectionConfig, TlsConfig};
+use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
 use etl_postgres::replication::connect_to_source_database;
 use etl_postgres::sqlx::test_utils::create_pg_database;
 use secrecy::ExposeSecret;
@@ -30,7 +30,7 @@ pub fn get_test_db_config() -> PgConnectionConfig {
             .ok()
             .map(Into::into),
         tls: TlsConfig::disabled(),
-        keepalive: None,
+        keepalive: TcpKeepaliveConfig::default(),
     }
 }
 

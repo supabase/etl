@@ -11,7 +11,9 @@ use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with_batch_conf
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 use etl::types::{EventType, PgNumeric, PipelineId};
-use etl_destinations::bigquery::test_utils::{parse_bigquery_table_rows, setup_bigquery_database};
+use etl_destinations::bigquery::test_utils::{
+    parse_bigquery_table_rows, setup_bigquery_database, skip_if_missing_bigquery_env_vars,
+};
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
@@ -40,6 +42,10 @@ mod support;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_streaming_with_restart() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     init_test_tracing();
 
     install_crypto_provider();
@@ -186,6 +192,10 @@ async fn table_copy_and_streaming_with_restart() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_insert_update_delete() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     init_test_tracing();
     install_crypto_provider();
 
@@ -304,6 +314,10 @@ async fn table_insert_update_delete() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_subsequent_updates() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     init_test_tracing();
     install_crypto_provider();
 
@@ -394,6 +408,10 @@ async fn table_subsequent_updates() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_truncate_with_batching() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     init_test_tracing();
     install_crypto_provider();
 
@@ -425,8 +443,8 @@ async fn table_truncate_with_batching() {
         // We use a batch size > 1, so that we can make sure that interleaved truncate statements
         // work well with multiple batches of events.
         BatchConfig {
-            max_size: 10,
             max_fill_ms: 1000,
+            memory_budget_ratio: 0.2,
         },
     );
 
@@ -518,6 +536,10 @@ async fn table_truncate_with_batching() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_nullable_scalar_columns() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     init_test_tracing();
     install_crypto_provider();
 
@@ -729,6 +751,10 @@ async fn table_nullable_scalar_columns() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_nullable_array_columns() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     init_test_tracing();
     install_crypto_provider();
 
@@ -966,6 +992,10 @@ async fn table_nullable_array_columns() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_non_nullable_scalar_columns() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     init_test_tracing();
     install_crypto_provider();
 
@@ -1218,6 +1248,10 @@ async fn table_non_nullable_scalar_columns() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_non_nullable_array_columns() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     init_test_tracing();
     install_crypto_provider();
 
@@ -1526,6 +1560,10 @@ async fn table_non_nullable_array_columns() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_array_with_null_values() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     init_test_tracing();
     install_crypto_provider();
 
@@ -1680,6 +1718,10 @@ async fn table_array_with_null_values() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_validation_out_of_bounds_values() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     init_test_tracing();
     install_crypto_provider();
 

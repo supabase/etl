@@ -8,15 +8,16 @@ use etl::types::{Event, ReplicatedTableSchema, TableRow};
 use etl_config::Environment;
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
-    TlsConfig,
+    TcpKeepaliveConfig, TlsConfig,
 };
 use etl_destinations::bigquery::BigQueryDestination;
 use etl_postgres::types::TableId;
 use etl_telemetry::tracing::init_tracing;
 use sqlx::postgres::PgPool;
 use std::error::Error;
-use std::sync::Once;
-use tracing::info;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Once};
+use tracing::{error, info};
 
 /// Ensures crypto provider is only initialized once.
 static INIT_CRYPTO: Once = Once::new();
@@ -98,15 +99,15 @@ enum Commands {
         /// Publication name
         #[arg(long, default_value = "bench_pub")]
         publication_name: String,
-        /// Maximum batch size
-        #[arg(long, default_value = "100000")]
-        batch_max_size: usize,
         /// Maximum batch fill time in milliseconds
         #[arg(long, default_value = "10000")]
         batch_max_fill_ms: u64,
         /// Maximum number of table sync workers
         #[arg(long, default_value = "8")]
         max_table_sync_workers: u16,
+        /// Maximum number of parallel copy connections per table
+        #[arg(long, default_value = "1")]
+        max_copy_connections_per_table: u16,
         /// Table IDs to replicate (comma-separated)
         #[arg(long, value_delimiter = ',')]
         table_ids: Vec<u32>,
@@ -128,27 +129,9 @@ enum Commands {
         /// BigQuery connection pool size (optional)
         #[arg(long, default_value = "32")]
         bq_connection_pool_size: usize,
-    },
-    /// Prepare the benchmark environment by cleaning up replication slots
-    Prepare {
-        /// Postgres host
-        #[arg(long, default_value = "localhost")]
-        host: String,
-        /// Postgres port
-        #[arg(long, default_value = "5432")]
-        port: u16,
-        /// Database name
-        #[arg(long, default_value = "bench")]
-        database: String,
-        /// Postgres username
-        #[arg(long, default_value = "postgres")]
-        username: String,
-        /// Postgres password (optional)
+        /// Expected total row count for validation (optional)
         #[arg(long)]
-        password: Option<String>,
-        /// Enable TLS
-        #[arg(long, default_value = "false")]
-        tls_enabled: bool,
+        expected_row_count: Option<u64>,
     },
 }
 
@@ -176,9 +159,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             tls_enabled,
             tls_certs,
             publication_name,
-            batch_max_size,
             batch_max_fill_ms,
             max_table_sync_workers,
+            max_copy_connections_per_table,
             table_ids,
             destination,
             bq_project_id,
@@ -186,6 +169,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             bq_sa_key_file,
             bq_max_staleness_mins,
             bq_connection_pool_size,
+            expected_row_count,
         } => {
             start_pipeline(RunArgs {
                 host,
@@ -196,9 +180,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 tls_enabled,
                 tls_certs,
                 publication_name,
-                batch_max_size,
                 batch_max_fill_ms,
                 max_table_sync_workers,
+                max_copy_connections_per_table,
                 table_ids,
                 destination,
                 bq_project_id,
@@ -206,24 +190,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 bq_sa_key_file,
                 bq_max_staleness_mins,
                 bq_connection_pool_size,
-            })
-            .await
-        }
-        Commands::Prepare {
-            host,
-            port,
-            database,
-            username,
-            password,
-            tls_enabled,
-        } => {
-            prepare_benchmark(PrepareArgs {
-                host,
-                port,
-                database,
-                username,
-                password,
-                tls_enabled,
+                expected_row_count,
             })
             .await
         }
@@ -240,9 +207,9 @@ struct RunArgs {
     tls_enabled: bool,
     tls_certs: String,
     publication_name: String,
-    batch_max_size: usize,
     batch_max_fill_ms: u64,
     max_table_sync_workers: u16,
+    max_copy_connections_per_table: u16,
     table_ids: Vec<u32>,
     destination: DestinationType,
     bq_project_id: Option<String>,
@@ -250,9 +217,11 @@ struct RunArgs {
     bq_sa_key_file: Option<String>,
     bq_max_staleness_mins: Option<u16>,
     bq_connection_pool_size: usize,
+    expected_row_count: Option<u64>,
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct PrepareArgs {
     host: String,
     port: u16,
@@ -262,52 +231,51 @@ struct PrepareArgs {
     tls_enabled: bool,
 }
 
-async fn prepare_benchmark(args: PrepareArgs) -> Result<(), Box<dyn Error>> {
-    info!("preparing benchmark environment");
-
+#[allow(clippy::too_many_arguments)]
+async fn cleanup_replication_slots(
+    host: &str,
+    port: u16,
+    database: &str,
+    username: &str,
+    password: Option<&str>,
+    tls_enabled: bool,
+    pipeline_id: u64,
+    table_ids: &[u32],
+) -> Result<(), Box<dyn Error>> {
     // Build connection string
-    let mut connection_string = format!(
-        "postgres://{}@{}:{}/{}",
-        args.username, args.host, args.port, args.database
-    );
+    let mut connection_string = format!("postgres://{username}@{host}:{port}/{database}");
 
-    if let Some(password) = &args.password {
-        connection_string = format!(
-            "postgres://{}:{}@{}:{}/{}",
-            args.username, password, args.host, args.port, args.database
-        );
+    if let Some(password) = password {
+        connection_string = format!("postgres://{username}:{password}@{host}:{port}/{database}");
     }
 
-    // Add SSL mode based on TLS settings
-    if args.tls_enabled {
+    // Add SSL mode
+    if tls_enabled {
         connection_string.push_str("?sslmode=require");
     } else {
         connection_string.push_str("?sslmode=disable");
     }
 
-    info!(host = %args.host, port = %args.port, "connecting to database");
-
     // Connect to the database
     let pool = PgPool::connect(&connection_string).await?;
 
-    info!("cleaning up existing replication slots");
+    // Drop the main apply slot
+    let apply_slot = format!("supabase_etl_apply_{pipeline_id}");
+    info!(slot_name = %apply_slot, "dropping apply replication slot");
+    let drop_apply_sql = format!(
+        "select pg_drop_replication_slot('{apply_slot}') where exists (select 1 from pg_replication_slots where slot_name = '{apply_slot}')"
+    );
+    sqlx::query(&drop_apply_sql).execute(&pool).await.ok(); // Ignore errors if slot doesn't exist
 
-    // Execute the cleanup SQL
-    let cleanup_sql = r#"
-        do $$
-        declare
-            slot record;
-        begin
-            for slot in (select slot_name from pg_replication_slots where slot_name like 'supabase_etl_%')
-            loop
-                execute 'select pg_drop_replication_slot(' || quote_literal(slot.slot_name) || ')';
-            end loop;
-        end $$;
-    "#;
-
-    sqlx::query(cleanup_sql).execute(&pool).await?;
-
-    info!("replication slots cleanup completed");
+    // Drop table sync slots for each table
+    for table_id in table_ids {
+        let table_slot = format!("supabase_etl_table_sync_{pipeline_id}_{table_id}");
+        info!(slot_name = %table_slot, "dropping table sync replication slot");
+        let drop_table_sql = format!(
+            "select pg_drop_replication_slot('{table_slot}') where exists (select 1 from pg_replication_slots where slot_name = '{table_slot}')"
+        );
+        sqlx::query(&drop_table_sql).execute(&pool).await.ok(); // Ignore errors if slot doesn't exist
+    }
 
     // Close the connection
     pool.close().await;
@@ -327,6 +295,14 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     info!(table_ids = ?args.table_ids, "target tables");
     info!(destination = ?args.destination, "destination type");
 
+    // Save connection parameters for cleanup before moving
+    let cleanup_host = args.host.clone();
+    let cleanup_port = args.port;
+    let cleanup_database = args.database.clone();
+    let cleanup_username = args.username.clone();
+    let cleanup_password = args.password.clone();
+    let cleanup_tls_enabled = args.tls_enabled;
+
     let pg_connection_config = PgConnectionConfig {
         host: args.host,
         port: args.port,
@@ -337,30 +313,34 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
             trusted_root_certs: args.tls_certs,
             enabled: args.tls_enabled,
         },
-        keepalive: None,
+        keepalive: TcpKeepaliveConfig::default(),
     };
-
-    let store = NotifyingStore::new();
 
     let pipeline_config = PipelineConfig {
         id: 1,
         publication_name: args.publication_name,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
-            max_size: args.batch_max_size,
             max_fill_ms: args.batch_max_fill_ms,
+            memory_budget_ratio: 0.2,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.max_table_sync_workers,
+        memory_refresh_interval_ms: 100,
+        memory_backpressure: None,
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
+        max_copy_connections_per_table: args.max_copy_connections_per_table,
     };
+
+    let store = NotifyingStore::new();
 
     // Create the appropriate destination based on the argument
     let destination = match args.destination {
-        DestinationType::Null => BenchDestination::Null(NullDestination),
-
+        DestinationType::Null => BenchDestination::Null(NullDestination {
+            row_count: Arc::new(AtomicU64::new(0)),
+        }),
         DestinationType::BigQuery => {
             install_crypto_provider();
 
@@ -400,7 +380,10 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         table_copied_notifications.push(table_copied);
     }
 
-    let mut pipeline = Pipeline::new(pipeline_config, store, destination);
+    // Save values needed for cleanup before moving
+    let pipeline_id = pipeline_config.id;
+
+    let mut pipeline = Pipeline::new(pipeline_config, store, destination.clone());
     info!("starting pipeline");
     pipeline.start().await?;
 
@@ -409,7 +392,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         "waiting for tables to complete copy phase"
     );
     for notification in table_copied_notifications {
-        notification.notified().await;
+        notification.inner().notified().await;
     }
     info!("all tables completed copy phase");
 
@@ -417,17 +400,68 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     pipeline.shutdown_and_wait().await?;
     info!("etl pipeline benchmark completed");
 
+    // Clean up replication slots created during benchmark
+    info!("cleaning up replication slots");
+    cleanup_replication_slots(
+        &cleanup_host,
+        cleanup_port,
+        &cleanup_database,
+        &cleanup_username,
+        cleanup_password.as_deref(),
+        cleanup_tls_enabled,
+        pipeline_id,
+        &args.table_ids,
+    )
+    .await?;
+    info!("replication slots cleaned up");
+
+    // Validate row count if expected count was provided
+    if let Some(expected) = args.expected_row_count {
+        if let Some(actual) = destination.get_row_count() {
+            info!(
+                expected_rows = expected,
+                actual_rows = actual,
+                "validating row count"
+            );
+
+            if actual == expected {
+                info!("Row count validation passed: {} rows replicated", actual);
+            } else {
+                error!(
+                    "Row count validation FAILED: expected {} rows, got {} rows (diff: {})",
+                    expected,
+                    actual,
+                    (actual as i64) - (expected as i64)
+                );
+                return Err("Row count validation failed".into());
+            }
+        } else {
+            info!("Row count validation skipped: destination doesn't support in-memory counting");
+        }
+    }
+
     Ok(())
 }
 
 #[derive(Clone)]
-struct NullDestination;
+struct NullDestination {
+    row_count: Arc<AtomicU64>,
+}
 
 #[expect(clippy::large_enum_variant)]
 #[derive(Clone)]
 enum BenchDestination {
     Null(NullDestination),
     BigQuery(BigQueryDestination<NotifyingStore>),
+}
+
+impl BenchDestination {
+    fn get_row_count(&self) -> Option<u64> {
+        match self {
+            BenchDestination::Null(dest) => Some(dest.row_count.load(Ordering::Relaxed)),
+            BenchDestination::BigQuery(_) => None, // BigQuery doesn't track in-memory
+        }
+    }
 }
 
 impl Destination for BenchDestination {
@@ -485,8 +519,11 @@ impl Destination for NullDestination {
     async fn write_table_rows(
         &self,
         _replicated_table_schema: &ReplicatedTableSchema,
-        _table_rows: Vec<TableRow>,
+        table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
+        self.row_count
+            .fetch_add(table_rows.len() as u64, Ordering::Relaxed);
+
         Ok(())
     }
 

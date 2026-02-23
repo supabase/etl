@@ -27,7 +27,10 @@ use tokio::sync::Semaphore;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
 
+use crate::concurrency::batch_budget::{BatchBudgetController, CachedBatchBudget};
+use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::concurrency::stream::BackpressureStream;
 use crate::conversions::event::{
     DDL_MESSAGE_PREFIX, SchemaChangeMessage, parse_event_from_begin_message,
     parse_event_from_commit_message, parse_event_from_delete_message,
@@ -36,19 +39,20 @@ use crate::conversions::event::{
 };
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
+#[cfg(feature = "failpoints")]
 use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
     ETL_EVENTS_PROCESSED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
     ETL_TRANSACTIONS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
-use crate::replication::client::PgReplicationClient;
+use crate::replication::client::{PgReplicationClient, PostgresConnectionUpdate};
 use crate::replication::masks::ReplicationMasks;
 use crate::replication::stream::{EventsStream, StatusUpdateType};
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
-use crate::types::{Event, PipelineId, RelationEvent};
+use crate::types::{Event, PipelineId, RelationEvent, SizeHint};
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 use crate::{bail, etl_error};
@@ -202,6 +206,10 @@ pub struct ApplyWorkerContext<S, D> {
     pub shutdown_rx: ShutdownRx,
     /// Semaphore controlling maximum concurrent table sync workers.
     pub table_sync_worker_permits: Arc<Semaphore>,
+    /// Shared memory backpressure controller.
+    pub memory_monitor: MemoryMonitor,
+    /// Shared batch budget controller.
+    pub batch_budget: BatchBudgetController,
 }
 
 /// Resources for the table sync worker during the apply loop.
@@ -320,6 +328,8 @@ struct ApplyLoopState {
     replication_progress: ReplicationProgress,
     /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
+    /// Approximate total size in bytes of events currently in the batch.
+    events_batch_bytes: usize,
     /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
@@ -340,7 +350,6 @@ impl ApplyLoopState {
     /// Creates a new [`ApplyLoopState`] with initial replication progress and event batch.
     fn new(
         replication_progress: ReplicationProgress,
-        max_batch_size: usize,
         max_batch_fill_duration: Duration,
         current_schema_snapshot_id: SnapshotId,
     ) -> Self {
@@ -348,7 +357,8 @@ impl ApplyLoopState {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
             replication_progress,
-            events_batch: Vec::with_capacity(max_batch_size),
+            events_batch: Vec::new(),
+            events_batch_bytes: 0,
             current_tx_begin_ts: None,
             current_tx_events: 0,
             shutdown_state: ShutdownState::NoShutdown,
@@ -442,6 +452,10 @@ pub struct ApplyLoop<S, D> {
     shutdown_rx: ShutdownRx,
     /// Worker context for worker-specific behavior.
     worker_context: WorkerContext<S, D>,
+    /// Shared memory backpressure controller.
+    memory_monitor: MemoryMonitor,
+    /// Cached dynamic batch budget used to decide flushes by bytes.
+    cached_batch_budget: CachedBatchBudget,
     /// Internal loop state.
     state: ApplyLoopState,
 }
@@ -465,6 +479,8 @@ where
         replication_masks: ReplicationMasks,
         worker_context: WorkerContext<S, D>,
         shutdown_rx: ShutdownRx,
+        memory_monitor: MemoryMonitor,
+        batch_budget: BatchBudgetController,
     ) -> EtlResult<ApplyLoopResult> {
         info!(
             worker_type = %worker_context.worker_type(),
@@ -482,10 +498,11 @@ where
 
         let state = ApplyLoopState::new(
             initial_progress,
-            config.batch.max_size,
             Duration::from_millis(config.batch.max_fill_ms),
             current_schema_snapshot_id,
         );
+
+        let cached_batch_budget = batch_budget.cached();
 
         let mut apply_loop = Self {
             pipeline_id,
@@ -495,6 +512,8 @@ where
             replication_masks,
             shutdown_rx,
             worker_context,
+            memory_monitor,
+            cached_batch_budget,
             state,
         };
 
@@ -518,12 +537,14 @@ where
             .await?;
 
         let events_stream = EventsStream::wrap(logical_replication_stream, self.pipeline_id);
+        let events_stream =
+            BackpressureStream::wrap(events_stream, self.memory_monitor.subscribe());
         pin!(events_stream);
+        let mut connection_updates_rx = replication_client.connection_updates_rx();
 
         // If the loop produces a result while waiting for shutdown acknowledgement,
         // we store it here and return it once the keepalive is received.
         let mut pending_result: Option<ApplyLoopResult> = None;
-
         loop {
             // If waiting for shutdown acknowledgement, the loop is now just waiting for the keep alive
             // message before shutting off.
@@ -565,7 +586,38 @@ where
                     self.handle_shutdown_signal(events_stream.as_mut()).await?;
                 }
 
-                // PRIORITY 2: Handle batch flush timer expiry.
+                // PRIORITY 2: Handle PostgreSQL connection lifecycle updates.
+                // Closed connections stop the loop and surface a source connection error.
+                changed = connection_updates_rx.changed() => {
+                    if changed.is_err() {
+                        return Err(etl_error!(
+                            ErrorKind::SourceConnectionFailed,
+                            "postgresql connection updates ended during the apply loop"
+                        ));
+                    }
+
+                    // We use `borrow_and_update` to avoid a race where a new update appears between
+                    // notification and borrow.
+                    let update = connection_updates_rx.borrow_and_update().clone();
+                    match update {
+                        PostgresConnectionUpdate::Running => {}
+                        PostgresConnectionUpdate::Terminated => {
+                            return Err(etl_error!(
+                                ErrorKind::SourceConnectionFailed,
+                                "postgresql connection terminated during the apply loop"
+                            ));
+                        }
+                        PostgresConnectionUpdate::Errored { error } => {
+                            return Err(etl_error!(
+                                ErrorKind::SourceConnectionFailed,
+                                "postgresql connection errored during the apply loop",
+                                error.to_string()
+                            ));
+                        }
+                    }
+                }
+
+                // PRIORITY 3: Handle batch flush timer expiry.
                 // Ensures batches don't wait indefinitely when message rate is low. The timer
                 // is started when the first event enters the batch and reset after each flush.
                 _ = Self::wait_for_batch_deadline(&self.state) => {
@@ -586,15 +638,15 @@ where
                     }
                 }
 
-                // PRIORITY 3: Process incoming replication messages from PostgreSQL.
+                // PRIORITY 4: Process incoming replication messages from PostgreSQL.
                 // This is the main work of the apply loop - receiving WAL events and converting
                 // them to destination writes. Has lowest priority so shutdown and flush timer
                 // are always handled promptly.
-                message = events_stream.next() => {
+                maybe_message = events_stream.next() => {
                     let action = self
                         .handle_stream_message(
                             events_stream.as_mut(),
-                            message,
+                            maybe_message,
                             &replication_client,
                         )
                         .await?;
@@ -693,7 +745,7 @@ where
     /// not complete within an acceptable timeframe.
     async fn handle_shutdown_signal(
         &mut self,
-        mut events_stream: Pin<&mut EventsStream>,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<()> {
         let worker_type = self.worker_context.worker_type();
 
@@ -735,12 +787,14 @@ where
     /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
     async fn initiate_graceful_shutdown(
         &mut self,
-        events_stream: Pin<&mut EventsStream>,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<()> {
         // Use effective flush LSN to report last received LSN when idle, since
         // last flush LSN only advances during actual flushes.
         let flush_lsn = self.state.effective_flush_lsn();
         events_stream
+            .as_mut()
+            .stream_mut()
             .send_status_update(
                 self.state.last_received_lsn(),
                 flush_lsn,
@@ -762,18 +816,21 @@ where
     /// at transaction boundaries.
     async fn handle_stream_message(
         &mut self,
-        mut events_stream: Pin<&mut EventsStream>,
-        message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        maybe_message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<ApplyLoopAction> {
         // If there is no message anymore, it means that the connection has been closed or had some
         // issues, we must handle this case.
-        let Some(message) = message else {
+        let Some(message) = maybe_message else {
             return Err(self.build_stream_ended_error(replication_client));
         };
 
+        // If the Postgres had an error, we want to raise it immediately.
+        let message = message?;
+
         let action = self
-            .handle_replication_message_and_flush(events_stream.as_mut(), message?)
+            .handle_replication_message_and_flush(events_stream.as_mut(), message)
             .await?;
 
         if !self.state.events_batch.is_empty() {
@@ -790,7 +847,7 @@ where
         if replication_client.is_closed() {
             warn!(
                 %worker_type,
-                "replication stream ended: PostgreSQL connection closed",
+                "replication stream ended: postgresql connection closed",
             );
 
             etl_error!(
@@ -813,7 +870,7 @@ where
     /// Handles a replication message and flushes the batch if necessary.
     async fn handle_replication_message_and_flush(
         &mut self,
-        mut events_stream: Pin<&mut EventsStream>,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<ApplyLoopAction> {
         let result = self
@@ -824,24 +881,30 @@ where
         if let Some(event) = result.event
             && should_include_event
         {
+            self.state.events_batch_bytes = self
+                .state
+                .events_batch_bytes
+                .saturating_add(event.size_hint());
             self.state.events_batch.push(event);
             self.state.update_last_commit_end_lsn(result.end_lsn);
         }
 
         let mut action = result.action;
 
-        let batch_size_reached = self.state.events_batch.len() >= self.config.batch.max_size;
+        let batch_size_reached =
+            self.state.events_batch_bytes >= self.cached_batch_budget.current_batch_size_bytes();
         let early_flush_requested = result.end_batch.is_some();
         let should_flush = batch_size_reached || early_flush_requested;
         if should_flush && !self.state.events_batch.is_empty() {
             let reason = if batch_size_reached {
-                "max batch size reached"
+                "max batch bytes reached"
             } else {
                 "early flush requested"
             };
             info!(
                 worker_type = %self.worker_context.worker_type(),
                 batch_size = self.state.events_batch.len(),
+                batch_size_bytes = self.state.events_batch_bytes,
                 %reason,
                 "flushing batch",
             );
@@ -862,7 +925,7 @@ where
     /// mid-transaction), this will initiate graceful shutdown.
     async fn flush_batch(
         &mut self,
-        events_stream: Pin<&mut EventsStream>,
+        events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<ApplyLoopAction> {
         self.state.reset_batch_deadline();
 
@@ -891,13 +954,16 @@ where
             return Ok(());
         }
 
-        let events_batch = std::mem::replace(
-            &mut self.state.events_batch,
-            Vec::with_capacity(self.config.batch.max_size),
-        );
+        // We replace the existing vector with a new one and reset the accumulated batch bytes size.
+        let events_batch = std::mem::take(&mut self.state.events_batch);
+        let events_batch_bytes = self.state.events_batch_bytes;
+        self.state.events_batch_bytes = 0;
 
-        let batch_size = events_batch.len();
-        info!(batch_size = batch_size, "sending batch to destination");
+        let events_batch_size = events_batch.len();
+        info!(
+            events_batch_size,
+            events_batch_bytes, "sending batch to destination"
+        );
 
         let before_sending = Instant::now();
 
@@ -912,7 +978,7 @@ where
             PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             DESTINATION_LABEL => D::name(),
         )
-        .increment(batch_size as u64);
+        .increment(events_batch_size as u64);
 
         let send_duration_seconds = before_sending.elapsed().as_secs_f64();
         histogram!(
@@ -930,7 +996,7 @@ where
     /// Dispatches replication protocol messages to appropriate handlers.
     async fn handle_replication_message(
         &mut self,
-        events_stream: Pin<&mut EventsStream>,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<HandleMessageResult> {
         match message {
@@ -967,6 +1033,8 @@ where
                 );
 
                 events_stream
+                    .as_mut()
+                    .stream_mut()
                     .send_status_update(
                         self.state.last_received_lsn(),
                         // Use effective flush LSN to report last received LSN when idle, since
@@ -2166,6 +2234,8 @@ mod apply_worker {
             ctx.replication_masks.clone(),
             ctx.shutdown_rx.clone(),
             ctx.table_sync_worker_permits.clone(),
+            ctx.memory_monitor.clone(),
+            ctx.batch_budget.clone(),
         )
     }
 

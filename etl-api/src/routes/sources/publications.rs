@@ -135,7 +135,7 @@ pub async fn create_publication(
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
@@ -182,7 +182,7 @@ pub async fn read_publication(
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
@@ -228,7 +228,7 @@ pub async fn update_publication(
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
@@ -275,7 +275,7 @@ pub async fn delete_publication(
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
@@ -315,7 +315,7 @@ pub async fn read_all_publications(
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))

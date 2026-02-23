@@ -534,15 +534,20 @@ where
         // Add the CDC operation type to all rows (no lock needed).
         for table_row in table_rows.iter_mut() {
             table_row
-                .values
+                .values_mut()
                 .push(BigQueryOperationType::Upsert.into_cell());
         }
+        let table_rows = table_rows
+            .into_iter()
+            .map(BigQueryTableRow::try_from)
+            .collect::<EtlResult<Vec<BigQueryTableRow>>>()?;
 
         // Calculate optimal target batches based on estimated row size.
         let target_batches = calculate_target_batches_for_table_copy(&table_rows)?;
 
         // Split table rows into optimal batches for parallel execution.
         let table_rows_batches = split_table_rows(table_rows, target_batches);
+        let sequenced_bigquery_table_id_string = sequenced_bigquery_table_id.to_string();
 
         // Create table batches from the split rows.
         let mut table_batches = Vec::with_capacity(table_rows_batches.len());
@@ -550,7 +555,7 @@ where
             if !table_rows.is_empty() {
                 let table_batch = self.client.create_table_batch(
                     &self.dataset_id,
-                    &sequenced_bigquery_table_id.to_string(),
+                    &sequenced_bigquery_table_id_string,
                     table_descriptor.clone(),
                     table_rows,
                 )?;
@@ -830,9 +835,12 @@ where
                             generate_sequence_number(insert.start_lsn, insert.commit_lsn);
                         insert
                             .table_row
-                            .values
+                            .values_mut()
                             .push(BigQueryOperationType::Upsert.into_cell());
-                        insert.table_row.values.push(Cell::String(sequence_number));
+                        insert
+                            .table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
                         let table_id = insert.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -845,9 +853,12 @@ where
                             generate_sequence_number(update.start_lsn, update.commit_lsn);
                         update
                             .table_row
-                            .values
+                            .values_mut()
                             .push(BigQueryOperationType::Upsert.into_cell());
-                        update.table_row.values.push(Cell::String(sequence_number));
+                        update
+                            .table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
                         let table_id = update.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -864,9 +875,11 @@ where
                         let sequence_number =
                             generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
-                            .values
+                            .values_mut()
                             .push(BigQueryOperationType::Delete.into_cell());
-                        old_table_row.values.push(Cell::String(sequence_number));
+                        old_table_row
+                            .values_mut()
+                            .push(Cell::String(sequence_number));
 
                         let table_id = delete.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -885,13 +898,17 @@ where
             if !table_id_to_data.is_empty() {
                 // Prepare batch metadata for all tables before streaming.
                 // This collects (sequenced_table_id, table_descriptor, rows) for retry support.
-                let mut prepared_data: Vec<(String, TableDescriptor, Vec<TableRow>)> =
+                let mut prepared_data: Vec<(String, TableDescriptor, Vec<BigQueryTableRow>)> =
                     Vec::with_capacity(table_id_to_data.len());
 
                 for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
                     let (sequenced_bigquery_table_id, table_descriptor) = self
                         .prepare_table_for_streaming(&replicated_table_schema, true)
                         .await?;
+                    let table_rows = table_rows
+                        .into_iter()
+                        .map(BigQueryTableRow::try_from)
+                        .collect::<EtlResult<Vec<BigQueryTableRow>>>()?;
 
                     prepared_data.push((
                         sequenced_bigquery_table_id.to_string(),
@@ -1126,14 +1143,12 @@ where
 ///
 /// Estimates the size of a single row by encoding the first row, then calculates how many
 /// rows would fit in approximately 10MB per batch.
-fn calculate_target_batches_for_table_copy(table_rows: &[TableRow]) -> EtlResult<usize> {
-    let Some(first_row) = table_rows.first() else {
+fn calculate_target_batches_for_table_copy(table_rows: &[BigQueryTableRow]) -> EtlResult<usize> {
+    let Some(encoded_row) = table_rows.first() else {
         return Ok(0);
     };
     let total_rows = table_rows.len();
 
-    // Encode first row to cheaply estimate row size.
-    let encoded_row = BigQueryTableRow::try_from(first_row.clone())?;
     let estimated_row_size = encoded_row.encoded_len();
 
     // Calculate how many rows would fit in target batch size.
@@ -1166,7 +1181,10 @@ fn calculate_target_batches_for_table_copy(table_rows: &[TableRow]) -> EtlResult
 ///
 /// Calculates the optimal distribution of rows across batches to produce the target amount of
 /// batches.
-fn split_table_rows(table_rows: Vec<TableRow>, target_batches: usize) -> Vec<Vec<TableRow>> {
+fn split_table_rows(
+    table_rows: Vec<BigQueryTableRow>,
+    target_batches: usize,
+) -> Vec<Vec<BigQueryTableRow>> {
     let total_rows = table_rows.len();
 
     if total_rows == 0 {
@@ -1190,18 +1208,13 @@ fn split_table_rows(table_rows: Vec<TableRow>, target_batches: usize) -> Vec<Vec
     let extra_rows = total_rows % num_sub_batches;
 
     let mut batches = Vec::with_capacity(num_sub_batches);
-    let mut start_idx = 0;
+    let mut remaining = table_rows;
     for i in 0..num_sub_batches {
-        let mut end_idx = start_idx + rows_per_sub_batch;
-
-        // Distribute extra rows evenly across the first few batches
-        if i < extra_rows {
-            end_idx += 1;
-        }
-
-        let sub_batch_rows = table_rows[start_idx..end_idx].to_vec();
-        batches.push(sub_batch_rows);
-        start_idx = end_idx;
+        // Distribute extra rows evenly across the first few batches.
+        let batch_size = rows_per_sub_batch + if i < extra_rows { 1 } else { 0 };
+        let rest = remaining.split_off(batch_size);
+        batches.push(remaining);
+        remaining = rest;
     }
 
     batches
@@ -1492,40 +1505,46 @@ mod tests {
 
     #[test]
     fn test_split_table_rows_empty_input() {
-        let rows = vec![];
+        let rows: Vec<BigQueryTableRow> = vec![];
         let result = split_table_rows(rows, 4);
-        assert_eq!(result, Vec::<Vec<TableRow>>::new());
+        assert!(result.is_empty());
     }
 
     #[test]
     fn test_split_table_rows_zero_concurrent_streams() {
-        let rows = vec![TableRow::new(vec![])];
-        let result = split_table_rows(rows.clone(), 0);
-        assert_eq!(result, vec![rows]);
+        let rows = vec![BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()];
+        let result = split_table_rows(rows, 0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 1);
     }
 
     #[test]
     fn test_split_table_rows_single_concurrent_stream() {
-        let rows = vec![TableRow::new(vec![]), TableRow::new(vec![])];
-        let result = split_table_rows(rows.clone(), 1);
-        assert_eq!(result, vec![rows]);
+        let rows = vec![
+            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+        ];
+        let result = split_table_rows(rows, 1);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 2);
     }
 
     #[test]
     fn test_split_table_rows_fewer_rows_than_streams() {
-        let rows = vec![TableRow::new(vec![]), TableRow::new(vec![])];
-        let result = split_table_rows(rows.clone(), 5);
-        assert_eq!(result, vec![rows]);
+        let rows = vec![
+            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+            BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
+        ];
+        let result = split_table_rows(rows, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 2);
     }
 
     #[test]
     fn test_split_table_rows_equal_distribution() {
-        let rows = vec![
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-        ];
+        let rows = (0..4)
+            .map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap())
+            .collect();
         let result = split_table_rows(rows, 2);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].len(), 2);
@@ -1534,13 +1553,9 @@ mod tests {
 
     #[test]
     fn test_split_table_rows_uneven_distribution() {
-        let rows = vec![
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-        ];
+        let rows = (0..5)
+            .map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap())
+            .collect();
         let result = split_table_rows(rows, 3);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].len(), 2); // Gets extra row
@@ -1550,18 +1565,9 @@ mod tests {
 
     #[test]
     fn test_split_table_rows_many_streams() {
-        let rows = vec![
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-            TableRow::new(vec![]),
-        ];
+        let rows = (0..10)
+            .map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap())
+            .collect();
         let result = split_table_rows(rows, 4);
         assert_eq!(result.len(), 4);
 
@@ -1578,14 +1584,15 @@ mod tests {
 
     #[test]
     fn test_split_table_rows_single_row() {
-        let rows = vec![TableRow::new(vec![])];
-        let result = split_table_rows(rows.clone(), 5);
-        assert_eq!(result, vec![rows]);
+        let rows = vec![BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()];
+        let result = split_table_rows(rows, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 1);
     }
 
     #[test]
     fn test_calculate_target_batches_empty_rows() {
-        let rows: Vec<TableRow> = vec![];
+        let rows: Vec<BigQueryTableRow> = vec![];
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
         assert_eq!(result, 0);
     }
@@ -1593,7 +1600,10 @@ mod tests {
     #[test]
     fn test_calculate_target_batches_single_small_row() {
         // Create a single row with one small string value
-        let rows = vec![TableRow::new(vec![Cell::String("test".to_string())])];
+        let rows = vec![
+            BigQueryTableRow::try_from(TableRow::new(vec![Cell::String("test".to_string())]))
+                .unwrap(),
+        ];
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
         assert_eq!(result, 1);
     }
@@ -1601,8 +1611,11 @@ mod tests {
     #[test]
     fn test_calculate_target_batches_many_small_rows() {
         // Create many rows with small values (estimated ~50 bytes each when encoded)
-        let rows: Vec<TableRow> = (0..100_000)
-            .map(|i| TableRow::new(vec![Cell::String(format!("value_{i}"))]))
+        let rows: Vec<BigQueryTableRow> = (0..100_000)
+            .map(|i| {
+                BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(format!("value_{i}"))]))
+                    .unwrap()
+            })
             .collect();
 
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
@@ -1613,8 +1626,11 @@ mod tests {
     fn test_calculate_target_batches_large_rows() {
         // Create rows with large string values (each ~1MB)
         let large_string = "x".repeat(1024 * 1024); // 1MB string
-        let rows: Vec<TableRow> = (0..50)
-            .map(|_| TableRow::new(vec![Cell::String(large_string.clone())]))
+        let rows: Vec<BigQueryTableRow> = (0..50)
+            .map(|_| {
+                BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(large_string.clone())]))
+                    .unwrap()
+            })
             .collect();
 
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
@@ -1625,7 +1641,9 @@ mod tests {
     fn test_calculate_target_batches_very_large_single_row() {
         // Create a row larger than max batch size (>10MB)
         let huge_string = "x".repeat(15 * 1024 * 1024); // 15MB string
-        let rows = vec![TableRow::new(vec![Cell::String(huge_string)])];
+        let rows = vec![
+            BigQueryTableRow::try_from(TableRow::new(vec![Cell::String(huge_string)])).unwrap(),
+        ];
 
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
         // Even though the row is too large, we should still get 1 batch

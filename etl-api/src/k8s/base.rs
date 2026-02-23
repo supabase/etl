@@ -36,8 +36,6 @@ pub struct ReplicatorConfigMapFile {
 /// when deploying a replicator.
 #[derive(Debug, Clone, Copy)]
 pub enum DestinationType {
-    /// In-memory storage destination.
-    Memory,
     /// Google BigQuery destination.
     BigQuery,
     /// Apache Iceberg destination.
@@ -48,7 +46,6 @@ impl From<&StoredDestinationConfig> for DestinationType {
     /// Extracts the destination type from a stored configuration.
     fn from(value: &StoredDestinationConfig) -> DestinationType {
         match value {
-            StoredDestinationConfig::Memory => DestinationType::Memory,
             StoredDestinationConfig::BigQuery { .. } => DestinationType::BigQuery,
             StoredDestinationConfig::Iceberg { .. } => DestinationType::Iceberg,
         }

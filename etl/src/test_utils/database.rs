@@ -18,7 +18,7 @@
 //!
 //! See `scripts/docker-compose.yaml` for the test database configuration.
 
-use etl_config::shared::{PgConnectionConfig, TlsConfig};
+use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
 use etl_postgres::replication::connect_to_source_database;
 use etl_postgres::tokio::test_utils::PgDatabase;
 use etl_postgres::types::TableName;
@@ -72,7 +72,7 @@ fn local_pg_connection_config() -> PgConnectionConfig {
             trusted_root_certs: String::new(),
             enabled: false,
         },
-        keepalive: None,
+        keepalive: TcpKeepaliveConfig::default(),
     }
 }
 

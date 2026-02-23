@@ -591,7 +591,6 @@ impl Validator for DestinationValidator {
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
         match &self.config {
-            FullApiDestinationConfig::Memory => Ok(vec![]),
             FullApiDestinationConfig::BigQuery {
                 project_id,
                 dataset_id,

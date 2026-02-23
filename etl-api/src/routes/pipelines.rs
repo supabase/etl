@@ -725,7 +725,7 @@ pub async fn delete_pipeline(
     .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
     db::pipelines::delete_pipeline_cascading(txn, tenant_id, &pipeline, &source, None, tls_config)
         .await?;
@@ -804,7 +804,7 @@ pub async fn start_pipeline(
         read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
 
     // We update the pipeline in K8s.
@@ -1041,7 +1041,7 @@ pub async fn get_pipeline_replication_status(
 
     // Connect to the source database to read the necessary state
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
     let source_pool =
         connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
@@ -1151,7 +1151,7 @@ pub async fn rollback_tables(
 
     // Connect to the source database to perform rollback
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
     let source_pool =
         connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
@@ -1332,7 +1332,7 @@ pub async fn update_pipeline_version(
     }
 
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
 
     // We update the pipeline in K8s if client is available.
@@ -1385,7 +1385,7 @@ pub async fn validate_pipeline(
             .ok_or(PipelineError::SourceNotFound(request.source_id))?;
 
     let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source_tls_enabled)
+        .get_tls_config(api_config.source.tls_enabled)
         .await?;
     let source_config = source.config.into_connection_config(tls_config);
 

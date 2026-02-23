@@ -5,5 +5,7 @@
 //! concurrent execution and lifecycle coordination.
 
 pub mod apply;
+pub mod policy;
 pub mod pool;
 pub mod table_sync;
+pub mod table_sync_copy;

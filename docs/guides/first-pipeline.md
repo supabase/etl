@@ -68,11 +68,10 @@ Replace `src/main.rs`:
 
 ```rust
 use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
-use etl::destination::memory::MemoryDestination;
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
+use etl_destinations::bigquery::BigQueryDestination;
 use std::error::Error;
-use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -103,22 +102,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let store = MemoryStore::new();
-    let destination = MemoryDestination::new();
-
-    // Print destination contents periodically
-    let dest_clone = destination.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            let rows = dest_clone.table_rows().await;
-            let events = dest_clone.events().await;
-            println!("\n--- Destination State ---");
-            println!("Tables: {}, Events: {}", rows.len(), events.len());
-            for (table_id, table_rows) in &rows {
-                println!("  Table {}: {} rows", table_id.0, table_rows.len());
-            }
-        }
-    });
+    let destination = BigQueryDestination::new_with_key_path(
+        "my-gcp-project".into(),
+        "my_dataset".into(),
+        "/path/to/service-account-key.json",
+        None,
+        1,
+        1,
+        store.clone(),
+    )
+    .await?;
 
     println!("Starting pipeline...");
     let mut pipeline = Pipeline::new(config, store, destination);

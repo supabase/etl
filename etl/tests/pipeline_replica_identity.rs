@@ -1,9 +1,9 @@
 #![cfg(feature = "test-utils")]
 
-use etl::destination::memory::MemoryDestination;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::materialize::{FromTableRow, materialize_events};
+use etl::test_utils::memory_destination::MemoryDestination;
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
@@ -35,7 +35,7 @@ impl FromTableRow for ToastTable {
     type Id = i64;
 
     fn from_table_row(table_row: &etl::types::TableRow) -> Option<Self> {
-        let values = &table_row.values;
+        let values = table_row.values();
         if values.len() == 3 {
             let id = match &values[0] {
                 Cell::I64(i) => *i,

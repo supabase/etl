@@ -206,7 +206,6 @@ impl SchemaStore for MemoryStore {
         let key = (table_schema.id, table_schema.snapshot_id);
         let table_schema = Arc::new(table_schema);
         inner.table_schemas.insert(key, table_schema.clone());
-
         Ok(table_schema)
     }
 }

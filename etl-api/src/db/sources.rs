@@ -1,4 +1,4 @@
-use sqlx::PgExecutor;
+use sqlx::{PgExecutor, PgPool};
 use std::fmt::Debug;
 use thiserror::Error;
 
@@ -10,6 +10,7 @@ use crate::configs::serde::{
 use crate::configs::source::{
     EncryptedStoredSourceConfig, FullApiSourceConfig, StoredSourceConfig,
 };
+use crate::routes::sources::SourceError;
 
 #[derive(Debug)]
 pub struct Source {
@@ -218,4 +219,29 @@ where
     .await?;
 
     Ok(record.exists)
+}
+
+pub async fn validate_trusted_username(
+    pool: &PgPool,
+    trusted_username: &Option<String>,
+) -> Result<(), SourceError> {
+    // If no trusted username configured, skip validation.
+    let Some(expected_username) = trusted_username else {
+        return Ok(());
+    };
+
+    // Check current username
+    let current_user: String = sqlx::query_scalar("select current_user")
+        .fetch_one(pool)
+        .await?;
+
+    // Validate match
+    if &current_user != expected_username {
+        return Err(SourceError::InvalidUsername(
+            current_user,
+            expected_username.clone(),
+        ));
+    }
+
+    Ok(())
 }

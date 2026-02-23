@@ -743,7 +743,6 @@ fn create_container_environment_json(
     }
 
     match destination_type {
-        DestinationType::Memory => {}
         DestinationType::BigQuery => {
             let postgres_secret_name = create_postgres_secret_name(prefix);
             let postgres_secret_env_var_json =
@@ -1062,9 +1061,9 @@ mod tests {
     use super::*;
 
     use etl_config::shared::{
-        BatchConfig, DestinationConfig, InvalidatedSlotBehavior, PgConnectionConfig,
-        PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets, TableSyncCopyConfig,
-        TlsConfig,
+        BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
+        PgConnectionConfig, PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
+        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     };
     use insta::assert_json_snapshot;
 
@@ -1157,17 +1156,23 @@ mod tests {
                     username: "postgres".to_string(),
                     password: Some("password".into()),
                     tls: TlsConfig::disabled(),
-                    keepalive: None,
+                    keepalive: TcpKeepaliveConfig::default(),
                 },
                 batch: BatchConfig {
-                    max_size: 10_000,
                     max_fill_ms: 1_000,
+                    memory_budget_ratio: 0.2,
                 },
                 table_error_retry_delay_ms: 500,
                 table_error_retry_max_attempts: 3,
                 max_table_sync_workers: 4,
+                memory_refresh_interval_ms: 100,
+                memory_backpressure: Some(MemoryBackpressureConfig {
+                    activate_threshold: 1.0,
+                    resume_threshold: 0.99,
+                }),
                 table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
                 invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
+                max_copy_connections_per_table: 2,
             },
             sentry: None,
             supabase: None,

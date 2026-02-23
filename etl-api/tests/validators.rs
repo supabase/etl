@@ -5,9 +5,11 @@ use etl_api::configs::pipeline::FullApiPipelineConfig;
 use etl_api::validation::{
     FailureType, ValidationContext, validate_destination, validate_pipeline,
 };
+use etl_config::shared::BatchConfig;
 use etl_config::{Environment, SerializableSecretString};
 use etl_destinations::bigquery::test_utils::{
     setup_bigquery_database, setup_bigquery_database_without_dataset,
+    skip_if_missing_bigquery_env_vars,
 };
 use etl_destinations::iceberg::test_utils::{
     LAKEKEEPER_URL, LakekeeperClient, MINIO_PASSWORD, MINIO_URL, MINIO_USERNAME,
@@ -66,11 +68,17 @@ fn create_bigquery_config(
 fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
     FullApiPipelineConfig {
         publication_name: publication_name.to_string(),
-        max_table_sync_workers: Some(2),
-        batch: None,
+        batch: Some(BatchConfig {
+            max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
+            memory_budget_ratio: 0.2,
+        }),
         log_level: None,
         table_error_retry_delay_ms: None,
         table_error_retry_max_attempts: None,
+        max_table_sync_workers: Some(2),
+        memory_refresh_interval_ms: Some(100),
+        max_copy_connections_per_table: None,
+        memory_backpressure: None,
         table_sync_copy: None,
         invalidated_slot_behavior: None,
     }
@@ -106,6 +114,10 @@ async fn validate_iceberg_connection_failure() {
 
 #[tokio::test]
 async fn validate_bigquery_connection_success() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     let db = setup_bigquery_database().await;
 
     let ctx = create_validation_context();
@@ -118,6 +130,10 @@ async fn validate_bigquery_connection_success() {
 
 #[tokio::test]
 async fn validate_bigquery_dataset_not_found() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     let db = setup_bigquery_database_without_dataset().await;
 
     let ctx = create_validation_context();
@@ -132,6 +148,10 @@ async fn validate_bigquery_dataset_not_found() {
 
 #[tokio::test]
 async fn validate_bigquery_invalid_credentials() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
     let ctx = create_validation_context();
     let config = create_bigquery_config("fake-project", "fake-dataset", "{}");
     let failures = validate_destination(&ctx, &config).await.unwrap();
@@ -139,15 +159,6 @@ async fn validate_bigquery_invalid_credentials() {
     assert!(!failures.is_empty(), "Expected validation failure");
     assert_eq!(failures[0].name, "BigQuery Authentication Failed");
     assert_eq!(failures[0].failure_type, FailureType::Critical);
-}
-
-#[tokio::test]
-async fn validate_memory_destination_always_passes() {
-    let ctx = create_validation_context();
-    let config = FullApiDestinationConfig::Memory;
-    let failures = validate_destination(&ctx, &config).await.unwrap();
-
-    assert!(failures.is_empty());
 }
 
 #[tokio::test]

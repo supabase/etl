@@ -1,7 +1,7 @@
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
 use etl::types::{
-    Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, TableRow, Type, is_array_type,
+    Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type,
 };
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
@@ -235,35 +235,35 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
     let (kind, description) = match &err {
         // Authentication related errors
         BQError::InvalidServiceAccountKey(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "Invalid BigQuery service account key",
         ),
         BQError::InvalidServiceAccountAuthenticator(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "Invalid BigQuery service account authenticator",
         ),
         BQError::InvalidInstalledFlowAuthenticator(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "Invalid BigQuery installed flow authenticator",
         ),
         BQError::InvalidApplicationDefaultCredentialsAuthenticator(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "Invalid BigQuery application default credentials",
         ),
         BQError::InvalidAuthorizedUserAuthenticator(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "Invalid BigQuery authorized user authenticator",
         ),
         BQError::AuthError(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "BigQuery authentication error",
         ),
         BQError::YupAuthError(_) => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "BigQuery OAuth authentication error",
         ),
         BQError::NoToken => (
-            ErrorKind::AuthenticationError,
+            ErrorKind::DestinationAuthenticationError,
             "BigQuery authentication token missing",
         ),
 
@@ -1085,13 +1085,8 @@ impl BigQueryClient {
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
         table_descriptor: TableDescriptor,
-        rows: Vec<TableRow>,
+        validated_rows: Vec<BigQueryTableRow>,
     ) -> EtlResult<TableBatch<BigQueryTableRow>> {
-        let validated_rows = rows
-            .into_iter()
-            .map(BigQueryTableRow::try_from)
-            .collect::<EtlResult<Vec<_>>>()?;
-
         // We want to use the default stream from BigQuery since it allows multiple connections to
         // send data to it. In addition, it's available by default for every table, so it also reduces
         // complexity.
