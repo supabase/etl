@@ -19,11 +19,12 @@ path = "src/bin/ducklake.rs"
 [dependencies]
 etl = { workspace = true }
 etl-config = { workspace = true }
-etl-destinations = { workspace = true, features = ["bigquery", "ducklake"] }
+etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake"] }
 etl-telemetry = { workspace = true }
 
 clap = { workspace = true, default-features = true, features = ["std", "derive"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
+sysinfo = { workspace = true, features = ["system"] }
 tokio = { workspace = true, features = ["macros", "signal"] }
 tracing = { workspace = true, default-features = true }
 tracing-subscriber = { workspace = true, default-features = true, features = ["env-filter"] }
