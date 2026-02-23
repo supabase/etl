@@ -25,7 +25,7 @@ use etl_postgres::types::TableId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Internal state tracking for pipeline lifecycle.
 ///
