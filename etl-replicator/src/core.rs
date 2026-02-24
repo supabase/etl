@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use crate::error::{ReplicatorError, ReplicatorResult};
 use crate::migrations::migrate_state_store;
+use etl::concurrency::memory_monitor::MemorySnapshot;
+use etl::config::MemoryBackpressureConfig;
 use etl::pipeline::Pipeline;
 use etl::store::both::postgres::PostgresStore;
 use etl::store::cleanup::CleanupStore;
@@ -13,6 +15,7 @@ use etl_config::Environment;
 use etl_config::shared::{
     BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
 };
+use etl_destinations::clickhouse::{ClickHouseDestination, ClickHouseInserterConfig};
 use etl_destinations::iceberg::{
     DestinationNamespace, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
 };
@@ -21,6 +24,7 @@ use etl_destinations::{
     iceberg::{IcebergClient, IcebergDestination},
 };
 use secrecy::ExposeSecret;
+use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{debug, info, warn};
 
@@ -130,6 +134,42 @@ pub async fn start_replicator_with_config(
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
+        DestinationConfig::ClickHouse {
+            url,
+            user,
+            password,
+            database,
+        } => {
+            let mut sys = System::new_with_specifics(
+                RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
+            );
+            let total_memory_bytes = MemorySnapshot::from_system(&mut sys).total();
+            let max_bytes_per_insert = (total_memory_bytes as f64
+                * replicator_config
+                    .pipeline
+                    .memory_backpressure
+                    .as_ref()
+                    .map(|config| config.activate_threshold)
+                    .unwrap_or(MemoryBackpressureConfig::default().activate_threshold)
+                    as f64
+                / replicator_config.pipeline.max_table_sync_workers as f64)
+                as u64;
+
+            let inserter_config = ClickHouseInserterConfig {
+                max_bytes_per_insert,
+            };
+            let destination = ClickHouseDestination::new(
+                url,
+                user,
+                password.as_ref().map(|p| p.expose_secret().to_string()),
+                database,
+                inserter_config,
+                state_store.clone(),
+            )?;
+
+            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            start_pipeline(pipeline).await?;
+        }
     }
 
     info!("replicator service completed");
@@ -209,6 +249,12 @@ fn log_destination_config(config: &DestinationConfig) {
                 "using generic rest iceberg destination config"
             )
         }
+        DestinationConfig::ClickHouse {
+            url,
+            user,
+            database,
+            password: _,
+        } => debug!(url, user, database, "using clickhouse destination config"),
     }
 }
 

@@ -34,6 +34,22 @@ pub enum FullApiDestinationConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
     },
+    ClickHouse {
+        /// ClickHouse HTTP(S) endpoint URL
+        #[schema(example = "http://test:8123")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        url: String, //TODO: use url type instead
+        /// ClickHouse user name
+        #[schema(example = "foo")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        user: String,
+        /// ClickHouse password (omit for passwordless access)
+        password: Option<SerializableSecretString>,
+        /// ClickHouse target database
+        #[schema(example = "my_db")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        database: String,
+    },
     Iceberg {
         #[serde(flatten)]
         config: FullApiIcebergConfig,
@@ -55,6 +71,17 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 service_account_key,
                 max_staleness_mins,
                 connection_pool_size: Some(connection_pool_size),
+            },
+            StoredDestinationConfig::ClickHouse {
+                url,
+                user,
+                password,
+                database,
+            } => Self::ClickHouse {
+                url,
+                user,
+                password,
+                database,
             },
             StoredDestinationConfig::Iceberg { config } => match config {
                 StoredIcebergConfig::Supabase {
@@ -107,6 +134,12 @@ pub enum StoredDestinationConfig {
         max_staleness_mins: Option<u16>,
         connection_pool_size: usize,
     },
+    ClickHouse {
+        url: String, //TODO: use url type instead
+        user: String,
+        password: Option<SerializableSecretString>,
+        database: String,
+    },
     Iceberg {
         config: StoredIcebergConfig,
     },
@@ -127,6 +160,17 @@ impl StoredDestinationConfig {
                 service_account_key: service_account_key.into(),
                 max_staleness_mins,
                 connection_pool_size,
+            },
+            Self::ClickHouse {
+                url,
+                user,
+                password,
+                database,
+            } => DestinationConfig::ClickHouse {
+                url,
+                user,
+                password: password.map(|s| s.into()),
+                database,
             },
             Self::Iceberg { config } => match config {
                 StoredIcebergConfig::Supabase {
@@ -186,6 +230,17 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size: connection_pool_size
                     .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
+            },
+            FullApiDestinationConfig::ClickHouse {
+                url,
+                user,
+                password,
+                database,
+            } => Self::ClickHouse {
+                url,
+                user,
+                password,
+                database,
             },
             FullApiDestinationConfig::Iceberg { config } => match config {
                 FullApiIcebergConfig::Supabase {
@@ -253,6 +308,24 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     service_account_key: encrypted_service_account_key,
                     max_staleness_mins,
                     connection_pool_size,
+                })
+            }
+            Self::ClickHouse {
+                url,
+                user,
+                password,
+                database,
+            } => {
+                let encrypted_password = match password {
+                    Some(p) => Some(encrypt_text(p.expose_secret().to_owned(), encryption_key)?),
+                    None => None,
+                };
+
+                Ok(EncryptedStoredDestinationConfig::ClickHouse {
+                    url,
+                    user,
+                    password: encrypted_password,
+                    database,
                 })
             }
             Self::Iceberg { config } => match config {
@@ -325,6 +398,12 @@ pub enum EncryptedStoredDestinationConfig {
         max_staleness_mins: Option<u16>,
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
+    },
+    ClickHouse {
+        url: String, //TODO: use url type instead
+        user: String,
+        password: Option<EncryptedValue>,
+        database: String,
     },
     Iceberg {
         #[serde(flatten)]
@@ -427,6 +506,27 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     })
                 }
             },
+            EncryptedStoredDestinationConfig::ClickHouse {
+                url,
+                user,
+                password,
+                database,
+            } => {
+                let password = match password {
+                    Some(p) => Some(SerializableSecretString::from(decrypt_text(
+                        p,
+                        encryption_key,
+                    )?)),
+                    None => None,
+                };
+
+                Ok(StoredDestinationConfig::ClickHouse {
+                    url,
+                    user,
+                    password,
+                    database,
+                })
+            }
         }
     }
 }

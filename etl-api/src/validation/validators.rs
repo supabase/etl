@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use etl_destinations::bigquery::BigQueryClient;
+use etl_destinations::clickhouse::ClickHouseClient;
 use etl_destinations::iceberg::{
     IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
 };
@@ -476,6 +477,59 @@ impl Validator for BigQueryValidator {
     }
 }
 
+/// Validates Clickhouse destination connectivity and dataset accessibility.
+#[derive(Debug)]
+struct ClickHouseValidator {
+    url: String, //TODO: use url type instead
+    user: String,
+    password: Option<String>,
+    database: String,
+}
+
+impl ClickHouseValidator {
+    fn new(
+        url: String, //TODO: use url type instead
+        user: String,
+        password: Option<String>,
+        database: String,
+    ) -> Self {
+        Self {
+            url,
+            user,
+            password,
+            database,
+        }
+    }
+}
+
+#[async_trait]
+impl Validator for ClickHouseValidator {
+    async fn validate(
+        &self,
+        _ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError> {
+        let client = ClickHouseClient::new(
+            self.url.clone(),
+            self.user.clone(),
+            self.password.clone(),
+            self.database.clone(),
+        );
+        match client.ping().await {
+            Ok(_) => Ok(Vec::new()),
+            Err(_) => Ok(vec![ValidationFailure::critical(
+                "ClickHouse Connection Failed",
+                "Unable to create clickhouse client.\n\n\
+                    Please verify:\n\
+                    (1) The url is valid and accessible\n\
+                    (2) The username is correct\n\
+                    (3) You set the right password\n\
+                    (4) You set the right database name
+                    ",
+            )]),
+        }
+    }
+}
+
 /// Validates Iceberg destination connectivity.
 #[derive(Debug)]
 struct IcebergValidator {
@@ -601,6 +655,20 @@ impl Validator for DestinationValidator {
                     project_id.clone(),
                     dataset_id.clone(),
                     service_account_key.expose_secret().to_string(),
+                );
+                validator.validate(ctx).await
+            }
+            FullApiDestinationConfig::ClickHouse {
+                url,
+                user,
+                password,
+                database,
+            } => {
+                let validator = ClickHouseValidator::new(
+                    url.clone(),
+                    user.clone(),
+                    password.as_ref().map(|p| p.expose_secret().to_string()),
+                    database.clone(),
                 );
                 validator.validate(ctx).await
             }

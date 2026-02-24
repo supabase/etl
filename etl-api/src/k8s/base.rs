@@ -40,6 +40,8 @@ pub enum DestinationType {
     BigQuery,
     /// Apache Iceberg destination.
     Iceberg,
+    /// ClickHouse destination.
+    ClickHouse,
 }
 
 impl From<&StoredDestinationConfig> for DestinationType {
@@ -48,6 +50,7 @@ impl From<&StoredDestinationConfig> for DestinationType {
         match value {
             StoredDestinationConfig::BigQuery { .. } => DestinationType::BigQuery,
             StoredDestinationConfig::Iceberg { .. } => DestinationType::Iceberg,
+            StoredDestinationConfig::ClickHouse { .. } => DestinationType::ClickHouse,
         }
     }
 }
@@ -128,6 +131,15 @@ pub trait K8sClient: Send + Sync {
         bq_service_account_key: &str,
     ) -> Result<(), K8sError>;
 
+    /// Creates or updates the ClickHouse password for a replicator.
+    ///
+    /// The secret name is derived from `prefix` and stored in the data-plane namespace.
+    async fn create_or_update_clickhouse_secret(
+        &self,
+        prefix: &str,
+        password: Option<&str>,
+    ) -> Result<(), K8sError>;
+
     /// Creates or updates the Iceberg credentials secret for a replicator.
     ///
     /// The secret contains the catalog token, S3 access key ID, and S3 secret access key.
@@ -144,6 +156,11 @@ pub trait K8sClient: Send + Sync {
     ///
     /// Does nothing if the secret does not exist.
     async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError>;
+
+    /// Deletes the ClickHouse credentials for a replicator.
+    ///
+    /// Does nothing if the secret does not exist.
+    async fn delete_clickhouse_secret(&self, prefix: &str) -> Result<(), K8sError>;
 
     /// Deletes the BigQuery service account secret for a replicator.
     ///

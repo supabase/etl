@@ -42,6 +42,16 @@ pub enum DestinationConfig {
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
     },
+    ClickHouse {
+        /// ClickHouse HTTP(S) endpoint URL
+        url: String, //TODO: use url instead
+        /// ClickHouse user name
+        user: String,
+        /// ClickHouse password (omit for passwordless access)
+        password: Option<SecretString>,
+        /// ClickHouse target database
+        database: String,
+    },
     Iceberg {
         #[serde(flatten)]
         config: IcebergConfig,
@@ -195,6 +205,14 @@ pub enum DestinationConfigWithoutSecrets {
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
     },
+    ClickHouse {
+        /// ClickHouse HTTP(S) endpoint URL
+        url: String, //TODO: use url instead
+        /// ClickHouse user name
+        user: String,
+        /// ClickHouse target database
+        database: String,
+    },
     Iceberg {
         #[serde(flatten)]
         config: IcebergConfigWithoutSecrets,
@@ -215,6 +233,16 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 dataset_id,
                 max_staleness_mins,
                 connection_pool_size,
+            },
+            DestinationConfig::ClickHouse {
+                url,
+                user,
+                database,
+                ..
+            } => DestinationConfigWithoutSecrets::ClickHouse {
+                url,
+                user,
+                database,
             },
             DestinationConfig::Iceberg { config } => DestinationConfigWithoutSecrets::Iceberg {
                 config: config.into(),
