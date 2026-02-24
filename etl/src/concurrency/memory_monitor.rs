@@ -22,14 +22,14 @@ use crate::types::PipelineId;
 
 /// Represents a memory snapshot.
 #[derive(Debug, Clone, Copy)]
-struct MemorySnapshot {
+pub struct MemorySnapshot {
     used: u64,
     total: u64,
 }
 
 impl MemorySnapshot {
     /// Refreshes memory readings from the operating system.
-    fn from_system(system: &mut sysinfo::System) -> Self {
+    pub fn from_system(system: &mut sysinfo::System) -> Self {
         system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
 
         match system.cgroup_limits() {
@@ -52,6 +52,10 @@ impl MemorySnapshot {
         }
 
         used_percent.clamp(0.0, 1.0)
+    }
+
+    pub fn total(&self) -> u64 {
+        self.total
     }
 }
 

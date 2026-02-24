@@ -18,7 +18,7 @@ name = "etl-api"
 [dependencies]
 etl = { workspace = true }
 etl-config = { workspace = true, features = ["utoipa", "supabase"] }
-etl-destinations = { workspace = true, features = ["bigquery", "iceberg", "ducklake"] }
+etl-destinations = { workspace = true, features = ["bigquery", "clickhouse", "ducklake", "iceberg"] }
 etl-postgres = { workspace = true, features = ["replication"] }
 etl-telemetry = { workspace = true }
 

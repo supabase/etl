@@ -113,7 +113,7 @@
 //!     // Create and start the pipeline
 //!     let mut pipeline = Pipeline::new(config, store, destination);
 //!     pipeline.start().await?;
-//!     
+//!
 //!     // Pipeline will run until stopped
 //!     pipeline.wait().await?;
 //!
@@ -123,10 +123,10 @@
 //!
 //! # Feature Flags
 //!
-//! - `test-utils`: Enable testing utilities and mock implementations  
+//! - `test-utils`: Enable testing utilities and mock implementations
 //! - `failpoints`: Enable fault injection for testing error scenarios
 
-mod concurrency;
+pub mod concurrency;
 pub mod config;
 mod conversions;
 pub mod destination;
