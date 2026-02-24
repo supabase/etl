@@ -1,6 +1,6 @@
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
-use etl::types::{Cell, ColumnSchema, PipelineId, Type, is_array_type};
+use etl::types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type};
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
 use gcp_bigquery_client::storage::{BatchAppendResult, ColumnMode, StorageApiConfig};
@@ -126,6 +126,22 @@ fn calculate_backoff(attempt: u32) -> Duration {
     Duration::from_millis(jitter)
 }
 
+/// Patterns that indicate transient schema propagation delays in BigQuery streaming.
+const RETRYABLE_STREAMING_PATTERNS: &[&str] = &[
+    "extra field",
+    "is missing in the proto",
+    "was not found",
+    "entity was not found",
+];
+
+/// Returns true if a status message matches known retryable streaming propagation patterns.
+fn is_retryable_streaming_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    RETRYABLE_STREAMING_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+}
+
 /// Checks if a [`BQError`] represents a transient condition that should be retried.
 ///
 /// Implements retry logic based on Google's official BigQuery Storage Write API guidance
@@ -136,43 +152,49 @@ fn is_retryable_bq_error(error: &BQError) -> bool {
         // Transport-level errors are always retriable (network failures, connection drops, etc.)
         BQError::TonicTransportError(_) => true,
 
-        BQError::TonicStatusError(status) => match status.code() {
-            // Immediately retriable: canonical "service unavailable" code
-            Code::Unavailable => true,
-
-            // Immediately retriable: transient internal server errors (GOAWAY, backend issues)
-            Code::Internal => true,
-
-            // Immediately retriable: concurrency conflicts and server-initiated aborts
-            Code::Aborted => true,
-
-            // Immediately retriable: server-cancelled operations (not client-cancelled)
-            Code::Cancelled => true,
-
-            // Immediately retriable: deadline exceeded (safe with offset-based deduplication)
-            Code::DeadlineExceeded => true,
-
-            // Retriable with backoff: rate limits and quota exhaustion
-            Code::ResourceExhausted => true,
-
-            // Transport error that never reached the server
-            Code::Unknown => {
-                let message = status.message().to_lowercase();
-                message.contains("transport") || message.contains("connection")
+        BQError::TonicStatusError(status) => {
+            if is_retryable_streaming_message(status.message()) {
+                return true;
             }
 
-            // Non-retriable errors
-            Code::InvalidArgument => false,
-            Code::NotFound => false,
-            Code::AlreadyExists => false,
-            Code::PermissionDenied => false,
-            Code::FailedPrecondition => false,
-            Code::Unimplemented => false,
-            Code::Unauthenticated => false,
-            Code::DataLoss => false,
-            Code::OutOfRange => false,
-            Code::Ok => false,
-        },
+            match status.code() {
+                // Immediately retriable: canonical "service unavailable" code
+                Code::Unavailable => true,
+
+                // Immediately retriable: transient internal server errors (GOAWAY, backend issues)
+                Code::Internal => true,
+
+                // Immediately retriable: concurrency conflicts and server-initiated aborts
+                Code::Aborted => true,
+
+                // Immediately retriable: server-cancelled operations (not client-cancelled)
+                Code::Cancelled => true,
+
+                // Immediately retriable: deadline exceeded (safe with offset-based deduplication)
+                Code::DeadlineExceeded => true,
+
+                // Retriable with backoff: rate limits and quota exhaustion
+                Code::ResourceExhausted => true,
+
+                // Transport error that never reached the server
+                Code::Unknown => {
+                    let message = status.message().to_lowercase();
+                    message.contains("transport") || message.contains("connection")
+                }
+
+                // Non-retriable errors
+                Code::InvalidArgument => false,
+                Code::NotFound => false,
+                Code::AlreadyExists => false,
+                Code::PermissionDenied => false,
+                Code::FailedPrecondition => false,
+                Code::Unimplemented => false,
+                Code::Unauthenticated => false,
+                Code::DataLoss => false,
+                Code::OutOfRange => false,
+                Code::Ok => false,
+            }
+        }
         // Other BQError variants are not retriable
         _ => false,
     }
@@ -339,12 +361,15 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
 
             // Code::NotFound (5) - Resource doesn't exist.
             // Requires creating the resource (table, dataset, stream) first. Never retry.
-            Code::NotFound => (ErrorKind::DestinationError, "BigQuery entity not found"),
+            Code::NotFound => (
+                ErrorKind::DestinationTableMissing,
+                "BigQuery entity not found",
+            ),
 
             // Code::AlreadyExists (6) - Entity conflict during creation.
             // For streaming with offsets, may indicate row was already written. Never retry.
             Code::AlreadyExists => (
-                ErrorKind::DestinationError,
+                ErrorKind::DestinationTableAlreadyExists,
                 "BigQuery entity already exists",
             ),
 
@@ -566,14 +591,14 @@ impl BigQueryClient {
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
-        column_schemas: &[ColumnSchema],
+        replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<bool> {
         let table_exists = self.table_exists(dataset_id, table_id).await?;
 
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
-        let columns_spec = Self::create_columns_spec(column_schemas)?;
+        let columns_spec = Self::create_columns_spec(replicated_table_schema)?;
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
@@ -603,15 +628,20 @@ impl BigQueryClient {
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
-        column_schemas: &[ColumnSchema],
+        replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<bool> {
         if self.table_exists(dataset_id, table_id).await? {
             return Ok(false);
         }
 
-        self.create_table(dataset_id, table_id, column_schemas, max_staleness_mins)
-            .await?;
+        self.create_table(
+            dataset_id,
+            table_id,
+            replicated_table_schema,
+            max_staleness_mins,
+        )
+        .await?;
 
         Ok(true)
     }
@@ -624,12 +654,12 @@ impl BigQueryClient {
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
-        column_schemas: &[ColumnSchema],
+        replicated_table_schema: &ReplicatedTableSchema,
         max_staleness_mins: Option<u16>,
     ) -> EtlResult<()> {
         let full_table_name = self.full_table_name(dataset_id, table_id)?;
 
-        let columns_spec = Self::create_columns_spec(column_schemas)?;
+        let columns_spec = Self::create_columns_spec(replicated_table_schema)?;
         let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
             Self::max_staleness_option(max_staleness_mins)
         } else {
@@ -701,6 +731,81 @@ impl BigQueryClient {
         info!(%full_table_name, "dropping table from bigquery");
 
         let query = format!("drop table if exists {full_table_name}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Adds a column to an existing BigQuery table.
+    ///
+    /// Executes an ALTER TABLE ADD COLUMN statement to add a new column with the
+    /// specified schema. New columns must be nullable in BigQuery.
+    pub async fn add_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_schema: &ColumnSchema,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let column_name = Self::sanitize_identifier(&column_schema.name, "BigQuery column name")?;
+        let column_type = Self::postgres_to_bigquery_type(&column_schema.typ);
+
+        info!(
+            "adding column `{column_name}` ({column_type}) to table {full_table_name} in BigQuery"
+        );
+
+        // BigQuery requires new columns to be nullable (no NOT NULL constraint allowed). Also, we wouldn't
+        // be able to add it nonetheless since we don't have a way to set a default value for past columns.
+        let query =
+            format!("alter table {full_table_name} add column `{column_name}` {column_type}");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Drops a column from an existing BigQuery table.
+    ///
+    /// Executes an ALTER TABLE DROP COLUMN statement to remove the specified column.
+    pub async fn drop_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        column_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let column_name = Self::sanitize_identifier(column_name, "BigQuery column name")?;
+
+        info!("dropping column `{column_name}` from table {full_table_name} in BigQuery");
+
+        let query = format!("alter table {full_table_name} drop column `{column_name}`");
+
+        let _ = self.query(QueryRequest::new(query)).await?;
+
+        Ok(())
+    }
+
+    /// Renames a column in an existing BigQuery table.
+    ///
+    /// Executes an ALTER TABLE RENAME COLUMN statement to rename the specified column.
+    pub async fn rename_column(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        old_name: &str,
+        new_name: &str,
+    ) -> EtlResult<()> {
+        let full_table_name = self.full_table_name(dataset_id, table_id)?;
+        let old_name = Self::sanitize_identifier(old_name, "BigQuery column name")?;
+        let new_name = Self::sanitize_identifier(new_name, "BigQuery column name")?;
+
+        info!(
+            "renaming column `{old_name}` to `{new_name}` in table {full_table_name} in BigQuery"
+        );
+
+        let query =
+            format!("alter table {full_table_name} rename column `{old_name}` to `{new_name}`");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -964,6 +1069,11 @@ impl BigQueryClient {
         Ok((total_bytes_sent, total_bytes_received))
     }
 
+    /// Invalidates all connections used by the storage write api.
+    pub async fn invalidate_all_connections(&self) {
+        self.client.storage().invalidate_all_connections().await;
+    }
+
     /// Creates a TableBatch for a specific table with validated rows.
     ///
     /// Converts TableRow instances to BigQueryTableRow and creates a properly configured
@@ -1061,38 +1171,53 @@ impl BigQueryClient {
 
     /// Creates a primary key clause for table creation.
     ///
-    /// Generates a primary key constraint clause from columns marked as primary key.
-    fn add_primary_key_clause(column_schemas: &[ColumnSchema]) -> EtlResult<String> {
-        let identity_columns: Vec<String> = column_schemas
-            .iter()
-            .filter(|s| s.primary)
+    /// Generates a primary key constraint clause from columns marked as primary key,
+    /// sorted by their ordinal position to ensure correct composite key ordering.
+    fn add_primary_key_clause(
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<Option<String>> {
+        let mut primary_key_columns: Vec<_> = replicated_table_schema
+            .column_schemas()
+            .filter(|s| s.primary_key())
+            .collect();
+
+        // If no primary key columns are marked, return early.
+        if primary_key_columns.is_empty() {
+            return Ok(None);
+        }
+
+        // Sort by primary_key_ordinal_position to ensure correct composite key ordering.
+        primary_key_columns.sort_by_key(|c| c.primary_key_ordinal_position);
+
+        let primary_key_columns: Vec<String> = primary_key_columns
+            .into_iter()
             .map(|c| {
                 Self::sanitize_identifier(&c.name, "BigQuery primary key column")
                     .map(|name| format!("`{name}`"))
             })
             .collect::<EtlResult<Vec<_>>>()?;
 
-        if identity_columns.is_empty() {
-            return Ok("".to_string());
-        }
-
-        Ok(format!(
+        let primary_key_clause = format!(
             ", primary key ({}) not enforced",
-            identity_columns.join(",")
-        ))
+            primary_key_columns.join(",")
+        );
+
+        Ok(Some(primary_key_clause))
     }
 
     /// Builds complete column specifications for CREATE TABLE statements.
-    fn create_columns_spec(column_schemas: &[ColumnSchema]) -> EtlResult<String> {
-        let mut s = column_schemas
-            .iter()
+    fn create_columns_spec(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<String> {
+        let mut column_spec = replicated_table_schema
+            .column_schemas()
             .map(Self::column_spec)
             .collect::<EtlResult<Vec<_>>>()?
             .join(",");
 
-        s.push_str(&Self::add_primary_key_clause(column_schemas)?);
+        if let Some(primary_key_clause) = Self::add_primary_key_clause(replicated_table_schema)? {
+            column_spec.push_str(&primary_key_clause);
+        }
 
-        Ok(format!("({s})"))
+        Ok(format!("({column_spec})"))
     }
 
     /// Creates max staleness option clause for CDC table creation.
@@ -1149,13 +1274,13 @@ impl BigQueryClient {
     /// Maps data types and nullability to BigQuery column specifications, setting
     /// appropriate column modes and automatically adding CDC special columns.
     pub fn column_schemas_to_table_descriptor(
-        column_schemas: &[ColumnSchema],
+        replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
     ) -> TableDescriptor {
-        let mut field_descriptors = Vec::with_capacity(column_schemas.len());
+        let mut field_descriptors = vec![];
         let mut number = 1;
 
-        for column_schema in column_schemas {
+        for column_schema in replicated_table_schema.column_schemas() {
             let typ = match column_schema.typ {
                 Type::BOOL => ColumnType::Bool,
                 Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
@@ -1250,7 +1375,45 @@ impl fmt::Debug for BigQueryClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use tonic::Status;
+
+    use etl::types::{ReplicationMask, TableId, TableName, TableSchema};
+    use std::collections::HashSet;
+
+    /// Creates a test column schema with common defaults.
+    ///
+    /// This helper simplifies column schema creation in tests by providing sensible
+    /// defaults for fields that are typically not relevant to the test logic.
+    fn test_column(
+        name: &str,
+        typ: Type,
+        ordinal_position: i32,
+        nullable: bool,
+        primary_key_ordinal: Option<i32>,
+    ) -> ColumnSchema {
+        ColumnSchema::new(
+            name.to_string(),
+            typ,
+            -1,
+            ordinal_position,
+            primary_key_ordinal,
+            nullable,
+        )
+    }
+
+    /// Creates a [`ReplicatedTableSchema`] from test columns with all columns replicated.
+    fn test_replicated_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
+        let column_names: HashSet<String> = columns.iter().map(|c| c.name.clone()).collect();
+        let table_schema = Arc::new(TableSchema::new(
+            TableId(1), // Dummy table ID
+            TableName::new("public".to_string(), "test_table".to_string()),
+            columns,
+        ));
+        let replication_mask = ReplicationMask::build_or_all(&table_schema, &column_names);
+
+        ReplicatedTableSchema::from_mask(table_schema, replication_mask)
+    }
 
     #[test]
     fn test_postgres_to_bigquery_type_basic_types() {
@@ -1310,24 +1473,23 @@ mod tests {
 
     #[test]
     fn test_column_spec() {
-        let column_schema = ColumnSchema::new("test_col".to_string(), Type::TEXT, -1, true, false);
+        let column_schema = test_column("test_col", Type::TEXT, 1, true, None);
         let spec = BigQueryClient::column_spec(&column_schema).expect("column spec generation");
         assert_eq!(spec, "`test_col` string");
 
-        let not_null_column = ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true);
+        let not_null_column = test_column("id", Type::INT4, 1, false, Some(1));
         let not_null_spec =
             BigQueryClient::column_spec(&not_null_column).expect("not null column spec");
         assert_eq!(not_null_spec, "`id` int64 not null");
 
-        let array_column =
-            ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false, false);
+        let array_column = test_column("tags", Type::TEXT_ARRAY, 1, false, None);
         let array_spec = BigQueryClient::column_spec(&array_column).expect("array column spec");
         assert_eq!(array_spec, "`tags` array<string>");
     }
 
     #[test]
     fn test_column_spec_escapes_backticks() {
-        let column_schema = ColumnSchema::new("pwn`name".to_string(), Type::TEXT, -1, true, false);
+        let column_schema = test_column("pwn`name", Type::TEXT, 1, true, None);
 
         let spec = BigQueryClient::column_spec(&column_schema).expect("escaped column spec");
 
@@ -1347,43 +1509,65 @@ mod tests {
     #[test]
     fn test_add_primary_key_clause() {
         let columns_with_pk = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
         ];
-        let pk_clause =
-            BigQueryClient::add_primary_key_clause(&columns_with_pk).expect("pk clause");
+        let schema_with_pk = test_replicated_schema(columns_with_pk);
+        let pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_pk)
+            .expect("pk clause")
+            .unwrap();
         assert_eq!(pk_clause, ", primary key (`id`) not enforced");
 
+        // Composite primary key with correct ordinal positions.
         let columns_with_composite_pk = vec![
-            ColumnSchema::new("tenant_id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            test_column("tenant_id", Type::INT4, 1, false, Some(1)),
+            test_column("id", Type::INT4, 2, false, Some(2)),
+            test_column("name", Type::TEXT, 3, true, None),
         ];
-        let composite_pk_clause =
-            BigQueryClient::add_primary_key_clause(&columns_with_composite_pk)
-                .expect("composite pk clause");
+        let schema_with_composite_pk = test_replicated_schema(columns_with_composite_pk);
+        let composite_pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_composite_pk)
+            .unwrap()
+            .expect("composite pk clause");
         assert_eq!(
             composite_pk_clause,
             ", primary key (`tenant_id`,`id`) not enforced"
         );
 
-        let columns_no_pk = vec![
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("age".to_string(), Type::INT4, -1, true, false),
+        // Composite primary key with reversed column order but correct ordinal positions.
+        // The primary key clause should still be ordered by ordinal position.
+        let columns_with_reversed_pk = vec![
+            test_column("id", Type::INT4, 1, false, Some(2)),
+            test_column("tenant_id", Type::INT4, 2, false, Some(1)),
+            test_column("name", Type::TEXT, 3, true, None),
         ];
+        let schema_with_reversed_pk = test_replicated_schema(columns_with_reversed_pk);
+        let reversed_pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_reversed_pk)
+            .unwrap()
+            .expect("reversed pk clause");
+        assert_eq!(
+            reversed_pk_clause,
+            ", primary key (`tenant_id`,`id`) not enforced"
+        );
+
+        let columns_no_pk = vec![
+            test_column("name", Type::TEXT, 1, true, None),
+            test_column("age", Type::INT4, 2, true, None),
+        ];
+        let schema_no_pk = test_replicated_schema(columns_no_pk);
         let no_pk_clause =
-            BigQueryClient::add_primary_key_clause(&columns_no_pk).expect("no pk clause");
-        assert_eq!(no_pk_clause, "");
+            BigQueryClient::add_primary_key_clause(&schema_no_pk).expect("no pk clause");
+        assert!(no_pk_clause.is_none());
     }
 
     #[test]
     fn test_create_columns_spec() {
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
+            test_column("active", Type::BOOL, 3, false, None),
         ];
-        let spec = BigQueryClient::create_columns_spec(&columns).expect("columns spec");
+        let schema = test_replicated_schema(columns);
+        let spec = BigQueryClient::create_columns_spec(&schema).expect("columns spec");
         assert_eq!(
             spec,
             "(`id` int64 not null,`name` string,`active` bool not null, primary key (`id`) not enforced)"
@@ -1399,13 +1583,14 @@ mod tests {
     #[test]
     fn test_column_schemas_to_table_descriptor() {
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
-            ColumnSchema::new("active".to_string(), Type::BOOL, -1, false, false),
-            ColumnSchema::new("tags".to_string(), Type::TEXT_ARRAY, -1, false, false),
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
+            test_column("active", Type::BOOL, 3, false, None),
+            test_column("tags", Type::TEXT_ARRAY, 4, false, None),
         ];
+        let schema = test_replicated_schema(columns);
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, true);
 
         assert_eq!(descriptor.field_descriptors.len(), 6); // 4 columns + CDC columns
 
@@ -1482,15 +1667,16 @@ mod tests {
     #[test]
     fn test_column_schemas_to_table_descriptor_complex_types() {
         let columns = vec![
-            ColumnSchema::new("uuid_col".to_string(), Type::UUID, -1, true, false),
-            ColumnSchema::new("json_col".to_string(), Type::JSON, -1, true, false),
-            ColumnSchema::new("bytea_col".to_string(), Type::BYTEA, -1, true, false),
-            ColumnSchema::new("numeric_col".to_string(), Type::NUMERIC, -1, true, false),
-            ColumnSchema::new("date_col".to_string(), Type::DATE, -1, true, false),
-            ColumnSchema::new("time_col".to_string(), Type::TIME, -1, true, false),
+            test_column("uuid_col", Type::UUID, 1, true, None),
+            test_column("json_col", Type::JSON, 2, true, None),
+            test_column("bytea_col", Type::BYTEA, 3, true, None),
+            test_column("numeric_col", Type::NUMERIC, 4, true, None),
+            test_column("date_col", Type::DATE, 5, true, None),
+            test_column("time_col", Type::TIME, 6, true, None),
         ];
+        let schema = test_replicated_schema(columns);
 
-        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&columns, true);
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, true);
 
         assert_eq!(descriptor.field_descriptors.len(), 8); // 6 columns + CDC columns
 
@@ -1544,9 +1730,10 @@ mod tests {
         let table_id = "test_table";
 
         let columns = vec![
-            ColumnSchema::new("id".to_string(), Type::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), Type::TEXT, -1, true, false),
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
         ];
+        let schema = test_replicated_schema(columns);
 
         // Simulate the query generation logic
         let full_table_name = format!(
@@ -1555,7 +1742,7 @@ mod tests {
             dataset = BigQueryClient::sanitize_identifier(dataset_id, "dataset").unwrap(),
             table = BigQueryClient::sanitize_identifier(table_id, "table").unwrap()
         );
-        let columns_spec = BigQueryClient::create_columns_spec(&columns).unwrap();
+        let columns_spec = BigQueryClient::create_columns_spec(&schema).unwrap();
         let query = format!("create or replace table {full_table_name} {columns_spec}");
 
         let expected_query = "create or replace table `test-project.test_dataset.test_table` (`id` int64 not null,`name` string, primary key (`id`) not enforced)";
@@ -1569,13 +1756,8 @@ mod tests {
         let table_id = "test_table";
         let max_staleness_mins = 15;
 
-        let columns = vec![ColumnSchema::new(
-            "id".to_string(),
-            Type::INT4,
-            -1,
-            false,
-            true,
-        )];
+        let columns = vec![test_column("id", Type::INT4, 1, false, Some(1))];
+        let schema = test_replicated_schema(columns);
 
         // Simulate the query generation logic with staleness
         let full_table_name = format!(
@@ -1584,7 +1766,7 @@ mod tests {
             dataset = BigQueryClient::sanitize_identifier(dataset_id, "dataset").unwrap(),
             table = BigQueryClient::sanitize_identifier(table_id, "table").unwrap()
         );
-        let columns_spec = BigQueryClient::create_columns_spec(&columns).unwrap();
+        let columns_spec = BigQueryClient::create_columns_spec(&schema).unwrap();
         let max_staleness_option = BigQueryClient::max_staleness_option(max_staleness_mins);
         let query = format!(
             "create or replace table {full_table_name} {columns_spec} {max_staleness_option}"
@@ -1670,6 +1852,18 @@ mod tests {
         )));
         assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
             Status::out_of_range("invalid offset")
+        )));
+    }
+
+    #[test]
+    fn test_is_retryable_bq_error_schema_propagation_message_patterns() {
+        // These are normally non-retriable codes, but message patterns indicate transient
+        // schema propagation delays and should be retried by the client.
+        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::failed_precondition("field foo is missing in the proto")
+        )));
+        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
+            Status::not_found("requested entity was not found")
         )));
     }
 

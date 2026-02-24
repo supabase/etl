@@ -89,10 +89,10 @@ pub enum ErrorKind {
     SourceLockTimeout,
     SourceOperationCanceled,
 
-    // Schema & Mapping Errors
+    // Schema Errors
     SourceSchemaError,
     MissingTableSchema,
-    MissingTableMapping,
+    CorruptedTableSchema,
     DestinationTableNameInvalid,
     DestinationNamespaceAlreadyExists,
     DestinationTableAlreadyExists,
@@ -970,6 +970,40 @@ impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlErro
                 Some(Cow::Owned(slot_name)),
                 None,
             ),
+        }
+    }
+}
+
+/// Converts [`etl_postgres::types::SchemaError`] to [`EtlError`] with [`ErrorKind::CorruptedTableSchema`].
+impl From<etl_postgres::types::SchemaError> for EtlError {
+    #[track_caller]
+    fn from(err: etl_postgres::types::SchemaError) -> EtlError {
+        match err {
+            etl_postgres::types::SchemaError::UnknownReplicatedColumns(columns) => {
+                EtlError::from_components(
+                    ErrorKind::CorruptedTableSchema,
+                    Cow::Borrowed(
+                        "Received columns during replication that are not in the stored table schema",
+                    ),
+                    Some(Cow::Owned(format!(
+                        "Unknown columns: {columns:?}\n\n\
+                        Cause: The pipeline crashed after a schema change but before reporting progress \
+                        back to Postgres. On restart, event streaming resumed from past events with an \
+                        outdated schema."
+                    ))),
+                    None,
+                )
+            }
+            etl_postgres::types::SchemaError::InvalidSnapshotId(lsn_str) => {
+                EtlError::from_components(
+                    ErrorKind::CorruptedTableSchema,
+                    Cow::Borrowed("Invalid snapshot id"),
+                    Some(Cow::Owned(format!(
+                        "Failed to parse snapshot '{lsn_str}' as PgLsn."
+                    ))),
+                    None,
+                )
+            }
         }
     }
 }

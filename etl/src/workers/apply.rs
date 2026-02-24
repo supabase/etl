@@ -21,6 +21,7 @@ use crate::metrics::{
 };
 use crate::replication::apply::{ApplyLoop, ApplyWorkerContext, WorkerContext};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState};
+use crate::replication::masks::ReplicationMasksCache;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
@@ -81,6 +82,7 @@ pub struct ApplyWorker<S, D> {
     pool: Arc<TableSyncWorkerPool>,
     store: S,
     destination: D,
+    replication_masks: ReplicationMasksCache,
     shutdown_rx: ShutdownRx,
     table_sync_worker_permits: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
@@ -99,6 +101,7 @@ impl<S, D> ApplyWorker<S, D> {
         pool: Arc<TableSyncWorkerPool>,
         store: S,
         destination: D,
+        replication_masks: ReplicationMasksCache,
         shutdown_rx: ShutdownRx,
         table_sync_worker_permits: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
@@ -115,6 +118,7 @@ impl<S, D> ApplyWorker<S, D> {
             pool,
             store,
             destination,
+            replication_masks,
             shutdown_rx,
             table_sync_worker_permits,
             memory_monitor,
@@ -225,6 +229,7 @@ where
         let pool = self.pool.clone();
         let store = self.store.clone();
         let destination = self.destination.clone();
+        let replication_masks = self.replication_masks.clone();
         let table_sync_worker_permits = self.table_sync_worker_permits.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let mut retry_attempts: u32 = 0;
@@ -236,6 +241,7 @@ where
                 pool: pool.clone(),
                 store: store.clone(),
                 destination: destination.clone(),
+                replication_masks: replication_masks.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 table_sync_worker_permits: table_sync_worker_permits.clone(),
                 memory_monitor: self.memory_monitor.clone(),
@@ -283,6 +289,7 @@ where
             pool: self.pool,
             store: self.store.clone(),
             destination: self.destination.clone(),
+            replication_masks: self.replication_masks.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
             table_sync_worker_permits: self.table_sync_worker_permits,
             memory_monitor: self.memory_monitor.clone(),
@@ -296,6 +303,7 @@ where
             replication_client,
             self.store,
             self.destination,
+            self.replication_masks,
             worker_context,
             self.shutdown_rx,
             self.memory_monitor,

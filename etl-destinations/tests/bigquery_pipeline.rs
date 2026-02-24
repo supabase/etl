@@ -4,6 +4,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
 use etl::error::ErrorKind;
 use etl::state::table::TableReplicationPhaseType;
+use etl::store::state::StateStore;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with_batch_config};
@@ -11,8 +12,9 @@ use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 use etl::types::{EventType, PgNumeric, PipelineId};
 use etl_destinations::bigquery::test_utils::{
-    setup_bigquery_database, skip_if_missing_bigquery_env_vars,
+    parse_bigquery_table_rows, setup_bigquery_database, skip_if_missing_bigquery_env_vars,
 };
+use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::str::FromStr;
@@ -34,7 +36,6 @@ fn install_crypto_provider() {
 
 use crate::support::bigquery::{
     BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
-    parse_bigquery_table_rows,
 };
 
 mod support;
@@ -601,7 +602,7 @@ async fn table_nullable_scalar_columns() {
 
     table_sync_done_notification.notified().await;
 
-    // insert
+    // Insert
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 1)])
         .await;
@@ -645,7 +646,7 @@ async fn table_nullable_scalar_columns() {
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsScalar>(table_rows);
     assert_eq!(parsed_table_rows, vec![NullableColsScalar::all_nulls(1),]);
 
-    // update
+    // Update
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Update, 1)])
         .await;
@@ -1649,8 +1650,9 @@ async fn table_array_with_null_values() {
     // We have to reset the state of the table and copy it from scratch, otherwise the CDC will contain
     // the inserts and deletes, failing again.
     store.reset_table_state(table_id).await.unwrap();
+
     // We also clear the events so that it's more idiomatic to wait for them, since we don't have
-    // the insert of before.
+    // the prior insert.
     destination.clear_events().await;
 
     // We recreate the pipeline and try again.
@@ -1847,4 +1849,180 @@ async fn table_validation_out_of_bounds_values() {
         err.kinds()
             .contains(&ErrorKind::UnsupportedValueInDestination)
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_schema_change() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let bigquery_database = setup_bigquery_database().await;
+    let table_name = test_table_name("schema_multi_ops");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("name", "text not null"),
+                ("age", "integer not null"),
+                ("status", "text"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    let publication_name = "test_pub_multi_ops".to_string();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_sync_done = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
+        .await;
+
+    pipeline.start().await.unwrap();
+    table_sync_done.notified().await;
+
+    // Insert the initial row.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "age", "status"],
+            &[&"Alice", &25, &"active"],
+        )
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    // Verify initial schema.
+    let initial_schema = bigquery_database
+        .query_table_schema(table_name.clone())
+        .await
+        .unwrap();
+    initial_schema.assert_columns(&["id", "name", "age", "status"]);
+
+    // Verify destination schema state is applied after initial table creation.
+    let initial_state = store
+        .get_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination schema state should exist after table creation");
+    assert!(
+        initial_state.is_applied(),
+        "initial destination schema state should be applied"
+    );
+    let initial_snapshot_id = initial_state.snapshot_id;
+
+    // Apply multiple schema changes:
+    // 1. Rename name -> full_name
+    // 2. Drop the status column
+    // 3. Add email column
+    //
+    // Note: Each DDL change is captured via the DDL event trigger and stored in the schema
+    // store, but PostgreSQL sends only ONE Relation message with the final schema when the
+    // next DML operation (INSERT) occurs. The schema diffing in handle_relation_event then
+    // computes and applies all changes at once.
+    let event_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "full_name",
+            }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::DropColumn { name: "status" }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn {
+                name: "email",
+                data_type: "text",
+            }],
+        )
+        .await
+        .unwrap();
+
+    // Insert row with new schema.
+    database
+        .insert_values(
+            table_name.clone(),
+            &["full_name", "age", "email"],
+            &[&"Bob", &30, &"bob@example.com"],
+        )
+        .await
+        .unwrap();
+
+    event_notify.notified().await;
+
+    // Give BigQuery time to apply all schema changes.
+    sleep(Duration::from_secs(3)).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify the final schema:
+    // - name should be renamed to full_name
+    // - status should be dropped
+    // - email should be added
+    let final_schema = bigquery_database
+        .query_table_schema(table_name.clone())
+        .await
+        .unwrap();
+    final_schema.assert_columns(&["id", "full_name", "age", "email"]);
+    final_schema.assert_no_column("name");
+    final_schema.assert_no_column("status");
+
+    // Verify destination schema state is applied after schema changes.
+    let final_state = store
+        .get_destination_table_metadata(table_id)
+        .await
+        .unwrap()
+        .expect("destination schema state should exist after schema change");
+    assert!(
+        final_state.is_applied(),
+        "final destination schema state should be applied"
+    );
+    assert!(
+        final_state.snapshot_id > initial_snapshot_id,
+        "snapshot_id should have increased after schema change"
+    );
+
+    // Verify data was inserted correctly.
+    let rows = bigquery_database.query_table(table_name).await.unwrap();
+    assert_eq!(rows.len(), 2);
 }

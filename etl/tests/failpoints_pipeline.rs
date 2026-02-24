@@ -207,10 +207,11 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     // Verify table schemas were correctly stored.
     let table_schemas = store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
+    let users_schemas = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
     assert_eq!(
-        *table_schemas
-            .get(&database_schema.users_schema().id)
-            .unwrap(),
+        users_schemas.last().unwrap().1,
         database_schema.users_schema()
     );
 }
@@ -270,10 +271,11 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     // Verify table schemas were correctly stored.
     let table_schemas = store.get_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
+    let users_schemas = table_schemas
+        .get(&database_schema.users_schema().id)
+        .unwrap();
     assert_eq!(
-        *table_schemas
-            .get(&database_schema.users_schema().id)
-            .unwrap(),
+        users_schemas.last().unwrap().1,
         database_schema.users_schema()
     );
 }

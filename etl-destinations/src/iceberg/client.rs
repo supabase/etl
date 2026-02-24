@@ -180,6 +180,7 @@ impl IcebergClient {
         debug!(%table_name, %namespace, "creating table if missing");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
         let table_ident = TableIdent::new(namespace_ident.clone(), table_name.clone());
+
         if !self.catalog.table_exists(&table_ident).await? {
             let iceberg_schema = postgres_to_iceberg_schema(column_schemas)?;
             let creation = TableCreation::builder()
@@ -191,6 +192,7 @@ impl IcebergClient {
                 .create_table(&namespace_ident, creation)
                 .await?;
         }
+
         Ok(())
     }
 

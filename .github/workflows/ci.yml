@@ -100,7 +100,7 @@ jobs:
       - name: Migrate Database
         run: |
           sudo apt-get install libpq-dev -y
-          ./etl-api/scripts/run_migrations.sh
+          ./scripts/run_migrations.sh etl-api
 
       - name: Run Doctests
         run: |
@@ -167,7 +167,7 @@ jobs:
       - name: Migrate Database
         run: |
           sudo apt-get install libpq-dev -y
-          ./etl-api/scripts/run_migrations.sh
+          ./scripts/run_migrations.sh etl-api
 
       - name: Set up BigQuery Credentials
         run: |

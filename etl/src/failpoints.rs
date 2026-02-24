@@ -8,9 +8,13 @@ use fail::fail_point;
 use crate::bail;
 use crate::error::{ErrorKind, EtlResult};
 
+pub const START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP: &str =
+    "start_table_sync.before_data_sync_slot_creation_fp";
+pub const START_TABLE_SYNC_DURING_DATA_SYNC_FP: &str = "start_table_sync.during_data_sync_fp";
+pub const SEND_STATUS_UPDATE_FP: &str = "send_status_update_fp";
 pub const START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION: &str =
-    "start_table_sync.before_data_sync_slot_creation";
-pub const START_TABLE_SYNC_DURING_DATA_SYNC: &str = "start_table_sync.during_data_sync";
+    START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP;
+pub const START_TABLE_SYNC_DURING_DATA_SYNC: &str = START_TABLE_SYNC_DURING_DATA_SYNC_FP;
 
 /// Executes a configurable failpoint for testing error scenarios.
 ///
@@ -44,4 +48,11 @@ pub fn etl_fail_point(name: &str) -> EtlResult<()> {
     });
 
     Ok(())
+}
+
+/// Returns `true` if a specific failpoint is active, `false` otherwise.
+///
+/// A failpoint is considered active if it throws an error.
+pub fn etl_fail_point_active(name: &str) -> bool {
+    etl_fail_point(name).is_err()
 }

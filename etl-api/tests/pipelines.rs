@@ -973,15 +973,15 @@ async fn rollback_tables_with_full_reset_succeeds() {
         .await
         .unwrap();
 
-    // Insert a table mapping for this table
-    sqlx::query("insert into etl.table_mappings (pipeline_id, source_table_id, destination_table_id) values ($1, $2, 'dest_test_users')")
+    // Insert destination metadata for this table
+    sqlx::query("insert into etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
         .bind(pipeline_id)
         .bind(table_oid)
         .execute(&source_db_pool)
         .await
         .unwrap();
 
-    // Verify table schema and mapping exist before reset
+    // Verify table schema and metadata exist before reset
     let schema_count_before: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
     )
@@ -992,15 +992,15 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .unwrap();
     assert_eq!(schema_count_before, 1);
 
-    let mapping_count_before: i64 = sqlx::query_scalar(
-        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    let metadata_count_before: i64 = sqlx::query_scalar(
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(mapping_count_before, 1);
+    assert_eq!(metadata_count_before, 1);
 
     let response = test_rollback(
         &app,
@@ -1043,22 +1043,22 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .unwrap();
     assert_eq!(schema_count_after, 1);
 
-    // Verify table mapping was also preserved
-    let mapping_count_after: i64 = sqlx::query_scalar(
-        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    // Verify destination metadata was not deleted.
+    let metadata_count_after: i64 = sqlx::query_scalar(
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(mapping_count_after, 1);
+    assert_eq!(metadata_count_after, 1);
 
     drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_to_init_keeps_schemas_and_mappings() {
+async fn rollback_to_init_keeps_schemas_and_metadata() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1094,7 +1094,7 @@ async fn rollback_to_init_keeps_schemas_and_mappings() {
         .await
         .unwrap();
 
-    sqlx::query("insert into etl.table_mappings (pipeline_id, source_table_id, destination_table_id) values ($1, $2, 'dest_test_users')")
+    sqlx::query("insert into etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
         .bind(pipeline_id)
         .bind(table_oid)
         .execute(&source_db_pool)
@@ -1130,22 +1130,22 @@ async fn rollback_to_init_keeps_schemas_and_mappings() {
     .unwrap();
     assert_eq!(schema_count, 1);
 
-    // Verify table mapping was also preserved
-    let mapping_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    // Verify destination metadata was not deleted.
+    let metadata_count: i64 = sqlx::query_scalar(
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(mapping_count, 1);
+    assert_eq!(metadata_count, 1);
 
     drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_to_non_starting_state_keeps_schemas_and_mappings() {
+async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1181,7 +1181,7 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_mappings() {
         .await
         .unwrap();
 
-    sqlx::query("insert into etl.table_mappings (pipeline_id, source_table_id, destination_table_id) values ($1, $2, 'dest_test_users')")
+    sqlx::query("insert into etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
         .bind(pipeline_id)
         .bind(table_oid)
         .execute(&source_db_pool)
@@ -1217,16 +1217,16 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_mappings() {
     .unwrap();
     assert_eq!(schema_count, 1);
 
-    // Verify table mapping was NOT deleted
-    let mapping_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    // Verify destination metadata was NOT deleted
+    let metadata_count: i64 = sqlx::query_scalar(
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(mapping_count, 1);
+    assert_eq!(metadata_count, 1);
 
     drop_pg_database(&source_db_config).await;
 }

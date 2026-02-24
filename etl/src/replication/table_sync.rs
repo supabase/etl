@@ -1,27 +1,28 @@
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::TableId;
+use etl_postgres::types::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId};
 use metrics::histogram;
 use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
 
-use crate::bail;
 use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, etl_fail_point};
+use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, etl_fail_point};
 use crate::metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL, PIPELINE_ID_LABEL};
 use crate::replication::client::PgReplicationClient;
+use crate::replication::masks::ReplicationMasksCache;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::table_sync::TableSyncWorkerState;
 use crate::workers::table_sync_copy::{TableCopyResult, table_copy};
+use crate::{bail, etl_error};
 
 /// Result type for table synchronization operations.
 ///
@@ -54,6 +55,7 @@ pub async fn start_table_sync<S, D>(
     table_sync_worker_state: TableSyncWorkerState,
     store: S,
     destination: D,
+    replication_masks: &ReplicationMasksCache,
     shutdown_rx: ShutdownRx,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -132,35 +134,40 @@ where
             // slot might be there from the previous run.
             replication_client.delete_slot_if_exists(&slot_name).await?;
 
-            // We should truncate the destination table before starting a copy to avoid data inconsistencies.
+            // We must truncate the destination table before starting a copy to avoid data inconsistencies.
+            //
             // Example scenario:
             // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
-            // 2. Before the table's phase is set to `FinishedCopy`, the process crashes.
+            // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
             // 3. While down, the source deletes row id = 1 and inserts row id = 2.
             // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
             // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
             // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
-            // Fix: truncate the destination table before starting a copy when we have enough metadata.
+            // Fix: Always truncate the destination table before starting a copy.
             //
-            // We try to truncate the table also during `Init` because we support state rollback and
-            // a table might be there from a previous run.
-            //
-            // We only attempt truncation when both table schema and mapping are present in the store.
-            // If either is missing, we skip this step. However, if the mapping exists, it doesn't say
-            // anything about the existence of the table in the destination since our internal metadata
-            // operations are not atomic with the destination operations. We are investigating how to
-            // introduce atomicity there.
-            let existing_table_schema = store.get_table_schema(&table_id).await?;
-            let existing_table_mapping = store.get_table_mapping(&table_id).await?;
-            if existing_table_schema.is_some()
-                && existing_table_mapping.is_some()
-                && let Err(err) = destination.truncate_table(table_id).await
-            {
-                warn!(
-                    table_id = table_id.0,
-                    error = %err,
-                    "failed to truncate destination table before copy, continuing"
-                );
+            // Try to load the previously stored destination table metadata, which contains
+            // both the snapshot_id and replication_mask. If available, we can load the
+            // corresponding table schema and truncate the destination table before starting a copy.
+            // If the metadata is not present, we can safely assume that no data is there in the
+            // table; thus a truncate won't be issued.
+            if let Some(current_metadata) = store.get_destination_table_metadata(table_id).await? {
+                if let Some(table_schema) = store
+                    .get_table_schema(&table_id, current_metadata.snapshot_id)
+                    .await?
+                {
+                    let replicated_table_schema = ReplicatedTableSchema::from_mask(
+                        table_schema,
+                        current_metadata.replication_mask,
+                    );
+                    destination.truncate_table(&replicated_table_schema).await?;
+
+                    info!(%table_id, "truncated destination table before starting copy");
+                } else {
+                    bail!(
+                        ErrorKind::InvalidState,
+                        "Destination table metadata found, but not corresponding table schema exists"
+                    );
+                }
             }
 
             // We are ready to start copying table data, and we update the state accordingly.
@@ -174,13 +181,10 @@ where
 
             // Fail point to test when the table sync fails before copying data.
             #[cfg(feature = "failpoints")]
-            etl_fail_point(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION)?;
+            etl_fail_point(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP)?;
 
             // We create the slot with a transaction, since we need to have a consistent snapshot of the database
-            // before copying the schema and tables. The transaction uses USE_SNAPSHOT so all subsequent
-            // reads on this connection see a consistent point. The transaction must stay open until
-            // the copy is done; for parallel copy, pg_export_snapshot() is called within it so child
-            // connections can share the same snapshot.
+            // before copying the schema and tables.
             //
             // If a slot already exists at this point, we could delete it and try to recover, but it means
             // that the state was somehow reset without the slot being deleted, and we want to surface this.
@@ -195,10 +199,8 @@ where
             //  for correct decoding, thus we rely on our own state store to preserve this information.
             // - Destination -> we write here because some consumers might want to have the schema of incoming
             //  data.
-            info!(table_id = table_id.0, "fetching table schema");
-            let table_schema = transaction
-                .get_table_schema(table_id, Some(&config.publication_name))
-                .await?;
+            info!(%table_id, "fetching table schema");
+            let table_schema = transaction.get_table_schema(table_id).await?;
 
             if !table_schema.has_primary_keys() {
                 bail!(
@@ -212,6 +214,33 @@ where
             // pipeline is restarted, since it's outside the lifecycle of the pipeline.
             let table_schema = store.store_table_schema(table_schema).await?;
 
+            // Get the names of columns being replicated based on the publication's column filter.
+            // This must be done in the same transaction as `get_table_schema` for consistency.
+            let replicated_column_names = transaction
+                .get_replicated_column_names(table_id, &table_schema, &config.publication_name)
+                .await?;
+
+            // Build and store the replication mask for use during CDC.
+            // We use `try_build` here because the schema was just loaded and should match
+            // the publication's column filter. Any mismatch indicates a schema inconsistency.
+            let replication_mask =
+                ReplicationMask::try_build(&table_schema, &replicated_column_names).map_err(
+                    |err: SchemaError| {
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "Schema mismatch during table sync",
+                            format!("{}", err)
+                        )
+                    },
+                )?;
+            replication_masks
+                .set(table_id, replication_mask.clone())
+                .await;
+
+            // Create the replicated table schema with the replication mask.
+            let replicated_table_schema =
+                ReplicatedTableSchema::from_mask(table_schema, replication_mask);
+
             let mut total_table_copy_rows = 0;
             let mut total_table_copy_duration_secs = 0.0;
 
@@ -223,7 +252,7 @@ where
                 let result = table_copy(
                     &transaction,
                     table_id,
-                    table_schema.clone(),
+                    replicated_table_schema.clone(),
                     Some(&config.publication_name),
                     config.max_copy_connections_per_table,
                     config.batch.clone(),
@@ -248,7 +277,6 @@ where
                             table_id = table_id.0,
                             "table copy interrupted by shutdown, terminating table sync"
                         );
-
                         return Ok(TableSyncResult::SyncStopped);
                     }
                 }
@@ -261,7 +289,9 @@ where
             // If no table rows were written, we call the method nonetheless with no rows, to kickstart
             // table creation.
             if total_table_copy_rows == 0 {
-                destination.write_table_rows(table_id, vec![]).await?;
+                destination
+                    .write_table_rows(&replicated_table_schema, vec![])
+                    .await?;
                 info!(
                     table_id = table_id.0,
                     "writing empty table rows for empty table"

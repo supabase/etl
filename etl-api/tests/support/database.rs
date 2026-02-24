@@ -111,8 +111,8 @@ pub async fn run_etl_migrations_on_source_database(source_db_config: &PgConnecti
         .await
         .expect("failed to set search path");
 
-    // Run replicator migrations to create the state store tables.
-    sqlx::migrate!("../etl-replicator/migrations")
+    // Run migrations to create the etl tables.
+    sqlx::migrate!("../etl/migrations")
         .run(&source_pool)
         .await
         .expect("failed to run etl migrations");

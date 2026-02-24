@@ -9,7 +9,9 @@ use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
+use crate::migrations::apply_etl_migrations;
 use crate::replication::client::PgReplicationClient;
+use crate::replication::masks::ReplicationMasksCache;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
@@ -23,7 +25,7 @@ use etl_postgres::types::TableId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Internal state tracking for pipeline lifecycle.
 ///
@@ -111,15 +113,26 @@ where
 
     /// Starts the pipeline and begins replication processing.
     ///
-    /// This method initializes the connection to Postgres, sets up table mappings and schemas,
-    /// creates the worker pool for table synchronization, and starts the apply worker for
-    /// processing replication stream events.
+    /// This method runs any pending migrations, initializes the connection to Postgres,
+    /// loads destination table metadata and schemas, creates the worker pool for table synchronization,
+    /// and starts the apply worker for processing replication stream events.
     pub async fn start(&mut self) -> EtlResult<()> {
         info!(
             publication_name = %self.config.publication_name,
             pipeline_id = %self.config.id,
             "starting pipeline"
         );
+
+        // Run migrations before starting the pipeline.
+        apply_etl_migrations(&self.config.pg_connection)
+            .await
+            .map_err(|e| {
+                crate::etl_error!(
+                    ErrorKind::SourceError,
+                    "Failed to run state store migrations",
+                    format!("{}", e)
+                )
+            })?;
 
         // We always start memory monitoring to keep total memory snapshots available.
         let memory_monitor = MemoryMonitor::new(
@@ -133,13 +146,12 @@ where
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
-        // We load the table mappings and schemas from the store to have them cached for quick
-        // access.
+        // We load the destination table metadata and schemas from the store to have them cached
+        // for quick access.
         //
-        // It's really important to load the mappings and schemas before starting the apply worker
-        // since downstream code relies on the assumption that the mappings and schemas are loaded
-        // in the cache.
-        self.store.load_table_mappings().await?;
+        // It's really important to load the metadata and schemas before starting the apply worker
+        // since downstream code relies on the assumption that they are loaded in the cache.
+        self.store.load_destination_tables_metadata().await?;
         self.store.load_table_schemas().await?;
 
         // We load the table states by checking the table ids of a publication and loading/creating
@@ -154,12 +166,18 @@ where
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
+        // We create the shared replication masks container that will be used by both the apply
+        // worker and table sync workers to track which columns are being replicated for each table.
+        let replication_masks = ReplicationMasksCache::new();
+
+        // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
             self.config.id,
             self.config.clone(),
             pool.clone(),
             self.store.clone(),
             self.destination.clone(),
+            replication_masks,
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
             memory_monitor,
@@ -312,12 +330,6 @@ where
             table_count = publication_table_ids.len(),
             "publication tables loaded"
         );
-
-        // We notify the user that if there are no tables in the publication, the system will start but
-        // the pipeline will be hanging idle forever.
-        if publication_table_ids.is_empty() {
-            warn!(publication_name = %self.config.publication_name, "the publication has no tables, the pipeline will not receive any data");
-        }
 
         // Validate that the publication is configured correctly for partitioned tables.
         //

@@ -5,21 +5,12 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::types::PgNumeric;
+use etl_destinations::bigquery::test_utils::parse_table_cell;
 use gcp_bigquery_client::model::table_cell::TableCell;
 use gcp_bigquery_client::model::table_row::TableRow;
 use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
-
-pub fn parse_table_cell<O>(table_cell: TableCell) -> Option<O>
-where
-    O: FromStr,
-    <O as FromStr>::Err: fmt::Debug,
-{
-    table_cell
-        .value
-        .map(|value| value.as_str().unwrap().parse().unwrap())
-}
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct BigQueryUser {
@@ -720,19 +711,4 @@ impl Ord for NonNullableColsScalar {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.id.cmp(&other.id)
     }
-}
-
-pub fn parse_bigquery_table_rows<T>(table_rows: Vec<TableRow>) -> Vec<T>
-where
-    T: Ord,
-    T: From<TableRow>,
-{
-    let mut parsed_table_rows = Vec::with_capacity(table_rows.len());
-
-    for table_row in table_rows {
-        parsed_table_rows.push(table_row.into());
-    }
-    parsed_table_rows.sort();
-
-    parsed_table_rows
 }

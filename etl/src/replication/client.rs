@@ -11,6 +11,7 @@ use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
 use rustls::pki_types::{CertificateDer, pem::PemObject};
+use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroI32;
 use std::sync::Arc;
@@ -218,15 +219,23 @@ impl PgReplicationTransaction {
     }
 
     /// Retrieves the schema information for the supplied table.
+    pub async fn get_table_schema(&self, table_id: TableId) -> EtlResult<TableSchema> {
+        self.client.get_table_schema(table_id, None).await
+    }
+
+    /// Retrieves the names of columns being replicated for a table in a publication.
     ///
-    /// If a publication is specified, only columns included in that publication
-    /// will be returned.
-    pub async fn get_table_schema(
+    /// Returns a [`HashSet`] containing the names of columns from the given [`TableSchema`]
+    /// that are included in the specified publication for the given [`TableId`].
+    pub async fn get_replicated_column_names(
         &self,
         table_id: TableId,
-        publication: Option<&str>,
-    ) -> EtlResult<TableSchema> {
-        self.client.get_table_schema(table_id, publication).await
+        table_schema: &TableSchema,
+        publication_name: &str,
+    ) -> EtlResult<HashSet<String>> {
+        self.client
+            .get_replicated_column_names(table_id, table_schema, publication_name)
+            .await
     }
 
     /// Creates a COPY stream for reading data from the specified table.
@@ -879,11 +888,112 @@ impl PgReplicationClient {
         Ok(table_names)
     }
 
+    /// Retrieves the names of columns being replicated for a table in a publication.
+    ///
+    /// Returns a [`HashSet`] containing the names of columns that are included in the publication
+    /// for the specified table. If the PostgreSQL version is below 15 (which doesn't support
+    /// column filtering), returns all column names from the table schema.
+    ///
+    /// For publications created with `FOR ALL TABLES` or `FOR TABLES IN SCHEMA`, all columns
+    /// are replicated since these publication types don't support column filtering.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::ConfigError`] if the table is not included in the publication.
+    /// This prevents silently syncing tables that won't receive CDC updates.
+    ///
+    /// This method should be called in the same transaction as describe_table_schema to ensure
+    /// consistency during initial table sync.
+    async fn get_replicated_column_names(
+        &self,
+        table_id: TableId,
+        table_schema: &TableSchema,
+        publication_name: &str,
+    ) -> EtlResult<HashSet<String>> {
+        // Column filtering in publications was added in Postgres 15. For earlier versions,
+        // all columns are replicated.
+        if below_version!(self.server_version, POSTGRES_15) {
+            return Ok(table_schema
+                .column_schemas
+                .iter()
+                .map(|column_schema| column_schema.name.clone())
+                .collect());
+        }
+
+        // Query pg_publication_tables using unnest() to properly decode the attnames array.
+        // This correctly handles column names containing special characters (spaces, commas,
+        // quotes) that would break naive string parsing.
+        //
+        // The query returns two columns:
+        // - table_in_publication: true if the table is in the publication
+        // - column_name: the column name (NULL if attnames is NULL, meaning all columns)
+        //
+        // When attnames is NULL (FOR ALL TABLES or FOR TABLES IN SCHEMA publications),
+        // all columns are replicated. When attnames has values, only those columns are
+        // replicated. If no rows are returned, the table is not in the publication.
+        let column_query = format!(
+            "select true as table_in_publication, u.column_name
+             from pg_publication_tables pt
+             left join lateral unnest(pt.attnames) as u(column_name) on true
+             join pg_namespace n on n.nspname = pt.schemaname
+             join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
+             where pt.pubname = {} and c.oid = {};",
+            quote_literal(publication_name),
+            table_id,
+        );
+
+        let rows = self.client.simple_query(&column_query).await?;
+        let mut column_names = HashSet::new();
+        let mut table_in_publication = false;
+
+        for row in rows {
+            if let SimpleQueryMessage::Row(row) = row {
+                // If we got any row, the table is in the publication.
+                table_in_publication = true;
+
+                if let Some(column_name) = row.try_get::<&str>("column_name")? {
+                    column_names.insert(column_name.to_string());
+                }
+            }
+        }
+
+        // If the table is not in the publication, error out. This prevents silently syncing
+        // tables that won't receive events, leaving the destination stale.
+        if !table_in_publication {
+            bail!(
+                ErrorKind::ConfigError,
+                "Table not in publication",
+                format!(
+                    "Table '{}' is not included in publication '{}'. \
+                     The table must be added to the publication to receive events.",
+                    table_schema.name, publication_name
+                )
+            );
+        }
+
+        // If column_names is empty but table is in publication, it means attnames was NULL,
+        // which indicates all columns are replicated (FOR ALL TABLES or FOR TABLES IN SCHEMA).
+        if column_names.is_empty() {
+            return Ok(table_schema
+                .column_schemas
+                .iter()
+                .map(|column_schema| column_schema.name.clone())
+                .collect());
+        }
+
+        Ok(column_names)
+    }
+
     /// Retrieves the OIDs of all tables included in a publication.
     ///
     /// For partitioned tables with `publish_via_partition_root=true`, this returns only the parent
     /// table OID. The query uses a recursive CTE to walk up the partition inheritance hierarchy
     /// and identify root tables that have no parent themselves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::ConfigError`] if the publication contains no tables. This typically
+    /// indicates a misconfigured publication that won't replicate any data.
     pub async fn get_publication_table_ids(
         &self,
         publication_name: &str,
@@ -920,15 +1030,28 @@ impl PgReplicationClient {
             pub = quote_literal(publication_name)
         );
 
-        let mut roots = vec![];
-        for msg in self.client.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = msg {
+        let mut root_tables = vec![];
+        for row in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = row {
                 let table_id = Self::get_row_value::<TableId>(&row, "oid", "pg_class")?;
-                roots.push(table_id);
+                root_tables.push(table_id);
             }
         }
 
-        Ok(roots)
+        if root_tables.is_empty() {
+            bail!(
+                ErrorKind::ConfigError,
+                "Publication has no tables",
+                format!(
+                    "Publication '{}' does not contain any tables. Ensure the publication \
+                     is configured with tables using FOR TABLE, FOR ALL TABLES, or \
+                     FOR TABLES IN SCHEMA.",
+                    publication_name
+                )
+            );
+        }
+
+        Ok(root_tables)
     }
 
     /// Starts a logical replication stream from the specified publication and slot.
@@ -944,7 +1067,7 @@ impl PgReplicationClient {
 
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
         let options = format!(
-            r#"("proto_version" '1', "publication_names" {})"#,
+            r#"("proto_version" '1', "publication_names" {}, "messages" 'true')"#,
             quote_literal(quote_identifier(publication_name).as_ref()),
         );
 
@@ -1064,11 +1187,7 @@ impl PgReplicationClient {
         let table_name = self.get_table_name(table_id).await?;
         let column_schemas = self.get_column_schemas(table_id, publication).await?;
 
-        Ok(TableSchema {
-            name: table_name,
-            id: table_id,
-            column_schemas,
-        })
+        Ok(TableSchema::new(table_id, table_name, column_schemas))
     }
 
     /// Loads the table name and schema information for a given table OID.
@@ -1213,10 +1332,10 @@ impl PgReplicationClient {
                 group by con.conname
             )
             select
-                a.attname,
-                a.atttypid,
-                a.atttypmod,
-                a.attnotnull,
+                a.attname as name,
+                a.atttypid as type_oid,
+                a.atttypmod as type_modifier,
+                a.attnum::int as ordinal_position,
                 case
                     -- Check if column has a direct primary key index
                     when coalesce(i.indisprimary, false) = true then true
@@ -1227,7 +1346,8 @@ impl PgReplicationClient {
                         where a.attname = any(pk.pk_column_names)
                     ) then true
                     else false
-                end as primary
+                end as is_primary,
+                not a.attnotnull as nullable
             from pg_attribute a
             left join pg_index i
                 on a.attrelid = i.indrelid
@@ -1282,22 +1402,32 @@ impl PgReplicationClient {
         // in order to use https://docs.rs/tokio-postgres/0.7.15/tokio_postgres/struct.Client.html#method.simple_query_raw to filter on SimpleQueryMessage::Row and avoid useless allocations
         for message in self.client.simple_query(&column_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
-                let name = Self::get_row_value::<String>(&row, "attname", "pg_attribute")?;
-                let type_oid = Self::get_row_value::<u32>(&row, "atttypid", "pg_attribute")?;
-                let modifier = Self::get_row_value::<i32>(&row, "atttypmod", "pg_attribute")?;
+                let name = Self::get_row_value::<String>(&row, "name", "pg_attribute")?;
+                let type_oid = Self::get_row_value::<u32>(&row, "type_oid", "pg_attribute")?;
+                let type_modifier =
+                    Self::get_row_value::<i32>(&row, "type_modifier", "pg_attribute")?;
+                let ordinal_position =
+                    Self::get_row_value::<i32>(&row, "ordinal_position", "pg_attribute")?;
+                let is_primary =
+                    Self::get_row_value::<String>(&row, "is_primary", "pg_index")? == "t";
                 let nullable =
-                    Self::get_row_value::<String>(&row, "attnotnull", "pg_attribute")? == "f";
-                let primary = Self::get_row_value::<String>(&row, "primary", "pg_index")? == "t";
+                    Self::get_row_value::<String>(&row, "nullable", "pg_attribute")? == "t";
 
                 let typ = convert_type_oid_to_type(type_oid);
+                let primary_key_ordinal_position = if is_primary {
+                    Some(ordinal_position)
+                } else {
+                    None
+                };
 
-                column_schemas.push(ColumnSchema {
+                column_schemas.push(ColumnSchema::new(
                     name,
                     typ,
-                    modifier,
+                    type_modifier,
+                    ordinal_position,
+                    primary_key_ordinal_position,
                     nullable,
-                    primary,
-                })
+                ))
             }
         }
 

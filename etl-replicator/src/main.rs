@@ -52,7 +52,6 @@ mod error;
 mod feature_flags;
 #[cfg(not(target_env = "msvc"))]
 mod jemalloc_metrics;
-mod migrations;
 mod notification;
 mod sentry;
 

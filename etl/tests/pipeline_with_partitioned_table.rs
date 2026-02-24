@@ -75,7 +75,7 @@ async fn partitioned_table_copy_replicates_existing_data() {
     let _ = pipeline.shutdown_and_wait().await;
 
     // Verify table schema was discovered correctly.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = state_store.get_latest_table_schemas().await;
     assert!(table_schemas.contains_key(&parent_table_id));
 
     let parent_schema = &table_schemas[&parent_table_id];
@@ -90,21 +90,21 @@ async fn partitioned_table_copy_replicates_existing_data() {
     assert_eq!(id_column.name, "id");
     assert_eq!(id_column.typ, Type::INT8);
     assert!(!id_column.nullable);
-    assert!(id_column.primary);
+    assert!(id_column.primary_key());
 
     // Check data column.
     let data_column = &parent_schema.column_schemas[1];
     assert_eq!(data_column.name, "data");
     assert_eq!(data_column.typ, Type::TEXT);
     assert!(!data_column.nullable);
-    assert!(!data_column.primary);
+    assert!(!data_column.primary_key());
 
     // Check partition_key column.
     let partition_key_column = &parent_schema.column_schemas[2];
     assert_eq!(partition_key_column.name, "partition_key");
     assert_eq!(partition_key_column.typ, Type::INT4);
     assert!(!partition_key_column.nullable);
-    assert!(partition_key_column.primary);
+    assert!(partition_key_column.primary_key());
 
     let table_rows = destination.get_table_rows().await;
     let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
@@ -1295,7 +1295,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
     parent_ready_notify.notified().await;
 
     // Verify table schema was discovered correctly for nested partitioned table.
-    let table_schemas = state_store.get_table_schemas().await;
+    let table_schemas = state_store.get_latest_table_schemas().await;
     assert!(table_schemas.contains_key(&parent_table_id));
 
     let parent_schema = &table_schemas[&parent_table_id];
@@ -1310,28 +1310,28 @@ async fn nested_partitioned_table_copy_and_cdc() {
     assert_eq!(id_column.name, "id");
     assert_eq!(id_column.typ, Type::INT8);
     assert!(!id_column.nullable);
-    assert!(id_column.primary);
+    assert!(id_column.primary_key());
 
     // Check data column.
     let data_column = &parent_schema.column_schemas[1];
     assert_eq!(data_column.name, "data");
     assert_eq!(data_column.typ, Type::TEXT);
     assert!(!data_column.nullable);
-    assert!(!data_column.primary);
+    assert!(!data_column.primary_key());
 
     // Check partition_key column (part of primary key).
     let partition_key_column = &parent_schema.column_schemas[2];
     assert_eq!(partition_key_column.name, "partition_key");
     assert_eq!(partition_key_column.typ, Type::INT4);
     assert!(!partition_key_column.nullable);
-    assert!(partition_key_column.primary);
+    assert!(partition_key_column.primary_key());
 
     // Check sub_partition_key column (part of primary key for nested partitioning).
     let sub_partition_key_column = &parent_schema.column_schemas[3];
     assert_eq!(sub_partition_key_column.name, "sub_partition_key");
     assert_eq!(sub_partition_key_column.typ, Type::INT4);
     assert!(!sub_partition_key_column.nullable);
-    assert!(sub_partition_key_column.primary);
+    assert!(sub_partition_key_column.primary_key());
 
     // Verify initial COPY replicated all 6 rows (one per leaf partition).
     let table_rows = destination.get_table_rows().await;
