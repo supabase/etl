@@ -78,9 +78,12 @@ fn normalize_catalog_url(catalog_url: &str) -> String {
 
     // Split userinfo from host/path: "user:pass@host:port/dbname"
     let (userinfo, host_path) = rest.split_once('@').unwrap_or(("", rest));
-    let (host_port, dbname) = host_path.split_once('/').unwrap_or((host_path, ""));
+    let (host_port, dbname_and_query) = host_path.split_once('/').unwrap_or((host_path, ""));
     let (host, port) = host_port.split_once(':').unwrap_or((host_port, "5432"));
     let (user, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+
+    // Split dbname from query string: "mydb?sslmode=disable&connect_timeout=10"
+    let (dbname, query) = dbname_and_query.split_once('?').unwrap_or((dbname_and_query, ""));
 
     let mut parts = Vec::new();
     if !host.is_empty() {
@@ -96,10 +99,38 @@ fn normalize_catalog_url(catalog_url: &str) -> String {
         parts.push(format!("user={user}"));
     }
     if !password.is_empty() {
-        parts.push(format!("password={password}"));
+        // Quote the password and escape any single quotes / backslashes inside it,
+        // as required by the libpq keyword=value format when values contain
+        // characters that could otherwise confuse the parser.
+        let escaped = password.replace('\\', "\\\\").replace('\'', "\\'");
+        parts.push(format!("password='{escaped}'"));
+    }
+    // Convert URL query params (key=value&...) to libpq key=value pairs.
+    for param in query.split('&').filter(|s| !s.is_empty()) {
+        parts.push(param.to_string());
     }
     // DuckLake PostgreSQL catalog prefix is "postgres:" (no slashes)
     format!("postgres:{}", parts.join(" "))
+}
+
+/// S3-compatible storage credentials for DuckDB's httpfs extension.
+///
+/// Used when `data_path` points to an S3, GCS, or Azure URI. The `endpoint`
+/// field supports an optional path prefix (e.g. `localhost:5000/s3` for
+/// Supabase Storage or other S3-compatible services mounted at a sub-path).
+#[derive(Debug, Clone)]
+pub struct S3Config {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    /// AWS region or equivalent (e.g. `"us-east-1"`).
+    pub region: String,
+    /// Host, host:port, or host:port/path of the S3-compatible endpoint.
+    /// Defaults to AWS S3 if not set.
+    pub endpoint: Option<String>,
+    /// `"path"` (default for MinIO / Supabase Storage) or `"vhost"` (AWS S3 default).
+    pub url_style: String,
+    /// Whether to use HTTPS. Set to `false` for local S3-compatible services.
+    pub use_ssl: bool,
 }
 
 /// Builds the one-time setup SQL executed for each new pool connection.
@@ -107,9 +138,9 @@ fn normalize_catalog_url(catalog_url: &str) -> String {
 /// - Always installs and loads the `ducklake` extension.
 /// - Installs the `postgres` extension when the catalog is PostgreSQL-backed
 ///   (`postgres:` prefix after normalisation).
-/// - Installs `httpfs` when the data path uses a cloud URI scheme
-///   (`s3://`, `gs://`, `az://`).
-fn build_setup_sql(catalog_url: &str, data_path: &str) -> String {
+/// - Installs `httpfs` and configures S3 credentials when the data path uses
+///   a cloud URI scheme (`s3://`, `gs://`, `az://`).
+fn build_setup_sql(catalog_url: &str, data_path: &str, s3: Option<&S3Config>, metadata_schema: Option<&str>) -> String {
     let normalized = normalize_catalog_url(catalog_url);
 
     let needs_postgres = normalized.starts_with("postgres:");
@@ -123,9 +154,42 @@ fn build_setup_sql(catalog_url: &str, data_path: &str) -> String {
     }
     if needs_httpfs {
         sql.push_str(" INSTALL httpfs; LOAD httpfs;");
+        if let Some(s3) = s3 {
+            // Escape values for embedding in SQL string literals.
+            let key = s3.access_key_id.replace('\'', "''");
+            let secret = s3.secret_access_key.replace('\'', "''");
+            let region = s3.region.replace('\'', "''");
+            let url_style = s3.url_style.replace('\'', "''");
+            let use_ssl = if s3.use_ssl { "true" } else { "false" };
+
+            let endpoint_clause = match &s3.endpoint {
+                Some(ep) => format!(", ENDPOINT '{}'", ep.replace('\'', "''")),
+                None => String::new(),
+            };
+
+            sql.push_str(&format!(
+                " CREATE OR REPLACE SECRET ducklake_s3 (\
+                    TYPE S3, \
+                    KEY_ID '{key}', \
+                    SECRET '{secret}', \
+                    REGION '{region}'{endpoint_clause}, \
+                    URL_STYLE '{url_style}', \
+                    USE_SSL {use_ssl}\
+                );"
+            ));
+        }
     }
+    // Escape single quotes for embedding in a SQL string literal ('' = literal ').
+    let sql_normalized = normalized.replace('\'', "''");
+    let sql_data_path = data_path.replace('\'', "''");
+
+    let metadata_schema_clause = match metadata_schema {
+        Some(schema) => format!(", METADATA_SCHEMA '{}'", schema.replace('\'', "''")),
+        None => String::new(),
+    };
+
     sql.push_str(&format!(
-        " ATTACH 'ducklake:{normalized}' AS {LAKE_CATALOG} (DATA_PATH '{data_path}');"
+        " ATTACH 'ducklake:{sql_normalized}' AS {LAKE_CATALOG} (DATA_PATH '{sql_data_path}'{metadata_schema_clause});"
     ));
     sql
 }
@@ -178,16 +242,22 @@ where
     /// - `pool_size`: Number of concurrent DuckDB connections. `4` is a
     ///   reasonable default; higher values allow more tables to be written in
     ///   parallel.
+    /// - `s3`: Optional S3 credentials. Required when `data_path` is an S3 URI
+    ///   and the bucket is not publicly accessible.
+    /// - `metadata_schema`: Optional Postgres schema for DuckLake metadata tables
+    ///   (e.g. `"ducklake"`). Uses the catalog default schema when not set.
     pub fn new(
         catalog_url: impl Into<String>,
         data_path: impl Into<String>,
         pool_size: u32,
+        s3: Option<S3Config>,
+        metadata_schema: Option<String>,
         store: S,
     ) -> EtlResult<Self> {
         let catalog_url = catalog_url.into();
         let data_path = data_path.into();
 
-        let setup_sql = build_setup_sql(&catalog_url, &data_path);
+        let setup_sql = build_setup_sql(&catalog_url, &data_path, s3.as_ref(), metadata_schema.as_deref());
         let manager = DuckLakeConnectionManager {
             setup_sql: Arc::new(setup_sql),
         };
@@ -805,11 +875,22 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_catalog_url_postgres_uri_with_query_params() {
+        let result = normalize_catalog_url(
+            "postgres://user:pass@localhost:5432/mydb?sslmode=disable&connect_timeout=10",
+        );
+        assert_eq!(
+            result,
+            "postgres:host=localhost dbname=mydb user=user password='pass' sslmode=disable connect_timeout=10"
+        );
+    }
+
+    #[test]
     fn test_normalize_catalog_url_postgres_uri_with_password() {
         let result = normalize_catalog_url("postgres://user:secret@db.example.com:5433/mydb");
         assert_eq!(
             result,
-            "postgres:host=db.example.com port=5433 dbname=mydb user=user password=secret"
+            "postgres:host=db.example.com port=5433 dbname=mydb user=user password='secret'"
         );
     }
 
@@ -822,7 +903,7 @@ mod tests {
 
     #[test]
     fn test_build_setup_sql_local() {
-        let sql = build_setup_sql("metadata.ducklake", "./data/");
+        let sql = build_setup_sql("metadata.ducklake", "./data/", None, None);
         assert!(sql.contains("INSTALL ducklake"));
         assert!(sql.contains("LOAD ducklake"));
         assert!(!sql.contains("postgres"));
@@ -833,7 +914,7 @@ mod tests {
 
     #[test]
     fn test_build_setup_sql_postgres_local_data() {
-        let sql = build_setup_sql("postgres://bnj@localhost:5432/ducklake_catalog", "./data/");
+        let sql = build_setup_sql("postgres://bnj@localhost:5432/ducklake_catalog", "./data/", None, None);
         assert!(sql.contains("INSTALL postgres"));
         assert!(sql.contains("LOAD postgres"));
         assert!(!sql.contains("httpfs"));
@@ -845,7 +926,7 @@ mod tests {
 
     #[test]
     fn test_build_setup_sql_postgres_s3_data() {
-        let sql = build_setup_sql("postgres://user:pass@host/db", "s3://my-bucket/lake/");
+        let sql = build_setup_sql("postgres://user:pass@host/db", "s3://my-bucket/lake/", None, None);
         assert!(sql.contains("INSTALL postgres"));
         assert!(sql.contains("INSTALL httpfs"));
         assert!(sql.contains("LOAD httpfs"));
