@@ -160,7 +160,13 @@ impl Scenario {
     ) -> Result<()> {
         let chaos_name = self.name(&labels);
         match self {
-            Self::PacketLoss { loss, target_url, target_port, target_pod, target_svc } => {
+            Self::PacketLoss {
+                loss,
+                target_url,
+                target_port,
+                target_pod,
+                target_svc,
+            } => {
                 let loss = loss
                     .ok_or_else(|| anyhow::anyhow!("<loss> is required when not using --delete"))?;
                 let effective_url = match target_svc {
@@ -173,7 +179,13 @@ impl Scenario {
             Scenario::Partition => {
                 partition(client, labels, &chaos_name).await?;
             }
-            Scenario::Latency { latency_ms, target_url, target_port, target_pod, target_svc } => {
+            Scenario::Latency {
+                latency_ms,
+                target_url,
+                target_port,
+                target_pod,
+                target_svc,
+            } => {
                 let latency_ms = latency_ms.ok_or_else(|| {
                     anyhow::anyhow!("<latency_ms> is required when not using --delete")
                 })?;
@@ -190,12 +202,31 @@ impl Scenario {
                 })?;
                 packet_corruption(client, labels, &chaos_name, percentage, direction).await?;
             }
-            Scenario::ConnectionFlapping { flaps, chaos_secs, recovery_secs } => {
-                connection_flapping(client, labels, &chaos_name, *flaps, *chaos_secs, *recovery_secs).await?;
+            Scenario::ConnectionFlapping {
+                flaps,
+                chaos_secs,
+                recovery_secs,
+            } => {
+                connection_flapping(
+                    client,
+                    labels,
+                    &chaos_name,
+                    *flaps,
+                    *chaos_secs,
+                    *recovery_secs,
+                )
+                .await?;
             }
-            Scenario::Bandwidth { rate, target_url, target_port, target_pod, target_svc } => {
-                let rate = rate.as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("<rate> is required when not using --delete (e.g. \"1mbps\")"))?;
+            Scenario::Bandwidth {
+                rate,
+                target_url,
+                target_port,
+                target_pod,
+                target_svc,
+            } => {
+                let rate = rate.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("<rate> is required when not using --delete (e.g. \"1mbps\")")
+                })?;
                 let effective_url = match target_svc {
                     Some(svc) => Some(client.resolve_svc_clusterip(svc).await?),
                     None => target_url.clone(),
@@ -224,7 +255,6 @@ impl Scenario {
                 unreachable!("install is handled before Scenario::delete")
             }
             _ => client.delete(&name).await,
-
         }
     }
 }
@@ -275,13 +305,17 @@ pub(crate) async fn packet_loss(
 }
 
 /// Apply a total network partition from the app pod (100% egress loss to all).
-pub async fn partition(client: &ChaosClient, labels: Labels, chaos_name: &str) -> Result<()> {
+pub(crate) async fn partition(
+    client: &ChaosClient,
+    labels: Labels,
+    chaos_name: &str,
+) -> Result<()> {
     let chaos = client.drop_to(chaos_name, labels, Target::All, 100, "to");
     client.apply(chaos).await
 }
 
 /// Inject `latency_ms` ms latency with 100ms jitter on the app pod's traffic.
-pub async fn latency(
+pub(crate) async fn latency(
     client: &ChaosClient,
     labels: Labels,
     chaos_name: &str,
@@ -295,7 +329,7 @@ pub async fn latency(
 }
 
 /// Flap the app pod's network `flaps` times with configurable chaos/recovery durations.
-pub async fn connection_flapping(
+pub(crate) async fn connection_flapping(
     client: &ChaosClient,
     labels: Labels,
     chaos_name: &str,
@@ -318,7 +352,7 @@ pub async fn connection_flapping(
 }
 
 /// Limit the throughput of the app pod's traffic to `rate` (e.g. `"1mbps"`).
-pub async fn bandwidth(
+pub(crate) async fn bandwidth(
     client: &ChaosClient,
     labels: Labels,
     chaos_name: &str,
@@ -332,7 +366,7 @@ pub async fn bandwidth(
 }
 
 /// Corrupt x% of packets on the app pod's wire.
-pub async fn packet_corruption(
+pub(crate) async fn packet_corruption(
     client: &ChaosClient,
     labels: Labels,
     chaos_name: &str,
