@@ -18,6 +18,10 @@ use tracing::debug;
 
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
+/// Secret name suffix for the ClickHouse password.
+const CLICKHOUSE_SECRET_NAME_SUFFIX: &str = "ch-password";
+/// Name of the password in the ClickHouse secret and its reference.
+const CLICKHOUSE_PASSWORD_NAME: &str = "ch-password";
 /// Name of the service account key in the BigQuery secret and its reference.
 const BQ_SERVICE_ACCOUNT_KEY_NAME: &str = "service-account-key";
 /// Secret name suffix for iceberg secrets (includes catalog token,
@@ -308,6 +312,36 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    async fn create_or_update_clickhouse_secret(
+        &self,
+        prefix: &str,
+        password: Option<&str>,
+    ) -> Result<(), K8sError> {
+        debug!("patching clickhouse secret");
+
+        if let Some(password) = password {
+            let encoded_ch_password = BASE64_STANDARD.encode(password);
+            let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
+            let replicator_app_name = create_replicator_app_name(prefix);
+            let clickhouse_secret_json = create_clickhouse_password_secret_json(
+                &clickhouse_secret_name,
+                &replicator_app_name,
+                &encoded_ch_password,
+            );
+            let secret: Secret = serde_json::from_value(clickhouse_secret_json)?;
+
+            // We are forcing the update since we are the field manager that should own the fields. If
+            // there is an override (likely during an incident or SREs intervention), we want to override
+            // their changes. The API database is the source of truth for credentials.
+            let pp = PatchParams::apply(&clickhouse_secret_name).force();
+            self.secrets_api
+                .patch(&clickhouse_secret_name, &pp, &Patch::Apply(secret))
+                .await?;
+        }
+
+        Ok(())
+    }
+
     async fn create_or_update_iceberg_secret(
         &self,
         prefix: &str,
@@ -351,6 +385,16 @@ impl K8sClient for HttpK8sClient {
         Self::handle_delete_with_404_ignore(
             self.secrets_api.delete(&postgres_secret_name, &dp).await,
         )?;
+
+        Ok(())
+    }
+
+    async fn delete_clickhouse_secret(&self, prefix: &str) -> Result<(), K8sError> {
+        debug!("deleting clickhouse secret");
+
+        let ch_secret_name = create_clickhouse_secret_name(prefix);
+        let dp = DeleteParams::default();
+        Self::handle_delete_with_404_ignore(self.secrets_api.delete(&ch_secret_name, &dp).await)?;
 
         Ok(())
     }
@@ -552,6 +596,10 @@ fn create_iceberg_secret_name(prefix: &str) -> String {
     format!("{prefix}-{ICEBERG_SECRET_NAME_SUFFIX}")
 }
 
+fn create_clickhouse_secret_name(prefix: &str) -> String {
+    format!("{prefix}-{CLICKHOUSE_SECRET_NAME_SUFFIX}")
+}
+
 fn create_replicator_config_map_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}")
 }
@@ -595,6 +643,29 @@ fn create_postgres_secret_json(
       "type": "Opaque",
       "data": {
         "password": encoded_postgres_password,
+      }
+    })
+}
+
+fn create_clickhouse_password_secret_json(
+    secret_name: &str,
+    replicator_app_name: &str,
+    encoded_ch_password: &str,
+) -> serde_json::Value {
+    json!({
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": secret_name,
+        "namespace": DATA_PLANE_NAMESPACE,
+        "labels": {
+          "etl.supabase.com/app-name": replicator_app_name,
+          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
+        }
+      },
+      "type": "Opaque",
+      "data": {
+        CLICKHOUSE_PASSWORD_NAME: encoded_ch_password,
       }
     })
 }
@@ -752,6 +823,17 @@ fn create_container_environment_json(
             let bq_secret_name = create_bq_secret_name(prefix);
             let bq_secret_env_var_json = create_bq_secret_env_var_json(&bq_secret_name);
             container_environment.push(bq_secret_env_var_json);
+        }
+        DestinationType::ClickHouse => {
+            let postgres_secret_name = create_postgres_secret_name(prefix);
+            let postgres_secret_env_var_json =
+                create_postgres_secret_env_var_json(&postgres_secret_name);
+            container_environment.push(postgres_secret_env_var_json);
+
+            let clickhouse_secret_name = create_clickhouse_secret_name(prefix);
+            let clickhouse_secret_env_var_json =
+                create_clickhouse_secret_env_var_json(&clickhouse_secret_name);
+            container_environment.push(clickhouse_secret_env_var_json);
         }
         DestinationType::Iceberg => {
             let postgres_secret_name = create_postgres_secret_name(prefix);
@@ -913,6 +995,18 @@ fn create_bq_secret_env_var_json(bq_secret_name: &str) -> serde_json::Value {
         "secretKeyRef": {
           "name": bq_secret_name,
           "key": BQ_SERVICE_ACCOUNT_KEY_NAME
+        }
+      }
+    })
+}
+
+fn create_clickhouse_secret_env_var_json(clickouse_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__CLICKHOUSE__PASSWORD",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": clickouse_secret_name,
+          "key": CLICKHOUSE_PASSWORD_NAME
         }
       }
     })

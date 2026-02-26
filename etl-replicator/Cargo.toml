@@ -14,7 +14,7 @@ egress = ["etl/egress", "etl-destinations/egress"]
 [dependencies]
 etl = { workspace = true }
 etl-config = { workspace = true, features = ["supabase"] }
-etl-destinations = { workspace = true, features = ["bigquery", "iceberg"] }
+etl-destinations = { workspace = true, features = ["bigquery", "iceberg", "clickhouse"] }
 etl-telemetry = { workspace = true }
 
 configcat = { workspace = true }
@@ -30,6 +30,7 @@ sqlx = { workspace = true, features = [
     "postgres",
     "migrate",
 ] }
+sysinfo = { workspace = true, features = ["system"] }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing = { workspace = true, default-features = true }

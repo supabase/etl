@@ -29,6 +29,13 @@ pub enum Secrets {
         /// Google Cloud service account key JSON for BigQuery authentication.
         big_query_service_account_key: String,
     },
+    /// Credentials for ClickHouse destinations.
+    ClickHouse {
+        /// PostgreSQL source database password.
+        postgres_password: String,
+        /// Clickhouse password
+        password: Option<String>,
+    },
     /// Credentials for Iceberg destinations.
     Iceberg {
         /// PostgreSQL source database password.
@@ -160,6 +167,10 @@ fn build_secrets_from_configs(
             s3_access_key_id: s3_access_key_id.expose_secret().to_string(),
             s3_secret_access_key: s3_secret_access_key.expose_secret().to_string(),
         },
+        StoredDestinationConfig::ClickHouse { password, .. } => Secrets::ClickHouse {
+            postgres_password,
+            password: password.as_ref().map(|p| p.expose_secret().to_string()),
+        },
     }
 }
 
@@ -235,6 +246,17 @@ async fn create_or_update_dynamic_replicator_secrets(
                     &s3_access_key_id,
                     &s3_secret_access_key,
                 )
+                .await?;
+        }
+        Secrets::ClickHouse {
+            postgres_password,
+            password,
+        } => {
+            k8s_client
+                .create_or_update_postgres_secret(prefix, &postgres_password)
+                .await?;
+            k8s_client
+                .create_or_update_clickhouse_secret(prefix, password.as_deref())
                 .await?;
         }
     }
