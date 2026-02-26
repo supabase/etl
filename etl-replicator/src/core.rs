@@ -19,7 +19,7 @@ use etl_destinations::iceberg::{
 use etl_destinations::{
     bigquery::BigQueryDestination,
     iceberg::{IcebergClient, IcebergDestination},
-    realtime::{DEFAULT_MAX_RETRIES, RealtimeDestination},
+    realtime::{DEFAULT_MAX_RETRIES, RealtimeConfig, RealtimeDestination},
 };
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
@@ -140,16 +140,16 @@ pub async fn start_replicator_with_config(
             update_event,
             delete_event,
         } => {
-            let destination = RealtimeDestination::new(
-                url.clone(),
-                api_key.expose_secret().to_string(),
-                channel_prefix.clone(),
-                *private_channels,
-                insert_event.clone(),
-                update_event.clone(),
-                delete_event.clone(),
-                DEFAULT_MAX_RETRIES,
-            );
+            let destination = RealtimeDestination::new(RealtimeConfig {
+                url: url.clone(),
+                api_key: api_key.expose_secret().to_string(),
+                channel_prefix: channel_prefix.clone(),
+                private_channels: *private_channels,
+                insert_event: insert_event.clone(),
+                update_event: update_event.clone(),
+                delete_event: delete_event.clone(),
+                max_retries: DEFAULT_MAX_RETRIES,
+            });
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;

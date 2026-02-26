@@ -11,16 +11,26 @@ use tokio::time::{Duration, interval};
 use tracing::{debug, warn};
 
 #[cfg(feature = "egress")]
-use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
+use crate::egress::{PROCESSING_TYPE_STREAMING, log_processed_bytes};
 
 use super::connection::ConnectionManager;
 use super::encoding::{
     build_broadcast_message, build_heartbeat_message, build_join_message, build_topic,
-    delete_payload, insert_payload, table_row_to_json, truncate_payload,
-    update_payload,
+    delete_payload, insert_payload, table_row_to_json, truncate_payload, update_payload,
 };
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+
+pub struct RealtimeConfig {
+    pub url: String,
+    pub api_key: String,
+    pub channel_prefix: String,
+    pub private_channels: bool,
+    pub insert_event: String,
+    pub update_event: String,
+    pub delete_event: String,
+    pub max_retries: u32,
+}
 
 /// Internal mutable state, protected by a single `Mutex`.
 struct RealtimeInner {
@@ -108,17 +118,12 @@ pub struct RealtimeDestination {
 }
 
 impl RealtimeDestination {
-    pub fn new(
-        url: String,
-        api_key: String,
-        channel_prefix: String,
-        private_channels: bool,
-        insert_event: String,
-        update_event: String,
-        delete_event: String,
-        max_retries: u32,
-    ) -> Self {
-        let inner = Arc::new(Mutex::new(RealtimeInner::new(url, api_key, max_retries)));
+    pub fn new(config: RealtimeConfig) -> Self {
+        let inner = Arc::new(Mutex::new(RealtimeInner::new(
+            config.url,
+            config.api_key,
+            config.max_retries,
+        )));
 
         // Spawn a background task that sends a heartbeat every 20 seconds.
         // The Realtime server closes the connection after ~25 seconds of silence,
@@ -141,11 +146,11 @@ impl RealtimeDestination {
         drop(heartbeat_task);
 
         Self {
-            channel_prefix,
-            private_channels,
-            insert_event,
-            update_event,
-            delete_event,
+            channel_prefix: config.channel_prefix,
+            private_channels: config.private_channels,
+            insert_event: config.insert_event,
+            update_event: config.update_event,
+            delete_event: config.delete_event,
             inner,
             heartbeat_abort: Arc::new(abort_handle),
         }
@@ -200,7 +205,8 @@ impl Destination for RealtimeDestination {
                         build_topic(&schema.name, &self.channel_prefix, self.private_channels);
                     let record = table_row_to_json(&ins.table_row, &schema);
                     let payload = insert_payload(&schema.name, record, ins.commit_lsn);
-                    bytes_sent += inner.broadcast(&topic, &self.insert_event, payload).await? as u64;
+                    bytes_sent +=
+                        inner.broadcast(&topic, &self.insert_event, payload).await? as u64;
                 }
                 Event::Update(upd) => {
                     let schema = inner.get_schema(upd.table_id)?;
@@ -212,7 +218,8 @@ impl Destination for RealtimeDestination {
                         .as_ref()
                         .map(|(_, row)| table_row_to_json(row, &schema));
                     let payload = update_payload(&schema.name, record, old_record, upd.commit_lsn);
-                    bytes_sent += inner.broadcast(&topic, &self.update_event, payload).await? as u64;
+                    bytes_sent +=
+                        inner.broadcast(&topic, &self.update_event, payload).await? as u64;
                 }
                 Event::Delete(del) => {
                     let schema = inner.get_schema(del.table_id)?;
@@ -223,7 +230,8 @@ impl Destination for RealtimeDestination {
                         .as_ref()
                         .map(|(_, row)| table_row_to_json(row, &schema));
                     let payload = delete_payload(&schema.name, old_record, del.commit_lsn);
-                    bytes_sent += inner.broadcast(&topic, &self.delete_event, payload).await? as u64;
+                    bytes_sent +=
+                        inner.broadcast(&topic, &self.delete_event, payload).await? as u64;
                 }
                 Event::Truncate(trunc) => {
                     for rel_id in &trunc.rel_ids {
@@ -236,8 +244,9 @@ impl Destination for RealtimeDestination {
                                     self.private_channels,
                                 );
                                 let payload = truncate_payload(&schema.name, trunc.commit_lsn);
-                                bytes_sent +=
-                                    inner.broadcast(&topic, &self.delete_event, payload).await? as u64;
+                                bytes_sent += inner
+                                    .broadcast(&topic, &self.delete_event, payload)
+                                    .await? as u64;
                             }
                             Err(e) => {
                                 warn!(table_id = %table_id, error = %e, "skipping truncate for unknown table");
