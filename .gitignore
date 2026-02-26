@@ -23,8 +23,8 @@ target/
 site/
 
 # venv files
-bin/
-lib/
+/bin/
+/lib/
 pyvenv.cfg
 
 # Log files
