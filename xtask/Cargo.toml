@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+k8s-openapi = { workspace = true, features = ["latest"] }
+kube = { workspace = true, features = ["client", "derive", "rustls-tls", "ring"] }
+schemars = "0.8"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
