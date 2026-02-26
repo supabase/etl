@@ -52,77 +52,9 @@ jobs:
         if: matrix.check == 'sort'
         run: cargo sort --workspace --grouped --check
 
-  test-partial:
-    name: Tests (Partial)
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    # Run on forks.
-    if: github.event.pull_request.head.repo.fork == true
-    permissions:
-      contents: read
-    strategy:
-      matrix:
-        postgres_version: [18, 17, 16, 15, 14]
-    env:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: postgres
-      POSTGRES_PORT: 5430
-      POSTGRES_HOST: localhost
-      TESTS_DATABASE_HOST: localhost
-      TESTS_DATABASE_PORT: 5430
-      TESTS_DATABASE_USERNAME: postgres
-      TESTS_DATABASE_PASSWORD: postgres
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: test-partial
-
-      - name: Start Docker Compose (Postgres ${{ matrix.postgres_version }})
-        run: |
-          POSTGRES_VERSION=${{ matrix.postgres_version }} docker compose -f ./scripts/docker-compose.yaml up -d
-
-      - name: Install sqlx-cli
-        run: |
-          cargo install sqlx-cli \
-            --features native-tls,postgres \
-            --no-default-features \
-            --locked
-
-      - name: Migrate Database
-        run: |
-          sudo apt-get install libpq-dev -y
-          ./etl-api/scripts/run_migrations.sh
-
-      - name: Run Doctests
-        run: |
-          cargo test --doc --workspace --all-features --no-fail-fast
-
-      - name: Run Unit and Integration Tests
-        run: |
-          cargo test \
-            --workspace \
-            --all-features \
-            --no-fail-fast \
-
-      - name: Run Exclusive Tests Sequentially
-        run: |
-          cargo test \
-            --workspace \
-            --all-features \
-            -- --ignored exclusive_ --test-threads=1
-
   test-full:
     name: Tests (Full)
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    # Run on non-forks.
-    if: github.event.pull_request.head.repo.fork == false
     permissions:
       contents: read
       id-token: write
