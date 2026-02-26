@@ -340,8 +340,8 @@ impl ChaosClient {
                 mode: "all".into(),
                 selector: sel(&self.namespace, selector),
                 delay: Some(DelaySpec {
-                    latency: format!("{}ms", latency_ms),
-                    jitter: format!("{}ms", jitter_ms),
+                    latency: format!("{latency_ms}ms"),
+                    jitter: format!("{jitter_ms}ms"),
                     correlation: "25".into(),
                 }),
                 loss: None,

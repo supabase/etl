@@ -76,7 +76,7 @@ fn run(argv: &[&str]) -> Result<()> {
     let status = std::process::Command::new(program)
         .args(args)
         .status()
-        .map_err(|e| anyhow::anyhow!("failed to run '{}': {e}", program))?;
+        .map_err(|e| anyhow::anyhow!("failed to run '{program}': {e}"))?;
     if !status.success() {
         anyhow::bail!("'{}' exited with {status}", argv.join(" "));
     }
