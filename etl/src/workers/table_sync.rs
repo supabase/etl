@@ -1,15 +1,3 @@
-use chrono::{Duration as ChronoDuration, Utc};
-use etl_config::shared::PipelineConfig;
-use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::TableId;
-use metrics::counter;
-use std::ops::Deref;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
-use tokio::task::AbortHandle;
-use tracing::{Instrument, debug, error, info};
-
 use crate::bail;
 use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
@@ -32,6 +20,17 @@ use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::policy::{RetryDirective, build_error_handling_policy};
 use crate::workers::pool::{TableSyncWorkerId, TableSyncWorkerPool};
+use chrono::{Duration as ChronoDuration, Utc};
+use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::slots::EtlReplicationSlot;
+use etl_postgres::types::TableId;
+use metrics::counter;
+use std::ops::Deref;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
+use tokio::task::AbortHandle;
+use tracing::{Instrument, debug, error, info, warn};
 
 /// Internal state of [`TableSyncWorkerState`].
 #[derive(Debug)]
@@ -436,7 +435,7 @@ where
         if policy.should_retry()
             && state_guard.retry_attempts() >= config.table_error_retry_max_attempts
         {
-            info!(
+            warn!(
                 table_id = table_id.0,
                 max_attempts = config.table_error_retry_max_attempts,
                 "max automatic retry attempts reached, switching to manual retry"
@@ -538,11 +537,6 @@ where
             .get_table_replication_state(self.table_id)
             .await?
         else {
-            error!(
-                table_id = self.table_id.0,
-                "no replication state found, cannot start sync worker"
-            );
-
             bail!(
                 ErrorKind::InvalidState,
                 "Table replication state not found",
@@ -690,13 +684,11 @@ where
         let start_lsn = match result {
             Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
             Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
-                info!(table_id = self.table_id.0, "table sync stopped");
+                info!(table_id = self.table_id.0, "table sync was stopped");
 
                 return Ok(());
             }
             Err(err) => {
-                error!(table_id = self.table_id.0, error = %err, "table sync failed");
-
                 return Err(err);
             }
         };

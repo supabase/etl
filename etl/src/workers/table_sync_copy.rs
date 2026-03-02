@@ -10,7 +10,7 @@ use tokio::pin;
 use tokio::sync::Semaphore;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
@@ -472,21 +472,9 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 }
             }
             Ok(Err(err)) => {
-                error!(
-                    table_id = table_id.0,
-                    error = %err,
-                    "one or more parallel copy partitions failed"
-                );
-
                 return Err(err);
             }
             Err(join_err) => {
-                error!(
-                    table_id = table_id.0,
-                    error = %join_err,
-                    "one or more parallel copy partitions panicked"
-                );
-
                 return Err(etl_error!(
                     ErrorKind::TableSyncWorkerPanic,
                     "One or more parallel copy partition tasks panicked, aborting all",

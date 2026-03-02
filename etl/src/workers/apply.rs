@@ -159,9 +159,8 @@ where
 
         // If we reached the max attempts, we propagate the last known error.
         if *retry_attempts >= config.table_error_retry_max_attempts {
-            error!(
+            warn!(
                 max_attempts = config.table_error_retry_max_attempts,
-                error = %err,
                 "apply worker timed retry limit reached, stopping worker",
             );
 
