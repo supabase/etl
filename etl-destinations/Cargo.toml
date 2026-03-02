@@ -81,10 +81,11 @@ etl = { workspace = true, features = ["test-utils"] }
 etl-telemetry = { workspace = true }
 
 chrono = { workspace = true }
+clickhouse = { workspace = true, features = ["inserter", "rustls-tls"] }
 futures = { workspace = true }
 rand = { workspace = true, features = ["thread_rng"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 uuid = { workspace = true, features = ["v4"] }

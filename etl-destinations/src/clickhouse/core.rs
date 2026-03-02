@@ -11,7 +11,7 @@ use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, TableId, TableRow};
+use etl::types::{Cell, Event, TableId, TableRow, is_array_type};
 use etl::{destination::Destination, types::PgLsn};
 use parking_lot::RwLock;
 use std::time::Instant;
@@ -151,9 +151,18 @@ where
         }
 
         // Compute nullable flags (user columns + 2 CDC columns always non-nullable).
+        //
+        // Array columns are NEVER marked nullable here, even if the Postgres column is nullable.
+        // The DDL always emits `Array(Nullable(T))` (no outer `Nullable` wrapper), so ClickHouse
+        // does not expect a null-indicator byte before the array. If we mistakenly set
+        // `nullable_flags[i] = true` for an array column, `rb_encode_nullable` would prepend a
+        // spurious `0x00` byte that ClickHouse reads as `varint(0)` (empty array), causing every
+        // subsequent column to be read from the wrong offset and ultimately "Cannot read all data".
         let column_schemas = &table_schema.column_schemas;
-        let mut nullable_flags_vec: Vec<bool> =
-            column_schemas.iter().map(|c| c.nullable).collect();
+        let mut nullable_flags_vec: Vec<bool> = column_schemas
+            .iter()
+            .map(|c| c.nullable && !is_array_type(&c.typ))
+            .collect();
         nullable_flags_vec.push(false); // cdc_operation
         nullable_flags_vec.push(false); // cdc_lsn
         let nullable_flags: Arc<[bool]> = nullable_flags_vec.into();

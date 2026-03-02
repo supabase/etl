@@ -1002,7 +1002,7 @@ fn create_bq_secret_env_var_json(bq_secret_name: &str) -> serde_json::Value {
 
 fn create_clickhouse_secret_env_var_json(clickouse_secret_name: &str) -> serde_json::Value {
     json!({
-      "name": "APP_DESTINATION__CLICKHOUSE__PASSWORD",
+      "name": "APP_DESTINATION__CLICK_HOUSE__PASSWORD",
       "valueFrom": {
         "secretKeyRef": {
           "name": clickouse_secret_name,

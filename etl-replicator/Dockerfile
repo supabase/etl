@@ -1,6 +1,6 @@
 # Build stage with cargo-chef for better layer caching
 # Native build: each runner builds for its own architecture
-FROM lukemathwalker/cargo-chef:latest-rust-1.88.0-slim-bookworm AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.93.1-slim-bookworm AS chef
 WORKDIR /app
 
 # Install system dependencies
