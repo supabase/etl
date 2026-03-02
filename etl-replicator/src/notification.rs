@@ -3,7 +3,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// The endpoint of the Supabase API to which error notifications are sent.
 const API_ENDPOINT: &str = "system/etl/error-notification";
@@ -144,12 +144,6 @@ impl ErrorNotificationClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<unable to read body>".to_string());
-            error!(
-                status = %status,
-                body = %body,
-                "error notification request failed"
-            );
-
             return Err(format!("API returned status {status}: {body}").into());
         }
 
