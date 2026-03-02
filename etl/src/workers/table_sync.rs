@@ -1,3 +1,15 @@
+use chrono::{Duration as ChronoDuration, Utc};
+use etl_config::shared::PipelineConfig;
+use etl_postgres::replication::slots::EtlReplicationSlot;
+use etl_postgres::types::TableId;
+use metrics::counter;
+use std::ops::Deref;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
+use tokio::task::AbortHandle;
+use tracing::{Instrument, debug, error, info, warn};
+
 use crate::bail;
 use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
@@ -20,17 +32,6 @@ use crate::store::state::StateStore;
 use crate::types::PipelineId;
 use crate::workers::policy::{RetryDirective, build_error_handling_policy};
 use crate::workers::pool::{TableSyncWorkerId, TableSyncWorkerPool};
-use chrono::{Duration as ChronoDuration, Utc};
-use etl_config::shared::PipelineConfig;
-use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::TableId;
-use metrics::counter;
-use std::ops::Deref;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
-use tokio::task::AbortHandle;
-use tracing::{Instrument, debug, error, info, warn};
 
 /// Internal state of [`TableSyncWorkerState`].
 #[derive(Debug)]
