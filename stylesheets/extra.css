@@ -1,0 +1,135 @@
+/* Custom Supabase color palette */
+:root {
+    --tab-size-preference: 4;
+    
+    /* Custom primary color: #11181c */
+    --md-primary-fg-color: #11181c;
+    --md-primary-fg-color--light: #11181c;
+    --md-primary-fg-color--dark: #0a0e10;
+    
+    /* Custom accent color: #34b27b */
+    --md-accent-fg-color: #34b27b;
+    --md-accent-fg-color--transparent: rgba(52, 178, 123, 0.1);
+}
+
+/* Override Material Design custom palette */
+[data-md-color-primary="custom"] {
+    --md-primary-fg-color: #11181c;
+    --md-primary-fg-color--light: #11181c;
+    --md-primary-fg-color--dark: #0a0e10;
+}
+
+[data-md-color-accent="custom"] {
+    --md-accent-fg-color: #34b27b;
+    --md-accent-fg-color--transparent: rgba(52, 178, 123, 0.1);
+}
+
+/* Code and pre elements */
+pre, code {
+    tab-size: var(--tab-size-preference);
+}
+
+/* Ensure good readability */
+.md-typeset {
+    font-size: 0.8rem;
+    line-height: 1.6;
+}
+
+/* Code styling improvements */
+.md-typeset code {
+    font-size: 0.85em;
+    color: var(--md-accent-fg-color);
+    font-weight: 500;
+}
+
+/* Clean navigation */
+.md-nav__item .md-nav__link--active {
+    color: var(--md-accent-fg-color);
+    font-weight: 500;
+}
+
+/* Table styling */
+.md-typeset table:not([class]) th {
+    background-color: var(--md-accent-fg-color--transparent);
+}
+
+/* Logo styling - ensure visibility */
+.md-header__button.md-logo img {
+    width: 1.5rem;
+    height: 1.5rem;
+}
+
+/* Header styling with custom primary color */
+.md-header {
+    background-color: var(--md-primary-fg-color);
+}
+
+.md-header__title {
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.md-header__button {
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.md-header__button:hover {
+    color: #ffffff;
+}
+
+/* Tabs styling */
+.md-tabs {
+    background-color: var(--md-primary-fg-color);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.md-tabs__link {
+    color: rgba(255, 255, 255, 0.7);
+    font-weight: 500;
+}
+
+.md-tabs__link:hover {
+    color: #ffffff;
+}
+
+.md-tabs__link--active {
+    color: var(--md-accent-fg-color);
+    font-weight: 600;
+}
+
+/* Links */
+.md-typeset a {
+    color: var(--md-accent-fg-color);
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.md-typeset a:hover {
+    text-decoration: underline;
+}
+
+/* Buttons */
+.md-button {
+    background-color: var(--md-accent-fg-color);
+    border-color: var(--md-accent-fg-color);
+    color: #ffffff;
+}
+
+.md-button:hover {
+    background-color: #2a9d65;
+    border-color: #2a9d65;
+}
+
+/* Footer */
+.md-footer {
+    background-color: var(--md-primary-fg-color);
+    color: #ffffff;
+}
+
+.md-footer__link {
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.md-footer__link:hover {
+    color: var(--md-accent-fg-color);
+}
