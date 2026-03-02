@@ -1,0 +1,21 @@
+application:
+  host: "[::]"
+  port: 8080
+destination:
+  click_house:
+    url: http://clickhouse.etl-data-plane.svc.cluster.local:8123
+    user: default
+    password: password
+    database: mydb
+pipeline:
+  id: 42
+  publication_name: my_pub
+  pg_connection:
+    host: postgres.etl-data-plane.svc.cluster.local
+    port: 5432
+    name: mydb
+    username: postgres
+    password: password
+    tls:
+      trusted_root_certs: ""
+      enabled: false
