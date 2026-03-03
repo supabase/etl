@@ -288,11 +288,6 @@ where
             .publication_exists(&self.config.publication_name)
             .await?
         {
-            error!(
-                publication_name = %self.config.publication_name,
-                "publication does not exist in the database"
-            );
-
             bail!(
                 ErrorKind::ConfigError,
                 "Missing publication",
@@ -335,11 +330,6 @@ where
                 .await?;
 
             if has_partitioned_tables {
-                error!(
-                    publication_name = %self.config.publication_name,
-                    "publication has publish_via_partition_root=false but contains partitioned tables"
-                );
-
                 bail!(
                     ErrorKind::ConfigError,
                     "Invalid publication configuration for partitioned tables",

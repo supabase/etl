@@ -52,6 +52,16 @@ pub fn init() -> ReplicatorResult<Option<sentry::ClientInitGuard>> {
     Ok(None)
 }
 
+/// Sets the destination tag on the current Sentry scope.
+///
+/// This tag is applied at the scope level so all captured errors inherit
+/// the configured destination type.
+pub fn set_destination_tag(destination: &'static str) {
+    sentry::configure_scope(|scope| {
+        scope.set_tag("destination", destination);
+    });
+}
+
 /// Captures a [`ReplicatorError`] to Sentry and returns the event ID.
 pub fn capture_error(err: &ReplicatorError) -> Uuid {
     let event = event_from_replicator_error(err);

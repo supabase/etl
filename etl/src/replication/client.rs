@@ -703,23 +703,15 @@ impl PgReplicationClient {
             match tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
             {
                 Ok(result) => result,
-                Err(err) => {
-                    error!(
-                        slot_name,
-                        timeout_secs = DELETE_SLOT_TIMEOUT.as_secs(),
-                        "timed out while deleting replication slot"
-                    );
-
-                    bail!(
-                        ErrorKind::ReplicationSlotDeletionTimeout,
-                        "Replication slot deletion timed out",
-                        format!(
-                            "Timed out after {:?} while deleting replication slot '{}'",
-                            DELETE_SLOT_TIMEOUT, slot_name
-                        ),
-                        source: err
-                    );
-                }
+                Err(err) => bail!(
+                    ErrorKind::ReplicationSlotDeletionTimeout,
+                    "Replication slot deletion timed out",
+                    format!(
+                        "Timed out after {:?} while deleting replication slot '{}'",
+                        DELETE_SLOT_TIMEOUT, slot_name
+                    ),
+                    source: err
+                ),
             };
 
         match delete_result {
@@ -750,8 +742,6 @@ impl PgReplicationClient {
 
                     return Ok(());
                 }
-
-                error!(slot_name, error = %err, "failed to delete replication slot");
 
                 Err(err.into())
             }
