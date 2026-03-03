@@ -11,6 +11,7 @@
 
 use std::time::Duration;
 
+use super::{APP_TYPE_LABEL, APP_TYPE_VALUE, PIPELINE_ID_LABEL};
 use metrics::{Unit, describe_gauge, gauge};
 use tikv_jemalloc_ctl::{epoch, opt, raw, stats};
 use tracing::{debug, info, warn};
@@ -108,15 +109,6 @@ const JEMALLOC_FRAGMENTATION_RATIO: &str = "jemalloc_fragmentation_ratio";
 
 /// Polling interval for jemalloc statistics.
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Label key for pipeline identifier.
-const PIPELINE_ID_LABEL: &str = "pipeline_id";
-
-/// Label key for application type.
-const APP_TYPE_LABEL: &str = "app_type";
-
-/// Application type value for the replicator.
-const APP_TYPE_VALUE: &str = "etl-replicator-app";
 
 /// Logs the current jemalloc configuration for validation.
 ///

@@ -6,8 +6,9 @@
 
 use std::time::Duration;
 
+use super::{APP_TYPE_LABEL, APP_TYPE_VALUE, PIPELINE_ID_LABEL};
 use metrics::{Unit, describe_gauge, gauge};
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Current number of worker threads used by the runtime.
 const TOKIO_METRICS_WORKERS: &str = "tokio_metrics_workers";
@@ -33,9 +34,6 @@ const TOKIO_METRICS_WORKER_PARK_UNPARK_TOTAL: &str = "tokio_metrics_worker_park_
 
 /// Polling interval for Tokio runtime statistics.
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Label key for pipeline identifier.
-const PIPELINE_ID_LABEL: &str = "pipeline_id";
 
 /// Label key for worker identifier.
 #[cfg(target_has_atomic = "64")]
@@ -99,16 +97,19 @@ pub fn spawn_tokio_metrics_task(pipeline_id: u64) {
             gauge!(
                 TOKIO_METRICS_WORKERS,
                 PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                APP_TYPE_LABEL => APP_TYPE_VALUE,
             )
             .set(num_workers as f64);
             gauge!(
                 TOKIO_METRICS_ALIVE_TASKS,
                 PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                APP_TYPE_LABEL => APP_TYPE_VALUE,
             )
             .set(alive_tasks);
             gauge!(
                 TOKIO_METRICS_GLOBAL_QUEUE_DEPTH,
                 PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                APP_TYPE_LABEL => APP_TYPE_VALUE,
             )
             .set(global_queue_depth);
 
@@ -119,6 +120,7 @@ pub fn spawn_tokio_metrics_task(pipeline_id: u64) {
                 gauge!(
                     TOKIO_METRICS_WORKER_BUSY_DURATION_SECONDS,
                     PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                    APP_TYPE_LABEL => APP_TYPE_VALUE,
                     WORKER_ID_LABEL => worker_id_str.clone(),
                 )
                 .set(
@@ -129,12 +131,14 @@ pub fn spawn_tokio_metrics_task(pipeline_id: u64) {
                 gauge!(
                     TOKIO_METRICS_WORKER_PARK_TOTAL,
                     PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                    APP_TYPE_LABEL => APP_TYPE_VALUE,
                     WORKER_ID_LABEL => worker_id_str.clone(),
                 )
                 .set(runtime_metrics.worker_park_count(worker_id) as f64);
                 gauge!(
                     TOKIO_METRICS_WORKER_PARK_UNPARK_TOTAL,
                     PIPELINE_ID_LABEL => pipeline_id_str.clone(),
+                    APP_TYPE_LABEL => APP_TYPE_VALUE,
                     WORKER_ID_LABEL => worker_id_str,
                 )
                 .set(runtime_metrics.worker_park_unpark_count(worker_id) as f64);
