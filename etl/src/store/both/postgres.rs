@@ -499,7 +499,7 @@ impl SchemaStore for PostgresStore {
     }
 
     /// Stores a table schema in both database and cache.
-    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<()> {
+    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         debug!(table_name = %table_schema.name, "storing table schema");
 
         schema::store_table_schema(&self.pool, self.pipeline_id as i64, &table_schema)
@@ -512,12 +512,13 @@ impl SchemaStore for PostgresStore {
                 )
             })?;
 
+        let table_schema = Arc::new(table_schema);
         let mut inner = self.inner.lock().await;
         inner
             .table_schemas
-            .insert(table_schema.id, Arc::new(table_schema));
+            .insert(table_schema.id, table_schema.clone());
 
-        Ok(())
+        Ok(table_schema)
     }
 }
 

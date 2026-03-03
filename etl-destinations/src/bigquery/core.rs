@@ -545,6 +545,7 @@ where
 
         // Split table rows into optimal batches for parallel execution.
         let table_rows_batches = split_table_rows(table_rows, target_batches);
+        let sequenced_bigquery_table_id_string = sequenced_bigquery_table_id.to_string();
 
         // Create table batches from the split rows.
         let mut table_batches = Vec::with_capacity(table_rows_batches.len());
@@ -552,7 +553,7 @@ where
             if !table_rows.is_empty() {
                 let table_batch = self.client.create_table_batch(
                     &self.dataset_id,
-                    &sequenced_bigquery_table_id.to_string(),
+                    &sequenced_bigquery_table_id_string,
                     table_descriptor.clone(),
                     table_rows,
                 )?;
@@ -662,10 +663,12 @@ where
                 for (table_id, table_rows) in table_id_to_table_rows {
                     let (sequenced_bigquery_table_id, table_descriptor) =
                         self.prepare_table_for_streaming(&table_id, true).await?;
+                    let sequenced_bigquery_table_id_string =
+                        sequenced_bigquery_table_id.to_string();
 
                     let table_batch = self.client.create_table_batch(
                         &self.dataset_id,
-                        &sequenced_bigquery_table_id.to_string(),
+                        &sequenced_bigquery_table_id_string,
                         table_descriptor.clone(),
                         table_rows,
                     )?;

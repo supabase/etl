@@ -11,6 +11,7 @@ use const_oid::db::{
     },
     rfc8410::ID_ED_25519,
 };
+use futures::FutureExt;
 use rustls::{ClientConfig, pki_types::ServerName};
 use std::io;
 use std::pin::Pin;
@@ -69,10 +70,7 @@ where
     type Output = io::Result<RustlsStream<S>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: If `self` is pinned, so is `inner`.
-        #[allow(unsafe_code)]
-        let fut = unsafe { self.map_unchecked_mut(|this| &mut this.inner) };
-        fut.poll(cx).map_ok(RustlsStream)
+        self.get_mut().inner.poll_unpin(cx).map_ok(RustlsStream)
     }
 }
 
@@ -100,13 +98,12 @@ where
 
 pub struct RustlsStream<S>(TlsStream<S>);
 
-impl<S> RustlsStream<S> {
+impl<S> RustlsStream<S>
+where
+    S: Unpin,
+{
     pub fn project_stream(self: Pin<&mut Self>) -> Pin<&mut TlsStream<S>> {
-        // SAFETY: When `Self` is pinned, so is the inner `TlsStream`.
-        #[allow(unsafe_code)]
-        unsafe {
-            self.map_unchecked_mut(|this| &mut this.0)
-        }
+        Pin::new(&mut self.get_mut().0)
     }
 }
 

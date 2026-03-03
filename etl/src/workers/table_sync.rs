@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
 use tokio::task::AbortHandle;
-use tracing::{Instrument, debug, error, info};
+use tracing::{Instrument, debug, error, info, warn};
 
 use crate::bail;
 use crate::concurrency::batch_budget::BatchBudgetController;
@@ -436,7 +436,7 @@ where
         if policy.should_retry()
             && state_guard.retry_attempts() >= config.table_error_retry_max_attempts
         {
-            info!(
+            warn!(
                 table_id = table_id.0,
                 max_attempts = config.table_error_retry_max_attempts,
                 "max automatic retry attempts reached, switching to manual retry"
@@ -538,11 +538,6 @@ where
             .get_table_replication_state(self.table_id)
             .await?
         else {
-            error!(
-                table_id = self.table_id.0,
-                "no replication state found, cannot start sync worker"
-            );
-
             bail!(
                 ErrorKind::InvalidState,
                 "Table replication state not found",
@@ -690,13 +685,11 @@ where
         let start_lsn = match result {
             Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
             Ok(TableSyncResult::SyncStopped | TableSyncResult::SyncNotRequired) => {
-                info!(table_id = self.table_id.0, "table sync stopped");
+                info!(table_id = self.table_id.0, "table sync was stopped");
 
                 return Ok(());
             }
             Err(err) => {
-                error!(table_id = self.table_id.0, error = %err, "table sync failed");
-
                 return Err(err);
             }
         };
