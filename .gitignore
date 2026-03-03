@@ -23,7 +23,7 @@ target/
 site/
 
 # venv files
-bin/
+/bin/
 lib/
 pyvenv.cfg
 
