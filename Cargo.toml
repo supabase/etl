@@ -19,6 +19,9 @@ rust-version = "1.88.0"
 repository = "https://github.com/supabase/etl"
 homepage = "https://supabase.github.io/etl/"
 
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
+
 [workspace.dependencies]
 etl = { path = "etl", default-features = false }
 etl-api = { path = "etl-api", default-features = false }
