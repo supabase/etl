@@ -14,6 +14,7 @@
 ## Coding Style & Naming
 - Rust 2024 edition; keep formatter clean and warnings denied.
 - Naming: crates `kebab-case`; files/modules `snake_case`; types/traits `CamelCase`; fns/vars `snake_case`.
+- Prefer absolute crate imports for shared module items, for example `use crate::metrics::{X, Y, Z};`, instead of `use super::{...};`.
 - Do not leave comments when you remove things.
 - All logs should be strictly lowercase.
 

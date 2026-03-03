@@ -11,10 +11,11 @@
 
 use std::time::Duration;
 
-use super::{APP_TYPE_LABEL, APP_TYPE_VALUE, PIPELINE_ID_LABEL};
 use metrics::{Unit, describe_gauge, gauge};
 use tikv_jemalloc_ctl::{epoch, opt, raw, stats};
 use tracing::{debug, info, warn};
+
+use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE, PIPELINE_ID_LABEL};
 
 /// Total bytes allocated by the application and currently in use.
 ///

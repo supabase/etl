@@ -6,9 +6,10 @@
 
 use std::time::Duration;
 
-use super::{APP_TYPE_LABEL, APP_TYPE_VALUE, PIPELINE_ID_LABEL};
 use metrics::{Unit, describe_gauge, gauge};
 use tracing::debug;
+
+use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE, PIPELINE_ID_LABEL};
 
 /// Current number of worker threads used by the runtime.
 const TOKIO_METRICS_WORKERS: &str = "tokio_metrics_workers";
