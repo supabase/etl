@@ -92,18 +92,23 @@ cargo run --bin ducklake -p etl-examples -- \
     --publication my_pub
 ```
 
-### Run (S3 data)
+### Run (S3 / S3-compatible data)
 
 ```bash
 cargo run --bin ducklake -p etl-examples -- \
-    --db-host localhost \
-    --db-port 5432 \
-    --db-name mydb \
-    --db-username postgres \
-    --db-password mypassword \
-    --catalog-url postgres://user:pass@localhost:5432/ducklake_catalog \
-    --data-path s3://my-bucket/lake/ \
-    --publication my_pub
+    --db-host <pg-host> \
+    --db-port <pg-port> \
+    --db-name <pg-database> \
+    --db-username <pg-user> \
+    --db-password <pg-password> \
+    --catalog-url "postgres://<pg-user>:<pg-password>@<pg-host>:<pg-port>/<pg-database>?sslmode=disable" \
+    --data-path s3://<bucket-name>/ \
+    --publication <publication-name> \
+    --s3-access-key-id <access-key-id> \
+    --s3-secret-access-key <secret-access-key> \
+    --s3-region <region> \
+    --s3-endpoint <host>:<port>/<path> \
+    --metadata-schema <schema-name>
 ```
 
 When the `--data-path` starts with `s3://`, `gs://`, or `az://` the pipeline
@@ -124,6 +129,13 @@ automatically loads the `httpfs` DuckDB extension for cloud storage access.
 | `--max-batch-fill-duration-ms` | `5000` | Max time to wait before flushing a batch |
 | `--max-table-sync-workers` | `4` | Concurrent workers during initial copy |
 | `--publication` | *(required)* | Postgres publication name |
+| `--s3-access-key-id` | — | S3 access key ID (required for private S3 buckets) |
+| `--s3-secret-access-key` | — | S3 secret access key |
+| `--s3-region` | `us-east-1` | S3 region |
+| `--s3-endpoint` | — | Custom S3 endpoint, e.g. `127.0.0.1:5000/s3` for Supabase Storage |
+| `--s3-url-style` | `path` | URL style: `path` (MinIO/Supabase) or `vhost` (AWS) |
+| `--s3-use-ssl` | `false` | Enable TLS for the S3 connection |
+| `--metadata-schema` | — | Postgres schema for DuckLake metadata tables (e.g. `ducklake`) |
 
 ### Query the replicated data
 
