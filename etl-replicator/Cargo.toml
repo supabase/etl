@@ -7,9 +7,6 @@ rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
-[lints]
-workspace = true
-
 [features]
 default = []
 egress = ["etl/egress", "etl-destinations/egress"]
@@ -40,3 +37,6 @@ tracing = { workspace = true, default-features = true }
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemalloc-ctl = { workspace = true }
 tikv-jemallocator = { workspace = true }
+
+[lints]
+workspace = true
