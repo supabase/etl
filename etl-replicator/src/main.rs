@@ -55,6 +55,7 @@ mod jemalloc_metrics;
 mod migrations;
 mod notification;
 mod sentry;
+mod tokio_metrics;
 
 /// The name of the environment variable which contains version information for this replicator.
 const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
@@ -122,14 +123,20 @@ fn try_main() -> ReplicatorResult<()> {
     Ok(())
 }
 
+/// Starts background metrics collection tasks for the replicator runtime.
+fn spawn_metrics_tasks(pipeline_id: u64) {
+    tokio_metrics::spawn_tokio_metrics_task(pipeline_id);
+
+    #[cfg(not(target_env = "msvc"))]
+    jemalloc_metrics::spawn_jemalloc_metrics_task(pipeline_id);
+}
+
 /// Main async entry point that starts the replicator pipeline.
 ///
 /// Launches the replicator with the provided configuration and captures any errors
 /// to Sentry and optionally sends notifications to the Supabase API.
 async fn async_main(replicator_config: ReplicatorConfig) -> ReplicatorResult<()> {
-    // Start the jemalloc metrics collection background task.
-    #[cfg(not(target_env = "msvc"))]
-    jemalloc_metrics::spawn_jemalloc_metrics_task(replicator_config.pipeline.id);
+    spawn_metrics_tasks(replicator_config.pipeline.id);
 
     let notification_client = replicator_config.supabase.as_ref().and_then(
         |supabase_config| match (&supabase_config.api_url, &supabase_config.api_key) {
