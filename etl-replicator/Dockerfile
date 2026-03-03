@@ -1,11 +1,14 @@
 # Build stage with cargo-chef for better layer caching
 # Native build: each runner builds for its own architecture
-FROM lukemathwalker/cargo-chef:latest-rust-1.88.0-slim-bookworm AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.92.0-slim-bookworm AS chef
 WORKDIR /app
 
 # Install system dependencies
 FROM chef AS planner
 COPY . .
+# xtask is a local dev tool and must not be part of the Docker build.
+# Remove it from the workspace so cargo-chef / cargo metadata ignores it.
+RUN sed -i '/"xtask"/d' Cargo.toml && rm -rf xtask
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Build dependencies
@@ -37,6 +40,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 # ENABLE_EGRESS: set to "true" to enable egress metrics logging
 ARG ENABLE_EGRESS="false"
 COPY . .
+RUN sed -i '/"xtask"/d' Cargo.toml && rm -rf xtask
 RUN FEATURES=""; \
     if [ "$ENABLE_EGRESS" = "true" ]; then FEATURES="--features egress"; fi && \
     RUSTFLAGS="-C panic=abort" cargo build --release -p etl-replicator $FEATURES && \
