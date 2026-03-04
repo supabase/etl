@@ -165,6 +165,9 @@ pub enum TableReplicationPhase {
         /// Retry policy specifying how/when to retry.
         retry_policy: RetryPolicy,
         /// Original error that triggered the table error state.
+        ///
+        /// The rationale for having the source error is that it enables the state store
+        /// implementations to have more knowledge on the source error.
         source_err: EtlError,
     },
 }
