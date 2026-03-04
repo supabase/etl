@@ -293,7 +293,7 @@ pub async fn create_database_and_pipeline_with_table(
 
     let publication_name = format!("pub_{}", random::<u32>());
     database
-        .create_publication(&publication_name, &[table_name.clone()])
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
         .unwrap();
 

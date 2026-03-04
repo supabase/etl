@@ -246,7 +246,7 @@ pub struct PipelineConfig {
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
     /// `Some(MemoryBackpressureConfig::default())`.
-    #[serde(default)]
+    #[serde(default = "default_memory_backpressure")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     /// Selection rules for tables participating in replication.
     #[serde(default)]
@@ -333,6 +333,10 @@ const fn default_memory_refresh_interval_ms() -> u64 {
     PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
+fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
+    Some(MemoryBackpressureConfig::default())
+}
+
 /// Same as [`PipelineConfig`] but without secrets. This type
 /// implements [`Serialize`] because it does not contains secrets
 /// so is safe to serialize.
@@ -376,7 +380,7 @@ pub struct PipelineConfigWithoutSecrets {
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
     /// `Some(MemoryBackpressureConfig::default())`.
-    #[serde(default)]
+    #[serde(default = "default_memory_backpressure")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     /// Selection rules for tables participating in replication.
     #[serde(default)]

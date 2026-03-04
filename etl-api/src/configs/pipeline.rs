@@ -27,6 +27,10 @@ const fn default_memory_refresh_interval_ms() -> u64 {
     PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
 }
 
+fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
+    Some(MemoryBackpressureConfig::default())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FullApiPipelineConfig {
     #[schema(example = "my_publication")]
@@ -49,7 +53,10 @@ pub struct FullApiPipelineConfig {
     #[schema(example = 100)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_refresh_interval_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default = "default_memory_backpressure",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_sync_copy: Option<TableSyncCopyConfig>,
@@ -91,7 +98,7 @@ pub struct StoredPipelineConfig {
     pub max_copy_connections_per_table: u16,
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
-    #[serde(default)]
+    #[serde(default = "default_memory_backpressure")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,

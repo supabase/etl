@@ -50,8 +50,7 @@ mod config;
 mod core;
 mod error;
 mod feature_flags;
-#[cfg(not(target_env = "msvc"))]
-mod jemalloc_metrics;
+mod metrics;
 mod notification;
 mod sentry;
 
@@ -126,9 +125,7 @@ fn try_main() -> ReplicatorResult<()> {
 /// Launches the replicator with the provided configuration and captures any errors
 /// to Sentry and optionally sends notifications to the Supabase API.
 async fn async_main(replicator_config: ReplicatorConfig) -> ReplicatorResult<()> {
-    // Start the jemalloc metrics collection background task.
-    #[cfg(not(target_env = "msvc"))]
-    jemalloc_metrics::spawn_jemalloc_metrics_task(replicator_config.pipeline.id);
+    metrics::spawn_metrics_tasks(replicator_config.pipeline.id);
 
     let notification_client = replicator_config.supabase.as_ref().and_then(
         |supabase_config| match (&supabase_config.api_url, &supabase_config.api_key) {

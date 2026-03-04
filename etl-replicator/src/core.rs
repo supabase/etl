@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::error::{ReplicatorError, ReplicatorResult};
+use crate::sentry::set_destination_tag;
 use etl::pipeline::Pipeline;
 use etl::store::both::postgres::PostgresStore;
 use etl::store::cleanup::CleanupStore;
@@ -35,7 +36,6 @@ pub async fn start_replicator_with_config(
     log_config(&replicator_config);
 
     // We initialize the state store, which for the replicator is not configurable.
-    // Migrations are run by the pipeline during startup.
     let state_store = init_store(
         replicator_config.pipeline.id,
         replicator_config.pipeline.pg_connection.clone(),
@@ -51,6 +51,8 @@ pub async fn start_replicator_with_config(
             max_staleness_mins,
             connection_pool_size,
         } => {
+            set_destination_scope::<BigQueryDestination<PostgresStore>>();
+
             let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
                 dataset_id.clone(),
@@ -77,6 +79,8 @@ pub async fn start_replicator_with_config(
                     s3_region,
                 },
         } => {
+            set_destination_scope::<IcebergDestination<PostgresStore>>();
+
             let env = Environment::load().map_err(ReplicatorError::config)?;
             let client = IcebergClient::new_with_supabase_catalog(
                 project_ref,
@@ -109,6 +113,8 @@ pub async fn start_replicator_with_config(
                     s3_endpoint,
                 },
         } => {
+            set_destination_scope::<IcebergDestination<PostgresStore>>();
+
             let client = IcebergClient::new_with_rest_catalog(
                 catalog_uri.clone(),
                 warehouse_name.clone(),
@@ -134,6 +140,11 @@ pub async fn start_replicator_with_config(
     info!("replicator service completed");
 
     Ok(())
+}
+
+/// Sets the destination tag on the current error-reporting scope.
+fn set_destination_scope<D: Destination>() {
+    set_destination_tag(D::name());
 }
 
 pub fn create_props(
@@ -245,7 +256,6 @@ fn log_batch_config(config: &BatchConfig) {
 /// Initializes the state store.
 ///
 /// Creates a [`PostgresStore`] instance for the given pipeline and connection configuration.
-/// Migrations are handled by the pipeline during startup.
 fn init_store(
     pipeline_id: PipelineId,
     pg_connection_config: PgConnectionConfig,

@@ -355,20 +355,18 @@ where
 
                         if let Some(metadata) =
                             self.store.get_destination_table_metadata(table_id).await?
+                            && (metadata.snapshot_id != new_snapshot_id
+                                || &metadata.replication_mask != new_replication_mask)
                         {
-                            if metadata.snapshot_id != new_snapshot_id
-                                || &metadata.replication_mask != new_replication_mask
-                            {
-                                return Err(etl_error!(
-                                    ErrorKind::CorruptedTableSchema,
-                                    "Schema changes not supported",
-                                    format!(
-                                        "Iceberg destination does not support schema changes. \
-                                         Table {} schema changed from snapshot_id {} to {}.",
-                                        table_id, metadata.snapshot_id, new_snapshot_id
-                                    )
-                                ));
-                            }
+                            return Err(etl_error!(
+                                ErrorKind::CorruptedTableSchema,
+                                "Schema changes not supported",
+                                format!(
+                                    "Iceberg destination does not support schema changes. \
+                                     Table {} schema changed from snapshot_id {} to {}.",
+                                    table_id, metadata.snapshot_id, new_snapshot_id
+                                )
+                            ));
                         }
                     }
                     event => {

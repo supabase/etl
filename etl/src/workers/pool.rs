@@ -4,7 +4,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinSet;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
@@ -85,8 +85,9 @@ impl TableSyncWorkerPool {
         {
             warn!(
                 table_id = table_id.0,
-                "worker already exists in pool and is still running"
+                "table sync worker already exists in pool and is still running"
             );
+
             return;
         }
 
@@ -104,7 +105,7 @@ impl TableSyncWorkerPool {
         let handle = TableSyncWorkerHandle::new(worker_id, state, abort_handle);
         workers.insert(table_id, handle);
 
-        debug!(%worker_id, "spawned worker in pool");
+        debug!(%worker_id, "spawned table sync worker in pool");
     }
 
     /// Retrieves the state handle for an active worker by table ID.
@@ -120,7 +121,10 @@ impl TableSyncWorkerPool {
             return None;
         }
 
-        debug!(table_id = table_id.0, "retrieved active worker state");
+        debug!(
+            table_id = table_id.0,
+            "retrieved active table sync worker state"
+        );
 
         Some(handle.state())
     }
@@ -165,15 +169,15 @@ impl TableSyncWorkerPool {
                     }
 
                     if let Err(err) = worker_result {
-                        error!(%worker_id, error = %err, "worker completed with error");
+                        debug!(%worker_id, error = %err, "table sync worker completed with error");
                         errors.push(err);
                     } else {
-                        debug!(%worker_id, "worker completed successfully");
+                        debug!(%worker_id, "table sync worker completed successfully");
                     }
                 }
                 Err(join_err) => {
                     if join_err.is_cancelled() {
-                        debug!("worker task was cancelled");
+                        debug!("table sync worker task was cancelled");
                     } else {
                         errors.push(etl_error!(
                             ErrorKind::TableSyncWorkerPanic,

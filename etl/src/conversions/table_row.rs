@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn try_from_multiple_columns_different_types() {
-        let column_schemas = vec![
+        let column_schemas = [
             test_column("int_col", Type::INT4, 1, false, false),
             test_column("float_col", Type::FLOAT8, 2, false, false),
             test_column("text_col", Type::TEXT, 3, false, false),
