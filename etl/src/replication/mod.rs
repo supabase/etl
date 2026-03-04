@@ -5,5 +5,6 @@
 
 pub mod apply;
 pub mod client;
+pub mod masks;
 pub mod stream;
 pub mod table_sync;

@@ -22,10 +22,15 @@ pub enum TableModification<'a> {
     DropColumn {
         name: &'a str,
     },
-    /// Alter an existing column with the specified alteration.
+    /// Alter an existing column. The `alteration` field is a SQL fragment describing how the column should be altered.
     AlterColumn {
         name: &'a str,
         alteration: &'a str,
+    },
+    /// Rename an existing column.
+    RenameColumn {
+        old_name: &'a str,
+        new_name: &'a str,
     },
     ReplicaIdentity {
         value: &'a str,
@@ -224,6 +229,9 @@ impl<G: GenericClient> PgDatabase<G> {
                 }
                 TableModification::AlterColumn { name, alteration } => {
                     format!("alter column {name} {alteration}")
+                }
+                TableModification::RenameColumn { old_name, new_name } => {
+                    format!("rename column {old_name} to {new_name}")
                 }
                 TableModification::ReplicaIdentity { value } => {
                     format!("replica identity {value}")
@@ -717,13 +725,7 @@ impl<G> Drop for PgDatabase<G> {
 /// Creates a [`ColumnSchema`] for a non-nullable, primary key column named "id"
 /// of type `INT8` that is added by default to tables created by [`PgDatabase`].
 pub fn id_column_schema() -> ColumnSchema {
-    ColumnSchema {
-        name: "id".to_string(),
-        typ: Type::INT8,
-        modifier: -1,
-        nullable: false,
-        primary: true,
-    }
+    ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false)
 }
 
 /// Creates a new Postgres database and returns a connected client.
@@ -746,7 +748,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> (Client, Option<
     // Spawn the connection on a new task
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            info!("connection error: {e}");
+            info!(error = %e, "connection error");
         }
     });
 
@@ -785,7 +787,7 @@ pub async fn connect_to_pg_database(config: &PgConnectionConfig) -> (Client, Opt
     // Spawn the connection on a new task
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            info!("connection error: {e}");
+            info!(error = %e, "connection error");
         }
     });
 
@@ -816,7 +818,7 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Spawn the connection on a new task
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            info!("connection error: {e}");
+            info!(error = %e, "connection error");
         }
     });
 

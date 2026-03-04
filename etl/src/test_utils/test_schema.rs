@@ -1,12 +1,31 @@
 use etl_postgres::tokio::test_utils::{PgDatabase, id_column_schema};
-use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
+use etl_postgres::types::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema};
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use tokio_postgres::types::{PgLsn, Type};
 use tokio_postgres::{Client, GenericClient};
 
 use crate::test_utils::database::{TEST_DATABASE_SCHEMA, test_table_name};
 use crate::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use crate::types::{Cell, Event, InsertEvent, TableRow};
+
+/// Creates a test column schema with sensible defaults.
+fn test_column(
+    name: &str,
+    typ: Type,
+    ordinal_position: i32,
+    nullable: bool,
+    primary_key: bool,
+) -> ColumnSchema {
+    ColumnSchema::new(
+        name.to_string(),
+        typ,
+        -1,
+        ordinal_position,
+        if primary_key { Some(1) } else { None },
+        nullable,
+    )
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum TableSelection {
@@ -70,20 +89,8 @@ pub async fn setup_test_database_schema<G: GenericClient>(
             users_table_name,
             vec![
                 id_column_schema(),
-                ColumnSchema {
-                    name: "name".to_string(),
-                    typ: Type::TEXT,
-                    modifier: -1,
-                    nullable: false,
-                    primary: false,
-                },
-                ColumnSchema {
-                    name: "age".to_string(),
-                    typ: Type::INT4,
-                    modifier: -1,
-                    nullable: false,
-                    primary: false,
-                },
+                test_column("name", Type::TEXT, 2, false, false),
+                test_column("age", Type::INT4, 3, false, false),
             ],
         ));
     }
@@ -106,13 +113,7 @@ pub async fn setup_test_database_schema<G: GenericClient>(
             orders_table_name,
             vec![
                 id_column_schema(),
-                ColumnSchema {
-                    name: "description".to_string(),
-                    typ: Type::TEXT,
-                    modifier: -1,
-                    nullable: false,
-                    primary: false,
-                },
+                test_column("description", Type::TEXT, 2, false, false),
             ],
         ));
     }
@@ -326,21 +327,28 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
                 && left.timestamp == right.timestamp
         }
         (Event::Insert(left), Event::Insert(right)) => {
-            left.table_id == right.table_id
+            left.replicated_table_schema.id() == right.replicated_table_schema.id()
                 && table_rows_equal_ignoring_size(&left.table_row, &right.table_row)
         }
         (Event::Update(left), Event::Update(right)) => {
-            left.table_id == right.table_id
+            left.replicated_table_schema.id() == right.replicated_table_schema.id()
                 && table_rows_equal_ignoring_size(&left.table_row, &right.table_row)
                 && old_table_rows_equal_ignoring_size(&left.old_table_row, &right.old_table_row)
         }
         (Event::Delete(left), Event::Delete(right)) => {
-            left.table_id == right.table_id
+            left.replicated_table_schema.id() == right.replicated_table_schema.id()
                 && old_table_rows_equal_ignoring_size(&left.old_table_row, &right.old_table_row)
         }
-        (Event::Relation(left), Event::Relation(right)) => left.table_schema == right.table_schema,
         (Event::Truncate(left), Event::Truncate(right)) => {
-            left.options == right.options && left.rel_ids == right.rel_ids
+            if left.options != right.options
+                || left.truncated_tables.len() != right.truncated_tables.len()
+            {
+                return false;
+            }
+            // Compare table IDs of truncated tables
+            let left_ids: Vec<_> = left.truncated_tables.iter().map(|s| s.id()).collect();
+            let right_ids: Vec<_> = right.truncated_tables.iter().map(|s| s.id()).collect();
+            left_ids == right_ids
         }
         (Event::Unsupported, Event::Unsupported) => true,
         _ => false,
@@ -349,16 +357,19 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
 
 pub fn build_expected_users_inserts(
     mut starting_id: i64,
-    users_table_id: TableId,
+    users_table_schema: &TableSchema,
     expected_rows: Vec<(&str, i32)>,
 ) -> Vec<Event> {
     let mut events = Vec::new();
+
+    // We build the replicated table schema with a mask for all columns.
+    let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(users_table_schema.clone()));
 
     for (name, age) in expected_rows {
         events.push(Event::Insert(InsertEvent {
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
-            table_id: users_table_id,
+            replicated_table_schema: replicated_table_schema.clone(),
             table_row: TableRow::new(vec![
                 Cell::I64(starting_id),
                 Cell::String(name.to_owned()),
@@ -374,16 +385,19 @@ pub fn build_expected_users_inserts(
 
 pub fn build_expected_orders_inserts(
     mut starting_id: i64,
-    orders_table_id: TableId,
+    orders_table_schema: &TableSchema,
     expected_rows: Vec<&str>,
 ) -> Vec<Event> {
     let mut events = Vec::new();
+
+    // We build the replicated table schema with a mask for all columns.
+    let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(orders_table_schema.clone()));
 
     for name in expected_rows {
         events.push(Event::Insert(InsertEvent {
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
-            table_id: orders_table_id,
+            replicated_table_schema: replicated_table_schema.clone(),
             table_row: TableRow::new(vec![Cell::I64(starting_id), Cell::String(name.to_owned())]),
         }));
 

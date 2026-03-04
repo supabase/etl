@@ -51,7 +51,6 @@ mod core;
 mod error;
 mod feature_flags;
 mod metrics;
-mod migrations;
 mod notification;
 mod sentry;
 
