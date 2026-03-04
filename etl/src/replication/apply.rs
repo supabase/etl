@@ -1210,7 +1210,8 @@ where
             let error = TableReplicationError::with_solution(
                 table_id,
                 format!("The schema for table {table_id} has changed during streaming"),
-                "ETL doesn't support schema changes at this point in time, rollback the schema",
+                "ETL doesn't support schema changes at this point in time, rollback the schema"
+                    .into(),
                 RetryPolicy::ManualRetry,
                 etl_error!(
                     ErrorKind::SourceSchemaError,

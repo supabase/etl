@@ -192,9 +192,8 @@ impl<S> ErrorNotifyingStateStore<S> {
                 "sending notification for table replication error"
             );
 
-            let error_message = format!("{source_err}");
             notification_client
-                .notify_error(error_message, source_err)
+                .notify_error(source_err.to_string(), source_err)
                 .await;
         }
     }

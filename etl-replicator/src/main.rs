@@ -169,7 +169,7 @@ async fn async_main(replicator_config: ReplicatorConfig) -> ReplicatorResult<()>
 
         // Send an error notification if a client is available.
         if let Some(client) = notification_client {
-            let error_message = format!("{err}");
+            let error_message = err.to_string();
             match &err {
                 ReplicatorError::Etl(etl_err) => {
                     client.notify_error(error_message.clone(), etl_err).await;

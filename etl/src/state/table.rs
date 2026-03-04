@@ -25,15 +25,15 @@ impl TableReplicationError {
     /// Creates a new [`TableReplicationError`] with a suggested solution.
     pub fn with_solution(
         table_id: TableId,
-        reason: impl ToString,
-        solution: impl ToString,
+        reason: String,
+        solution: String,
         retry_policy: RetryPolicy,
         source_err: EtlError,
     ) -> Self {
         Self {
             table_id,
-            reason: reason.to_string(),
-            solution: Some(solution.to_string()),
+            reason,
+            solution: Some(solution),
             retry_policy,
             source_err,
         }
@@ -42,13 +42,13 @@ impl TableReplicationError {
     /// Creates a new [`TableReplicationError`] without a suggested solution.
     pub fn without_solution(
         table_id: TableId,
-        reason: impl ToString,
+        reason: String,
         retry_policy: RetryPolicy,
         source_err: EtlError,
     ) -> Self {
         Self {
             table_id,
-            reason: reason.to_string(),
+            reason,
             solution: None,
             retry_policy,
             source_err,
@@ -74,15 +74,19 @@ impl TableReplicationError {
     /// Builds a [`TableReplicationError`] from a shared handling policy and worker retry policy.
     pub fn from_error_policy(
         table_id: TableId,
-        error: &EtlError,
+        err: EtlError,
         policy: &ErrorHandlingPolicy,
         retry_policy: RetryPolicy,
     ) -> Self {
         match policy.solution() {
-            Some(solution) => {
-                Self::with_solution(table_id, error, solution, retry_policy, error.clone())
-            }
-            None => Self::without_solution(table_id, error, retry_policy, error.clone()),
+            Some(solution) => Self::with_solution(
+                table_id,
+                err.to_string(),
+                solution.to_string(),
+                retry_policy,
+                err,
+            ),
+            None => Self::without_solution(table_id, err.to_string(), retry_policy, err),
         }
     }
 }
