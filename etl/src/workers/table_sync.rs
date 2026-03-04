@@ -440,7 +440,7 @@ where
             RetryDirective::NoRetry => RetryPolicy::NoRetry,
         };
         let mut table_error =
-            TableReplicationError::from_error_policy(table_id, &err, &policy, retry_policy.clone());
+            TableReplicationError::from_error_policy(table_id, err, &policy, retry_policy.clone());
 
         let mut state_guard = state.lock().await;
 

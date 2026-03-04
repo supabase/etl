@@ -81,6 +81,7 @@ impl TryFrom<TableReplicationPhase> for state::TableReplicationState {
                 reason,
                 solution,
                 retry_policy,
+                source_err: _,
             } => {
                 // Convert ETL RetryPolicy to postgres RetryPolicy
                 let db_retry_policy = match retry_policy {

@@ -6,6 +6,7 @@ use etl::store::cleanup::CleanupStore;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::test_utils::database::spawn_source_database_for_store;
+use etl::{error::ErrorKind, error::EtlError};
 use etl_postgres::replication::connect_to_source_database;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use etl_telemetry::tracing::init_test_tracing;
@@ -98,6 +99,7 @@ async fn test_state_store_operations() {
         reason: "Test error".to_string(),
         solution: Some("Test solution".to_string()),
         retry_policy: RetryPolicy::ManualRetry,
+        source_err: EtlError::from((ErrorKind::SourceError, "Test error")),
     };
     store
         .update_table_replication_state(table_id, errored_phase.clone())
@@ -432,6 +434,7 @@ async fn test_errored_state_with_different_retry_policies() {
         reason: "Fatal error".to_string(),
         solution: None,
         retry_policy: RetryPolicy::NoRetry,
+        source_err: EtlError::from((ErrorKind::DestinationError, "Fatal error")),
     };
     store
         .update_table_replication_state(table_id, errored_no_retry.clone())
@@ -447,6 +450,7 @@ async fn test_errored_state_with_different_retry_policies() {
         reason: "Temporary error".to_string(),
         solution: Some("Wait and retry".to_string()),
         retry_policy: RetryPolicy::TimedRetry { next_retry },
+        source_err: EtlError::from((ErrorKind::SourceError, "Temporary error")),
     };
     store
         .update_table_replication_state(table_id, errored_timed_retry.clone())

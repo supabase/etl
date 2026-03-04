@@ -37,7 +37,7 @@ pub static malloc_conf: &[u8] =
 use crate::config::load_replicator_config;
 use crate::core::start_replicator_with_config;
 use crate::error::{ReplicatorError, ReplicatorResult};
-use crate::notification::ErrorNotificationClient;
+use crate::error_notification::ErrorNotificationClient;
 use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
 use etl_telemetry::tracing::init_tracing_with_top_level_fields;
@@ -49,10 +49,10 @@ use tracing::{error, info, warn};
 mod config;
 mod core;
 mod error;
+mod error_notification;
 mod feature_flags;
 mod metrics;
 mod migrations;
-mod notification;
 mod sentry;
 
 /// The name of the environment variable which contains version information for this replicator.
@@ -161,13 +161,15 @@ async fn async_main(replicator_config: ReplicatorConfig) -> ReplicatorResult<()>
     };
 
     // We start the replicator and catch any errors.
-    if let Err(err) = start_replicator_with_config(replicator_config).await {
+    if let Err(err) =
+        start_replicator_with_config(replicator_config, notification_client.clone()).await
+    {
         sentry::capture_error(&err);
         error!("{err}");
 
         // Send an error notification if a client is available.
         if let Some(client) = notification_client {
-            let error_message = format!("{err}");
+            let error_message = err.to_string();
             match &err {
                 ReplicatorError::Etl(etl_err) => {
                     client.notify_error(error_message.clone(), etl_err).await;

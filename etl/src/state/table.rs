@@ -18,35 +18,40 @@ pub struct TableReplicationError {
     reason: String,
     solution: Option<String>,
     retry_policy: RetryPolicy,
+    source_err: EtlError,
 }
 
 impl TableReplicationError {
     /// Creates a new [`TableReplicationError`] with a suggested solution.
     pub fn with_solution(
         table_id: TableId,
-        reason: impl ToString,
-        solution: impl ToString,
+        reason: String,
+        solution: String,
         retry_policy: RetryPolicy,
+        source_err: EtlError,
     ) -> Self {
         Self {
             table_id,
-            reason: reason.to_string(),
-            solution: Some(solution.to_string()),
+            reason,
+            solution: Some(solution),
             retry_policy,
+            source_err,
         }
     }
 
     /// Creates a new [`TableReplicationError`] without a suggested solution.
     pub fn without_solution(
         table_id: TableId,
-        reason: impl ToString,
+        reason: String,
         retry_policy: RetryPolicy,
+        source_err: EtlError,
     ) -> Self {
         Self {
             table_id,
-            reason: reason.to_string(),
+            reason,
             solution: None,
             retry_policy,
+            source_err,
         }
     }
 
@@ -69,13 +74,19 @@ impl TableReplicationError {
     /// Builds a [`TableReplicationError`] from a shared handling policy and worker retry policy.
     pub fn from_error_policy(
         table_id: TableId,
-        error: &EtlError,
+        err: EtlError,
         policy: &ErrorHandlingPolicy,
         retry_policy: RetryPolicy,
     ) -> Self {
         match policy.solution() {
-            Some(solution) => Self::with_solution(table_id, error, solution, retry_policy),
-            None => Self::without_solution(table_id, error, retry_policy),
+            Some(solution) => Self::with_solution(
+                table_id,
+                err.to_string(),
+                solution.to_string(),
+                retry_policy,
+                err,
+            ),
+            None => Self::without_solution(table_id, err.to_string(), retry_policy, err),
         }
     }
 }
@@ -99,7 +110,7 @@ impl RetryPolicy {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TableReplicationPhase {
     /// Set by the pipeline when it first starts and encounters a table for the first time.
     Init,
@@ -157,6 +168,11 @@ pub enum TableReplicationPhase {
         solution: Option<String>,
         /// Retry policy specifying how/when to retry.
         retry_policy: RetryPolicy,
+        /// Original error that triggered the table error state.
+        ///
+        /// The rationale for having the source error is that it enables the state store
+        /// implementations to have more knowledge on the source error.
+        source_err: EtlError,
     },
 }
 
@@ -187,6 +203,7 @@ impl From<TableReplicationError> for TableReplicationPhase {
             reason: value.reason,
             solution: value.solution,
             retry_policy: value.retry_policy,
+            source_err: value.source_err,
         }
     }
 }
@@ -246,6 +263,10 @@ impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
                     reason,
                     solution,
                     retry_policy: etl_retry_policy,
+                    source_err: etl_error!(
+                        ErrorKind::Unknown,
+                        "table replication error restored from state store"
+                    ),
                 })
             }
         }
