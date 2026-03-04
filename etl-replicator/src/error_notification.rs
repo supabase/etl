@@ -183,22 +183,18 @@ impl<S> ErrorNotifyingStateStore<S> {
         };
 
         for (table_id, phase) in updates {
-            let TableReplicationPhase::Errored {
-                reason, source_err, ..
-            } = phase
-            else {
+            let TableReplicationPhase::Errored { source_err, .. } = phase else {
                 continue;
             };
-
-            let error_message = format!("table {table_id} replication errored: {reason}");
 
             info!(
                 table_id = table_id.0,
                 "sending notification for table replication error"
             );
 
+            let error_message = format!("{source_err}");
             notification_client
-                .notify_error(error_message, (*table_id, source_err))
+                .notify_error(error_message, source_err)
                 .await;
         }
     }
