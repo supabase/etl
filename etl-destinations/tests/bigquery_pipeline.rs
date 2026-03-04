@@ -3,7 +3,7 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
 use etl::error::ErrorKind;
-use etl::state::table::TableReplicationPhaseType;
+use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use etl::store::state::StateStore;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::notifying_store::NotifyingStore;
@@ -12,7 +12,7 @@ use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
 use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
 use etl::types::{EventType, PgNumeric, PipelineId};
 use etl_destinations::bigquery::test_utils::{
-    parse_bigquery_table_rows, setup_bigquery_database, skip_if_missing_bigquery_env_vars,
+    setup_bigquery_database, skip_if_missing_bigquery_env_vars,
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
@@ -36,6 +36,7 @@ fn install_crypto_provider() {
 
 use crate::support::bigquery::{
     BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
+    parse_bigquery_table_rows,
 };
 
 mod support;
@@ -1843,12 +1844,16 @@ async fn table_validation_out_of_bounds_values() {
     old_date_error_notify.notified().await;
     nan_array_error_notify.notified().await;
 
-    let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 3);
-    assert!(
-        err.kinds()
-            .contains(&ErrorKind::UnsupportedValueInDestination)
-    );
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    for table_id in [huge_numeric_table_id, old_date_table_id, nan_array_table_id] {
+        let table_state = store
+            .get_table_replication_state(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(table_state, TableReplicationPhase::Errored { .. }));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

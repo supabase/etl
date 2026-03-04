@@ -2,6 +2,7 @@
 
 use etl::error::ErrorKind;
 use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use etl::store::state::StateStore;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::{EventCondition, group_events_by_type_and_table_id};
 use etl::test_utils::memory_destination::MemoryDestination;
@@ -1487,10 +1488,14 @@ async fn table_without_primary_key_is_errored() {
 
     errored_state.notified().await;
 
-    // Wait for the pipeline expecting an error to be returned.
-    let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 1);
-    assert_eq!(err.kinds()[0], ErrorKind::SourceSchemaError);
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_state = state_store
+        .get_table_replication_state(table_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(table_state, TableReplicationPhase::Errored { .. }));
 
     // We expect the insert events to not be saved.
     let events = destination.get_events().await;

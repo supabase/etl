@@ -712,3 +712,18 @@ impl Ord for NonNullableColsScalar {
         self.id.cmp(&other.id)
     }
 }
+
+pub fn parse_bigquery_table_rows<T>(table_rows: Vec<TableRow>) -> Vec<T>
+where
+    T: Ord,
+    T: From<TableRow>,
+{
+    let mut parsed_table_rows = Vec::with_capacity(table_rows.len());
+
+    for table_row in table_rows {
+        parsed_table_rows.push(table_row.into());
+    }
+    parsed_table_rows.sort();
+
+    parsed_table_rows
+}
