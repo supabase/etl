@@ -33,14 +33,14 @@ use crate::workers::policy::{RetryDirective, build_error_handling_policy};
 use crate::workers::pool::{TableSyncWorkerId, TableSyncWorkerPool};
 use crate::{bail, etl_error};
 
-/// Terminal result for a table sync worker task.
+/// Result for a table sync worker task.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum TableSyncWorkerResult {
     /// The worker completed the sync flow successfully.
     Completed,
     /// The worker stopped because shutdown was requested.
     Shutdown,
-    /// The worker stopped after persisting a terminal table error state.
+    /// The worker stopped after persisting the table error state.
     Errored,
 }
 
@@ -401,13 +401,14 @@ where
     S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
 {
-    /// Handles table sync worker errors using policy-based retry and backoff.
+    /// Handles a table sync worker failure using the configured retry policy.
     ///
-    /// Returns [`TableSyncWorkerResult::Shutdown`] if shutdown was requested while waiting to
-    /// retry, `None` if execution should continue retrying, or `Err` when the failure should be
-    /// propagated.
+    /// Returns [`Some(TableSyncWorkerResult)`] when error handling terminates the worker,
+    /// [`None`] when the worker should retry, or [`Err`] when the failure cannot be handled and
+    /// must be propagated.
     ///
-    /// Errors that happen while handling the worker error in this function are immediately propagated.
+    /// Any errors encountered while persisting error state or preparing a retry are propagated
+    /// immediately.
     async fn handle_table_sync_worker_error(
         pipeline_id: PipelineId,
         table_id: TableId,
@@ -626,14 +627,14 @@ where
 
             let result = worker.run_table_sync_worker(state.clone()).await;
             match result {
-                Ok(worker_result) => {
+                Ok(result) => {
                     let mut state_guard = state.lock().await;
                     state_guard.reset_retry_attempts();
 
-                    return Ok(worker_result);
+                    return Ok(result);
                 }
                 Err(err) => {
-                    let outcome = Self::handle_table_sync_worker_error(
+                    let result = Self::handle_table_sync_worker_error(
                         pipeline_id,
                         table_id,
                         config.as_ref(),
@@ -644,8 +645,8 @@ where
                     )
                     .await?;
 
-                    if let Some(outcome) = outcome {
-                        return Ok(outcome);
+                    if let Some(result) = result {
+                        return Ok(result);
                     }
                 }
             }
