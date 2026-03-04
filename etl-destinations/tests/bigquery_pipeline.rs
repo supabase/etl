@@ -3,7 +3,8 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
 use etl::error::ErrorKind;
-use etl::state::table::TableReplicationPhaseType;
+use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
+use etl::store::state::StateStore;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with_batch_config};
@@ -1841,10 +1842,14 @@ async fn table_validation_out_of_bounds_values() {
     old_date_error_notify.notified().await;
     nan_array_error_notify.notified().await;
 
-    let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 3);
-    assert!(
-        err.kinds()
-            .contains(&ErrorKind::UnsupportedValueInDestination)
-    );
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    for table_id in [huge_numeric_table_id, old_date_table_id, nan_array_table_id] {
+        let table_state = store
+            .get_table_replication_state(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(table_state, TableReplicationPhase::Errored { .. }));
+    }
 }
