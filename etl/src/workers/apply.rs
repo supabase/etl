@@ -19,7 +19,7 @@ use crate::metrics::{
     ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL,
     WORKER_TYPE_LABEL,
 };
-use crate::replication::apply::{ApplyLoop, ApplyWorkerContext, WorkerContext};
+use crate::replication::apply::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState};
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
@@ -288,7 +288,7 @@ where
             batch_budget: self.batch_budget.clone(),
         });
 
-        ApplyLoop::start(
+        let apply_loop_result = ApplyLoop::start(
             self.pipeline_id,
             start_lsn,
             self.config,
@@ -302,7 +302,14 @@ where
         )
         .await?;
 
-        info!("apply worker completed successfully");
+        match apply_loop_result {
+            ApplyLoopResult::Completed => {
+                info!("apply worker apply loop completed successfully");
+            }
+            ApplyLoopResult::Paused => {
+                info!("apply worker apply loop paused for shutdown");
+            }
+        }
 
         Ok(())
     }

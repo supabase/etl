@@ -8,7 +8,9 @@ use tracing::{debug, warn};
 
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
-use crate::workers::table_sync::{TableSyncWorkerHandle, TableSyncWorkerState};
+use crate::workers::table_sync::{
+    TableSyncWorkerHandle, TableSyncWorkerResult, TableSyncWorkerState,
+};
 
 /// Unique identifier for a table sync worker run.
 ///
@@ -48,7 +50,7 @@ pub struct TableSyncWorkerPool {
     /// Monotonically increasing counter for generating unique run IDs.
     next_run_id: AtomicU64,
     /// Owns all spawned worker tasks. Locked first during spawn operations.
-    workers_join_set: Mutex<JoinSet<(TableSyncWorkerId, EtlResult<()>)>>,
+    workers_join_set: Mutex<JoinSet<(TableSyncWorkerId, EtlResult<TableSyncWorkerResult>)>>,
     /// Last known worker handle per table. Uses RwLock for cheap read access.
     workers: RwLock<HashMap<TableId, TableSyncWorkerHandle>>,
 }
@@ -73,7 +75,7 @@ impl TableSyncWorkerPool {
     /// [`wait_all`] is in progress, this method blocks until it completes.
     pub async fn spawn<F>(&self, table_id: TableId, state: TableSyncWorkerState, future: F)
     where
-        F: Future<Output = EtlResult<()>> + Send + 'static,
+        F: Future<Output = EtlResult<TableSyncWorkerResult>> + Send + 'static,
     {
         // Lock workers_join_set first to ensure we block if wait_all is in progress.
         let mut workers_join_set = self.workers_join_set.lock().await;
@@ -145,7 +147,7 @@ impl TableSyncWorkerPool {
     /// any new spawn attempts. For each completed task, it briefly acquires a write
     /// lock on the workers map to remove the entry only if the worker_id matches.
     ///
-    /// If any workers encounter errors, those errors are collected and returned.
+    /// If any workers encounter supervision errors, those errors are collected and returned.
     pub async fn wait_all(&self) -> EtlResult<()> {
         let mut errors = Vec::new();
         let mut workers_join_set = self.workers_join_set.lock().await;
@@ -168,11 +170,28 @@ impl TableSyncWorkerPool {
                         }
                     }
 
-                    if let Err(err) = worker_result {
-                        debug!(%worker_id, error = %err, "table sync worker completed with error");
-                        errors.push(err);
-                    } else {
-                        debug!(%worker_id, "table sync worker completed successfully");
+                    match worker_result {
+                        Ok(TableSyncWorkerResult::Completed) => {
+                            debug!(%worker_id, "table sync worker completed successfully");
+                        }
+                        Ok(TableSyncWorkerResult::Shutdown) => {
+                            debug!(%worker_id, "table sync worker completed after shutdown");
+                        }
+                        Ok(TableSyncWorkerResult::Errored) => {
+                            debug!(
+                                %worker_id,
+                                "table sync worker completed after persisting error state"
+                            );
+                        }
+                        Err(err) => {
+                            debug!(
+                                %worker_id,
+                                error = %err,
+                                "table sync worker completed with error"
+                            );
+
+                            errors.push(err);
+                        }
                     }
                 }
                 Err(join_err) => {
