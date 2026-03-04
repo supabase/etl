@@ -1212,6 +1212,11 @@ where
                 format!("The schema for table {table_id} has changed during streaming"),
                 "ETL doesn't support schema changes at this point in time, rollback the schema",
                 RetryPolicy::ManualRetry,
+                etl_error!(
+                    ErrorKind::SourceSchemaError,
+                    "table schema changed during streaming",
+                    format!("table schema for table {table_id} changed during streaming")
+                ),
             );
 
             return Ok(HandleMessageResult::finish_batch_and_exclude_event(error));

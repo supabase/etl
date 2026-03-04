@@ -18,6 +18,7 @@ pub struct TableReplicationError {
     reason: String,
     solution: Option<String>,
     retry_policy: RetryPolicy,
+    source_err: EtlError,
 }
 
 impl TableReplicationError {
@@ -27,12 +28,14 @@ impl TableReplicationError {
         reason: impl ToString,
         solution: impl ToString,
         retry_policy: RetryPolicy,
+        source_err: EtlError,
     ) -> Self {
         Self {
             table_id,
             reason: reason.to_string(),
             solution: Some(solution.to_string()),
             retry_policy,
+            source_err,
         }
     }
 
@@ -41,12 +44,14 @@ impl TableReplicationError {
         table_id: TableId,
         reason: impl ToString,
         retry_policy: RetryPolicy,
+        source_err: EtlError,
     ) -> Self {
         Self {
             table_id,
             reason: reason.to_string(),
             solution: None,
             retry_policy,
+            source_err,
         }
     }
 
@@ -74,8 +79,10 @@ impl TableReplicationError {
         retry_policy: RetryPolicy,
     ) -> Self {
         match policy.solution() {
-            Some(solution) => Self::with_solution(table_id, error, solution, retry_policy),
-            None => Self::without_solution(table_id, error, retry_policy),
+            Some(solution) => {
+                Self::with_solution(table_id, error, solution, retry_policy, error.clone())
+            }
+            None => Self::without_solution(table_id, error, retry_policy, error.clone()),
         }
     }
 }
@@ -99,7 +106,7 @@ impl RetryPolicy {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TableReplicationPhase {
     /// Set by the pipeline when it first starts and encounters a table for the first time.
     Init,
@@ -157,6 +164,8 @@ pub enum TableReplicationPhase {
         solution: Option<String>,
         /// Retry policy specifying how/when to retry.
         retry_policy: RetryPolicy,
+        /// Original error that triggered the table error state.
+        source_err: EtlError,
     },
 }
 
@@ -187,6 +196,7 @@ impl From<TableReplicationError> for TableReplicationPhase {
             reason: value.reason,
             solution: value.solution,
             retry_policy: value.retry_policy,
+            source_err: value.source_err,
         }
     }
 }
@@ -246,6 +256,10 @@ impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
                     reason,
                     solution,
                     retry_policy: etl_retry_policy,
+                    source_err: etl_error!(
+                        ErrorKind::Unknown,
+                        "table replication error restored from state store"
+                    ),
                 })
             }
         }

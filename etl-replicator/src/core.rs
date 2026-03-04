@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::error::{ReplicatorError, ReplicatorResult};
+use crate::error_notification::{ErrorNotificationClient, ErrorNotifyingStateStore};
 use crate::migrations::migrate_state_store;
 use crate::sentry::set_destination_tag;
 use etl::pipeline::Pipeline;
@@ -31,6 +32,7 @@ use tracing::{debug, info, warn};
 /// configuration, and starts the pipeline.
 pub async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
+    notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
     info!("starting replicator service");
 
@@ -40,6 +42,7 @@ pub async fn start_replicator_with_config(
     let state_store = init_store(
         replicator_config.pipeline.id,
         replicator_config.pipeline.pg_connection.clone(),
+        notification_client,
     )
     .await?;
 
@@ -53,7 +56,7 @@ pub async fn start_replicator_with_config(
             max_staleness_mins,
             connection_pool_size,
         } => {
-            set_destination_scope::<BigQueryDestination<PostgresStore>>();
+            set_destination_scope::<BigQueryDestination<ErrorNotifyingStateStore<PostgresStore>>>();
 
             let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
@@ -81,7 +84,7 @@ pub async fn start_replicator_with_config(
                     s3_region,
                 },
         } => {
-            set_destination_scope::<IcebergDestination<PostgresStore>>();
+            set_destination_scope::<IcebergDestination<ErrorNotifyingStateStore<PostgresStore>>>();
 
             let env = Environment::load().map_err(ReplicatorError::config)?;
             let client = IcebergClient::new_with_supabase_catalog(
@@ -115,7 +118,7 @@ pub async fn start_replicator_with_config(
                     s3_endpoint,
                 },
         } => {
-            set_destination_scope::<IcebergDestination<PostgresStore>>();
+            set_destination_scope::<IcebergDestination<ErrorNotifyingStateStore<PostgresStore>>>();
 
             let client = IcebergClient::new_with_rest_catalog(
                 catalog_uri.clone(),
@@ -262,10 +265,14 @@ fn log_batch_config(config: &BatchConfig) {
 async fn init_store(
     pipeline_id: PipelineId,
     pg_connection_config: PgConnectionConfig,
+    notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<impl StateStore + SchemaStore + CleanupStore + Clone> {
     migrate_state_store(&pg_connection_config).await?;
 
-    Ok(PostgresStore::new(pipeline_id, pg_connection_config))
+    Ok(ErrorNotifyingStateStore::new(
+        PostgresStore::new(pipeline_id, pg_connection_config),
+        notification_client,
+    ))
 }
 
 /// Starts a pipeline and handles graceful shutdown signals.
