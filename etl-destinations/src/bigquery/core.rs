@@ -8,6 +8,7 @@ use etl::{bail, etl_error};
 #[cfg(feature = "egress")]
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
+use metrics::counter;
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -20,7 +21,9 @@ use tracing::{debug, info, warn};
 use crate::bigquery::encoding::BigQueryTableRow;
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
-use crate::bigquery::metrics::register_metrics;
+use crate::bigquery::metrics::{
+    ETL_BQ_APPEND_BATCHES_DUPLICATE_SEQUENCE_NUMBERS_TOTAL, register_metrics,
+};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
@@ -60,6 +63,34 @@ pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableI
 /// Used for truncate handling where each truncate creates a new table version.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct SequencedBigQueryTableId(BigQueryTableId, u64);
+
+/// Source DML type used for duplicate sequence number metrics.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+enum DmlType {
+    Insert,
+    Update,
+    Delete,
+}
+
+impl DmlType {
+    /// Returns a stable lowercase label for metric tags.
+    fn as_label(self) -> &'static str {
+        match self {
+            Self::Insert => "insert",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+
+    /// Returns a stable ordering for metric tag normalization.
+    fn sort_key(self) -> u8 {
+        match self {
+            Self::Insert => 0,
+            Self::Update => 1,
+            Self::Delete => 2,
+        }
+    }
+}
 
 impl SequencedBigQueryTableId {
     /// Creates a new sequenced table ID starting at version 0.
@@ -608,11 +639,15 @@ where
                         insert
                             .table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_number.clone()));
 
-                        let table_rows: &mut Vec<BigQueryTableRow> =
+                        let table_rows: &mut Vec<(String, DmlType, BigQueryTableRow)> =
                             table_id_to_table_rows.entry(insert.table_id).or_default();
-                        table_rows.push(BigQueryTableRow::try_from(insert.table_row)?);
+                        table_rows.push((
+                            sequence_number,
+                            DmlType::Insert,
+                            BigQueryTableRow::try_from(insert.table_row)?,
+                        ));
                     }
                     Event::Update(mut update) => {
                         let sequence_number =
@@ -624,11 +659,15 @@ where
                         update
                             .table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_number.clone()));
 
-                        let table_rows: &mut Vec<BigQueryTableRow> =
+                        let table_rows: &mut Vec<(String, DmlType, BigQueryTableRow)> =
                             table_id_to_table_rows.entry(update.table_id).or_default();
-                        table_rows.push(BigQueryTableRow::try_from(update.table_row)?);
+                        table_rows.push((
+                            sequence_number,
+                            DmlType::Update,
+                            BigQueryTableRow::try_from(update.table_row)?,
+                        ));
                     }
                     Event::Delete(delete) => {
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
@@ -643,11 +682,15 @@ where
                             .push(BigQueryOperationType::Delete.into_cell());
                         old_table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_number.clone()));
 
-                        let table_rows: &mut Vec<BigQueryTableRow> =
+                        let table_rows: &mut Vec<(String, DmlType, BigQueryTableRow)> =
                             table_id_to_table_rows.entry(delete.table_id).or_default();
-                        table_rows.push(BigQueryTableRow::try_from(old_table_row)?);
+                        table_rows.push((
+                            sequence_number,
+                            DmlType::Delete,
+                            BigQueryTableRow::try_from(old_table_row)?,
+                        ));
                     }
                     event => {
                         // Every other event type is currently not supported.
@@ -661,6 +704,32 @@ where
                 let mut table_batches = Vec::with_capacity(table_id_to_table_rows.len());
 
                 for (table_id, table_rows) in table_id_to_table_rows {
+                    let sequence_numbers_with_dml: Vec<(String, DmlType)> = table_rows
+                        .iter()
+                        .map(|(sequence_number, dml_type, _)| (sequence_number.clone(), *dml_type))
+                        .collect();
+                    let duplicate_sequence_numbers =
+                        count_duplicate_sequence_number_pairs(&sequence_numbers_with_dml);
+                    for (dml_combination, duplicate_pairs) in duplicate_sequence_numbers {
+                        info!(
+                            pipeline_id = self.pipeline_id.to_string(),
+                            table_id = table_id.0,
+                            %dml_combination,
+                            duplicate_pairs,
+                            "duplicate sequence number dml combinations detected in batch"
+                        );
+                        counter!(
+                            ETL_BQ_APPEND_BATCHES_DUPLICATE_SEQUENCE_NUMBERS_TOTAL,
+                            "pipeline_id" => self.pipeline_id.to_string(),
+                            "dml_combination" => dml_combination
+                        )
+                        .increment(duplicate_pairs);
+                    }
+
+                    let table_rows = table_rows
+                        .into_iter()
+                        .map(|(_, _, table_row)| table_row)
+                        .collect();
                     let (sequenced_bigquery_table_id, table_descriptor) =
                         self.prepare_table_for_streaming(&table_id, true).await?;
                     let sequenced_bigquery_table_id_string =
@@ -948,6 +1017,36 @@ fn split_table_rows(
     }
 
     batches
+}
+
+/// Builds a stable metric label for a pair of DML types that share a sequence number.
+fn dml_combination_label(left: DmlType, right: DmlType) -> String {
+    let (left, right) = if left.sort_key() <= right.sort_key() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+
+    format!("{}-{}", left.as_label(), right.as_label())
+}
+
+/// Counts duplicate CDC sequence number pairs within a single BigQuery batch by DML combination.
+fn count_duplicate_sequence_number_pairs(
+    sequence_numbers_with_dml: &[(String, DmlType)],
+) -> HashMap<String, u64> {
+    let mut duplicate_pairs_by_combination = HashMap::new();
+    for (index, (left_sequence_number, left_dml)) in sequence_numbers_with_dml.iter().enumerate() {
+        for (right_sequence_number, right_dml) in sequence_numbers_with_dml.iter().skip(index + 1) {
+            if left_sequence_number == right_sequence_number {
+                let combination = dml_combination_label(*left_dml, *right_dml);
+                *duplicate_pairs_by_combination
+                    .entry(combination)
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    duplicate_pairs_by_combination
 }
 
 #[cfg(test)]
@@ -1318,6 +1417,47 @@ mod tests {
         let result = split_table_rows(rows, 5);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].len(), 1);
+    }
+
+    #[test]
+    fn test_dml_combination_label_normalizes_order() {
+        let label = dml_combination_label(DmlType::Delete, DmlType::Update);
+        assert_eq!(label, "update-delete");
+    }
+
+    #[test]
+    fn test_count_duplicate_sequence_number_pairs_no_duplicates() {
+        let duplicates = count_duplicate_sequence_number_pairs(&[
+            ("1".to_string(), DmlType::Insert),
+            ("2".to_string(), DmlType::Update),
+            ("3".to_string(), DmlType::Delete),
+        ]);
+        assert!(duplicates.is_empty());
+    }
+
+    #[test]
+    fn test_count_duplicate_sequence_number_pairs_counts_pair_combinations() {
+        let duplicates = count_duplicate_sequence_number_pairs(&[
+            ("1".to_string(), DmlType::Insert),
+            ("1".to_string(), DmlType::Delete),
+            ("2".to_string(), DmlType::Update),
+            ("2".to_string(), DmlType::Delete),
+        ]);
+        assert_eq!(duplicates.get("insert-delete"), Some(&1));
+        assert_eq!(duplicates.get("update-delete"), Some(&1));
+        assert_eq!(duplicates.len(), 2);
+    }
+
+    #[test]
+    fn test_count_duplicate_sequence_number_pairs_counts_all_pairs_for_repeats() {
+        let duplicates = count_duplicate_sequence_number_pairs(&[
+            ("1".to_string(), DmlType::Insert),
+            ("1".to_string(), DmlType::Insert),
+            ("1".to_string(), DmlType::Delete),
+        ]);
+        assert_eq!(duplicates.get("insert-insert"), Some(&1));
+        assert_eq!(duplicates.get("insert-delete"), Some(&2));
+        assert_eq!(duplicates.len(), 2);
     }
 
     #[test]

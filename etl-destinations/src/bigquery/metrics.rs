@@ -12,6 +12,8 @@ pub const ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL: &str =
     "etl_bq_append_batches_batch_errors_total";
 pub const ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL: &str =
     "etl_bq_append_batches_batch_row_errors_total";
+pub const ETL_BQ_APPEND_BATCHES_DUPLICATE_SEQUENCE_NUMBERS_TOTAL: &str =
+    "etl_bq_append_batches_duplicate_sequence_numbers_total";
 
 /// Register BigQuery-specific metrics.
 ///
@@ -41,6 +43,12 @@ pub fn register_metrics() {
             ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
             Unit::Count,
             "Total append_batches row-level errors"
+        );
+
+        describe_counter!(
+            ETL_BQ_APPEND_BATCHES_DUPLICATE_SEQUENCE_NUMBERS_TOTAL,
+            Unit::Count,
+            "Total duplicate CDC sequence number row pairs detected in BigQuery batches before append, labeled by dml_combination"
         );
     });
 }
