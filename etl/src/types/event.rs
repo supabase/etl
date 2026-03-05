@@ -33,6 +33,8 @@ pub struct CommitEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction committed.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// Transaction commit flags from Postgres.
     pub flags: i8,
     /// Final LSN position after the transaction.
@@ -52,6 +54,8 @@ pub struct RelationEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// Complete table schema including columns and types.
     pub table_schema: TableSchema,
 }
@@ -67,6 +71,8 @@ pub struct InsertEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// ID of the table where the row was inserted.
     pub table_id: TableId,
     /// Complete row data for the inserted row.
@@ -85,6 +91,8 @@ pub struct UpdateEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// ID of the table where the row was updated.
     pub table_id: TableId,
     /// New row data after the update.
@@ -108,6 +116,8 @@ pub struct DeleteEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// ID of the table where the row was deleted.
     pub table_id: TableId,
     /// Data from the deleted row.
@@ -130,6 +140,8 @@ pub struct TruncateEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// Truncate operation options from Postgres.
     pub options: i8,
     /// List of table IDs that were truncated in this operation.
@@ -160,6 +172,32 @@ pub enum Event {
     Truncate(TruncateEvent),
     /// Unsupported event type that cannot be processed.
     Unsupported,
+}
+
+/// Pair used to build a CDC sequence number for destinations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventSequenceKey {
+    /// Commit LSN identifying transaction order across transactions.
+    pub commit_lsn: PgLsn,
+    /// Zero-based ordinal identifying order within the same transaction.
+    pub tx_ordinal: u64,
+}
+
+impl EventSequenceKey {
+    /// Creates a new sequence key from commit LSN and transaction-local ordinal.
+    pub fn new(commit_lsn: PgLsn, tx_ordinal: u64) -> Self {
+        Self {
+            commit_lsn,
+            tx_ordinal,
+        }
+    }
+}
+
+impl fmt::Display for EventSequenceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let commit_lsn = u64::from(self.commit_lsn);
+        write!(f, "{commit_lsn:016x}/{:016x}", self.tx_ordinal)
+    }
 }
 
 impl Event {

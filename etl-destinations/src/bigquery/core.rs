@@ -2,7 +2,7 @@ use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, PipelineId, TableId, TableName, TableRow, generate_sequence_number};
+use etl::types::{Cell, Event, EventSequenceKey, PipelineId, TableId, TableName, TableRow};
 use etl::{bail, etl_error};
 
 #[cfg(feature = "egress")]
@@ -600,7 +600,7 @@ where
                 match event {
                     Event::Insert(mut insert) => {
                         let sequence_number =
-                            generate_sequence_number(insert.start_lsn, insert.commit_lsn);
+                            EventSequenceKey::new(insert.commit_lsn, insert.tx_ordinal).to_string();
                         insert
                             .table_row
                             .values_mut()
@@ -616,7 +616,7 @@ where
                     }
                     Event::Update(mut update) => {
                         let sequence_number =
-                            generate_sequence_number(update.start_lsn, update.commit_lsn);
+                            EventSequenceKey::new(update.commit_lsn, update.tx_ordinal).to_string();
                         update
                             .table_row
                             .values_mut()
@@ -637,7 +637,7 @@ where
                         };
 
                         let sequence_number =
-                            generate_sequence_number(delete.start_lsn, delete.commit_lsn);
+                            EventSequenceKey::new(delete.commit_lsn, delete.tx_ordinal).to_string();
                         old_table_row
                             .values_mut()
                             .push(BigQueryOperationType::Delete.into_cell());

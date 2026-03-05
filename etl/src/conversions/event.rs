@@ -56,11 +56,13 @@ pub fn parse_event_from_begin_message(
 pub fn parse_event_from_commit_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     commit_body: &protocol::CommitBody,
 ) -> CommitEvent {
     CommitEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         flags: commit_body.flags(),
         end_lsn: commit_body.end_lsn().into(),
         timestamp: commit_body.timestamp(),
@@ -74,6 +76,7 @@ pub fn parse_event_from_commit_message(
 pub fn parse_event_from_relation_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<RelationEvent> {
     let table_name = TableName::new(
@@ -94,6 +97,7 @@ pub fn parse_event_from_relation_message(
     Ok(RelationEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         table_schema,
     })
 }
@@ -107,6 +111,7 @@ pub async fn parse_event_from_insert_message<S>(
     schema_store: &S,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     insert_body: &protocol::InsertBody,
     pipeline_id: PipelineId,
 ) -> EtlResult<InsertEvent>
@@ -138,6 +143,7 @@ where
     Ok(InsertEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         table_id: TableId::new(table_id),
         table_row,
     })
@@ -153,6 +159,7 @@ pub async fn parse_event_from_update_message<S>(
     schema_store: &S,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     update_body: &protocol::UpdateBody,
     pipeline_id: PipelineId,
 ) -> EtlResult<UpdateEvent>
@@ -210,6 +217,7 @@ where
     Ok(UpdateEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         table_id: TableId::new(table_id),
         table_row,
         old_table_row,
@@ -226,6 +234,7 @@ pub async fn parse_event_from_delete_message<S>(
     schema_store: &S,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     delete_body: &protocol::DeleteBody,
     pipeline_id: PipelineId,
 ) -> EtlResult<DeleteEvent>
@@ -272,6 +281,7 @@ where
     Ok(DeleteEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         table_id: TableId::new(table_id),
         old_table_row,
     })
@@ -284,12 +294,14 @@ where
 pub fn parse_event_from_truncate_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     truncate_body: &protocol::TruncateBody,
     overridden_rel_ids: Vec<u32>,
 ) -> TruncateEvent {
     TruncateEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         options: truncate_body.options(),
         rel_ids: overridden_rel_ids,
     }

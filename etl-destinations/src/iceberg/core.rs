@@ -13,8 +13,7 @@ use etl::error::{ErrorKind, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
-    Cell, ColumnSchema, Event, TableId, TableName, TableRow, TableSchema, Type,
-    generate_sequence_number,
+    Cell, ColumnSchema, Event, EventSequenceKey, TableId, TableName, TableRow, TableSchema, Type,
 };
 use etl::{bail, etl_error};
 use tokio::sync::Mutex;
@@ -246,7 +245,7 @@ where
         };
 
         for row in &mut table_rows {
-            let sequence_number = generate_sequence_number(0.into(), 0.into());
+            let sequence_number = EventSequenceKey::new(0.into(), 0).to_string();
             row.values_mut().push(IcebergOperationType::Insert.into());
             row.values_mut().push(Cell::String(sequence_number));
         }
@@ -287,7 +286,7 @@ where
                 match event {
                     Event::Insert(mut insert) => {
                         let sequence_number =
-                            generate_sequence_number(insert.start_lsn, insert.commit_lsn);
+                            EventSequenceKey::new(insert.commit_lsn, insert.tx_ordinal).to_string();
                         insert
                             .table_row
                             .values_mut()
@@ -303,7 +302,7 @@ where
                     }
                     Event::Update(mut update) => {
                         let sequence_number =
-                            generate_sequence_number(update.start_lsn, update.commit_lsn);
+                            EventSequenceKey::new(update.commit_lsn, update.tx_ordinal).to_string();
                         update
                             .table_row
                             .values_mut()
@@ -324,7 +323,7 @@ where
                         };
 
                         let sequence_number =
-                            generate_sequence_number(delete.start_lsn, delete.commit_lsn);
+                            EventSequenceKey::new(delete.commit_lsn, delete.tx_ordinal).to_string();
                         old_table_row
                             .values_mut()
                             .push(IcebergOperationType::Delete.into());
