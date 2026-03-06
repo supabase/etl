@@ -438,7 +438,7 @@ impl ApplyLoopState {
         self.next_tx_ordinal = match self.next_tx_ordinal.checked_add(1) {
             Some(next_tx_ordinal) => next_tx_ordinal,
             None => {
-                error!(
+                warn!(
                     current_tx_ordinal = self.next_tx_ordinal,
                     "transaction-local ordinal overflow detected; subsequent events may reuse the same ordinal"
                 );
