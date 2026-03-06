@@ -21,6 +21,7 @@ use etl_destinations::iceberg::{
 use etl_destinations::{
     bigquery::BigQueryDestination,
     iceberg::{IcebergClient, IcebergDestination},
+    realtime::{RealtimeConfig, RealtimeDestination},
 };
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
@@ -140,6 +141,23 @@ pub async fn start_replicator_with_config(
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
+        DestinationConfig::SupabaseRealtime {
+            url,
+            api_key,
+            private_channels,
+            max_retries,
+        } => {
+            let destination = RealtimeDestination::new(RealtimeConfig {
+                url: url.clone(),
+                api_key: api_key.expose_secret().to_string(),
+                private_channels: *private_channels,
+                max_retries: *max_retries,
+                heartbeat_interval: etl_destinations::realtime::DEFAULT_HEARTBEAT_INTERVAL,
+            });
+
+            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            start_pipeline(pipeline).await?;
+        }
     }
 
     info!("replicator service completed");
@@ -222,6 +240,17 @@ fn log_destination_config(config: &DestinationConfig) {
                 namespace,
                 s3_endpoint,
                 "using generic rest iceberg destination config"
+            )
+        }
+        DestinationConfig::SupabaseRealtime {
+            url,
+            api_key: _,
+            private_channels,
+            max_retries,
+        } => {
+            debug!(
+                url,
+                private_channels, max_retries, "using realtime destination config"
             )
         }
     }

@@ -9,3 +9,5 @@ pub mod bigquery;
 pub mod egress;
 #[cfg(feature = "iceberg")]
 pub mod iceberg;
+#[cfg(feature = "realtime")]
+pub mod realtime;

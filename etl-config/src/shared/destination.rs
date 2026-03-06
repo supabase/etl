@@ -46,6 +46,24 @@ pub enum DestinationConfig {
         #[serde(flatten)]
         config: IcebergConfig,
     },
+    #[serde(rename = "realtime")]
+    SupabaseRealtime {
+        /// WebSocket URL, e.g. wss://project.supabase.co/realtime/v1/websocket
+        url: String,
+        /// API key (anon key) for authenticating with Realtime.
+        api_key: SecretString,
+        /// Whether to use private channels (prefixes topic with `"private:"`).
+        /// Defaults to `false`.
+        #[serde(default)]
+        private_channels: bool,
+        /// Maximum number of send retries before giving up. Defaults to `5`.
+        #[serde(default = "default_max_retries")]
+        max_retries: u32,
+    },
+}
+
+fn default_max_retries() -> u32 {
+    5
 }
 
 impl DestinationConfig {
@@ -199,6 +217,12 @@ pub enum DestinationConfigWithoutSecrets {
         #[serde(flatten)]
         config: IcebergConfigWithoutSecrets,
     },
+    #[serde(rename = "realtime")]
+    SupabaseRealtime {
+        url: String,
+        private_channels: bool,
+        max_retries: u32,
+    },
 }
 
 impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
@@ -218,6 +242,16 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
             },
             DestinationConfig::Iceberg { config } => DestinationConfigWithoutSecrets::Iceberg {
                 config: config.into(),
+            },
+            DestinationConfig::SupabaseRealtime {
+                url,
+                api_key: _,
+                private_channels,
+                max_retries,
+            } => DestinationConfigWithoutSecrets::SupabaseRealtime {
+                url,
+                private_channels,
+                max_retries,
             },
         }
     }
