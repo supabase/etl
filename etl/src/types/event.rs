@@ -225,7 +225,7 @@ pub enum Event {
     Unsupported,
 }
 
-/// Pair used to build a CDC sequence number for destinations.
+/// Pair used to build a CDC sequence key for destinations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventSequenceKey {
     /// Commit LSN identifying transaction order across transactions.

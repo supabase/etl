@@ -599,7 +599,7 @@ where
                 let event = event_iter.next().unwrap();
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_number = insert.event_sequence_key().to_string();
+                        let sequence_key = insert.event_sequence_key().to_string();
                         insert
                             .table_row
                             .values_mut()
@@ -607,14 +607,14 @@ where
                         insert
                             .table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_key));
 
                         let table_rows: &mut Vec<BigQueryTableRow> =
                             table_id_to_table_rows.entry(insert.table_id).or_default();
                         table_rows.push(BigQueryTableRow::try_from(insert.table_row)?);
                     }
                     Event::Update(mut update) => {
-                        let sequence_number = update.event_sequence_key().to_string();
+                        let sequence_key = update.event_sequence_key().to_string();
                         update
                             .table_row
                             .values_mut()
@@ -622,14 +622,14 @@ where
                         update
                             .table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_key));
 
                         let table_rows: &mut Vec<BigQueryTableRow> =
                             table_id_to_table_rows.entry(update.table_id).or_default();
                         table_rows.push(BigQueryTableRow::try_from(update.table_row)?);
                     }
                     Event::Delete(delete) => {
-                        let sequence_number = delete.event_sequence_key().to_string();
+                        let sequence_key = delete.event_sequence_key().to_string();
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
                             info!("delete event has no row, skipping");
                             continue;
@@ -638,9 +638,7 @@ where
                         old_table_row
                             .values_mut()
                             .push(BigQueryOperationType::Delete.into_cell());
-                        old_table_row
-                            .values_mut()
-                            .push(Cell::String(sequence_number));
+                        old_table_row.values_mut().push(Cell::String(sequence_key));
 
                         let table_rows: &mut Vec<BigQueryTableRow> =
                             table_id_to_table_rows.entry(delete.table_id).or_default();

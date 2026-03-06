@@ -435,7 +435,18 @@ impl ApplyLoopState {
     /// Returns and advances the next transaction-local ordinal.
     fn next_tx_ordinal(&mut self) -> u64 {
         let tx_ordinal = self.next_tx_ordinal;
-        self.next_tx_ordinal = self.next_tx_ordinal.saturating_add(1);
+        self.next_tx_ordinal = match self.next_tx_ordinal.checked_add(1) {
+            Some(next_tx_ordinal) => next_tx_ordinal,
+            None => {
+                error!(
+                    current_tx_ordinal = self.next_tx_ordinal,
+                    "transaction-local ordinal overflow detected; subsequent events may reuse the same ordinal"
+                );
+
+                self.next_tx_ordinal
+            }
+        };
+
         tx_ordinal
     }
 }

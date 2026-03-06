@@ -229,7 +229,7 @@ where
     /// Writes table rows to the Iceberg destination as upsert operations.
     ///
     /// Prepares the target table for streaming, augments each row with CDC metadata
-    /// (operation type and sequence number), and inserts the rows into the Iceberg table.
+    /// (operation type and sequence key), and inserts the rows into the Iceberg table.
     /// All rows are treated as upsert operations in this context.
     async fn write_table_rows(
         &self,
@@ -244,10 +244,10 @@ where
                 .await?
         };
 
+        let sequence_key = EventSequenceKey::new(0.into(), 0).to_string();
         for row in &mut table_rows {
-            let sequence_number = EventSequenceKey::new(0.into(), 0).to_string();
             row.values_mut().push(IcebergOperationType::Insert.into());
-            row.values_mut().push(Cell::String(sequence_number));
+            row.values_mut().push(Cell::String(sequence_key.clone()));
         }
 
         if !table_rows.is_empty() {
@@ -269,7 +269,7 @@ where
     /// Handles a stream of CDC events by batching non-truncate events by table ID
     /// and processing them concurrently. Truncate events are processed separately
     /// and deduplicated for efficiency. Each event is augmented with CDC metadata
-    /// including operation type and sequence number based on LSN information.
+    /// including operation type and sequence key based on LSN information.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -285,7 +285,7 @@ where
                 let event = event_iter.next().unwrap();
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_number = insert.event_sequence_key().to_string();
+                        let sequence_key = insert.event_sequence_key().to_string();
                         insert
                             .table_row
                             .values_mut()
@@ -293,14 +293,14 @@ where
                         insert
                             .table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_key));
 
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(insert.table_id).or_default();
                         table_rows.push(insert.table_row);
                     }
                     Event::Update(mut update) => {
-                        let sequence_number = update.event_sequence_key().to_string();
+                        let sequence_key = update.event_sequence_key().to_string();
                         update
                             .table_row
                             .values_mut()
@@ -308,14 +308,14 @@ where
                         update
                             .table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_key));
 
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(update.table_id).or_default();
                         table_rows.push(update.table_row);
                     }
                     Event::Delete(delete) => {
-                        let sequence_number = delete.event_sequence_key().to_string();
+                        let sequence_key = delete.event_sequence_key().to_string();
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
                             info!("delete event has no row, skipping");
                             continue;
@@ -324,9 +324,7 @@ where
                         old_table_row
                             .values_mut()
                             .push(IcebergOperationType::Delete.into());
-                        old_table_row
-                            .values_mut()
-                            .push(Cell::String(sequence_number));
+                        old_table_row.values_mut().push(Cell::String(sequence_key));
 
                         let table_rows: &mut Vec<TableRow> =
                             table_id_to_table_rows.entry(delete.table_id).or_default();
@@ -495,7 +493,7 @@ where
     /// Creates a new table schema based on the source table schema with two
     /// additional columns for CDC operations:
     /// - `cdc_operation`: Tracks whether the row represents an upsert or delete
-    /// - `sequence_number`: Provides ordering information based on WAL LSN
+    /// - `sequence_key`: Provides ordering information based on WAL LSN
     ///
     /// These columns enable CDC consumers to understand the chronological order
     /// of changes and distinguish between different types of operations.
@@ -505,7 +503,7 @@ where
         // Add cdc specific columns.
         let cdc_operation_col =
             find_unique_column_name(&final_schema.column_schemas, CDC_OPERATION_COLUMN_NAME);
-        let sequence_number_col =
+        let sequence_key_col =
             find_unique_column_name(&final_schema.column_schemas, SEQUENCE_NUMBER_COLUMN_NAME);
 
         final_schema.add_column_schema(ColumnSchema {
@@ -516,7 +514,7 @@ where
             primary: false,
         });
         final_schema.add_column_schema(ColumnSchema {
-            name: sequence_number_col,
+            name: sequence_key_col,
             typ: Type::TEXT,
             modifier: -1,
             nullable: false,
@@ -571,7 +569,7 @@ where
     ///
     /// Augments each row with CDC metadata and inserts them into the
     /// corresponding Iceberg changelog table. All rows are treated
-    /// as upsert operations with generated sequence numbers.
+    /// as upsert operations with generated sequence keys.
     async fn write_table_rows(
         &self,
         table_id: TableId,
