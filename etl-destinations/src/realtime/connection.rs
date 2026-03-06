@@ -1,8 +1,8 @@
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
 use futures::SinkExt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
@@ -94,7 +94,10 @@ impl ConnectionManager {
     /// Callers are responsible for retrying with backoff.
     pub async fn try_send(&mut self, message: &str) -> EtlResult<()> {
         self.ensure_connected().await?;
-        let conn = self.connection.as_mut().expect("ensure_connected guarantees Some");
+        let conn = self
+            .connection
+            .as_mut()
+            .expect("ensure_connected guarantees Some");
         match conn.send(message).await {
             Ok(()) => Ok(()),
             Err(e) => {

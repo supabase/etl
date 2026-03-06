@@ -250,9 +250,7 @@ fn log_destination_config(config: &DestinationConfig) {
         } => {
             debug!(
                 url,
-                private_channels,
-                max_retries,
-                "using realtime destination config"
+                private_channels, max_retries, "using realtime destination config"
             )
         }
     }

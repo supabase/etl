@@ -302,37 +302,82 @@ mod tests {
     #[test]
     fn large_i64_is_serialized_as_string_to_preserve_js_precision() {
         let large: i64 = (1_i64 << 53) + 1;
-        assert_eq!(cell_to_json(&Cell::I64(large)), Value::String(large.to_string()));
+        assert_eq!(
+            cell_to_json(&Cell::I64(large)),
+            Value::String(large.to_string())
+        );
     }
 
     #[test]
     fn float_special_values_are_serialized_as_strings_because_json_has_no_nan_or_inf() {
-        assert_eq!(cell_to_json(&Cell::F64(f64::NAN)), Value::String("NaN".into()));
-        assert_eq!(cell_to_json(&Cell::F64(f64::INFINITY)), Value::String("Infinity".into()));
-        assert_eq!(cell_to_json(&Cell::F64(f64::NEG_INFINITY)), Value::String("-Infinity".into()));
-        assert_eq!(cell_to_json(&Cell::F32(f32::NAN)), Value::String("NaN".into()));
-        assert_eq!(cell_to_json(&Cell::F32(f32::INFINITY)), Value::String("Infinity".into()));
-        assert_eq!(cell_to_json(&Cell::F32(f32::NEG_INFINITY)), Value::String("-Infinity".into()));
+        assert_eq!(
+            cell_to_json(&Cell::F64(f64::NAN)),
+            Value::String("NaN".into())
+        );
+        assert_eq!(
+            cell_to_json(&Cell::F64(f64::INFINITY)),
+            Value::String("Infinity".into())
+        );
+        assert_eq!(
+            cell_to_json(&Cell::F64(f64::NEG_INFINITY)),
+            Value::String("-Infinity".into())
+        );
+        assert_eq!(
+            cell_to_json(&Cell::F32(f32::NAN)),
+            Value::String("NaN".into())
+        );
+        assert_eq!(
+            cell_to_json(&Cell::F32(f32::INFINITY)),
+            Value::String("Infinity".into())
+        );
+        assert_eq!(
+            cell_to_json(&Cell::F32(f32::NEG_INFINITY)),
+            Value::String("-Infinity".into())
+        );
     }
 
     #[test]
     fn numeric_special_values_are_serialized_as_strings() {
-        assert_eq!(cell_to_json(&Cell::Numeric(PgNumeric::NaN)), Value::String("NaN".into()));
-        assert_eq!(cell_to_json(&Cell::Numeric(PgNumeric::PositiveInfinity)), Value::String("Infinity".into()));
-        assert_eq!(cell_to_json(&Cell::Numeric(PgNumeric::NegativeInfinity)), Value::String("-Infinity".into()));
-        let n = PgNumeric::Value { weight: 0, sign: etl::types::Sign::Positive, scale: 2, digits: vec![1, 50] };
-        assert_eq!(cell_to_json(&Cell::Numeric(n.clone())), Value::String(n.to_string()));
+        assert_eq!(
+            cell_to_json(&Cell::Numeric(PgNumeric::NaN)),
+            Value::String("NaN".into())
+        );
+        assert_eq!(
+            cell_to_json(&Cell::Numeric(PgNumeric::PositiveInfinity)),
+            Value::String("Infinity".into())
+        );
+        assert_eq!(
+            cell_to_json(&Cell::Numeric(PgNumeric::NegativeInfinity)),
+            Value::String("-Infinity".into())
+        );
+        let n = PgNumeric::Value {
+            weight: 0,
+            sign: etl::types::Sign::Positive,
+            scale: 2,
+            digits: vec![1, 50],
+        };
+        assert_eq!(
+            cell_to_json(&Cell::Numeric(n.clone())),
+            Value::String(n.to_string())
+        );
     }
 
     #[test]
     fn bytes_are_base64_encoded() {
         let bytes = vec![0u8, 1, 2, 255];
-        assert_eq!(cell_to_json(&Cell::Bytes(bytes.clone())), Value::String(BASE64.encode(&bytes)));
+        assert_eq!(
+            cell_to_json(&Cell::Bytes(bytes.clone())),
+            Value::String(BASE64.encode(&bytes))
+        );
     }
 
     #[test]
     fn array_nulls_are_preserved_as_json_null() {
-        let arr = Cell::Array(ArrayCell::String(vec![Some("a".into()), None, Some("b".into())]));
+        let arr = Cell::Array(ArrayCell::String(vec![
+            Some("a".into()),
+            None,
+            Some("b".into()),
+        ]));
         assert_eq!(cell_to_json(&arr), serde_json::json!(["a", null, "b"]));
     }
 
@@ -348,7 +393,11 @@ mod tests {
 
     #[test]
     fn array_numeric_special_values_are_serialized_as_strings() {
-        let arr = Cell::Array(ArrayCell::Numeric(vec![Some(PgNumeric::NaN), None, Some(PgNumeric::PositiveInfinity)]));
+        let arr = Cell::Array(ArrayCell::Numeric(vec![
+            Some(PgNumeric::NaN),
+            None,
+            Some(PgNumeric::PositiveInfinity),
+        ]));
         let result = cell_to_json(&arr);
         assert_eq!(result[0], Value::String("NaN".into()));
         assert_eq!(result[1], Value::Null);
@@ -373,7 +422,10 @@ mod tests {
     #[test]
     fn private_channel_topic_includes_private_segment() {
         let name = TableName::new("public".into(), "users".into());
-        assert_eq!(build_topic(&name, true), "realtime:private:etl:public.users");
+        assert_eq!(
+            build_topic(&name, true),
+            "realtime:private:etl:public.users"
+        );
     }
 
     #[test]

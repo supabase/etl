@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlResult};
@@ -82,8 +82,7 @@ async fn send_with_retry(
 
 impl RealtimeDestination {
     pub fn new(config: RealtimeConfig) -> Self {
-        let (manager, connection_generation) =
-            ConnectionManager::new(config.url, config.api_key);
+        let (manager, connection_generation) = ConnectionManager::new(config.url, config.api_key);
         let connection = Arc::new(Mutex::new(manager));
 
         let connection_clone = Arc::clone(&connection);
@@ -97,9 +96,7 @@ impl RealtimeDestination {
             stream.next().await; // skip the immediate first tick
             loop {
                 stream.next().await;
-                if let Err(e) =
-                    send_with_retry(&connection_clone, &heartbeat, max_retries).await
-                {
+                if let Err(e) = send_with_retry(&connection_clone, &heartbeat, max_retries).await {
                     warn!(error = %e, "heartbeat failed after all retries");
                 }
             }
@@ -134,7 +131,12 @@ impl RealtimeDestination {
                 return Ok(());
             }
         } // write lock released before network I/O
-        send_with_retry(&self.connection, &build_join_message(topic), self.max_retries).await?;
+        send_with_retry(
+            &self.connection,
+            &build_join_message(topic),
+            self.max_retries,
+        )
+        .await?;
         debug!(topic, "joined realtime channel");
         Ok(())
     }
@@ -151,6 +153,172 @@ impl RealtimeDestination {
         let bytes = msg.len();
         send_with_retry(&self.connection, &msg, self.max_retries).await?;
         Ok(bytes)
+    }
+}
+
+impl Destination for RealtimeDestination {
+    fn name() -> &'static str {
+        "realtime"
+    }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.heartbeat_abort.abort();
+        self.connection.lock().await.close().await;
+        Ok(())
+    }
+
+    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+        let schema = self
+            .schema_cache
+            .read()
+            .await
+            .get(&table_id)
+            .cloned()
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::MissingTableSchema,
+                    "Schema not found for table",
+                    format!("table_id={table_id}")
+                )
+            })?;
+        let topic = build_topic(&schema.name, self.private_channels);
+        let payload = truncate_payload(&schema.name, PgLsn::from(0u64));
+        self.broadcast(&topic, DELETE_EVENT, payload).await?;
+        Ok(())
+    }
+
+    async fn write_table_rows(
+        &self,
+        table_id: TableId,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        if table_rows.is_empty() {
+            return Ok(());
+        }
+        let schema = self
+            .schema_cache
+            .read()
+            .await
+            .get(&table_id)
+            .cloned()
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::MissingTableSchema,
+                    "Schema not found for table",
+                    format!("table_id={table_id}")
+                )
+            })?;
+        let topic = build_topic(&schema.name, self.private_channels);
+        for row in table_rows {
+            let record = table_row_to_json(&row, &schema);
+            let payload = insert_payload(&schema.name, record, PgLsn::from(0u64));
+            self.broadcast(&topic, INSERT_EVENT, payload).await?;
+        }
+        Ok(())
+    }
+
+    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+        #[cfg_attr(not(feature = "egress"), allow(unused_variables))]
+        let mut bytes_sent: u64 = 0;
+
+        for event in events {
+            match event {
+                Event::Relation(rel) => {
+                    self.schema_cache
+                        .write()
+                        .await
+                        .insert(rel.table_schema.id, Arc::new(rel.table_schema));
+                }
+                Event::Insert(ins) => {
+                    let schema = self
+                        .schema_cache
+                        .read()
+                        .await
+                        .get(&ins.table_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            etl_error!(
+                                ErrorKind::MissingTableSchema,
+                                "Schema not found for table",
+                                format!("table_id={}", ins.table_id)
+                            )
+                        })?;
+                    let topic = build_topic(&schema.name, self.private_channels);
+                    let record = table_row_to_json(&ins.table_row, &schema);
+                    let payload = insert_payload(&schema.name, record, ins.commit_lsn);
+                    bytes_sent += self.broadcast(&topic, INSERT_EVENT, payload).await? as u64;
+                }
+                Event::Update(upd) => {
+                    let schema = self
+                        .schema_cache
+                        .read()
+                        .await
+                        .get(&upd.table_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            etl_error!(
+                                ErrorKind::MissingTableSchema,
+                                "Schema not found for table",
+                                format!("table_id={}", upd.table_id)
+                            )
+                        })?;
+                    let topic = build_topic(&schema.name, self.private_channels);
+                    let record = table_row_to_json(&upd.table_row, &schema);
+                    let old_record = upd
+                        .old_table_row
+                        .as_ref()
+                        .map(|(_, row)| table_row_to_json(row, &schema));
+                    let payload = update_payload(&schema.name, record, old_record, upd.commit_lsn);
+                    bytes_sent += self.broadcast(&topic, UPDATE_EVENT, payload).await? as u64;
+                }
+                Event::Delete(del) => {
+                    let schema = self
+                        .schema_cache
+                        .read()
+                        .await
+                        .get(&del.table_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            etl_error!(
+                                ErrorKind::MissingTableSchema,
+                                "Schema not found for table",
+                                format!("table_id={}", del.table_id)
+                            )
+                        })?;
+                    let topic = build_topic(&schema.name, self.private_channels);
+                    let old_record = del
+                        .old_table_row
+                        .as_ref()
+                        .map(|(_, row)| table_row_to_json(row, &schema));
+                    let payload = delete_payload(&schema.name, old_record, del.commit_lsn);
+                    bytes_sent += self.broadcast(&topic, DELETE_EVENT, payload).await? as u64;
+                }
+                Event::Truncate(trunc) => {
+                    for rel_id in &trunc.rel_ids {
+                        let table_id = TableId::new(*rel_id);
+                        match self.schema_cache.read().await.get(&table_id).cloned() {
+                            Some(schema) => {
+                                let topic = build_topic(&schema.name, self.private_channels);
+                                let payload = truncate_payload(&schema.name, trunc.commit_lsn);
+                                bytes_sent +=
+                                    self.broadcast(&topic, DELETE_EVENT, payload).await? as u64;
+                            }
+                            None => {
+                                warn!(table_id = %table_id, "skipping truncate for unknown table");
+                            }
+                        }
+                    }
+                }
+                Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
+            }
+        }
+
+        #[cfg(feature = "egress")]
+        if bytes_sent > 0 {
+            log_processed_bytes(Self::name(), PROCESSING_TYPE_STREAMING, bytes_sent, 0);
+        }
+
+        Ok(())
     }
 }
 
@@ -246,7 +414,11 @@ mod tests {
         dest.shutdown().await.unwrap();
         let msgs = server.await.unwrap();
 
-        let broadcast = msgs.iter().map(|m| parsed(m)).find(|m| m[3] == "broadcast").unwrap();
+        let broadcast = msgs
+            .iter()
+            .map(|m| parsed(m))
+            .find(|m| m[3] == "broadcast")
+            .unwrap();
         assert_eq!(broadcast[4]["event"], "insert");
         assert_eq!(broadcast[4]["payload"]["op"], "INSERT");
         assert_eq!(broadcast[4]["payload"]["schema"], "public");
@@ -405,20 +577,30 @@ mod tests {
         let dest = RealtimeDestination::new(test_config(format!("ws://{addr}/")));
 
         let schema = test_schema();
-        let insert = |id| Event::Insert(InsertEvent {
-            start_lsn: lsn(),
-            commit_lsn: lsn(),
-            table_id: TableId::new(1),
-            table_row: TableRow::new(vec![Cell::I32(id)]),
-        });
+        let insert = |id| {
+            Event::Insert(InsertEvent {
+                start_lsn: lsn(),
+                commit_lsn: lsn(),
+                table_id: TableId::new(1),
+                table_row: TableRow::new(vec![Cell::I32(id)]),
+            })
+        };
 
-        dest.write_events(vec![relation_event(schema.clone()), insert(1)]).await.unwrap();
-        dest.write_events(vec![relation_event(schema), insert(2)]).await.unwrap();
+        dest.write_events(vec![relation_event(schema.clone()), insert(1)])
+            .await
+            .unwrap();
+        dest.write_events(vec![relation_event(schema), insert(2)])
+            .await
+            .unwrap();
 
         dest.shutdown().await.unwrap();
         let msgs = server.await.unwrap();
 
-        let broadcasts: Vec<_> = msgs.iter().map(|m| parsed(m)).filter(|m| m[3] == "broadcast").collect();
+        let broadcasts: Vec<_> = msgs
+            .iter()
+            .map(|m| parsed(m))
+            .filter(|m| m[3] == "broadcast")
+            .collect();
         assert_eq!(broadcasts.len(), 2);
         assert_eq!(broadcasts[0][4]["payload"]["record"]["id"], 1);
         assert_eq!(broadcasts[1][4]["payload"]["record"]["id"], 2);
@@ -451,178 +633,5 @@ mod tests {
 
         let join = parsed(&msgs[0]);
         assert_eq!(join[2], "realtime:private:etl:public.users");
-    }
-}
-
-impl Destination for RealtimeDestination {
-    fn name() -> &'static str {
-        "realtime"
-    }
-
-    async fn shutdown(&self) -> EtlResult<()> {
-        self.heartbeat_abort.abort();
-        self.connection.lock().await.close().await;
-        Ok(())
-    }
-
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        let schema = self
-            .schema_cache
-            .read()
-            .await
-            .get(&table_id)
-            .cloned()
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Schema not found for table",
-                    format!("table_id={table_id}")
-                )
-            })?;
-        let topic = build_topic(&schema.name, self.private_channels);
-        let payload = truncate_payload(&schema.name, PgLsn::from(0u64));
-        self.broadcast(&topic, DELETE_EVENT, payload).await?;
-        Ok(())
-    }
-
-    async fn write_table_rows(
-        &self,
-        table_id: TableId,
-        table_rows: Vec<TableRow>,
-    ) -> EtlResult<()> {
-        if table_rows.is_empty() {
-            return Ok(());
-        }
-        let schema = self
-            .schema_cache
-            .read()
-            .await
-            .get(&table_id)
-            .cloned()
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Schema not found for table",
-                    format!("table_id={table_id}")
-                )
-            })?;
-        let topic = build_topic(&schema.name, self.private_channels);
-        for row in table_rows {
-            let record = table_row_to_json(&row, &schema);
-            let payload = insert_payload(&schema.name, record, PgLsn::from(0u64));
-            self.broadcast(&topic, INSERT_EVENT, payload).await?;
-        }
-        Ok(())
-    }
-
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        #[cfg_attr(not(feature = "egress"), allow(unused_variables))]
-        let mut bytes_sent: u64 = 0;
-
-        for event in events {
-            match event {
-                Event::Relation(rel) => {
-                    self.schema_cache
-                        .write()
-                        .await
-                        .insert(rel.table_schema.id, Arc::new(rel.table_schema));
-                }
-                Event::Insert(ins) => {
-                    let schema = self
-                        .schema_cache
-                        .read()
-                        .await
-                        .get(&ins.table_id)
-                        .cloned()
-                        .ok_or_else(|| {
-                            etl_error!(
-                                ErrorKind::MissingTableSchema,
-                                "Schema not found for table",
-                                format!("table_id={}", ins.table_id)
-                            )
-                        })?;
-                    let topic =
-                        build_topic(&schema.name, self.private_channels);
-                    let record = table_row_to_json(&ins.table_row, &schema);
-                    let payload = insert_payload(&schema.name, record, ins.commit_lsn);
-                    bytes_sent +=
-                        self.broadcast(&topic, INSERT_EVENT, payload).await? as u64;
-                }
-                Event::Update(upd) => {
-                    let schema = self
-                        .schema_cache
-                        .read()
-                        .await
-                        .get(&upd.table_id)
-                        .cloned()
-                        .ok_or_else(|| {
-                            etl_error!(
-                                ErrorKind::MissingTableSchema,
-                                "Schema not found for table",
-                                format!("table_id={}", upd.table_id)
-                            )
-                        })?;
-                    let topic =
-                        build_topic(&schema.name, self.private_channels);
-                    let record = table_row_to_json(&upd.table_row, &schema);
-                    let old_record = upd
-                        .old_table_row
-                        .as_ref()
-                        .map(|(_, row)| table_row_to_json(row, &schema));
-                    let payload = update_payload(&schema.name, record, old_record, upd.commit_lsn);
-                    bytes_sent +=
-                        self.broadcast(&topic, UPDATE_EVENT, payload).await? as u64;
-                }
-                Event::Delete(del) => {
-                    let schema = self
-                        .schema_cache
-                        .read()
-                        .await
-                        .get(&del.table_id)
-                        .cloned()
-                        .ok_or_else(|| {
-                            etl_error!(
-                                ErrorKind::MissingTableSchema,
-                                "Schema not found for table",
-                                format!("table_id={}", del.table_id)
-                            )
-                        })?;
-                    let topic =
-                        build_topic(&schema.name, self.private_channels);
-                    let old_record = del
-                        .old_table_row
-                        .as_ref()
-                        .map(|(_, row)| table_row_to_json(row, &schema));
-                    let payload = delete_payload(&schema.name, old_record, del.commit_lsn);
-                    bytes_sent +=
-                        self.broadcast(&topic, DELETE_EVENT, payload).await? as u64;
-                }
-                Event::Truncate(trunc) => {
-                    for rel_id in &trunc.rel_ids {
-                        let table_id = TableId::new(*rel_id);
-                        match self.schema_cache.read().await.get(&table_id).cloned() {
-                            Some(schema) => {
-                                let topic = build_topic(&schema.name, self.private_channels);
-                                let payload = truncate_payload(&schema.name, trunc.commit_lsn);
-                                bytes_sent += self
-                                    .broadcast(&topic, DELETE_EVENT, payload)
-                                    .await? as u64;
-                            }
-                            None => {
-                                warn!(table_id = %table_id, "skipping truncate for unknown table");
-                            }
-                        }
-                    }
-                }
-                Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
-            }
-        }
-
-        #[cfg(feature = "egress")]
-        if bytes_sent > 0 {
-            log_processed_bytes(Self::name(), PROCESSING_TYPE_STREAMING, bytes_sent, 0);
-        }
-
-        Ok(())
     }
 }
