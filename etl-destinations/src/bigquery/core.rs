@@ -20,8 +20,9 @@ use tracing::{debug, info, warn};
 use crate::bigquery::encoding::BigQueryTableRow;
 
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
-use crate::bigquery::metrics::register_metrics;
+use crate::bigquery::metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
+use metrics::histogram;
 
 /// Delimiter separating schema from table name in BigQuery table identifiers.
 const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
@@ -548,24 +549,32 @@ where
         let sequenced_bigquery_table_id_string = sequenced_bigquery_table_id.to_string();
 
         // Create table batches from the split rows.
-        let mut table_batches = Vec::with_capacity(table_rows_batches.len());
-        for table_rows in table_rows_batches {
+        let mut append_requests = Vec::with_capacity(table_rows_batches.len());
+        for (batch_index, table_rows) in table_rows_batches.into_iter().enumerate() {
             if !table_rows.is_empty() {
-                let table_batch = self.client.create_table_batch(
+                histogram!(
+                    ETL_BQ_APPEND_BATCHES_BATCH_SIZE,
+                    "pipeline_id" => self.pipeline_id.to_string()
+                )
+                .record(table_rows.len() as f64);
+
+                let append_request = self.client.create_batch_append_request(
+                    self.pipeline_id,
+                    batch_index,
                     &self.dataset_id,
                     &sequenced_bigquery_table_id_string,
                     table_descriptor.clone(),
                     table_rows,
                 )?;
-                table_batches.push(table_batch);
+                append_requests.push(append_request);
             }
         }
 
-        if !table_batches.is_empty() {
+        if !append_requests.is_empty() {
             #[allow(unused_variables)]
             let (bytes_sent, bytes_received) = self
                 .client
-                .append_table_batches(self.pipeline_id, table_batches)
+                .append_table_batches(self.pipeline_id, append_requests)
                 .await?;
 
             #[cfg(feature = "egress")]
@@ -658,28 +667,38 @@ where
 
             // Process accumulated events for each table.
             if !table_id_to_table_rows.is_empty() {
-                let mut table_batches = Vec::with_capacity(table_id_to_table_rows.len());
+                let mut append_requests = Vec::with_capacity(table_id_to_table_rows.len());
 
-                for (table_id, table_rows) in table_id_to_table_rows {
+                for (batch_index, (table_id, table_rows)) in
+                    table_id_to_table_rows.into_iter().enumerate()
+                {
                     let (sequenced_bigquery_table_id, table_descriptor) =
                         self.prepare_table_for_streaming(&table_id, true).await?;
                     let sequenced_bigquery_table_id_string =
                         sequenced_bigquery_table_id.to_string();
 
-                    let table_batch = self.client.create_table_batch(
+                    histogram!(
+                        ETL_BQ_APPEND_BATCHES_BATCH_SIZE,
+                        "pipeline_id" => self.pipeline_id.to_string()
+                    )
+                    .record(table_rows.len() as f64);
+
+                    let append_request = self.client.create_batch_append_request(
+                        self.pipeline_id,
+                        batch_index,
                         &self.dataset_id,
                         &sequenced_bigquery_table_id_string,
                         table_descriptor.clone(),
                         table_rows,
                     )?;
-                    table_batches.push(table_batch);
+                    append_requests.push(append_request);
                 }
 
-                if !table_batches.is_empty() {
+                if !append_requests.is_empty() {
                     #[allow(unused_variables)]
                     let (bytes_sent, bytes_received) = self
                         .client
-                        .append_table_batches(self.pipeline_id, table_batches)
+                        .append_table_batches(self.pipeline_id, append_requests)
                         .await?;
 
                     #[cfg(feature = "egress")]
