@@ -23,6 +23,7 @@ use crate::bigquery::encoding::BigQueryTableRow;
 use crate::bigquery::metrics::{
     ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_RETRIES_TOTAL,
     ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_SIZE,
+    ETL_BQ_APPEND_BATCHES_EMPTY_RESPONSES_TOTAL,
 };
 use metrics::{counter, histogram};
 
@@ -855,6 +856,14 @@ impl BigQueryClient {
             non_retryable_errors.clear();
 
             for batch_append_result in batch_append_results {
+                if batch_append_result.responses.is_empty() {
+                    counter!(
+                        ETL_BQ_APPEND_BATCHES_EMPTY_RESPONSES_TOTAL,
+                        "pipeline_id" => pipeline_id.to_string()
+                    )
+                    .increment(1);
+                }
+
                 let batch_index = batch_append_result.batch_index;
 
                 match process_single_batch_append_result(batch_append_result) {

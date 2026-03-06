@@ -12,6 +12,8 @@ pub const ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL: &str =
     "etl_bq_append_batches_batch_errors_total";
 pub const ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL: &str =
     "etl_bq_append_batches_batch_row_errors_total";
+pub const ETL_BQ_APPEND_BATCHES_EMPTY_RESPONSES_TOTAL: &str =
+    "etl_bq_append_batches_empty_responses_total";
 
 /// Register BigQuery-specific metrics.
 ///
@@ -41,6 +43,12 @@ pub fn register_metrics() {
             ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
             Unit::Count,
             "Total append_batches row-level errors"
+        );
+
+        describe_counter!(
+            ETL_BQ_APPEND_BATCHES_EMPTY_RESPONSES_TOTAL,
+            Unit::Count,
+            "Total append_batches batch results with empty responses"
         );
     });
 }
