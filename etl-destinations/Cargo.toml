@@ -35,6 +35,7 @@ realtime = [
     "dep:tokio-tungstenite",
     "dep:tokio",
     "tokio/time",
+    "dep:tokio-stream",
     "dep:futures",
     "dep:tracing",
     "dep:serde_json",
@@ -50,9 +51,9 @@ etl = { workspace = true }
 
 arrow = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
-base64 = { workspace = true, optional = true, features = ["std"] }
+base64 = { workspace = true, optional = true }
 chrono = { workspace = true }
-futures = { version = "0.3", optional = true }
+futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = [
     "rust-tls",
     "aws-lc-rs",
@@ -67,7 +68,8 @@ reqwest = { workspace = true, optional = true, features = ["json"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["sync"] }
-tokio-tungstenite = { version = "0.26", optional = true, features = ["rustls-tls-native-roots"] }
+tokio-stream = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true, default-features = true }
 uuid = { workspace = true, optional = true, features = ["v4"] }

@@ -1,8 +1,5 @@
 mod connection;
 mod core;
-pub mod encoding;
+mod encoding;
 
-pub use core::{RealtimeConfig, RealtimeDestination};
-
-pub const DEFAULT_CHANNEL_PREFIX: &str = "etl";
-pub const DEFAULT_MAX_RETRIES: u32 = 5;
+pub use core::{DEFAULT_HEARTBEAT_INTERVAL, RealtimeConfig, RealtimeDestination};

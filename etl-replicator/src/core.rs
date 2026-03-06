@@ -21,7 +21,7 @@ use etl_destinations::iceberg::{
 use etl_destinations::{
     bigquery::BigQueryDestination,
     iceberg::{IcebergClient, IcebergDestination},
-    realtime::{DEFAULT_MAX_RETRIES, RealtimeConfig, RealtimeDestination},
+    realtime::{RealtimeConfig, RealtimeDestination},
 };
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
@@ -141,24 +141,18 @@ pub async fn start_replicator_with_config(
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
-        DestinationConfig::Realtime {
+        DestinationConfig::SupabaseRealtime {
             url,
             api_key,
-            channel_prefix,
             private_channels,
-            insert_event,
-            update_event,
-            delete_event,
+            max_retries,
         } => {
             let destination = RealtimeDestination::new(RealtimeConfig {
                 url: url.clone(),
                 api_key: api_key.expose_secret().to_string(),
-                channel_prefix: channel_prefix.clone(),
                 private_channels: *private_channels,
-                insert_event: insert_event.clone(),
-                update_event: update_event.clone(),
-                delete_event: delete_event.clone(),
-                max_retries: DEFAULT_MAX_RETRIES,
+                max_retries: *max_retries,
+                heartbeat_interval: etl_destinations::realtime::DEFAULT_HEARTBEAT_INTERVAL,
             });
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
@@ -248,22 +242,16 @@ fn log_destination_config(config: &DestinationConfig) {
                 "using generic rest iceberg destination config"
             )
         }
-        DestinationConfig::Realtime {
+        DestinationConfig::SupabaseRealtime {
             url,
             api_key: _,
-            channel_prefix,
             private_channels,
-            insert_event,
-            update_event,
-            delete_event,
+            max_retries,
         } => {
             debug!(
                 url,
-                channel_prefix,
                 private_channels,
-                insert_event,
-                update_event,
-                delete_event,
+                max_retries,
                 "using realtime destination config"
             )
         }

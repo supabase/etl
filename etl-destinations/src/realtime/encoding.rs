@@ -3,7 +3,7 @@ use etl::types::{ArrayCell, Cell, PgLsn, TableName, TableRow, TableSchema};
 use serde_json::{Map, Value};
 
 /// Serializes a [`TableRow`] into a JSON object using the column names from the schema.
-pub fn table_row_to_json(row: &TableRow, schema: &TableSchema) -> Value {
+pub(super) fn table_row_to_json(row: &TableRow, schema: &TableSchema) -> Value {
     let mut map = Map::with_capacity(schema.column_schemas.len());
     for (cell, col) in row.values().iter().zip(schema.column_schemas.iter()) {
         map.insert(col.name.clone(), cell_to_json(cell));
@@ -19,7 +19,7 @@ pub fn table_row_to_json(row: &TableRow, schema: &TableSchema) -> Value {
 /// - `Bytes` → base64-encoded string
 /// - `Numeric` NaN/Inf variants → string
 /// - `Array` elements containing `None` → JSON `null`
-pub fn cell_to_json(cell: &Cell) -> Value {
+pub(super) fn cell_to_json(cell: &Cell) -> Value {
     match cell {
         Cell::Null => Value::Null,
         Cell::Bool(v) => Value::Bool(*v),
@@ -185,16 +185,15 @@ fn opt_to_json<T, F: Fn(&T) -> Value>(opt: &Option<T>, f: F) -> Value {
     opt.as_ref().map(f).unwrap_or(Value::Null)
 }
 
+const CHANNEL_PREFIX: &str = "etl";
+
 /// Builds the topic string for a Realtime channel.
 ///
-/// Format: `realtime:<prefix>:<schema>.<table>` for public channels
-/// or `realtime:private:<prefix>:<schema>.<table>` for private channels.
+/// Format: `realtime:etl:<schema>.<table>` for public channels
+/// or `realtime:private:etl:<schema>.<table>` for private channels.
 /// The `realtime:` prefix is required by the Supabase Realtime server.
-pub fn build_topic(table_name: &TableName, channel_prefix: &str, private_channels: bool) -> String {
-    let channel = format!(
-        "{}:{}.{}",
-        channel_prefix, table_name.schema, table_name.name
-    );
+pub(super) fn build_topic(table_name: &TableName, private_channels: bool) -> String {
+    let channel = format!("{CHANNEL_PREFIX}:{}.{}", table_name.schema, table_name.name);
     if private_channels {
         format!("realtime:private:{channel}")
     } else {
@@ -203,7 +202,7 @@ pub fn build_topic(table_name: &TableName, channel_prefix: &str, private_channel
 }
 
 /// Builds a Phoenix v2 `phx_join` message for the given topic.
-pub fn build_join_message(topic: &str) -> String {
+pub(super) fn build_join_message(topic: &str) -> String {
     serde_json::json!([
         null,
         "1",
@@ -223,18 +222,18 @@ pub fn build_join_message(topic: &str) -> String {
 /// Builds a Phoenix v2 heartbeat message.
 ///
 /// Must be sent every ~25 seconds to prevent the server from closing the connection.
-pub fn build_heartbeat_message() -> String {
+pub(super) fn build_heartbeat_message() -> String {
     serde_json::json!([null, "hb", "phoenix", "heartbeat", {}]).to_string()
 }
 
 /// Builds a Phoenix v2 broadcast message for a CDC event.
-pub fn build_broadcast_message(topic: &str, event: &str, payload: Value) -> String {
+pub(super) fn build_broadcast_message(topic: &str, event: &str, payload: Value) -> String {
     serde_json::json!([null, null, topic, "broadcast", {"event": event, "payload": payload}])
         .to_string()
 }
 
 /// Builds the payload for an INSERT event.
-pub fn insert_payload(table_name: &TableName, record: Value, commit_lsn: PgLsn) -> Value {
+pub(super) fn insert_payload(table_name: &TableName, record: Value, commit_lsn: PgLsn) -> Value {
     serde_json::json!({
         "op": "INSERT",
         "schema": table_name.schema,
@@ -246,7 +245,7 @@ pub fn insert_payload(table_name: &TableName, record: Value, commit_lsn: PgLsn) 
 }
 
 /// Builds the payload for an UPDATE event.
-pub fn update_payload(
+pub(super) fn update_payload(
     table_name: &TableName,
     record: Value,
     old_record: Option<Value>,
@@ -263,7 +262,7 @@ pub fn update_payload(
 }
 
 /// Builds the payload for a DELETE event.
-pub fn delete_payload(
+pub(super) fn delete_payload(
     table_name: &TableName,
     old_record: Option<Value>,
     commit_lsn: PgLsn,
@@ -279,7 +278,7 @@ pub fn delete_payload(
 }
 
 /// Builds the payload for a TRUNCATE event.
-pub fn truncate_payload(table_name: &TableName, commit_lsn: PgLsn) -> Value {
+pub(super) fn truncate_payload(table_name: &TableName, commit_lsn: PgLsn) -> Value {
     serde_json::json!({
         "op": "TRUNCATE",
         "schema": table_name.schema,
@@ -290,146 +289,91 @@ pub fn truncate_payload(table_name: &TableName, commit_lsn: PgLsn) -> Value {
     })
 }
 
-/// Builds the payload for a TABLE_SYNC (initial copy) event.
-pub fn table_sync_payload(table_name: &TableName, rows: Vec<Value>) -> Value {
-    serde_json::json!({
-        "op": "TABLE_SYNC",
-        "schema": table_name.schema,
-        "table": table_name.name,
-        "rows": rows
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use etl::types::PgNumeric;
     use etl::types::{ArrayCell, Cell};
 
-    #[test]
-    fn cell_null_serializes_to_json_null() {
-        assert_eq!(cell_to_json(&Cell::Null), Value::Null);
-    }
+    // These tests cover non-obvious serialization contracts that affect Realtime
+    // consumers — cases where a naive implementation would silently lose data or
+    // produce invalid JSON.
 
     #[test]
-    fn cell_bool_round_trips() {
-        assert_eq!(cell_to_json(&Cell::Bool(true)), Value::Bool(true));
-        assert_eq!(cell_to_json(&Cell::Bool(false)), Value::Bool(false));
-    }
-
-    #[test]
-    fn cell_integers_round_trip() {
-        assert_eq!(cell_to_json(&Cell::I16(42)), serde_json::json!(42));
-        assert_eq!(
-            cell_to_json(&Cell::I32(1_000_000)),
-            serde_json::json!(1_000_000)
-        );
-        assert_eq!(
-            cell_to_json(&Cell::U32(u32::MAX)),
-            serde_json::json!(u32::MAX)
-        );
-    }
-
-    #[test]
-    fn cell_i64_large_value_becomes_string() {
+    fn large_i64_is_serialized_as_string_to_preserve_js_precision() {
         let large: i64 = (1_i64 << 53) + 1;
-        let result = cell_to_json(&Cell::I64(large));
-        assert_eq!(result, Value::String(large.to_string()));
+        assert_eq!(cell_to_json(&Cell::I64(large)), Value::String(large.to_string()));
     }
 
     #[test]
-    fn cell_i64_safe_value_stays_number() {
-        assert_eq!(cell_to_json(&Cell::I64(42)), serde_json::json!(42));
-        assert_eq!(cell_to_json(&Cell::I64(-42)), serde_json::json!(-42));
+    fn float_special_values_are_serialized_as_strings_because_json_has_no_nan_or_inf() {
+        assert_eq!(cell_to_json(&Cell::F64(f64::NAN)), Value::String("NaN".into()));
+        assert_eq!(cell_to_json(&Cell::F64(f64::INFINITY)), Value::String("Infinity".into()));
+        assert_eq!(cell_to_json(&Cell::F64(f64::NEG_INFINITY)), Value::String("-Infinity".into()));
+        assert_eq!(cell_to_json(&Cell::F32(f32::NAN)), Value::String("NaN".into()));
+        assert_eq!(cell_to_json(&Cell::F32(f32::INFINITY)), Value::String("Infinity".into()));
+        assert_eq!(cell_to_json(&Cell::F32(f32::NEG_INFINITY)), Value::String("-Infinity".into()));
     }
 
     #[test]
-    fn cell_float_special_values_become_strings() {
-        assert_eq!(
-            cell_to_json(&Cell::F64(f64::NAN)),
-            Value::String("NaN".into())
-        );
-        assert_eq!(
-            cell_to_json(&Cell::F64(f64::INFINITY)),
-            Value::String("Infinity".into())
-        );
-        assert_eq!(
-            cell_to_json(&Cell::F64(f64::NEG_INFINITY)),
-            Value::String("-Infinity".into())
-        );
-        assert_eq!(
-            cell_to_json(&Cell::F32(f32::NAN)),
-            Value::String("NaN".into())
-        );
-        assert_eq!(
-            cell_to_json(&Cell::F32(f32::INFINITY)),
-            Value::String("Infinity".into())
-        );
-        assert_eq!(
-            cell_to_json(&Cell::F32(f32::NEG_INFINITY)),
-            Value::String("-Infinity".into())
-        );
+    fn numeric_special_values_are_serialized_as_strings() {
+        assert_eq!(cell_to_json(&Cell::Numeric(PgNumeric::NaN)), Value::String("NaN".into()));
+        assert_eq!(cell_to_json(&Cell::Numeric(PgNumeric::PositiveInfinity)), Value::String("Infinity".into()));
+        assert_eq!(cell_to_json(&Cell::Numeric(PgNumeric::NegativeInfinity)), Value::String("-Infinity".into()));
+        let n = PgNumeric::Value { weight: 0, sign: etl::types::Sign::Positive, scale: 2, digits: vec![1, 50] };
+        assert_eq!(cell_to_json(&Cell::Numeric(n.clone())), Value::String(n.to_string()));
     }
 
     #[test]
-    fn cell_numeric_special_values_become_strings() {
-        assert_eq!(
-            cell_to_json(&Cell::Numeric(PgNumeric::NaN)),
-            Value::String("NaN".into())
-        );
-        assert_eq!(
-            cell_to_json(&Cell::Numeric(PgNumeric::PositiveInfinity)),
-            Value::String("Infinity".into())
-        );
-        assert_eq!(
-            cell_to_json(&Cell::Numeric(PgNumeric::NegativeInfinity)),
-            Value::String("-Infinity".into())
-        );
-    }
-
-    #[test]
-    fn cell_bytes_encode_as_base64() {
+    fn bytes_are_base64_encoded() {
         let bytes = vec![0u8, 1, 2, 255];
-        let result = cell_to_json(&Cell::Bytes(bytes.clone()));
-        assert_eq!(result, Value::String(BASE64.encode(&bytes)));
+        assert_eq!(cell_to_json(&Cell::Bytes(bytes.clone())), Value::String(BASE64.encode(&bytes)));
     }
 
     #[test]
-    fn cell_array_with_nulls_serializes_nulls() {
-        let arr = Cell::Array(ArrayCell::String(vec![
-            Some("a".into()),
-            None,
-            Some("b".into()),
-        ]));
+    fn array_nulls_are_preserved_as_json_null() {
+        let arr = Cell::Array(ArrayCell::String(vec![Some("a".into()), None, Some("b".into())]));
+        assert_eq!(cell_to_json(&arr), serde_json::json!(["a", null, "b"]));
+    }
+
+    #[test]
+    fn array_large_i64_elements_are_serialized_as_strings() {
+        let large: i64 = (1_i64 << 53) + 1;
+        let arr = Cell::Array(ArrayCell::I64(vec![Some(large), None, Some(1i64)]));
         let result = cell_to_json(&arr);
-        assert_eq!(result, serde_json::json!(["a", null, "b"]));
+        assert_eq!(result[0], Value::String(large.to_string()));
+        assert_eq!(result[1], Value::Null);
+        assert_eq!(result[2], serde_json::json!(1));
     }
 
     #[test]
-    fn build_topic_public_channel() {
+    fn array_numeric_special_values_are_serialized_as_strings() {
+        let arr = Cell::Array(ArrayCell::Numeric(vec![Some(PgNumeric::NaN), None, Some(PgNumeric::PositiveInfinity)]));
+        let result = cell_to_json(&arr);
+        assert_eq!(result[0], Value::String("NaN".into()));
+        assert_eq!(result[1], Value::Null);
+        assert_eq!(result[2], Value::String("Infinity".into()));
+    }
+
+    #[test]
+    fn array_bytes_elements_are_base64_encoded() {
+        let bytes = vec![0u8, 255u8];
+        let arr = Cell::Array(ArrayCell::Bytes(vec![Some(bytes.clone()), None]));
+        let result = cell_to_json(&arr);
+        assert_eq!(result[0], Value::String(BASE64.encode(&bytes)));
+        assert_eq!(result[1], Value::Null);
+    }
+
+    #[test]
+    fn public_channel_topic_has_realtime_prefix() {
         let name = TableName::new("public".into(), "users".into());
-        assert_eq!(
-            build_topic(&name, "etl", false),
-            "realtime:etl:public.users"
-        );
+        assert_eq!(build_topic(&name, false), "realtime:etl:public.users");
     }
 
     #[test]
-    fn build_topic_private_channel() {
+    fn private_channel_topic_includes_private_segment() {
         let name = TableName::new("public".into(), "users".into());
-        assert_eq!(
-            build_topic(&name, "etl", true),
-            "realtime:private:etl:public.users"
-        );
-    }
-
-    #[test]
-    fn build_topic_custom_prefix() {
-        let name = TableName::new("myschema".into(), "orders".into());
-        assert_eq!(
-            build_topic(&name, "myapp", false),
-            "realtime:myapp:myschema.orders"
-        );
+        assert_eq!(build_topic(&name, true), "realtime:private:etl:public.users");
     }
 
     #[test]
