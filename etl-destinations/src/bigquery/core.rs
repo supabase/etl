@@ -2,7 +2,7 @@ use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, EventSequenceKey, PipelineId, TableId, TableName, TableRow};
+use etl::types::{Cell, Event, PipelineId, TableId, TableName, TableRow};
 use etl::{bail, etl_error};
 
 #[cfg(feature = "egress")]
@@ -599,8 +599,7 @@ where
                 let event = event_iter.next().unwrap();
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_number =
-                            EventSequenceKey::new(insert.commit_lsn, insert.tx_ordinal).to_string();
+                        let sequence_number = insert.event_sequence_key().to_string();
                         insert
                             .table_row
                             .values_mut()
@@ -615,8 +614,7 @@ where
                         table_rows.push(BigQueryTableRow::try_from(insert.table_row)?);
                     }
                     Event::Update(mut update) => {
-                        let sequence_number =
-                            EventSequenceKey::new(update.commit_lsn, update.tx_ordinal).to_string();
+                        let sequence_number = update.event_sequence_key().to_string();
                         update
                             .table_row
                             .values_mut()
@@ -631,13 +629,12 @@ where
                         table_rows.push(BigQueryTableRow::try_from(update.table_row)?);
                     }
                     Event::Delete(delete) => {
+                        let sequence_number = delete.event_sequence_key().to_string();
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
                             info!("delete event has no row, skipping");
                             continue;
                         };
 
-                        let sequence_number =
-                            EventSequenceKey::new(delete.commit_lsn, delete.tx_ordinal).to_string();
                         old_table_row
                             .values_mut()
                             .push(BigQueryOperationType::Delete.into_cell());

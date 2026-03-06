@@ -39,11 +39,13 @@ fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
 pub fn parse_event_from_begin_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     begin_body: &protocol::BeginBody,
 ) -> BeginEvent {
     BeginEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         timestamp: begin_body.timestamp(),
         xid: begin_body.xid(),
     }

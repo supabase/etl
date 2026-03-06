@@ -16,10 +16,19 @@ pub struct BeginEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction will commit.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// Transaction start timestamp in Postgres format.
     pub timestamp: i64,
     /// Transaction ID for tracking and coordination.
     pub xid: u32,
+}
+
+impl BeginEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
 }
 
 /// Transaction commit event from Postgres logical replication.
@@ -43,6 +52,13 @@ pub struct CommitEvent {
     pub timestamp: i64,
 }
 
+impl CommitEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
+}
+
 /// Table schema definition event from Postgres logical replication.
 ///
 /// [`RelationEvent`] provides schema information for tables involved in replication.
@@ -58,6 +74,13 @@ pub struct RelationEvent {
     pub tx_ordinal: u64,
     /// Complete table schema including columns and types.
     pub table_schema: TableSchema,
+}
+
+impl RelationEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
 }
 
 /// Row insertion event from Postgres logical replication.
@@ -77,6 +100,13 @@ pub struct InsertEvent {
     pub table_id: TableId,
     /// Complete row data for the inserted row.
     pub table_row: TableRow,
+}
+
+impl InsertEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
 }
 
 /// Row update event from Postgres logical replication.
@@ -105,6 +135,13 @@ pub struct UpdateEvent {
     pub old_table_row: Option<(bool, TableRow)>,
 }
 
+impl UpdateEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
+}
+
 /// Row deletion event from Postgres logical replication.
 ///
 /// [`DeleteEvent`] represents a row being removed from a table. It contains
@@ -128,6 +165,13 @@ pub struct DeleteEvent {
     pub old_table_row: Option<(bool, TableRow)>,
 }
 
+impl DeleteEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
+}
+
 /// Table truncation event from Postgres logical replication.
 ///
 /// [`TruncateEvent`] represents one or more tables being truncated (all rows deleted).
@@ -146,6 +190,13 @@ pub struct TruncateEvent {
     pub options: i8,
     /// List of table IDs that were truncated in this operation.
     pub rel_ids: Vec<u32>,
+}
+
+impl TruncateEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
 }
 
 /// Represents a single replication event from Postgres logical replication.

@@ -1097,7 +1097,8 @@ where
         self.state.current_tx_events = 0;
         self.state.reset_tx_ordinal();
 
-        let event = parse_event_from_begin_message(start_lsn, final_lsn, message);
+        let tx_ordinal = self.state.next_tx_ordinal();
+        let event = parse_event_from_begin_message(start_lsn, final_lsn, tx_ordinal, message);
 
         Ok(HandleMessageResult::return_event(Event::Begin(event)))
     }

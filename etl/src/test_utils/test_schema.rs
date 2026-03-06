@@ -316,6 +316,7 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
     match (left, right) {
         (Event::Begin(left), Event::Begin(right)) => {
             left.commit_lsn == right.commit_lsn
+                && left.tx_ordinal == right.tx_ordinal
                 && left.timestamp == right.timestamp
                 && left.xid == right.xid
         }
