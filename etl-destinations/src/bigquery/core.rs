@@ -2,7 +2,7 @@ use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, PipelineId, TableId, TableName, TableRow, generate_sequence_number};
+use etl::types::{Cell, Event, PipelineId, TableId, TableName, TableRow};
 use etl::{bail, etl_error};
 
 #[cfg(feature = "egress")]
@@ -599,8 +599,7 @@ where
                 let event = event_iter.next().unwrap();
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_number =
-                            generate_sequence_number(insert.start_lsn, insert.commit_lsn);
+                        let sequence_key = insert.event_sequence_key().to_string();
                         insert
                             .table_row
                             .values_mut()
@@ -608,15 +607,14 @@ where
                         insert
                             .table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_key));
 
                         let table_rows: &mut Vec<BigQueryTableRow> =
                             table_id_to_table_rows.entry(insert.table_id).or_default();
                         table_rows.push(BigQueryTableRow::try_from(insert.table_row)?);
                     }
                     Event::Update(mut update) => {
-                        let sequence_number =
-                            generate_sequence_number(update.start_lsn, update.commit_lsn);
+                        let sequence_key = update.event_sequence_key().to_string();
                         update
                             .table_row
                             .values_mut()
@@ -624,26 +622,23 @@ where
                         update
                             .table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_key));
 
                         let table_rows: &mut Vec<BigQueryTableRow> =
                             table_id_to_table_rows.entry(update.table_id).or_default();
                         table_rows.push(BigQueryTableRow::try_from(update.table_row)?);
                     }
                     Event::Delete(delete) => {
+                        let sequence_key = delete.event_sequence_key().to_string();
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
                             info!("delete event has no row, skipping");
                             continue;
                         };
 
-                        let sequence_number =
-                            generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
                             .values_mut()
                             .push(BigQueryOperationType::Delete.into_cell());
-                        old_table_row
-                            .values_mut()
-                            .push(Cell::String(sequence_number));
+                        old_table_row.values_mut().push(Cell::String(sequence_key));
 
                         let table_rows: &mut Vec<BigQueryTableRow> =
                             table_id_to_table_rows.entry(delete.table_id).or_default();
