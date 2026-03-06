@@ -26,7 +26,7 @@ pub fn register_metrics() {
         describe_counter!(
             ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
             Unit::Count,
-            "Total append_batches errors from BigQuery, labeled by error_code and retryable"
+            "Total append_batches errors from BigQuery, labeled by error_code"
         );
 
         describe_counter!(

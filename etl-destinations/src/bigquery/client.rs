@@ -101,58 +101,6 @@ fn process_single_batch_append_result(
     }
 }
 
-/// Checks if a [`BQError`] represents a transient condition that should be retried.
-///
-/// Implements retry logic based on Google's official BigQuery Storage Write API guidance
-/// and production experience with the API. This deviates from the general AIP-194 guidance
-/// to match BigQuery-specific behavior.
-fn is_retryable_bq_error(error: &BQError) -> bool {
-    match error {
-        // Transport-level errors are always retriable (network failures, connection drops, etc.)
-        BQError::TonicTransportError(_) => true,
-
-        BQError::TonicStatusError(status) => match status.code() {
-            // Immediately retriable: canonical "service unavailable" code
-            Code::Unavailable => true,
-
-            // Immediately retriable: transient internal server errors (GOAWAY, backend issues)
-            Code::Internal => true,
-
-            // Immediately retriable: concurrency conflicts and server-initiated aborts
-            Code::Aborted => true,
-
-            // Immediately retriable: server-cancelled operations (not client-cancelled)
-            Code::Cancelled => true,
-
-            // Immediately retriable: deadline exceeded (safe with offset-based deduplication)
-            Code::DeadlineExceeded => true,
-
-            // Retriable with backoff: rate limits and quota exhaustion
-            Code::ResourceExhausted => true,
-
-            // Transport error that never reached the server
-            Code::Unknown => {
-                let message = status.message().to_lowercase();
-                message.contains("transport") || message.contains("connection")
-            }
-
-            // Non-retriable errors
-            Code::InvalidArgument => false,
-            Code::NotFound => false,
-            Code::AlreadyExists => false,
-            Code::PermissionDenied => false,
-            Code::FailedPrecondition => false,
-            Code::Unimplemented => false,
-            Code::Unauthenticated => false,
-            Code::DataLoss => false,
-            Code::OutOfRange => false,
-            Code::Ok => false,
-        },
-        // Other BQError variants are not retriable
-        _ => false,
-    }
-}
-
 /// Creates a per-batch BigQuery trace identifier for Storage Write requests.
 fn create_append_trace_id(pipeline_id: PipelineId, table_id: &str, batch_index: usize) -> String {
     format!(
@@ -766,12 +714,10 @@ impl BigQueryClient {
             .await
             .map_err(|err| {
                 let error_code = error_code_label(&err);
-                let is_retryable = is_retryable_bq_error(&err);
 
                 counter!(ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
                     "pipeline_id" => pipeline_id.to_string(),
-                    "error_code" => error_code,
-                    "retryable" => is_retryable.to_string()
+                    "error_code" => error_code
                 )
                 .increment(1);
 
@@ -812,7 +758,6 @@ impl BigQueryClient {
                 }
                 BatchProcessResult::RequestError { error } => {
                     let error_code = error_code_label(&error);
-                    let is_retryable = is_retryable_bq_error(&error);
                     warn!(
                         batch_index,
                         error = %error,
@@ -821,8 +766,7 @@ impl BigQueryClient {
 
                     counter!(ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
                         "pipeline_id" => pipeline_id.to_string(),
-                        "error_code" => error_code,
-                        "retryable" => is_retryable.to_string()
+                        "error_code" => error_code
                     )
                     .increment(1);
 
@@ -1126,7 +1070,6 @@ impl fmt::Debug for BigQueryClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tonic::Status;
 
     #[test]
     fn test_postgres_to_bigquery_type_basic_types() {
@@ -1468,92 +1411,5 @@ mod tests {
 
         let expected_query = "create or replace table `test-project.test_dataset.test_table` (`id` int64 not null, primary key (`id`) not enforced) options (max_staleness = interval 15 minute)";
         assert_eq!(query, expected_query);
-    }
-
-    #[test]
-    fn test_is_retryable_bq_error_immediately_retriable_codes() {
-        // Test immediately retriable codes per BigQuery Storage Write API guidance
-        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::unavailable("service unavailable")
-        )));
-        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::internal("internal error")
-        )));
-        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::aborted("operation aborted")
-        )));
-        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::cancelled("operation cancelled")
-        )));
-        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::deadline_exceeded("deadline exceeded")
-        )));
-    }
-
-    #[test]
-    fn test_is_retryable_bq_error_resource_exhausted() {
-        // Test retriable with exponential backoff
-        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::resource_exhausted("quota exceeded")
-        )));
-    }
-
-    #[test]
-    fn test_is_retryable_bq_error_transport_errors() {
-        // Test transport-level errors via Code::Unknown with transport-related messages
-        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::unknown("transport error")
-        )));
-        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::unknown("connection reset")
-        )));
-        assert!(is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::unknown("Connection refused")
-        )));
-
-        // Note: BQError::TonicTransportError is also retriable but we cannot easily construct
-        // a test instance since tonic::transport::Error::from_source is private.
-        // The actual retry logic handles this case in production via the match arm:
-        // BQError::TonicTransportError(_) => true
-    }
-
-    #[test]
-    fn test_is_retryable_bq_error_non_retriable_codes() {
-        // Test non-retriable codes
-        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::invalid_argument("bad request")
-        )));
-        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::not_found("table not found")
-        )));
-        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::already_exists("table exists")
-        )));
-        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::permission_denied("access denied")
-        )));
-        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::failed_precondition("stream finalized")
-        )));
-        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::unauthenticated("invalid credentials")
-        )));
-        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::unimplemented("not supported")
-        )));
-        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::data_loss("data corruption")
-        )));
-        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::out_of_range("invalid offset")
-        )));
-    }
-
-    #[test]
-    fn test_is_retryable_bq_error_unknown_without_transport() {
-        // Test that Code::Unknown without transport-related message is not retriable
-        assert!(!is_retryable_bq_error(&BQError::TonicStatusError(
-            Status::unknown("some other error")
-        )));
     }
 }
