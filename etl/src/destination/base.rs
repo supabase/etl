@@ -1,5 +1,6 @@
 use etl_postgres::types::TableId;
 use std::future::Future;
+use tokio_postgres::types::PgLsn;
 
 use crate::error::EtlResult;
 use crate::types::{Event, TableRow};
@@ -64,4 +65,31 @@ pub trait Destination {
     /// Event ordering within a transaction is guaranteed, and transactions are ordered according to
     /// their commit time.
     fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
+
+    /// Returns the confirmed flush position and in-flight write status for
+    /// asynchronous destinations.
+    ///
+    /// The returned tuple contains:
+    /// - [`PgLsn`]: The END LSN of the last fully committed transaction that has been
+    ///   durably processed by the destination. This MUST be a `CommitEvent.end_lsn`
+    ///   value that was previously delivered via [`Destination::write_events`].
+    ///   Returning any other value (mid-transaction LSN, fabricated value) will cause
+    ///   incorrect WAL retention and potential data loss on restart.
+    /// - [`bool`]: Whether the destination currently has in-flight (unconfirmed) writes.
+    ///   When `false` and no new data is flowing, the system can safely advance the
+    ///   flush LSN to prevent WAL buildup.
+    ///
+    /// Returns [`None`] by default, which preserves the existing auto-advance behavior
+    /// where `flush_lsn` is advanced immediately after [`Destination::write_events`] completes.
+    ///
+    /// # Contract
+    ///
+    /// - The LSN MUST only increase monotonically across calls.
+    /// - The LSN MUST be a `CommitEvent.end_lsn` previously delivered via `write_events()`.
+    /// - When `has_inflight_writes` is `false`, the destination guarantees no data
+    ///   is pending durable processing.
+    /// - Violations are caught by `debug_assert!` in development and capped in production.
+    fn confirmed_flush_lsn(&self) -> Option<(PgLsn, bool)> {
+        None
+    }
 }
