@@ -5,6 +5,8 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, RwLock};
 
+use tokio_postgres::types::PgLsn;
+
 use crate::destination::Destination;
 use crate::error::EtlResult;
 use crate::test_utils::event::{check_all_events_count, check_events_count, deduplicate_events};
@@ -323,5 +325,14 @@ where
         }
 
         result
+    }
+
+    fn confirmed_flush_lsn(&self) -> Option<(PgLsn, bool)> {
+        // Delegate to the wrapped destination so that integration tests
+        // can exercise the destination-controlled flush path.
+        tokio::task::block_in_place(move || {
+            Handle::current()
+                .block_on(async move { self.inner.read().await.wrapped_destination.confirmed_flush_lsn() })
+        })
     }
 }

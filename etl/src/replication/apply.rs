@@ -403,21 +403,6 @@ impl ApplyLoopState {
         self.replication_progress.last_received_lsn
     }
 
-    /// Returns the effective flush LSN to report to PostgreSQL.
-    ///
-    /// When idle (no active transaction and empty batch), returns the last received LSN since no
-    /// actual flushes occur. Otherwise, returns the last flush LSN from completed transactions.
-    ///
-    /// Note that when a transaction is now started, the last flush lsn will be used, and it might
-    /// jump back compared to the last received lsn that we sent before, however this is fine since the
-    /// status update logic guarantees monotonically increasing LSNs.
-    fn effective_flush_lsn(&self) -> PgLsn {
-        if !self.handling_transaction() && self.events_batch.is_empty() {
-            self.replication_progress.last_received_lsn
-        } else {
-            self.replication_progress.last_flush_lsn
-        }
-    }
 
     /// Returns true if the apply loop is in the middle of processing a transaction.
     fn handling_transaction(&self) -> bool {
@@ -760,9 +745,11 @@ where
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<()> {
-        // Use effective flush LSN to report last received LSN when idle, since
-        // last flush LSN only advances during actual flushes.
-        let flush_lsn = self.state.effective_flush_lsn();
+        // Poll destination one last time before shutdown to capture any
+        // final confirmed progress.
+        self.poll_destination_flush();
+
+        let flush_lsn = self.effective_flush_lsn();
         events_stream
             .as_mut()
             .stream_mut()
@@ -1008,14 +995,19 @@ where
                     "received keep alive",
                 );
 
+                // Poll destination for confirmed flush progress (async destinations).
+                // This advances last_flush_lsn before the existing
+                // process_syncing_tables_when_idle() call in
+                // handle_replication_message_and_flush(), making progress reactive
+                // rather than purely batch-driven.
+                self.poll_destination_flush();
+
                 events_stream
                     .as_mut()
                     .stream_mut()
                     .send_status_update(
                         self.state.last_received_lsn(),
-                        // Use effective flush LSN to report last received LSN when idle, since
-                        // last flush LSN only advances during actual flushes.
-                        self.state.effective_flush_lsn(),
+                        self.effective_flush_lsn(),
                         message.reply() == 1,
                         StatusUpdateType::KeepAlive,
                     )
@@ -1377,6 +1369,62 @@ where
         }
     }
 
+    /// Returns the effective flush LSN to report to PostgreSQL, with destination awareness.
+    ///
+    /// When idle (no active transaction and empty batch), checks the destination for
+    /// in-flight writes. If the destination has no pending work, returns `last_received_lsn`
+    /// (safe to advance). If the destination has in-flight writes, returns `last_flush_lsn`
+    /// (do not advance past confirmed position).
+    ///
+    /// For destinations that return `None` from `confirmed_flush_lsn()`, preserves the
+    /// existing behavior of returning `last_received_lsn` when idle.
+    fn effective_flush_lsn(&self) -> PgLsn {
+        let is_idle = !self.state.handling_transaction() && self.state.events_batch.is_empty();
+
+        if !is_idle {
+            return self.state.replication_progress.last_flush_lsn;
+        }
+
+        match self.destination.confirmed_flush_lsn() {
+            None => {
+                // Legacy: safe to report last_received_lsn when idle
+                self.state.replication_progress.last_received_lsn
+            }
+            Some((_, true)) => {
+                // Destination has in-flight writes: do NOT advance past confirmed
+                self.state.replication_progress.last_flush_lsn
+            }
+            Some((_, false)) => {
+                // Destination has no pending work: safe to advance
+                self.state.replication_progress.last_received_lsn
+            }
+        }
+    }
+
+    /// Polls the destination for confirmed flush progress and advances `last_flush_lsn`.
+    ///
+    /// The destination's `confirmed_flush_lsn()` must return a `CommitEvent.end_lsn`
+    /// value previously delivered via `write_events()`. This is enforced by contract
+    /// (see [`Destination::confirmed_flush_lsn`] docs) and validated via `debug_assert!`.
+    fn poll_destination_flush(&mut self) {
+        let Some((confirmed_lsn, _)) = self.destination.confirmed_flush_lsn() else {
+            return;
+        };
+
+        debug_assert!(
+            confirmed_lsn <= self.state.last_received_lsn(),
+            "destination returned confirmed_lsn ({}) beyond last_received_lsn ({}). \
+             confirmed_flush_lsn() must return a CommitEvent.end_lsn previously \
+             delivered via write_events()",
+            confirmed_lsn,
+            self.state.last_received_lsn(),
+        );
+
+        // Cap as safety net in release builds
+        let capped = std::cmp::min(confirmed_lsn, self.state.last_received_lsn());
+        self.state.replication_progress.update_last_flush_lsn(capped);
+    }
+
     /// Processes syncing tables after a commit message.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
@@ -1398,18 +1446,28 @@ where
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
     async fn process_syncing_tables_after_batch_flush(&mut self) -> EtlResult<ApplyLoopAction> {
+        // Always poll destination first — even for mid-transaction flushes where
+        // last_commit_end_lsn is None, the destination may have confirmed previously
+        // sent transactions.
+        self.poll_destination_flush();
+
         // Take the last commit end LSN, which is the highest LSN from any commit message in this
         // batch. Batches can flush mid-transaction, so this may refer to the previous transaction.
         let Some(last_commit_end_lsn) = self.state.last_commit_end_lsn.take() else {
             return Ok(ApplyLoopAction::Continue);
         };
 
-        // Update replication progress to notify PostgreSQL of durable flush. Only reports progress
-        // up to the last completed transaction, which may cause duplicates on restart for partial
-        // transactions. Destinations must handle at-least-once delivery semantics.
-        self.state
-            .replication_progress
-            .update_last_flush_lsn(last_commit_end_lsn);
+        if self.destination.confirmed_flush_lsn().is_none() {
+            // Legacy: no destination control, auto-advance immediately after write_events().
+            // Only reports progress up to the last completed transaction, which may cause
+            // duplicates on restart for partial transactions. Destinations must handle
+            // at-least-once delivery semantics.
+            self.state
+                .replication_progress
+                .update_last_flush_lsn(last_commit_end_lsn);
+        }
+        // else: destination-controlled — poll_destination_flush() above already
+        // advanced to the confirmed position. Don't auto-advance past it.
 
         let current_lsn = self.state.replication_progress.last_flush_lsn;
         info!(
@@ -1445,8 +1503,9 @@ where
             return Ok(ApplyLoopAction::Continue);
         }
 
-        // Use effective flush LSN to report last received LSN when idle.
-        let current_lsn = self.state.effective_flush_lsn();
+        // Use destination-aware effective flush LSN when idle. For async destinations
+        // with in-flight writes, this returns last_flush_lsn instead of last_received_lsn.
+        let current_lsn = self.effective_flush_lsn();
 
         debug!(
             worker_type = %self.worker_context.worker_type(),
@@ -2301,5 +2360,778 @@ mod table_sync_worker {
             .await?;
 
         Ok(ApplyLoopAction::Complete)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use etl_postgres::types::{TableId, TableSchema};
+    use tokio_postgres::types::PgLsn;
+
+    use crate::concurrency::batch_budget::BatchBudgetController;
+    use crate::concurrency::memory_monitor::MemoryMonitor;
+    use crate::concurrency::signal::create_signal;
+    use crate::destination::Destination;
+    use crate::error::EtlResult;
+    use crate::state::table::TableReplicationPhase;
+    use crate::store::schema::SchemaStore;
+    use crate::store::state::StateStore;
+    use crate::types::{Event, TableRow};
+    use crate::workers::pool::TableSyncWorkerPool;
+
+    // ---- Mock Destination ----
+
+    #[derive(Debug, Clone)]
+    struct MockDestination {
+        flush_lsn: Option<(PgLsn, bool)>,
+    }
+
+    impl MockDestination {
+        /// Legacy destination: returns None from confirmed_flush_lsn().
+        fn legacy() -> Self {
+            Self { flush_lsn: None }
+        }
+
+        /// Destination-controlled: returns a specific LSN and inflight status.
+        fn controlled(lsn: u64, has_inflight: bool) -> Self {
+            Self {
+                flush_lsn: Some((PgLsn::from(lsn), has_inflight)),
+            }
+        }
+    }
+
+    impl Destination for MockDestination {
+        fn name() -> &'static str {
+            "mock"
+        }
+
+        async fn truncate_table(&self, _table_id: TableId) -> EtlResult<()> {
+            Ok(())
+        }
+
+        async fn write_table_rows(
+            &self,
+            _table_id: TableId,
+            _table_rows: Vec<TableRow>,
+        ) -> EtlResult<()> {
+            Ok(())
+        }
+
+        async fn write_events(&self, _events: Vec<Event>) -> EtlResult<()> {
+            Ok(())
+        }
+
+        fn confirmed_flush_lsn(&self) -> Option<(PgLsn, bool)> {
+            self.flush_lsn
+        }
+    }
+
+    // ---- Mock Store ----
+
+    #[derive(Debug, Clone)]
+    struct MockStore;
+
+    impl StateStore for MockStore {
+        async fn get_table_replication_state(
+            &self,
+            _table_id: TableId,
+        ) -> EtlResult<Option<TableReplicationPhase>> {
+            Ok(None)
+        }
+
+        async fn get_table_replication_states(
+            &self,
+        ) -> EtlResult<BTreeMap<TableId, TableReplicationPhase>> {
+            Ok(BTreeMap::new())
+        }
+
+        async fn load_table_replication_states(&self) -> EtlResult<usize> {
+            Ok(0)
+        }
+
+        async fn update_table_replication_states(
+            &self,
+            _updates: Vec<(TableId, TableReplicationPhase)>,
+        ) -> EtlResult<()> {
+            Ok(())
+        }
+
+        async fn rollback_table_replication_state(
+            &self,
+            _table_id: TableId,
+        ) -> EtlResult<TableReplicationPhase> {
+            unimplemented!("not needed for unit tests")
+        }
+
+        async fn get_table_mapping(
+            &self,
+            _source_table_id: &TableId,
+        ) -> EtlResult<Option<String>> {
+            Ok(None)
+        }
+
+        async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
+            Ok(HashMap::new())
+        }
+
+        async fn load_table_mappings(&self) -> EtlResult<usize> {
+            Ok(0)
+        }
+
+        async fn store_table_mapping(
+            &self,
+            _source_table_id: TableId,
+            _destination_table_id: String,
+        ) -> EtlResult<()> {
+            Ok(())
+        }
+    }
+
+    impl SchemaStore for MockStore {
+        async fn get_table_schema(
+            &self,
+            _table_id: &TableId,
+        ) -> EtlResult<Option<Arc<TableSchema>>> {
+            Ok(None)
+        }
+
+        async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
+            Ok(Vec::new())
+        }
+
+        async fn load_table_schemas(&self) -> EtlResult<usize> {
+            Ok(0)
+        }
+
+        async fn store_table_schema(
+            &self,
+            _table_schema: TableSchema,
+        ) -> EtlResult<Arc<TableSchema>> {
+            unimplemented!("not needed for unit tests")
+        }
+    }
+
+    // ---- Test Fixtures ----
+
+    fn test_pipeline_config() -> Arc<PipelineConfig> {
+        Arc::new(PipelineConfig {
+            id: 1,
+            publication_name: "test_pub".to_string(),
+            pg_connection: etl_config::shared::PgConnectionConfig {
+                host: "localhost".to_string(),
+                port: 5432,
+                name: "test".to_string(),
+                username: "test".to_string(),
+                password: None,
+                tls: etl_config::shared::TlsConfig::disabled(),
+                keepalive: etl_config::shared::TcpKeepaliveConfig::default(),
+            },
+            batch: etl_config::shared::BatchConfig::default(),
+            table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
+            table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
+            max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
+            max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+            memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
+            memory_backpressure: None,
+            table_sync_copy: etl_config::shared::TableSyncCopyConfig::default(),
+            invalidated_slot_behavior: etl_config::shared::InvalidatedSlotBehavior::default(),
+        })
+    }
+
+    fn create_test_apply_loop(
+        destination: MockDestination,
+        start_lsn: u64,
+    ) -> ApplyLoop<MockStore, MockDestination> {
+        let config = test_pipeline_config();
+        let memory_monitor = MemoryMonitor::new_for_test();
+        let batch_budget = BatchBudgetController::new(1, memory_monitor.clone(), 0.2);
+        let (_shutdown_tx, shutdown_rx) = create_signal();
+        let (_shutdown_tx2, shutdown_rx2) = create_signal();
+
+        let initial_progress = ReplicationProgress {
+            last_received_lsn: PgLsn::from(start_lsn),
+            last_flush_lsn: PgLsn::from(start_lsn),
+        };
+        let state =
+            ApplyLoopState::new(initial_progress, Duration::from_secs(10));
+
+        let worker_context = WorkerContext::Apply(ApplyWorkerContext {
+            pipeline_id: 1,
+            config: config.clone(),
+            pool: Arc::new(TableSyncWorkerPool::new()),
+            store: MockStore,
+            destination: destination.clone(),
+            shutdown_rx: shutdown_rx2,
+            table_sync_worker_permits: Arc::new(Semaphore::new(4)),
+            memory_monitor: memory_monitor.clone(),
+            batch_budget: batch_budget.clone(),
+        });
+
+        ApplyLoop {
+            pipeline_id: 1,
+            config,
+            schema_store: MockStore,
+            destination,
+            shutdown_rx,
+            worker_context,
+            memory_monitor,
+            cached_batch_budget: batch_budget.cached(),
+            state,
+        }
+    }
+
+    /// Helper: put the apply loop into an active transaction state.
+    fn set_in_transaction(apply_loop: &mut ApplyLoop<MockStore, MockDestination>) {
+        apply_loop.state.remote_final_lsn = Some(PgLsn::from(999u64));
+    }
+
+    /// Helper: make the events batch non-empty.
+    fn set_batch_non_empty(apply_loop: &mut ApplyLoop<MockStore, MockDestination>) {
+        apply_loop
+            .state
+            .events_batch
+            .push(Event::Unsupported);
+    }
+
+    /// Helper: set the last commit end LSN for batch flush tests.
+    fn set_last_commit_end_lsn(
+        apply_loop: &mut ApplyLoop<MockStore, MockDestination>,
+        lsn: u64,
+    ) {
+        apply_loop.state.last_commit_end_lsn = Some(PgLsn::from(lsn));
+    }
+
+    /// Helper: advance the received LSN.
+    fn advance_received_lsn(
+        apply_loop: &mut ApplyLoop<MockStore, MockDestination>,
+        lsn: u64,
+    ) {
+        apply_loop
+            .state
+            .replication_progress
+            .update_last_received_lsn(PgLsn::from(lsn));
+    }
+
+    // ========================================================================
+    // A. ReplicationProgress tests
+    // ========================================================================
+
+    #[test]
+    fn replication_progress_initial_values() {
+        let progress = ReplicationProgress {
+            last_received_lsn: PgLsn::from(42u64),
+            last_flush_lsn: PgLsn::from(42u64),
+        };
+        assert_eq!(progress.last_received_lsn, PgLsn::from(42u64));
+        assert_eq!(progress.last_flush_lsn, PgLsn::from(42u64));
+    }
+
+    #[test]
+    fn replication_progress_flush_lsn_only_increases() {
+        let mut progress = ReplicationProgress {
+            last_received_lsn: PgLsn::from(100u64),
+            last_flush_lsn: PgLsn::from(50u64),
+        };
+
+        // Advance to 80
+        progress.update_last_flush_lsn(PgLsn::from(80u64));
+        assert_eq!(progress.last_flush_lsn, PgLsn::from(80u64));
+
+        // Try to go backward — should be no-op
+        progress.update_last_flush_lsn(PgLsn::from(60u64));
+        assert_eq!(progress.last_flush_lsn, PgLsn::from(80u64));
+
+        // Try zero — should be no-op
+        progress.update_last_flush_lsn(PgLsn::from(0u64));
+        assert_eq!(progress.last_flush_lsn, PgLsn::from(80u64));
+    }
+
+    #[test]
+    fn replication_progress_received_lsn_only_increases() {
+        let mut progress = ReplicationProgress {
+            last_received_lsn: PgLsn::from(50u64),
+            last_flush_lsn: PgLsn::from(50u64),
+        };
+
+        // Advance
+        progress.update_last_received_lsn(PgLsn::from(100u64));
+        assert_eq!(progress.last_received_lsn, PgLsn::from(100u64));
+
+        // Try to go backward — should be no-op
+        progress.update_last_received_lsn(PgLsn::from(70u64));
+        assert_eq!(progress.last_received_lsn, PgLsn::from(100u64));
+    }
+
+    #[test]
+    fn replication_progress_equal_update_is_noop() {
+        let mut progress = ReplicationProgress {
+            last_received_lsn: PgLsn::from(100u64),
+            last_flush_lsn: PgLsn::from(50u64),
+        };
+
+        progress.update_last_flush_lsn(PgLsn::from(50u64));
+        assert_eq!(progress.last_flush_lsn, PgLsn::from(50u64));
+
+        progress.update_last_received_lsn(PgLsn::from(100u64));
+        assert_eq!(progress.last_received_lsn, PgLsn::from(100u64));
+    }
+
+    // ========================================================================
+    // B. effective_flush_lsn tests
+    // ========================================================================
+
+    #[test]
+    fn effective_flush_lsn_legacy_idle_returns_received() {
+        let mut apply_loop = create_test_apply_loop(MockDestination::legacy(), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+
+        // Idle (no transaction, empty batch) + legacy → last_received_lsn
+        assert_eq!(apply_loop.effective_flush_lsn(), PgLsn::from(100u64));
+    }
+
+    #[test]
+    fn effective_flush_lsn_legacy_in_transaction_returns_flush() {
+        let mut apply_loop = create_test_apply_loop(MockDestination::legacy(), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+        set_in_transaction(&mut apply_loop);
+
+        // In transaction → last_flush_lsn (which is still at start_lsn)
+        assert_eq!(apply_loop.effective_flush_lsn(), PgLsn::from(10u64));
+    }
+
+    #[test]
+    fn effective_flush_lsn_legacy_batch_nonempty_returns_flush() {
+        let mut apply_loop = create_test_apply_loop(MockDestination::legacy(), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+        set_batch_non_empty(&mut apply_loop);
+
+        // Non-empty batch → last_flush_lsn
+        assert_eq!(apply_loop.effective_flush_lsn(), PgLsn::from(10u64));
+    }
+
+    #[test]
+    fn effective_flush_lsn_controlled_idle_no_inflight() {
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(50, false), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+
+        // Idle + controlled + no inflight → safe to advance → last_received_lsn
+        assert_eq!(apply_loop.effective_flush_lsn(), PgLsn::from(100u64));
+    }
+
+    #[test]
+    fn effective_flush_lsn_controlled_idle_has_inflight() {
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(50, true), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+
+        // Idle + controlled + has inflight → don't advance → last_flush_lsn
+        assert_eq!(apply_loop.effective_flush_lsn(), PgLsn::from(10u64));
+    }
+
+    #[test]
+    fn effective_flush_lsn_controlled_in_transaction_ignores_destination() {
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(50, false), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+        set_in_transaction(&mut apply_loop);
+
+        // In transaction → always returns last_flush_lsn regardless of destination
+        assert_eq!(apply_loop.effective_flush_lsn(), PgLsn::from(10u64));
+    }
+
+    #[test]
+    fn effective_flush_lsn_controlled_batch_nonempty_ignores_destination() {
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(50, false), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+        set_batch_non_empty(&mut apply_loop);
+
+        // Non-empty batch → always returns last_flush_lsn regardless of destination
+        assert_eq!(apply_loop.effective_flush_lsn(), PgLsn::from(10u64));
+    }
+
+    // ========================================================================
+    // C. poll_destination_flush tests
+    // ========================================================================
+
+    #[test]
+    fn poll_destination_flush_legacy_is_noop() {
+        let mut apply_loop = create_test_apply_loop(MockDestination::legacy(), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+
+        apply_loop.poll_destination_flush();
+
+        // Legacy → no change
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(10u64)
+        );
+    }
+
+    #[test]
+    fn poll_destination_flush_advances_to_confirmed() {
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(50, false), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+
+        apply_loop.poll_destination_flush();
+
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(50u64)
+        );
+    }
+
+    #[test]
+    fn poll_destination_flush_caps_at_received() {
+        // Destination reports a higher LSN than we've received — should be capped.
+        // In debug builds this would also trigger a debug_assert, but we test that
+        // separately with #[should_panic]. Here we test the release-mode safety net
+        // by calling the capping logic directly.
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(200, false), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+
+        // Manually replicate the capping logic (poll_destination_flush would
+        // panic in debug mode due to debug_assert, so we test the cap separately)
+        let confirmed_lsn = PgLsn::from(200u64);
+        let capped = std::cmp::min(confirmed_lsn, apply_loop.state.last_received_lsn());
+        apply_loop
+            .state
+            .replication_progress
+            .update_last_flush_lsn(capped);
+
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(100u64)
+        );
+    }
+
+    #[test]
+    fn poll_destination_flush_lower_confirmed_no_regression() {
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(30, false), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+
+        // First, advance flush to 50 manually
+        apply_loop
+            .state
+            .replication_progress
+            .update_last_flush_lsn(PgLsn::from(50u64));
+
+        // Now poll with confirmed=30 — should NOT regress
+        apply_loop.poll_destination_flush();
+
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(50u64)
+        );
+    }
+
+    #[test]
+    fn poll_destination_flush_multiple_advances() {
+        // Simulate multiple polls with increasing confirmations
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(20, false), 10);
+        advance_received_lsn(&mut apply_loop, 200);
+
+        apply_loop.poll_destination_flush();
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(20u64)
+        );
+
+        // "Update" the destination's confirmed LSN
+        apply_loop.destination = MockDestination::controlled(80, false);
+        apply_loop.poll_destination_flush();
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(80u64)
+        );
+
+        // Another advance
+        apply_loop.destination = MockDestination::controlled(150, true);
+        apply_loop.poll_destination_flush();
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(150u64)
+        );
+    }
+
+    #[test]
+    fn poll_destination_flush_exact_boundary() {
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(100, false), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+
+        apply_loop.poll_destination_flush();
+
+        // confirmed == received → should advance to exactly 100
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(100u64)
+        );
+    }
+
+    // ========================================================================
+    // D. process_syncing_tables_after_batch_flush tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn batch_flush_legacy_auto_advances() {
+        let mut apply_loop = create_test_apply_loop(MockDestination::legacy(), 10);
+        advance_received_lsn(&mut apply_loop, 200);
+        set_last_commit_end_lsn(&mut apply_loop, 100);
+
+        let action = apply_loop
+            .process_syncing_tables_after_batch_flush()
+            .await
+            .unwrap();
+
+        // Legacy → auto-advance to last_commit_end_lsn
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(100u64)
+        );
+        assert!(matches!(action, ApplyLoopAction::Continue));
+    }
+
+    #[tokio::test]
+    async fn batch_flush_controlled_does_not_auto_advance() {
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(50, true), 10);
+        advance_received_lsn(&mut apply_loop, 200);
+        set_last_commit_end_lsn(&mut apply_loop, 100);
+
+        let action = apply_loop
+            .process_syncing_tables_after_batch_flush()
+            .await
+            .unwrap();
+
+        // Controlled → flush stays at confirmed (50), NOT auto-advanced to 100
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(50u64)
+        );
+        assert!(matches!(action, ApplyLoopAction::Continue));
+    }
+
+    #[tokio::test]
+    async fn batch_flush_no_commit_lsn_returns_continue() {
+        let mut apply_loop = create_test_apply_loop(MockDestination::legacy(), 10);
+        advance_received_lsn(&mut apply_loop, 200);
+        // Don't set last_commit_end_lsn — it's None
+
+        let action = apply_loop
+            .process_syncing_tables_after_batch_flush()
+            .await
+            .unwrap();
+
+        // No commit LSN → Continue, no LSN change
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(10u64)
+        );
+        assert!(matches!(action, ApplyLoopAction::Continue));
+    }
+
+    #[tokio::test]
+    async fn batch_flush_controlled_polls_before_decision() {
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(80, false), 10);
+        advance_received_lsn(&mut apply_loop, 200);
+        set_last_commit_end_lsn(&mut apply_loop, 100);
+
+        let action = apply_loop
+            .process_syncing_tables_after_batch_flush()
+            .await
+            .unwrap();
+
+        // poll_destination_flush runs first → advances to 80
+        // Then controlled path skips auto-advance → stays at 80
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(80u64)
+        );
+        assert!(matches!(action, ApplyLoopAction::Continue));
+    }
+
+    // ========================================================================
+    // E. Edge cases
+    // ========================================================================
+
+    #[test]
+    fn effective_flush_lsn_all_zeros() {
+        // Startup: everything at 0. Legacy destination, idle → returns 0.
+        let apply_loop = create_test_apply_loop(MockDestination::legacy(), 0);
+        assert_eq!(apply_loop.effective_flush_lsn(), PgLsn::from(0u64));
+    }
+
+    #[test]
+    fn poll_destination_flush_confirmed_zero_is_noop() {
+        // Destination returns confirmed=0 when nothing has been confirmed yet.
+        // Since start_lsn=10, flush is already at 10. update_last_flush_lsn(0)
+        // should be a no-op (monotonic).
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(0, false), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+
+        apply_loop.poll_destination_flush();
+
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(10u64)
+        );
+    }
+
+    #[test]
+    fn poll_destination_flush_ignores_inflight_bool() {
+        // poll_destination_flush uses _ for the bool — always advances regardless.
+        // Verify inflight=true and inflight=false both advance the same way.
+        let mut loop_inflight =
+            create_test_apply_loop(MockDestination::controlled(50, true), 10);
+        advance_received_lsn(&mut loop_inflight, 100);
+        loop_inflight.poll_destination_flush();
+
+        let mut loop_no_inflight =
+            create_test_apply_loop(MockDestination::controlled(50, false), 10);
+        advance_received_lsn(&mut loop_no_inflight, 100);
+        loop_no_inflight.poll_destination_flush();
+
+        assert_eq!(
+            loop_inflight.state.replication_progress.last_flush_lsn,
+            loop_no_inflight.state.replication_progress.last_flush_lsn
+        );
+        assert_eq!(
+            loop_inflight.state.replication_progress.last_flush_lsn,
+            PgLsn::from(50u64)
+        );
+    }
+
+    #[test]
+    fn effective_flush_lsn_after_poll_advances_with_inflight() {
+        // Poll advances flush to 80. Then effective_flush_lsn with inflight=true
+        // should return the new flush (80), not the original (10).
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(80, true), 10);
+        advance_received_lsn(&mut apply_loop, 200);
+
+        apply_loop.poll_destination_flush();
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(80u64)
+        );
+
+        // effective_flush_lsn: idle + inflight → returns last_flush_lsn = 80
+        assert_eq!(apply_loop.effective_flush_lsn(), PgLsn::from(80u64));
+    }
+
+    #[tokio::test]
+    async fn batch_flush_take_consumes_commit_lsn() {
+        // .take() should consume last_commit_end_lsn. Second call returns Continue
+        // with no LSN change.
+        let mut apply_loop = create_test_apply_loop(MockDestination::legacy(), 10);
+        advance_received_lsn(&mut apply_loop, 200);
+        set_last_commit_end_lsn(&mut apply_loop, 100);
+
+        // First call: advances flush to 100
+        apply_loop
+            .process_syncing_tables_after_batch_flush()
+            .await
+            .unwrap();
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(100u64)
+        );
+
+        // Second call: last_commit_end_lsn was consumed by .take()
+        let action = apply_loop
+            .process_syncing_tables_after_batch_flush()
+            .await
+            .unwrap();
+        assert!(matches!(action, ApplyLoopAction::Continue));
+        // Flush unchanged
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(100u64)
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_flush_controlled_confirmed_greater_than_commit() {
+        // confirmed=150 > commit=100. Poll advances to 150. Controlled path
+        // skips auto-advance. Flush should be at 150, not capped at commit.
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(150, false), 10);
+        advance_received_lsn(&mut apply_loop, 200);
+        set_last_commit_end_lsn(&mut apply_loop, 100);
+
+        apply_loop
+            .process_syncing_tables_after_batch_flush()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(150u64)
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_flush_legacy_commit_lower_than_current_flush_no_regression() {
+        // Flush already at 100 (manually advanced). New batch commit=80.
+        // Monotonic guarantee: flush stays at 100.
+        let mut apply_loop = create_test_apply_loop(MockDestination::legacy(), 10);
+        advance_received_lsn(&mut apply_loop, 200);
+        apply_loop
+            .state
+            .replication_progress
+            .update_last_flush_lsn(PgLsn::from(100u64));
+        set_last_commit_end_lsn(&mut apply_loop, 80);
+
+        apply_loop
+            .process_syncing_tables_after_batch_flush()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            apply_loop.state.replication_progress.last_flush_lsn,
+            PgLsn::from(100u64)
+        );
+    }
+
+    #[test]
+    fn effective_flush_lsn_both_in_transaction_and_batch_nonempty() {
+        // Both conditions that make it "not idle" — should still return last_flush_lsn.
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(50, false), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+        set_in_transaction(&mut apply_loop);
+        set_batch_non_empty(&mut apply_loop);
+
+        assert_eq!(apply_loop.effective_flush_lsn(), PgLsn::from(10u64));
+    }
+
+    // ========================================================================
+    // F. debug_assert validation
+    // ========================================================================
+
+    #[test]
+    #[should_panic(expected = "destination returned confirmed_lsn")]
+    #[cfg(debug_assertions)]
+    fn poll_destination_flush_panics_when_confirmed_exceeds_received() {
+        let mut apply_loop =
+            create_test_apply_loop(MockDestination::controlled(200, false), 10);
+        advance_received_lsn(&mut apply_loop, 100);
+
+        // confirmed (200) > received (100) → debug_assert fires
+        apply_loop.poll_destination_flush();
     }
 }
