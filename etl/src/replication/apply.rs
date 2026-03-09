@@ -340,6 +340,8 @@ struct ApplyLoopState {
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
     current_tx_events: u64,
+    /// Next zero-based ordinal to assign to transaction-scoped events.
+    next_tx_ordinal: u64,
     /// The current shutdown state tracking graceful shutdown progress.
     shutdown_state: ShutdownState,
     /// The deadline by which the current batch must be flushed.
@@ -359,6 +361,7 @@ impl ApplyLoopState {
             events_batch_bytes: 0,
             current_tx_begin_ts: None,
             current_tx_events: 0,
+            next_tx_ordinal: 0,
             shutdown_state: ShutdownState::NoShutdown,
             batch_flush_deadline: None,
             max_batch_fill_duration,
@@ -422,6 +425,29 @@ impl ApplyLoopState {
     /// Returns true if the apply loop is in the middle of processing a transaction.
     fn handling_transaction(&self) -> bool {
         self.remote_final_lsn.is_some()
+    }
+
+    /// Resets transaction-local ordinal assignment.
+    fn reset_tx_ordinal(&mut self) {
+        self.next_tx_ordinal = 0;
+    }
+
+    /// Returns and advances the next transaction-local ordinal.
+    fn next_tx_ordinal(&mut self) -> u64 {
+        let tx_ordinal = self.next_tx_ordinal;
+        self.next_tx_ordinal = match self.next_tx_ordinal.checked_add(1) {
+            Some(next_tx_ordinal) => next_tx_ordinal,
+            None => {
+                warn!(
+                    current_tx_ordinal = self.next_tx_ordinal,
+                    "transaction-local ordinal overflow detected; subsequent events may reuse the same ordinal"
+                );
+
+                self.next_tx_ordinal
+            }
+        };
+
+        tx_ordinal
     }
 }
 
@@ -1080,8 +1106,10 @@ where
 
         self.state.current_tx_begin_ts = Some(Instant::now());
         self.state.current_tx_events = 0;
+        self.state.reset_tx_ordinal();
 
-        let event = parse_event_from_begin_message(start_lsn, final_lsn, message);
+        let tx_ordinal = self.state.next_tx_ordinal();
+        let event = parse_event_from_begin_message(start_lsn, final_lsn, tx_ordinal, message);
 
         Ok(HandleMessageResult::return_event(Event::Begin(event)))
     }
@@ -1151,7 +1179,8 @@ where
             action = action.merge(ApplyLoopAction::Pause);
         }
 
-        let event = parse_event_from_commit_message(start_lsn, commit_lsn, message);
+        let tx_ordinal = self.state.next_tx_ordinal();
+        let event = parse_event_from_commit_message(start_lsn, commit_lsn, tx_ordinal, message);
 
         let mut result = HandleMessageResult {
             event: Some(Event::Commit(event)),
@@ -1184,6 +1213,7 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
+        let tx_ordinal = self.state.next_tx_ordinal();
 
         if !self
             .should_apply_changes(table_id, remote_final_lsn)
@@ -1204,7 +1234,8 @@ where
                 )
             })?;
 
-        let event = parse_event_from_relation_message(start_lsn, remote_final_lsn, message)?;
+        let event =
+            parse_event_from_relation_message(start_lsn, remote_final_lsn, tx_ordinal, message)?;
 
         if !existing_table_schema.partial_eq(&event.table_schema) {
             let error = TableReplicationError::with_solution(
@@ -1240,6 +1271,8 @@ where
             );
         };
 
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         if !self
             .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
             .await?
@@ -1251,6 +1284,7 @@ where
             &self.schema_store,
             start_lsn,
             remote_final_lsn,
+            tx_ordinal,
             message,
             self.pipeline_id,
         )
@@ -1273,6 +1307,8 @@ where
             );
         };
 
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         if !self
             .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
             .await?
@@ -1284,6 +1320,7 @@ where
             &self.schema_store,
             start_lsn,
             remote_final_lsn,
+            tx_ordinal,
             message,
             self.pipeline_id,
         )
@@ -1306,6 +1343,8 @@ where
             );
         };
 
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         if !self
             .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
             .await?
@@ -1317,6 +1356,7 @@ where
             &self.schema_store,
             start_lsn,
             remote_final_lsn,
+            tx_ordinal,
             message,
             self.pipeline_id,
         )
@@ -1339,6 +1379,8 @@ where
             );
         };
 
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         let mut rel_ids = Vec::with_capacity(message.rel_ids().len());
         for &table_id in message.rel_ids().iter() {
             let should_apply_truncate = self
@@ -1353,8 +1395,13 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        let event =
-            parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, rel_ids);
+        let event = parse_event_from_truncate_message(
+            start_lsn,
+            remote_final_lsn,
+            tx_ordinal,
+            message,
+            rel_ids,
+        );
 
         Ok(HandleMessageResult::return_event(Event::Truncate(event)))
     }

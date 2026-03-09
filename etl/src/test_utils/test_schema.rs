@@ -316,6 +316,7 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
     match (left, right) {
         (Event::Begin(left), Event::Begin(right)) => {
             left.commit_lsn == right.commit_lsn
+                && left.tx_ordinal == right.tx_ordinal
                 && left.timestamp == right.timestamp
                 && left.xid == right.xid
         }
@@ -358,6 +359,7 @@ pub fn build_expected_users_inserts(
         events.push(Event::Insert(InsertEvent {
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
+            tx_ordinal: 0,
             table_id: users_table_id,
             table_row: TableRow::new(vec![
                 Cell::I64(starting_id),
@@ -383,6 +385,7 @@ pub fn build_expected_orders_inserts(
         events.push(Event::Insert(InsertEvent {
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
+            tx_ordinal: 0,
             table_id: orders_table_id,
             table_row: TableRow::new(vec![Cell::I64(starting_id), Cell::String(name.to_owned())]),
         }));
