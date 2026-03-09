@@ -11,6 +11,7 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{ArrayCell, Cell, Event, TableId, TableName, TableRow};
 use parking_lot::Mutex;
+use pg_escape::quote_identifier;
 use r2d2::Pool;
 use rand::Rng;
 use tokio::sync::Semaphore;
@@ -94,7 +95,7 @@ impl<S> DuckLakeDestination<S> {
     ///   (`file:///tmp/catalog.ducklake`).
     /// - `data_path`: Where Parquet files are stored. Use a local file URL
     ///   (`file:///tmp/lake_data`) or a cloud URL (`s3://bucket/prefix/`,
-    ///   `gs://bucket/prefix/`, `az://container/prefix/`).
+    ///   `gs://bucket/prefix/`).
     /// - `pool_size`: Number of concurrent DuckDB connections. `4` is a
     ///   reasonable default; higher values allow more tables to be written in
     ///   parallel.
@@ -368,9 +369,10 @@ where
         // Prefix the table name with the catalog alias so DuckLake knows which
         // catalog to create the table in.
         let ddl = build_create_table_sql_ducklake(&table_name, &table_schema.column_schemas);
+        let quoted_table_name = quote_identifier(&table_name).into_owned();
         let qualified_ddl = ddl.replace(
-            &format!("{table_name:?}"),
-            &format!("{LAKE_CATALOG}.\"{table_name}\""),
+            &quoted_table_name,
+            &format!("{LAKE_CATALOG}.{quoted_table_name}"),
         );
 
         let pool = self.pool.clone();

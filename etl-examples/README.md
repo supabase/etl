@@ -114,7 +114,7 @@ cargo run --bin ducklake -p etl-examples -- \
     --metadata-schema <schema-name>
 ```
 
-When the `--data-path` starts with `s3://`, `gs://`, or `az://` the pipeline
+When the `--data-path` starts with `s3://` or `gs://` the pipeline
 automatically loads the `httpfs` DuckDB extension for cloud storage access.
 
 ### All flags

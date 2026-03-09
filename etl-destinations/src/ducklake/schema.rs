@@ -1,4 +1,5 @@
 use etl::types::{ColumnSchema, Type, is_array_type};
+use pg_escape::quote_identifier;
 
 /// Returns the DuckLake SQL type string for a given Postgres scalar type.
 fn postgres_scalar_type_to_ducklake_sql(typ: &Type) -> &'static str {
@@ -70,17 +71,19 @@ pub fn build_create_table_sql_ducklake(
     table_name: &str,
     column_schemas: &[ColumnSchema],
 ) -> String {
+    let table_name = quote_identifier(table_name);
     let col_defs: Vec<String> = column_schemas
         .iter()
         .map(|col| {
+            let column_name = quote_identifier(&col.name);
             let duckdb_type = postgres_column_type_to_ducklake_sql(&col.typ);
             let nullability = if col.nullable { "" } else { " NOT NULL" };
-            format!("  {:?} {}{}", col.name, duckdb_type, nullability)
+            format!("  {column_name} {duckdb_type}{nullability}")
         })
         .collect();
 
     format!(
-        "CREATE TABLE IF NOT EXISTS {table_name:?} (\n{}\n)",
+        "CREATE TABLE IF NOT EXISTS {table_name} (\n{}\n)",
         col_defs.join(",\n")
     )
 }
@@ -147,5 +150,22 @@ mod tests {
             postgres_array_type_to_ducklake_sql(&Type::UUID_ARRAY),
             "UUID[]"
         );
+    }
+
+    #[test]
+    fn test_build_create_table_sql_quotes_identifiers() {
+        let sql = build_create_table_sql_ducklake(
+            "odd\"table",
+            &[ColumnSchema::new(
+                "select".to_string(),
+                Type::INT4,
+                -1,
+                false,
+                true,
+            )],
+        );
+
+        assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS \"odd\"\"table\""));
+        assert!(sql.contains("  \"select\" INTEGER NOT NULL"));
     }
 }

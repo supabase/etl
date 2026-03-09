@@ -143,7 +143,7 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
         parts.push(format!("connect_timeout={}", connect_timeout.as_secs()));
     }
     if let Some(tcp_user_timeout) = config.get_tcp_user_timeout() {
-        parts.push(format!("tcp_user_timeout={}", tcp_user_timeout.as_secs()));
+        parts.push(format!("tcp_user_timeout={}", tcp_user_timeout.as_millis()));
     }
 
     parts.push(format!(
@@ -313,7 +313,7 @@ pub(super) fn replication_mode_to_str(
 /// Returns a validated DuckLake data path string.
 pub(super) fn validate_data_path(data_path: &Url) -> EtlResult<&str> {
     match data_path.scheme() {
-        "file" | "s3" | "gs" | "az" => Ok(data_path.as_str()),
+        "file" | "s3" | "gs" => Ok(data_path.as_str()),
         scheme => Err(etl_error!(
             ErrorKind::ConfigError,
             "Unsupported DuckLake data URL scheme",
@@ -327,7 +327,7 @@ pub(super) fn validate_data_path(data_path: &Url) -> EtlResult<&str> {
 /// - Always installs and loads the `ducklake` extension.
 /// - Installs the `postgres` extension when the catalog uses a PostgreSQL URL.
 /// - Installs `httpfs` and configures S3 credentials when the data path uses
-///   a cloud URL (`s3://`, `gs://`, `az://`).
+///   a cloud URL (`s3://`, `gs://`).
 pub(super) fn build_setup_sql(
     catalog_url: &Url,
     data_path: &Url,
@@ -338,7 +338,7 @@ pub(super) fn build_setup_sql(
     let data_path = validate_data_path(data_path)?;
 
     let needs_postgres = matches!(catalog_url.scheme(), "postgres" | "postgresql");
-    let needs_httpfs = matches!(data_path.split(':').next(), Some("s3" | "gs" | "az"));
+    let needs_httpfs = matches!(data_path.split(':').next(), Some("s3" | "gs"));
     let lake_catalog = quote_identifier(LAKE_CATALOG);
     let mut secret_options = BTreeMap::from([
         (
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn test_catalog_conninfo_from_postgres_url_with_password_and_query_params_round_trip() {
         let url = Url::parse(
-            "postgres://user:pa%27ss%5Cword@localhost:5433/mydb?sslmode=disable&connect_timeout=10&application_name=myapp",
+            "postgres://user:pa%27ss%5Cword@localhost:5433/mydb?sslmode=disable&connect_timeout=10&tcp_user_timeout=1500&application_name=myapp",
         )
         .unwrap();
         let conninfo = catalog_conninfo_from_url(&url).unwrap();
@@ -450,6 +450,7 @@ mod tests {
         );
         assert_eq!(parsed.get_ssl_mode(), SslMode::Disable);
         assert_eq!(parsed.get_connect_timeout().unwrap().as_secs(), 10);
+        assert!(conninfo.contains("tcp_user_timeout=1500"));
         assert_eq!(parsed.get_application_name(), Some("myapp"));
     }
 
@@ -465,6 +466,15 @@ mod tests {
         let err = build_setup_sql(
             &Url::from_file_path("/tmp/catalog.ducklake").unwrap(),
             &Url::parse("https://example.com/lake").unwrap(),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConfigError);
+
+        let err = build_setup_sql(
+            &Url::from_file_path("/tmp/catalog.ducklake").unwrap(),
+            &Url::parse("az://container/lake").unwrap(),
             None,
             None,
         )
