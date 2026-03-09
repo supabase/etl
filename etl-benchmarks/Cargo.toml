@@ -14,18 +14,10 @@ etl-destinations = { workspace = true, features = ["bigquery"] }
 etl-postgres = { workspace = true, features = ["sqlx"] }
 etl-telemetry = { workspace = true }
 
-clap = { workspace = true, default-features = true, features = [
-    "std",
-    "derive",
-] }
+clap = { workspace = true, default-features = true, features = ["std", "derive"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
-tokio = { workspace = true, features = [
-    "rt-multi-thread",
-    "macros",
-    "sync",
-    "signal",
-] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal"] }
 tracing = { workspace = true, default-features = true }
 
 [[bench]]
