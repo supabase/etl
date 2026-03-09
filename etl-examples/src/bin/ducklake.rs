@@ -243,7 +243,8 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         s3_config,
         args.ducklake_args.metadata_schema,
         store.clone(),
-    )?;
+    )
+    .await?;
 
     let mut pipeline = Pipeline::new(pipeline_config, store, ducklake_destination);
 

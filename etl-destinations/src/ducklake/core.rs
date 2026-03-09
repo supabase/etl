@@ -102,7 +102,11 @@ impl<S> DuckLakeDestination<S> {
     ///   and the bucket is not publicly accessible.
     /// - `metadata_schema`: Optional Postgres schema for DuckLake metadata tables
     ///   (e.g. `"ducklake"`). Uses the catalog default schema when not set.
-    pub fn new(
+    ///
+    /// Pool initialization is blocking because `r2d2` eagerly opens and
+    /// validates connections. This constructor offloads that work to Tokio's
+    /// blocking pool.
+    pub async fn new(
         catalog_url: Url,
         data_path: Url,
         pool_size: u32,
@@ -121,16 +125,22 @@ impl<S> DuckLakeDestination<S> {
             setup_sql: Arc::new(setup_sql),
         };
 
-        let pool = Pool::builder()
-            .max_size(pool_size)
-            .build(manager)
-            .map_err(|e| {
-                etl_error!(
-                    ErrorKind::DestinationConnectionFailed,
-                    "Failed to build DuckLake connection pool",
-                    source: e
-                )
-            })?;
+        let pool =
+            tokio::task::spawn_blocking(move || Pool::builder().max_size(pool_size).build(manager))
+                .await
+                .map_err(|_| {
+                    etl_error!(
+                        ErrorKind::ApplyWorkerPanic,
+                        "DuckLake pool build task panicked"
+                    )
+                })?
+                .map_err(|e| {
+                    etl_error!(
+                        ErrorKind::DestinationConnectionFailed,
+                        "Failed to build DuckLake connection pool",
+                        source: e
+                    )
+                })?;
 
         Ok(Self {
             pool,

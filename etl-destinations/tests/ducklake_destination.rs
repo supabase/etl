@@ -136,6 +136,7 @@ async fn test_write_table_rows_basic() {
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .await
             .unwrap();
     destination
         .write_table_rows(
@@ -187,6 +188,7 @@ async fn test_write_table_rows_empty_creates_table() {
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .await
             .unwrap();
     destination
         .write_table_rows(table_id, vec![])
@@ -221,6 +223,7 @@ async fn test_truncate_clears_rows() {
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .await
             .unwrap();
     destination
         .write_table_rows(
@@ -287,6 +290,7 @@ async fn test_write_events() {
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .await
             .unwrap();
 
     let lsn = PgLsn::from(100u64);
@@ -346,6 +350,7 @@ async fn test_concurrent_writes_with_single_slot_complete() {
 
     let destination = Arc::new(
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .await
             .unwrap(),
     );
 
@@ -393,6 +398,7 @@ async fn test_type_mapping_round_trip() {
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .await
             .unwrap();
     destination
         .write_table_rows(
