@@ -2,7 +2,7 @@ use etl_postgres::types::TableId;
 use std::collections::HashSet;
 use tracing::info;
 
-use crate::destination::Destination;
+use crate::destination::{ApplyAsyncResult, Destination};
 use crate::error::EtlResult;
 use crate::store::state::StateStore;
 use crate::types::{Event, TableRow};
@@ -55,39 +55,47 @@ where
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        let mut table_ids = HashSet::new();
-        for event in &events {
-            match event {
-                Event::Insert(event) => {
-                    table_ids.insert(event.table_id);
-                }
-                Event::Update(event) => {
-                    table_ids.insert(event.table_id);
-                }
-                Event::Delete(event) => {
-                    table_ids.insert(event.table_id);
-                }
-                Event::Relation(event) => {
-                    table_ids.insert(event.table_schema.id);
-                }
-                Event::Truncate(event) => {
-                    for table_id in &event.rel_ids {
-                        table_ids.insert(TableId::new(*table_id));
+    async fn write_events(&self, events: Vec<Event>, apply_result: ApplyAsyncResult<()>) {
+        let result = async {
+            let mut table_ids = HashSet::new();
+            for event in &events {
+                match event {
+                    Event::Insert(event) => {
+                        table_ids.insert(event.table_id);
                     }
+                    Event::Update(event) => {
+                        table_ids.insert(event.table_id);
+                    }
+                    Event::Delete(event) => {
+                        table_ids.insert(event.table_id);
+                    }
+                    Event::Relation(event) => {
+                        table_ids.insert(event.table_schema.id);
+                    }
+                    Event::Truncate(event) => {
+                        for table_id in &event.rel_ids {
+                            table_ids.insert(TableId::new(*table_id));
+                        }
+                    }
+                    Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
                 }
-                Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
             }
+
+            for table_id in table_ids {
+                self.state_store
+                    .store_table_mapping(
+                        table_id,
+                        format!("memory_destination_table_{}", table_id.0),
+                    )
+                    .await?;
+            }
+
+            info!(event_count = events.len(), "writing events");
+
+            Ok(())
         }
+        .await;
 
-        for table_id in table_ids {
-            self.state_store
-                .store_table_mapping(table_id, format!("memory_destination_table_{}", table_id.0))
-                .await?;
-        }
-
-        info!(event_count = events.len(), "writing events");
-
-        Ok(())
+        let _ = apply_result.send_result(result);
     }
 }

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::types::TableId;
-use futures::StreamExt;
+use futures::{StreamExt, stream::FuturesOrdered};
 use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
@@ -33,7 +33,9 @@ use crate::conversions::event::{
     parse_event_from_relation_message, parse_event_from_truncate_message,
     parse_event_from_update_message,
 };
-use crate::destination::Destination;
+use crate::destination::{
+    ApplyAsyncResult, CompletedApplyAsyncResult, Destination, PendingApplyAsyncResult,
+};
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
@@ -154,6 +156,21 @@ impl ApplyLoopAction {
     }
 }
 
+/// Maximum number of destination writes allowed to remain in flight.
+const MAX_IN_FLIGHT_APPLY_RESULTS: usize = 10;
+
+/// Represents the shutdown state of the apply loop.
+///
+/// Tracks the progress of a graceful shutdown, ensuring that PostgreSQL acknowledges
+/// our flush position before we terminate to prevent data duplication on restart.
+#[derive(Debug, Copy, Clone)]
+pub enum DeferredReason {
+    /// Shutdown was requested while a transaction is still being processed.
+    ActiveTransaction,
+    /// Shutdown was requested while destination write results are still in flight.
+    PendingApplyResults,
+}
+
 /// Represents the shutdown state of the apply loop.
 ///
 /// Tracks the progress of a graceful shutdown, ensuring that PostgreSQL acknowledges
@@ -162,9 +179,8 @@ impl ApplyLoopAction {
 pub enum ShutdownState {
     /// No shutdown requested, normal operation.
     NoShutdown,
-    /// Shutdown requested but deferred because we're mid-transaction.
-    /// Once the transaction commits, we'll send a status update and wait for acknowledgement.
-    Deferred,
+    /// Shutdown requested but deferred until a blocking condition clears.
+    Deferred(DeferredReason),
     /// Shutdown in progress, waiting for PostgreSQL to acknowledge our flush position.
     /// The loop will only process keepalive messages until one arrives with `wal_end >= acked_flush_lsn`.
     WaitingForPrimaryKeepAlive {
@@ -408,14 +424,18 @@ impl ApplyLoopState {
 
     /// Returns the effective flush LSN to report to PostgreSQL.
     ///
-    /// When idle (no active transaction and empty batch), returns the last received LSN since no
-    /// actual flushes occur. Otherwise, returns the last flush LSN from completed transactions.
+    /// When idle (no active transaction, empty batch, and no in-flight apply results), returns the
+    /// last received LSN since no actual flushes occur. Otherwise, returns the last flush LSN from
+    /// completed transactions.
     ///
     /// Note that when a transaction is now started, the last flush lsn will be used, and it might
     /// jump back compared to the last received lsn that we sent before, however this is fine since the
     /// status update logic guarantees monotonically increasing LSNs.
-    fn effective_flush_lsn(&self) -> PgLsn {
-        if !self.handling_transaction() && self.events_batch.is_empty() {
+    fn effective_flush_lsn(&self, has_in_flight_apply_results: bool) -> PgLsn {
+        if !has_in_flight_apply_results
+            && !self.handling_transaction()
+            && self.events_batch.is_empty()
+        {
             self.replication_progress.last_received_lsn
         } else {
             self.replication_progress.last_flush_lsn
@@ -472,6 +492,8 @@ pub struct ApplyLoop<S, D> {
     memory_monitor: MemoryMonitor,
     /// Cached dynamic batch budget used to decide flushes by bytes.
     cached_batch_budget: CachedBatchBudget,
+    /// Ordered destination write results waiting to be applied to replication progress.
+    in_flight_apply_results: FuturesOrdered<PendingApplyAsyncResult<()>>,
     /// Internal loop state.
     state: ApplyLoopState,
 }
@@ -524,10 +546,35 @@ where
             worker_context,
             memory_monitor,
             cached_batch_budget,
+            in_flight_apply_results: FuturesOrdered::new(),
             state,
         };
 
         apply_loop.run(replication_client, start_lsn).await
+    }
+
+    /// Returns `true` if the destination has pending ordered apply results.
+    fn has_in_flight_apply_results(&self) -> bool {
+        !self.in_flight_apply_results.is_empty()
+    }
+
+    /// Returns the effective flush LSN accounting for in-flight destination writes.
+    fn effective_flush_lsn(&self) -> PgLsn {
+        self.state
+            .effective_flush_lsn(self.has_in_flight_apply_results())
+    }
+
+    /// Returns `true` when the loop is allowed to read more WAL data or flush on the batch timer.
+    fn can_process_new_input(&self) -> bool {
+        if matches!(
+            self.state.shutdown_state,
+            ShutdownState::Deferred(DeferredReason::PendingApplyResults)
+                | ShutdownState::WaitingForPrimaryKeepAlive { .. }
+        ) {
+            return false;
+        }
+
+        self.in_flight_apply_results.len() < MAX_IN_FLIGHT_APPLY_RESULTS
     }
 
     /// Runs the main event processing loop.
@@ -570,6 +617,9 @@ where
 
                 continue;
             }
+
+            let can_process_new_input = self.can_process_new_input();
+            let has_in_flight_apply_results = self.has_in_flight_apply_results();
 
             tokio::select! {
                 biased;
@@ -614,10 +664,27 @@ where
                     }
                 }
 
-                // PRIORITY 3: Handle batch flush timer expiry.
+                // PRIORITY 3: Handle destination write results in send order.
+                // `FuturesOrdered` keeps later completions buffered until earlier writes resolve, so
+                // dropping this `next()` future due to another selected branch does not lose state.
+                maybe_apply_result = self.in_flight_apply_results.next(), if has_in_flight_apply_results => {
+                    let action = self
+                        .handle_apply_result(events_stream.as_mut(), maybe_apply_result)
+                        .await?;
+
+                    if let Some(result) = action.to_result() {
+                        if matches!(self.state.shutdown_state, ShutdownState::WaitingForPrimaryKeepAlive { .. }) {
+                            pending_result = Some(result);
+                        } else {
+                            return Ok(result);
+                        }
+                    }
+                }
+
+                // PRIORITY 4: Handle batch flush timer expiry.
                 // Ensures batches don't wait indefinitely when message rate is low. The timer
                 // is started when the first event enters the batch and reset after each flush.
-                _ = Self::wait_for_batch_deadline(&self.state) => {
+                _ = Self::wait_for_batch_deadline(&self.state), if can_process_new_input => {
                     info!(
                         worker_type = %self.worker_context.worker_type(),
                         batch_size = self.state.events_batch.len(),
@@ -635,11 +702,11 @@ where
                     }
                 }
 
-                // PRIORITY 4: Process incoming replication messages from PostgreSQL.
+                // PRIORITY 5: Process incoming replication messages from PostgreSQL.
                 // This is the main work of the apply loop - receiving WAL events and converting
                 // them to destination writes. Has lowest priority so shutdown and flush timer
                 // are always handled promptly.
-                maybe_message = events_stream.next() => {
+                maybe_message = events_stream.next(), if can_process_new_input => {
                     let action = self
                         .handle_stream_message(
                             events_stream.as_mut(),
@@ -659,6 +726,47 @@ where
                 }
             }
         }
+    }
+
+    /// Handles a completed destination write result.
+    async fn handle_apply_result(
+        &mut self,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        maybe_apply_result: Option<CompletedApplyAsyncResult<()>>,
+    ) -> EtlResult<ApplyLoopAction> {
+        let Some(apply_result) = maybe_apply_result else {
+            return Ok(ApplyLoopAction::Continue);
+        };
+
+        let (commit_end_lsn, result) = apply_result.into_parts();
+        result?;
+
+        let mut action = self
+            .process_syncing_tables_after_batch_flush(commit_end_lsn)
+            .await?;
+
+        if matches!(
+            self.state.shutdown_state,
+            ShutdownState::Deferred(DeferredReason::PendingApplyResults)
+        ) && !self.has_in_flight_apply_results()
+        {
+            info!(
+                worker_type = %self.worker_context.worker_type(),
+                "all in-flight apply results resolved, initiating graceful shutdown",
+            );
+
+            self.initiate_graceful_shutdown(events_stream.as_mut())
+                .await?;
+
+            return Ok(action);
+        }
+
+        if !self.has_in_flight_apply_results() {
+            let synchronize_action = self.process_syncing_tables_when_idle().await?;
+            action = action.merge(synchronize_action);
+        }
+
+        Ok(action)
     }
 
     /// Waits for the batch flush deadline if one is set.
@@ -730,8 +838,10 @@ where
 
     /// Handles a shutdown signal by transitioning to the appropriate shutdown state.
     ///
-    /// If outside a transaction, sends a status update and transitions to [`ShutdownState::WaitingForPrimaryKeepAlive`].
     /// If inside a transaction, defers shutdown until the transaction boundary.
+    /// If outside a transaction but destination writes are still in flight, waits for them
+    /// to resolve in order before sending the final PostgreSQL status update.
+    /// Otherwise, sends a status update and transitions to [`ShutdownState::WaitingForPrimaryKeepAlive`].
     ///
     /// The goal of the shutdown procedure is to reduce duplicates on restart as much as possible
     /// by ensuring the replication slot's confirmed LSN reflects the latest flushed data.
@@ -765,7 +875,18 @@ where
                 %worker_type,
                 "shutdown signal received during transaction/non-empty batch, deferring until transaction boundary",
             );
-            self.state.shutdown_state = ShutdownState::Deferred;
+            self.state.shutdown_state = ShutdownState::Deferred(DeferredReason::ActiveTransaction);
+
+            return Ok(());
+        }
+
+        if self.has_in_flight_apply_results() {
+            info!(
+                %worker_type,
+                "shutdown signal received with in-flight apply results, waiting for destination acknowledgements",
+            );
+            self.state.shutdown_state =
+                ShutdownState::Deferred(DeferredReason::PendingApplyResults);
 
             return Ok(());
         }
@@ -788,7 +909,7 @@ where
     ) -> EtlResult<()> {
         // Use effective flush LSN to report last received LSN when idle, since
         // last flush LSN only advances during actual flushes.
-        let flush_lsn = self.state.effective_flush_lsn();
+        let flush_lsn = self.effective_flush_lsn();
         events_stream
             .as_mut()
             .stream_mut()
@@ -924,7 +1045,8 @@ where
     /// Flushes the current batch of events to the destination.
     ///
     /// If we are in deferred shutdown and the batch ended with a commit (i.e., we're no longer
-    /// mid-transaction), this will initiate graceful shutdown.
+    /// mid-transaction), this will either wait for in-flight destination acknowledgements or
+    /// initiate graceful shutdown immediately if none are pending.
     async fn flush_batch(
         &mut self,
         events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -932,19 +1054,31 @@ where
         self.state.reset_batch_deadline();
 
         self.send_batch_to_destination().await?;
-        let action = self.process_syncing_tables_after_batch_flush().await?;
+        let action = ApplyLoopAction::Continue;
 
         // If we're in deferred shutdown and the batch ended with a commit (i.e., we're no longer
-        // mid-transaction), initiate graceful shutdown now.
-        if matches!(self.state.shutdown_state, ShutdownState::Deferred)
-            && !self.state.handling_transaction()
+        // mid-transaction), stop consuming new input and wait for in-flight results before sending
+        // the final PostgreSQL status update.
+        if matches!(
+            self.state.shutdown_state,
+            ShutdownState::Deferred(DeferredReason::ActiveTransaction)
+        ) && !self.state.handling_transaction()
         {
-            info!(
-                worker_type = %self.worker_context.worker_type(),
-                "deferred shutdown: batch flush completed transaction, initiating graceful shutdown",
-            );
+            if self.has_in_flight_apply_results() {
+                info!(
+                    worker_type = %self.worker_context.worker_type(),
+                    "deferred shutdown: batch flush completed transaction, waiting for destination acknowledgements",
+                );
+                self.state.shutdown_state =
+                    ShutdownState::Deferred(DeferredReason::PendingApplyResults);
+            } else {
+                info!(
+                    worker_type = %self.worker_context.worker_type(),
+                    "deferred shutdown: batch flush completed transaction, initiating graceful shutdown",
+                );
 
-            self.initiate_graceful_shutdown(events_stream).await?;
+                self.initiate_graceful_shutdown(events_stream).await?;
+            }
         }
 
         Ok(action)
@@ -955,6 +1089,8 @@ where
         if self.state.events_batch.is_empty() {
             return Ok(());
         }
+
+        let batch_end_lsn = self.state.last_commit_end_lsn.take();
 
         // We replace the existing vector with a new one and reset the accumulated batch bytes size.
         let events_batch = std::mem::take(&mut self.state.events_batch);
@@ -971,7 +1107,11 @@ where
 
         // TODO: in the future we want to investigate how to perform the writing asynchronously
         //  to avoid stalling the apply loop.
-        self.destination.write_events(events_batch).await?;
+        let (apply_result, pending_apply_result) = ApplyAsyncResult::new(batch_end_lsn);
+        self.destination
+            .write_events(events_batch, apply_result)
+            .await;
+        self.in_flight_apply_results.push_back(pending_apply_result);
 
         counter!(
             ETL_EVENTS_PROCESSED_TOTAL,
@@ -1041,7 +1181,7 @@ where
                         self.state.last_received_lsn(),
                         // Use effective flush LSN to report last received LSN when idle, since
                         // last flush LSN only advances during actual flushes.
-                        self.state.effective_flush_lsn(),
+                        self.effective_flush_lsn(),
                         message.reply() == 1,
                         StatusUpdateType::KeepAlive,
                     )
@@ -1171,11 +1311,14 @@ where
             .process_syncing_tables_after_commit_event(end_lsn)
             .await?;
 
-        // If shutdown was deferred (see [`ShutdownState::Deferred`]), we merge
+        // If shutdown was deferred because of an active transaction, we merge
         // [`ApplyLoopAction::Pause`] so the apply loop pauses after this commit. This allows
         // [`Self::flush_batch`] to perform the status update and wait for PostgreSQL
         // acknowledgement before shutting down.
-        if matches!(self.state.shutdown_state, ShutdownState::Deferred) {
+        if matches!(
+            self.state.shutdown_state,
+            ShutdownState::Deferred(DeferredReason::ActiveTransaction)
+        ) {
             action = action.merge(ApplyLoopAction::Pause);
         }
 
@@ -1444,10 +1587,11 @@ where
     /// Processes syncing tables after a batch has been flushed.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
-    async fn process_syncing_tables_after_batch_flush(&mut self) -> EtlResult<ApplyLoopAction> {
-        // Take the last commit end LSN, which is the highest LSN from any commit message in this
-        // batch. Batches can flush mid-transaction, so this may refer to the previous transaction.
-        let Some(last_commit_end_lsn) = self.state.last_commit_end_lsn.take() else {
+    async fn process_syncing_tables_after_batch_flush(
+        &mut self,
+        last_commit_end_lsn: Option<PgLsn>,
+    ) -> EtlResult<ApplyLoopAction> {
+        let Some(last_commit_end_lsn) = last_commit_end_lsn else {
             return Ok(ApplyLoopAction::Continue);
         };
 
@@ -1493,7 +1637,7 @@ where
         }
 
         // Use effective flush LSN to report last received LSN when idle.
-        let current_lsn = self.state.effective_flush_lsn();
+        let current_lsn = self.effective_flush_lsn();
 
         debug!(
             worker_type = %self.worker_context.worker_type(),

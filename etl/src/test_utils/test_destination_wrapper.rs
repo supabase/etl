@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, RwLock};
 
-use crate::destination::Destination;
+use crate::destination::{ApplyAsyncResult, Destination};
 use crate::error::EtlResult;
 use crate::test_utils::event::{check_all_events_count, check_events_count, deduplicate_events};
 use crate::test_utils::notify::TimedNotify;
@@ -289,13 +289,17 @@ where
         result
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events(&self, events: Vec<Event>, apply_result: ApplyAsyncResult<()>) {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
         };
 
-        let result = destination.write_events(events.clone()).await;
+        let (wrapped_apply_result, pending_result) = ApplyAsyncResult::new(None);
+        destination
+            .write_events(events.clone(), wrapped_apply_result)
+            .await;
+        let result = pending_result.await.into_result();
 
         {
             let mut inner = self.inner.write().await;
@@ -306,7 +310,7 @@ where
             inner.check_conditions().await;
         }
 
-        result
+        let _ = apply_result.send_result(result);
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
