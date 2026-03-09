@@ -5,7 +5,9 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, RwLock};
 
-use crate::destination::{ApplyAsyncResult, Destination};
+use std::time::Instant;
+
+use crate::destination::{BatchFlushMetrics, BatchFlushResult, Destination};
 use crate::error::EtlResult;
 use crate::test_utils::event::{check_all_events_count, check_events_count, deduplicate_events};
 use crate::test_utils::notify::TimedNotify;
@@ -289,15 +291,19 @@ where
         result
     }
 
-    async fn write_events(&self, events: Vec<Event>, apply_result: ApplyAsyncResult<()>) {
+    async fn write_events(&self, events: Vec<Event>, flush_result: BatchFlushResult<()>) {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
         };
 
-        let (wrapped_apply_result, pending_result) = ApplyAsyncResult::new(None);
+        let metrics = BatchFlushMetrics {
+            events_count: events.len(),
+            dispatched_at: Instant::now(),
+        };
+        let (wrapped_flush_result, pending_result) = BatchFlushResult::new(None, metrics);
         destination
-            .write_events(events.clone(), wrapped_apply_result)
+            .write_events(events.clone(), wrapped_flush_result)
             .await;
         let result = pending_result.await.into_result();
 
@@ -310,7 +316,7 @@ where
             inner.check_conditions().await;
         }
 
-        let _ = apply_result.send_result(result);
+        let _ = flush_result.send_result(result);
     }
 
     async fn shutdown(&self) -> EtlResult<()> {

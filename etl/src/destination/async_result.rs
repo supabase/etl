@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
@@ -9,24 +10,40 @@ use tokio_postgres::types::PgLsn;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 
-/// Sender half of an asynchronous apply result.
+/// Metrics captured at batch dispatch time and carried through to result processing.
+#[derive(Debug, Clone, Copy)]
+pub struct BatchFlushMetrics {
+    /// Number of events in the dispatched batch.
+    pub events_count: usize,
+    /// Instant at which the batch was handed off to the destination.
+    pub dispatched_at: Instant,
+}
+
+/// Sender half of an asynchronous batch flush result.
 ///
 /// This handle is passed to [`crate::destination::Destination::write_events`] so
 /// destinations can report the final outcome of a flushed event batch without
 /// coupling apply-loop progress to the method's return value.
 #[derive(Debug)]
-pub struct ApplyAsyncResult<T> {
+pub struct BatchFlushResult<T> {
     tx: Option<oneshot::Sender<EtlResult<T>>>,
 }
 
-impl<T> ApplyAsyncResult<T> {
-    /// Creates a new apply result channel and its pending counterpart.
-    pub fn new(commit_end_lsn: Option<PgLsn>) -> (Self, PendingApplyAsyncResult<T>) {
+impl<T> BatchFlushResult<T> {
+    /// Creates a new batch flush result channel and its pending counterpart.
+    pub fn new(
+        commit_end_lsn: Option<PgLsn>,
+        metrics: BatchFlushMetrics,
+    ) -> (Self, PendingBatchFlushResult<T>) {
         let (tx, rx) = oneshot::channel();
 
         (
             Self { tx: Some(tx) },
-            PendingApplyAsyncResult { commit_end_lsn, rx },
+            PendingBatchFlushResult {
+                commit_end_lsn,
+                metrics,
+                rx,
+            },
         )
     }
 
@@ -44,7 +61,7 @@ impl<T> ApplyAsyncResult<T> {
         match self.send_result(Ok(value)) {
             Ok(()) => Ok(()),
             Err(Ok(value)) => Err(value),
-            Err(Err(_)) => unreachable!("successful apply results cannot return errors"),
+            Err(Err(_)) => unreachable!("successful batch flush results cannot return errors"),
         }
     }
 
@@ -53,12 +70,12 @@ impl<T> ApplyAsyncResult<T> {
         match self.send_result(Err(error)) {
             Ok(()) => Ok(()),
             Err(Err(error)) => Err(error),
-            Err(Ok(_)) => unreachable!("failed apply results cannot return success values"),
+            Err(Ok(_)) => unreachable!("failed batch flush results cannot return success values"),
         }
     }
 }
 
-impl<T> Drop for ApplyAsyncResult<T> {
+impl<T> Drop for BatchFlushResult<T> {
     fn drop(&mut self) {
         let Some(tx) = self.tx.take() else {
             return;
@@ -66,44 +83,56 @@ impl<T> Drop for ApplyAsyncResult<T> {
 
         let _ = tx.send(Err(etl_error!(
             ErrorKind::DestinationError,
-            "apply async result dropped without sending"
+            "batch flush result dropped without sending"
         )));
     }
 }
 
 pin_project! {
-    /// Receiver half of an asynchronous apply result.
+    /// Receiver half of an asynchronous batch flush result.
     ///
     /// The apply loop stores these in a [`futures::stream::FuturesOrdered`] so
     /// destination acknowledgements are processed in the same order batches were
     /// written, even if the destination completes them out of order.
-    #[must_use = "pending apply results do nothing unless polled"]
+    #[must_use = "pending batch flush results do nothing unless polled"]
     #[derive(Debug)]
-    pub struct PendingApplyAsyncResult<T> {
+    pub struct PendingBatchFlushResult<T> {
         commit_end_lsn: Option<PgLsn>,
+        metrics: BatchFlushMetrics,
         #[pin]
         rx: oneshot::Receiver<EtlResult<T>>,
     }
 }
 
-impl<T> PendingApplyAsyncResult<T> {
+impl<T> PendingBatchFlushResult<T> {
     /// Returns the commit end LSN associated with this result, if any.
     pub fn commit_end_lsn(&self) -> Option<PgLsn> {
         self.commit_end_lsn
     }
+
+    /// Returns the metrics captured when the batch was dispatched.
+    pub fn metrics(&self) -> BatchFlushMetrics {
+        self.metrics
+    }
 }
 
-/// Completed asynchronous apply result returned by [`PendingApplyAsyncResult`].
+/// Completed batch flush result returned by [`PendingBatchFlushResult`].
 #[derive(Debug)]
-pub struct CompletedApplyAsyncResult<T> {
+pub struct CompletedBatchFlushResult<T> {
     commit_end_lsn: Option<PgLsn>,
+    metrics: BatchFlushMetrics,
     result: EtlResult<T>,
 }
 
-impl<T> CompletedApplyAsyncResult<T> {
+impl<T> CompletedBatchFlushResult<T> {
     /// Returns the commit end LSN associated with this result, if any.
     pub fn commit_end_lsn(&self) -> Option<PgLsn> {
         self.commit_end_lsn
+    }
+
+    /// Returns the metrics captured when the batch was dispatched.
+    pub fn metrics(&self) -> BatchFlushMetrics {
+        self.metrics
     }
 
     /// Returns the final result.
@@ -111,28 +140,30 @@ impl<T> CompletedApplyAsyncResult<T> {
         self.result
     }
 
-    /// Returns the LSN and final result.
-    pub fn into_parts(self) -> (Option<PgLsn>, EtlResult<T>) {
-        (self.commit_end_lsn, self.result)
+    /// Returns the LSN, metrics, and final result.
+    pub fn into_parts(self) -> (Option<PgLsn>, BatchFlushMetrics, EtlResult<T>) {
+        (self.commit_end_lsn, self.metrics, self.result)
     }
 }
 
-impl<T> Future for PendingApplyAsyncResult<T> {
-    type Output = CompletedApplyAsyncResult<T>;
+impl<T> Future for PendingBatchFlushResult<T> {
+    type Output = CompletedBatchFlushResult<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
 
         match this.rx.poll(cx) {
-            Poll::Ready(Ok(result)) => Poll::Ready(CompletedApplyAsyncResult {
+            Poll::Ready(Ok(result)) => Poll::Ready(CompletedBatchFlushResult {
                 commit_end_lsn: *this.commit_end_lsn,
+                metrics: *this.metrics,
                 result,
             }),
-            Poll::Ready(Err(_)) => Poll::Ready(CompletedApplyAsyncResult {
+            Poll::Ready(Err(_)) => Poll::Ready(CompletedBatchFlushResult {
                 commit_end_lsn: *this.commit_end_lsn,
+                metrics: *this.metrics,
                 result: Err(etl_error!(
                     ErrorKind::DestinationError,
-                    "apply async result channel closed before sending"
+                    "batch flush result channel closed before sending"
                 )),
             }),
             Poll::Pending => Poll::Pending,
@@ -145,10 +176,14 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn apply_async_result_round_trips_success() {
-        let (apply_result, pending_result) = ApplyAsyncResult::new(Some(PgLsn::from(42)));
+    async fn batch_flush_result_round_trips_success() {
+        let metrics = BatchFlushMetrics {
+            events_count: 1,
+            dispatched_at: Instant::now(),
+        };
+        let (flush_result, pending_result) = BatchFlushResult::new(Some(PgLsn::from(42)), metrics);
 
-        apply_result.send_ok(7_u64).unwrap();
+        flush_result.send_ok(7_u64).unwrap();
 
         let completed = pending_result.await;
         let (commit_end_lsn, result) = completed.into_parts();
@@ -158,15 +193,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_apply_async_result_surfaces_error() {
-        let (apply_result, pending_result) = ApplyAsyncResult::<()>::new(None);
-        drop(apply_result);
+    async fn dropping_batch_flush_result_surfaces_error() {
+        let metrics = BatchFlushMetrics {
+            events_count: 0,
+            dispatched_at: Instant::now(),
+        };
+        let (flush_result, pending_result) = BatchFlushResult::<()>::new(None, metrics);
+        drop(flush_result);
 
         let err = pending_result.await.into_result().unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationError);
         assert_eq!(
             err.description(),
-            Some("apply async result dropped without sending")
+            Some("batch flush result dropped without sending")
         );
     }
 }

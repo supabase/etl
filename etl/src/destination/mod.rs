@@ -6,5 +6,7 @@
 mod async_result;
 mod base;
 
-pub use async_result::{ApplyAsyncResult, CompletedApplyAsyncResult, PendingApplyAsyncResult};
+pub use async_result::{
+    BatchFlushMetrics, BatchFlushResult, CompletedBatchFlushResult, PendingBatchFlushResult,
+};
 pub use base::Destination;

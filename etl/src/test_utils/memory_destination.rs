@@ -2,7 +2,7 @@ use etl_postgres::types::TableId;
 use std::collections::HashSet;
 use tracing::info;
 
-use crate::destination::{ApplyAsyncResult, Destination};
+use crate::destination::{BatchFlushResult, Destination};
 use crate::error::EtlResult;
 use crate::store::state::StateStore;
 use crate::types::{Event, TableRow};
@@ -55,7 +55,7 @@ where
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>, apply_result: ApplyAsyncResult<()>) {
+    async fn write_events(&self, events: Vec<Event>, flush_result: BatchFlushResult<()>) {
         let result = async {
             let mut table_ids = HashSet::new();
             for event in &events {
@@ -96,6 +96,6 @@ where
         }
         .await;
 
-        let _ = apply_result.send_result(result);
+        let _ = flush_result.send_result(result);
     }
 }

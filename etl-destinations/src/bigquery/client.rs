@@ -768,7 +768,7 @@ impl BigQueryClient {
             return Ok((0, 0));
         }
 
-        // Record batch sizes
+        // Record batch sizes.
         for batch in &table_batches {
             histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE, "pipeline_id" => pipeline_id.to_string())
                 .record(batch.rows().len() as f64);

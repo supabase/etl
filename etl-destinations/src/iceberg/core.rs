@@ -8,7 +8,7 @@ use std::{
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
-use etl::destination::{ApplyAsyncResult, Destination};
+use etl::destination::{BatchFlushResult, Destination};
 use etl::error::{ErrorKind, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
@@ -585,9 +585,9 @@ where
     /// Handles insert, update, delete, and truncate events by converting
     /// them to appropriate Iceberg operations. Events are batched by table
     /// and processed concurrently for optimal performance.
-    async fn write_events(&self, events: Vec<Event>, apply_result: ApplyAsyncResult<()>) {
+    async fn write_events(&self, events: Vec<Event>, flush_result: BatchFlushResult<()>) {
         let result = self.write_events(events).await;
-        let _ = apply_result.send_result(result);
+        let _ = flush_result.send_result(result);
     }
 }
 

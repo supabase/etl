@@ -1,7 +1,7 @@
 use etl_postgres::types::TableId;
 use std::future::Future;
 
-use crate::destination::ApplyAsyncResult;
+use crate::destination::BatchFlushResult;
 use crate::error::EtlResult;
 use crate::types::{Event, TableRow};
 
@@ -62,7 +62,7 @@ pub trait Destination {
     /// Events include inserts, updates, deletes, and transaction boundaries. The
     /// destination should process events in order, this is required to maintain data consistency.
     ///
-    /// Implementations must report the final outcome by sending it through `apply_result`.
+    /// Implementations must report the final outcome by sending it through `flush_result`.
     /// This decouples durable progress tracking from the method return path so callers can
     /// wait on ordered completion separately from write dispatch.
     ///
@@ -71,6 +71,6 @@ pub trait Destination {
     fn write_events(
         &self,
         events: Vec<Event>,
-        apply_result: ApplyAsyncResult<()>,
+        flush_result: BatchFlushResult<()>,
     ) -> impl Future<Output = ()> + Send;
 }

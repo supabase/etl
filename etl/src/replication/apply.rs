@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::types::TableId;
-use futures::{StreamExt, stream::FuturesOrdered};
+use futures::StreamExt;
 use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
@@ -34,7 +34,8 @@ use crate::conversions::event::{
     parse_event_from_update_message,
 };
 use crate::destination::{
-    ApplyAsyncResult, CompletedApplyAsyncResult, Destination, PendingApplyAsyncResult,
+    BatchFlushMetrics, BatchFlushResult, CompletedBatchFlushResult, Destination,
+    PendingBatchFlushResult,
 };
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
@@ -156,9 +157,6 @@ impl ApplyLoopAction {
     }
 }
 
-/// Maximum number of destination writes allowed to remain in flight.
-const MAX_IN_FLIGHT_APPLY_RESULTS: usize = 10;
-
 /// Represents the shutdown state of the apply loop.
 ///
 /// Tracks the progress of a graceful shutdown, ensuring that PostgreSQL acknowledges
@@ -167,8 +165,8 @@ const MAX_IN_FLIGHT_APPLY_RESULTS: usize = 10;
 pub enum DeferredReason {
     /// Shutdown was requested while a transaction is still being processed.
     ActiveTransaction,
-    /// Shutdown was requested while destination write results are still in flight.
-    PendingApplyResults,
+    /// Shutdown was requested while destination batch flush result is still pending.
+    PendingFlushResult,
 }
 
 /// Represents the shutdown state of the apply loop.
@@ -193,6 +191,16 @@ impl ShutdownState {
     /// Returns `true` if a shutdown has been requested (either deferred or waiting).
     pub fn is_shutdown_requested(&self) -> bool {
         !matches!(self, Self::NoShutdown)
+    }
+
+    /// Returns `true` if a shutdown was deferred because of an active transaction.
+    pub fn active_transaction_deferred(&self) -> bool {
+        matches!(self, Self::Deferred(DeferredReason::ActiveTransaction))
+    }
+
+    /// Returns `true` if a shutdown was deferred because of a pending flush result.
+    pub fn pending_flush_result_deferred(&self) -> bool {
+        matches!(self, Self::Deferred(DeferredReason::PendingFlushResult))
     }
 }
 
@@ -364,6 +372,12 @@ struct ApplyLoopState {
     batch_flush_deadline: Option<Instant>,
     /// The maximum duration to wait before forcibly flushing a batch.
     max_batch_fill_duration: Duration,
+    /// Destination write result waiting to be applied to replication progress.
+    pending_flush_result: Option<PendingBatchFlushResult<()>>,
+    /// Set to `true` when a batch flush is ready but cannot proceed because a flush is already
+    /// in flight. The flush is deferred until the in-flight result resolves, at which point the
+    /// loop immediately dispatches the accumulated batch.
+    flush_paused: bool,
 }
 
 impl ApplyLoopState {
@@ -381,7 +395,27 @@ impl ApplyLoopState {
             shutdown_state: ShutdownState::NoShutdown,
             batch_flush_deadline: None,
             max_batch_fill_duration,
+            pending_flush_result: None,
+            flush_paused: false,
         }
+    }
+
+    /// Adds an event to the batch.
+    fn add_event_to_batch(&mut self, event: Event) {
+        // We track the current number of bytes in the batch.
+        self.events_batch_bytes = self.events_batch_bytes.saturating_add(event.size_hint());
+
+        // We add the element to the pending batch.
+        self.events_batch.push(event);
+    }
+
+    /// Takes the events batch for further processing. Replacing it with a new empty batch.
+    fn take_events_batch(&mut self) -> (Vec<Event>, usize) {
+        let events_batch = std::mem::take(&mut self.events_batch);
+        let events_batch_bytes = self.events_batch_bytes;
+        self.events_batch_bytes = 0;
+
+        (events_batch, events_batch_bytes)
     }
 
     /// Starts the batch flush timer if not already running.
@@ -431,8 +465,8 @@ impl ApplyLoopState {
     /// Note that when a transaction is now started, the last flush lsn will be used, and it might
     /// jump back compared to the last received lsn that we sent before, however this is fine since the
     /// status update logic guarantees monotonically increasing LSNs.
-    fn effective_flush_lsn(&self, has_in_flight_apply_results: bool) -> PgLsn {
-        if !has_in_flight_apply_results
+    fn effective_flush_lsn(&self) -> PgLsn {
+        if self.pending_flush_result.is_none()
             && !self.handling_transaction()
             && self.events_batch.is_empty()
         {
@@ -469,6 +503,11 @@ impl ApplyLoopState {
 
         tx_ordinal
     }
+
+    /// Returns `true` if there is a pending flush.
+    fn has_pending_flush(&self) -> bool {
+        self.pending_flush_result.is_some()
+    }
 }
 
 /// Main apply loop implementation that processes replication events.
@@ -492,8 +531,6 @@ pub struct ApplyLoop<S, D> {
     memory_monitor: MemoryMonitor,
     /// Cached dynamic batch budget used to decide flushes by bytes.
     cached_batch_budget: CachedBatchBudget,
-    /// Ordered destination write results waiting to be applied to replication progress.
-    in_flight_apply_results: FuturesOrdered<PendingApplyAsyncResult<()>>,
     /// Internal loop state.
     state: ApplyLoopState,
 }
@@ -546,35 +583,10 @@ where
             worker_context,
             memory_monitor,
             cached_batch_budget,
-            in_flight_apply_results: FuturesOrdered::new(),
             state,
         };
 
         apply_loop.run(replication_client, start_lsn).await
-    }
-
-    /// Returns `true` if the destination has pending ordered apply results.
-    fn has_in_flight_apply_results(&self) -> bool {
-        !self.in_flight_apply_results.is_empty()
-    }
-
-    /// Returns the effective flush LSN accounting for in-flight destination writes.
-    fn effective_flush_lsn(&self) -> PgLsn {
-        self.state
-            .effective_flush_lsn(self.has_in_flight_apply_results())
-    }
-
-    /// Returns `true` when the loop is allowed to read more WAL data or flush on the batch timer.
-    fn can_process_new_input(&self) -> bool {
-        if matches!(
-            self.state.shutdown_state,
-            ShutdownState::Deferred(DeferredReason::PendingApplyResults)
-                | ShutdownState::WaitingForPrimaryKeepAlive { .. }
-        ) {
-            return false;
-        }
-
-        self.in_flight_apply_results.len() < MAX_IN_FLIGHT_APPLY_RESULTS
     }
 
     /// Runs the main event processing loop.
@@ -617,9 +629,6 @@ where
 
                 continue;
             }
-
-            let can_process_new_input = self.can_process_new_input();
-            let has_in_flight_apply_results = self.has_in_flight_apply_results();
 
             tokio::select! {
                 biased;
@@ -664,12 +673,14 @@ where
                     }
                 }
 
-                // PRIORITY 3: Handle destination write results in send order.
-                // `FuturesOrdered` keeps later completions buffered until earlier writes resolve, so
-                // dropping this `next()` future due to another selected branch does not lose state.
-                maybe_apply_result = self.in_flight_apply_results.next(), if has_in_flight_apply_results => {
+                // PRIORITY 3: Handle the pending destination write result.
+                // This branch polls the stored future by mutable reference, so if another branch wins
+                // the select first we keep the pending result in place for the next iteration.
+                // After resolving, immediately dispatches the deferred flush if one was requested
+                // while the previous batch was in flight.
+                apply_result = Self::wait_for_batch_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
                     let action = self
-                        .handle_apply_result(events_stream.as_mut(), maybe_apply_result)
+                        .handle_batch_flush_result(events_stream.as_mut(), apply_result)
                         .await?;
 
                     if let Some(result) = action.to_result() {
@@ -684,29 +695,23 @@ where
                 // PRIORITY 4: Handle batch flush timer expiry.
                 // Ensures batches don't wait indefinitely when message rate is low. The timer
                 // is started when the first event enters the batch and reset after each flush.
-                _ = Self::wait_for_batch_deadline(&self.state), if can_process_new_input => {
+                _ = Self::wait_for_batch_deadline(self.state.batch_flush_deadline), if !self.state.flush_paused => {
                     info!(
                         worker_type = %self.worker_context.worker_type(),
                         batch_size = self.state.events_batch.len(),
                         "batch flush deadline reached, flushing batch",
                     );
 
-                    let action = self.flush_batch(events_stream.as_mut()).await?;
-                    if let Some(result) = action.to_result() {
-                        // If we're waiting for shutdown acknowledgement, store the result and continue.
-                        if matches!(self.state.shutdown_state, ShutdownState::WaitingForPrimaryKeepAlive { .. }) {
-                            pending_result = Some(result);
-                        } else {
-                            return Ok(result);
-                        }
-                    }
+                    self.flush_batch(events_stream.as_mut()).await?;
                 }
 
                 // PRIORITY 5: Process incoming replication messages from PostgreSQL.
                 // This is the main work of the apply loop - receiving WAL events and converting
                 // them to destination writes. Has lowest priority so shutdown and flush timer
-                // are always handled promptly.
-                maybe_message = events_stream.next(), if can_process_new_input => {
+                // are always handled promptly. Disabled when a flush is in flight or the batch
+                // is full and waiting to be flushed (flush_paused), so no further data
+                // is accumulated until the pending result resolves.
+                maybe_message = events_stream.next(), if !self.state.flush_paused => {
                     let action = self
                         .handle_stream_message(
                             events_stream.as_mut(),
@@ -716,7 +721,6 @@ where
                         .await?;
 
                     if let Some(result) = action.to_result() {
-                        // If we're waiting for shutdown acknowledgement, store the result and continue.
                         if matches!(self.state.shutdown_state, ShutdownState::WaitingForPrimaryKeepAlive { .. }) {
                             pending_result = Some(result);
                         } else {
@@ -728,50 +732,9 @@ where
         }
     }
 
-    /// Handles a completed destination write result.
-    async fn handle_apply_result(
-        &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
-        maybe_apply_result: Option<CompletedApplyAsyncResult<()>>,
-    ) -> EtlResult<ApplyLoopAction> {
-        let Some(apply_result) = maybe_apply_result else {
-            return Ok(ApplyLoopAction::Continue);
-        };
-
-        let (commit_end_lsn, result) = apply_result.into_parts();
-        result?;
-
-        let mut action = self
-            .process_syncing_tables_after_batch_flush(commit_end_lsn)
-            .await?;
-
-        if matches!(
-            self.state.shutdown_state,
-            ShutdownState::Deferred(DeferredReason::PendingApplyResults)
-        ) && !self.has_in_flight_apply_results()
-        {
-            info!(
-                worker_type = %self.worker_context.worker_type(),
-                "all in-flight apply results resolved, initiating graceful shutdown",
-            );
-
-            self.initiate_graceful_shutdown(events_stream.as_mut())
-                .await?;
-
-            return Ok(action);
-        }
-
-        if !self.has_in_flight_apply_results() {
-            let synchronize_action = self.process_syncing_tables_when_idle().await?;
-            action = action.merge(synchronize_action);
-        }
-
-        Ok(action)
-    }
-
     /// Waits for the batch flush deadline if one is set.
-    async fn wait_for_batch_deadline(state: &ApplyLoopState) {
-        match state.batch_flush_deadline {
+    async fn wait_for_batch_deadline(deadline: Option<Instant>) {
+        match deadline {
             Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
             None => std::future::pending().await,
         }
@@ -880,13 +843,13 @@ where
             return Ok(());
         }
 
-        if self.has_in_flight_apply_results() {
+        if self.state.has_pending_flush() {
             info!(
                 %worker_type,
                 "shutdown signal received with in-flight apply results, waiting for destination acknowledgements",
             );
-            self.state.shutdown_state =
-                ShutdownState::Deferred(DeferredReason::PendingApplyResults);
+
+            self.state.shutdown_state = ShutdownState::Deferred(DeferredReason::PendingFlushResult);
 
             return Ok(());
         }
@@ -909,7 +872,7 @@ where
     ) -> EtlResult<()> {
         // Use effective flush LSN to report last received LSN when idle, since
         // last flush LSN only advances during actual flushes.
-        let flush_lsn = self.effective_flush_lsn();
+        let flush_lsn = self.state.effective_flush_lsn();
         events_stream
             .as_mut()
             .stream_mut()
@@ -926,6 +889,85 @@ where
         };
 
         Ok(())
+    }
+
+    /// Waits for the pending flush result, if any.
+    async fn wait_for_batch_flush_result(
+        pending_flush_result: Option<&mut PendingBatchFlushResult<()>>,
+    ) -> CompletedBatchFlushResult<()> {
+        match pending_flush_result {
+            Some(flush_result) => flush_result.await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Handles a completed batch flush result.
+    async fn handle_batch_flush_result(
+        &mut self,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        flush_result: CompletedBatchFlushResult<()>,
+    ) -> EtlResult<ApplyLoopAction> {
+        let (commit_end_lsn, metrics, result) = flush_result.into_parts();
+
+        // If there was an error in the flushing, we return it immediately.
+        result?;
+
+        counter!(
+            ETL_EVENTS_PROCESSED_TOTAL,
+            WORKER_TYPE_LABEL => "apply",
+            ACTION_LABEL => "table_streaming",
+            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
+            DESTINATION_LABEL => D::name(),
+        )
+        .increment(metrics.events_count as u64);
+
+        histogram!(
+            ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+            WORKER_TYPE_LABEL => "apply",
+            ACTION_LABEL => "table_streaming",
+            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
+            DESTINATION_LABEL => D::name(),
+        )
+        .record(metrics.dispatched_at.elapsed().as_secs_f64());
+
+        let mut action = ApplyLoopAction::Continue;
+
+        // We process the syncing tables with the last end lsn that the batch contains.
+        //
+        // Note that it could be that there is no end lsn for a specific batch, which could happen
+        // if we process a huge transaction, and we don't reach the commit before flushing. In that
+        // case, we don't process syncing tables, meaning that progress it not tracked, since it's
+        // not going to do anything because we can only track progress at commit boundaries.
+        if let Some(commit_end_lsn) = commit_end_lsn {
+            let synchronize_action = self
+                .process_syncing_tables_after_flush(commit_end_lsn)
+                .await?;
+            action = action.merge(synchronize_action);
+        }
+
+        // If the shutdown was deferred because of a pending flush, we have now flushed the pending
+        // batch, so we can initialize the graceful shutdown.
+        if self.state.shutdown_state.pending_flush_result_deferred() {
+            info!(
+                worker_type = %self.worker_context.worker_type(),
+                "pending apply result resolved, initiating graceful shutdown",
+            );
+
+            self.initiate_graceful_shutdown(events_stream.as_mut())
+                .await?;
+
+            return Ok(action);
+        }
+
+        let synchronize_action = self.process_syncing_tables_when_idle().await?;
+        action = action.merge(synchronize_action);
+
+        // We reset the apply loop state corresponding to the batch flush, so that we can resume processing
+        // as normal.
+        self.state.pending_flush_result = None;
+        self.state.flush_paused = false;
+
+        Ok(action)
     }
 
     /// Handles a message from the replication stream.
@@ -950,10 +992,6 @@ where
         let action = self
             .handle_replication_message_and_flush(events_stream.as_mut(), message)
             .await?;
-
-        if !self.state.events_batch.is_empty() {
-            self.state.start_batch_timer_if_needed();
-        }
 
         Ok(action)
     }
@@ -999,26 +1037,29 @@ where
         if let Some(event) = result.event
             && should_include_event
         {
-            self.state.events_batch_bytes = self
-                .state
-                .events_batch_bytes
-                .saturating_add(event.size_hint());
-            self.state.events_batch.push(event);
-            self.state.update_last_commit_end_lsn(result.end_lsn);
-        }
+            // We add the element to the pending batch.
+            self.state.add_event_to_batch(event);
 
-        let mut action = result.action;
+            // We update the last end lsn of the commit that we encountered, if any.
+            self.state.update_last_commit_end_lsn(result.end_lsn);
+
+            // We start the batch timer for the flushing. This timer is needed to control force
+            // flushing of a batch if its size is not reached in time.
+            self.state.start_batch_timer_if_needed();
+        }
 
         let batch_size_reached =
             self.state.events_batch_bytes >= self.cached_batch_budget.current_batch_size_bytes();
         let early_flush_requested = result.end_batch.is_some();
         let should_flush = batch_size_reached || early_flush_requested;
+
         if should_flush && !self.state.events_batch.is_empty() {
             let reason = if batch_size_reached {
                 "max batch bytes reached"
             } else {
                 "early flush requested"
             };
+
             info!(
                 worker_type = %self.worker_context.worker_type(),
                 batch_size = self.state.events_batch.len(),
@@ -1027,9 +1068,10 @@ where
                 "flushing batch",
             );
 
-            let flush_batch_action = self.flush_batch(events_stream.as_mut()).await?;
-            action = action.merge(flush_batch_action);
+            self.flush_batch(events_stream.as_mut()).await?;
         }
+
+        let mut action = result.action;
 
         if let Some(error) = result.table_replication_error {
             let mark_table_errored_action = self.mark_table_errored(error).await?;
@@ -1050,27 +1092,28 @@ where
     async fn flush_batch(
         &mut self,
         events_stream: Pin<&mut BackpressureStream<EventsStream>>,
-    ) -> EtlResult<ApplyLoopAction> {
+    ) -> EtlResult<()> {
+        // We reset the deadline for the batch, since we are now flushing a new batch. The new deadline
+        // will start as soon as we process a new element.
         self.state.reset_batch_deadline();
 
-        self.send_batch_to_destination().await?;
-        let action = ApplyLoopAction::Continue;
+        // We send the batch to the destination.
+        self.flush_batch_to_destination().await?;
 
         // If we're in deferred shutdown and the batch ended with a commit (i.e., we're no longer
         // mid-transaction), stop consuming new input and wait for in-flight results before sending
         // the final PostgreSQL status update.
-        if matches!(
-            self.state.shutdown_state,
-            ShutdownState::Deferred(DeferredReason::ActiveTransaction)
-        ) && !self.state.handling_transaction()
+        if self.state.shutdown_state.active_transaction_deferred()
+            && !self.state.handling_transaction()
         {
-            if self.has_in_flight_apply_results() {
+            if self.state.has_pending_flush() {
                 info!(
                     worker_type = %self.worker_context.worker_type(),
                     "deferred shutdown: batch flush completed transaction, waiting for destination acknowledgements",
                 );
+
                 self.state.shutdown_state =
-                    ShutdownState::Deferred(DeferredReason::PendingApplyResults);
+                    ShutdownState::Deferred(DeferredReason::PendingFlushResult);
             } else {
                 info!(
                     worker_type = %self.worker_context.worker_type(),
@@ -1081,21 +1124,28 @@ where
             }
         }
 
-        Ok(action)
+        Ok(())
     }
 
-    /// Sends the current batch of events to the destination and updates metrics.
-    async fn send_batch_to_destination(&mut self) -> EtlResult<()> {
+    /// Flushes the current batch of events to the destination.
+    ///
+    /// If a flush is already in flight, sets [`ApplyLoopState::flush_paused`] to `true` and
+    /// returns without dispatching, deferring the flush until the pending result resolves.
+    async fn flush_batch_to_destination(&mut self) -> EtlResult<()> {
         if self.state.events_batch.is_empty() {
             return Ok(());
         }
 
-        let batch_end_lsn = self.state.last_commit_end_lsn.take();
+        // If there is a pending flush, we don't want to flush the batch. In this case, we will wait
+        // for the result to be received from the destination.
+        if self.state.has_pending_flush() {
+            self.state.flush_paused = true;
+
+            return Ok(());
+        }
 
         // We replace the existing vector with a new one and reset the accumulated batch bytes size.
-        let events_batch = std::mem::take(&mut self.state.events_batch);
-        let events_batch_bytes = self.state.events_batch_bytes;
-        self.state.events_batch_bytes = 0;
+        let (events_batch, events_batch_bytes) = self.state.take_events_batch();
 
         let events_batch_size = events_batch.len();
         info!(
@@ -1103,34 +1153,21 @@ where
             events_batch_bytes, "sending batch to destination"
         );
 
-        let before_sending = Instant::now();
+        // We prepare the batch flush metrics that will be collected and used to emit metrics once
+        // the batch is flushed.
+        let metrics = BatchFlushMetrics {
+            events_count: events_batch_size,
+            dispatched_at: Instant::now(),
+        };
 
-        // TODO: in the future we want to investigate how to perform the writing asynchronously
-        //  to avoid stalling the apply loop.
-        let (apply_result, pending_apply_result) = ApplyAsyncResult::new(batch_end_lsn);
+        // We prepare the batch flush result struct which is used to allow destinations to asynchronously
+        // notify the apply loop when the result is ready.
+        let (flush_result, pending_flush_result) =
+            BatchFlushResult::new(self.state.last_commit_end_lsn.take(), metrics);
         self.destination
-            .write_events(events_batch, apply_result)
+            .write_events(events_batch, flush_result)
             .await;
-        self.in_flight_apply_results.push_back(pending_apply_result);
-
-        counter!(
-            ETL_EVENTS_PROCESSED_TOTAL,
-            WORKER_TYPE_LABEL => "apply",
-            ACTION_LABEL => "table_streaming",
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
-            DESTINATION_LABEL => D::name(),
-        )
-        .increment(events_batch_size as u64);
-
-        let send_duration_seconds = before_sending.elapsed().as_secs_f64();
-        histogram!(
-            ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-            WORKER_TYPE_LABEL => "apply",
-            ACTION_LABEL => "table_streaming",
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
-            DESTINATION_LABEL => D::name(),
-        )
-        .record(send_duration_seconds);
+        self.state.pending_flush_result = Some(pending_flush_result);
 
         Ok(())
     }
@@ -1181,7 +1218,7 @@ where
                         self.state.last_received_lsn(),
                         // Use effective flush LSN to report last received LSN when idle, since
                         // last flush LSN only advances during actual flushes.
-                        self.effective_flush_lsn(),
+                        self.state.effective_flush_lsn(),
                         message.reply() == 1,
                         StatusUpdateType::KeepAlive,
                     )
@@ -1315,10 +1352,7 @@ where
         // [`ApplyLoopAction::Pause`] so the apply loop pauses after this commit. This allows
         // [`Self::flush_batch`] to perform the status update and wait for PostgreSQL
         // acknowledgement before shutting down.
-        if matches!(
-            self.state.shutdown_state,
-            ShutdownState::Deferred(DeferredReason::ActiveTransaction)
-        ) {
+        if self.state.shutdown_state.active_transaction_deferred() {
             action = action.merge(ApplyLoopAction::Pause);
         }
 
@@ -1587,14 +1621,10 @@ where
     /// Processes syncing tables after a batch has been flushed.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
-    async fn process_syncing_tables_after_batch_flush(
+    async fn process_syncing_tables_after_flush(
         &mut self,
-        last_commit_end_lsn: Option<PgLsn>,
+        last_commit_end_lsn: PgLsn,
     ) -> EtlResult<ApplyLoopAction> {
-        let Some(last_commit_end_lsn) = last_commit_end_lsn else {
-            return Ok(ApplyLoopAction::Continue);
-        };
-
         // Update replication progress to notify PostgreSQL of durable flush. Only reports progress
         // up to the last completed transaction, which may cause duplicates on restart for partial
         // transactions. Destinations must handle at-least-once delivery semantics.
@@ -1611,10 +1641,10 @@ where
 
         match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
-                apply_worker::process_syncing_tables_after_batch_flush(ctx, current_lsn).await
+                apply_worker::process_syncing_tables_after_flush(ctx, current_lsn).await
             }
             WorkerContext::TableSync(ctx) => {
-                table_sync_worker::process_syncing_tables_after_batch_flush(ctx, current_lsn).await
+                table_sync_worker::process_syncing_tables_after_flush(ctx, current_lsn).await
             }
         }
     }
@@ -1637,7 +1667,7 @@ where
         }
 
         // Use effective flush LSN to report last received LSN when idle.
-        let current_lsn = self.effective_flush_lsn();
+        let current_lsn = self.state.effective_flush_lsn();
 
         debug!(
             worker_type = %self.worker_context.worker_type(),
@@ -1922,7 +1952,7 @@ mod apply_worker {
     /// Processes syncing tables after a batch flush.
     ///
     /// Handles `SyncDone → Ready` transitions and spawns new workers.
-    pub(super) async fn process_syncing_tables_after_batch_flush<S, D>(
+    pub(super) async fn process_syncing_tables_after_flush<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         current_lsn: PgLsn,
     ) -> EtlResult<ApplyLoopAction>
@@ -1931,7 +1961,7 @@ mod apply_worker {
         D: Destination + Clone + Send + Sync + 'static,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
-            let action = process_single_syncing_table_after_batch_flush(
+            let action = process_single_syncing_table_after_flush(
                 ctx,
                 table_id,
                 table_replication_phase,
@@ -1950,7 +1980,7 @@ mod apply_worker {
     /// Processes a single syncing table after batch flush.
     ///
     /// Handles `SyncDone → Ready` transitions and spawns new workers.
-    async fn process_single_syncing_table_after_batch_flush<S, D>(
+    async fn process_single_syncing_table_after_flush<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         table_id: TableId,
         table_replication_phase: TableReplicationPhase,
@@ -2395,7 +2425,7 @@ mod table_sync_worker {
     ///
     /// Validates whether catchup position has been reached.
     /// If so, transitions to SyncDone and returns Complete.
-    pub(super) async fn process_syncing_tables_after_batch_flush<S>(
+    pub(super) async fn process_syncing_tables_after_flush<S>(
         ctx: &mut TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
     ) -> EtlResult<ApplyLoopAction>
