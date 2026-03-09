@@ -91,9 +91,9 @@ impl<T> Drop for BatchFlushResult<T> {
 pin_project! {
     /// Receiver half of an asynchronous batch flush result.
     ///
-    /// The apply loop stores these in a [`futures::stream::FuturesOrdered`] so
-    /// destination acknowledgements are processed in the same order batches were
-    /// written, even if the destination completes them out of order.
+    /// Stored by the apply loop while the destination processes the batch. Resolves
+    /// once the destination calls [`BatchFlushResult::send_result`], [`BatchFlushResult::send_ok`],
+    /// or [`BatchFlushResult::send_err`], or drops the sender.
     #[must_use = "pending batch flush results do nothing unless polled"]
     #[derive(Debug)]
     pub struct PendingBatchFlushResult<T> {
