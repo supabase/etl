@@ -2,25 +2,20 @@
 
 DuckLake Example
 
-This example demonstrates how to use the pipeline to replicate data from
-Postgres to a DuckLake data lake using change data capture (CDC).
+This example demonstrates how to use the pipeline to stream
+data from Postgres to DuckLake using change data capture (CDC).
 
 DuckLake separates storage into two components:
-  - Catalog: metadata (tables, snapshots, stats) stored in a PostgreSQL database
-  - Data:    row data written as Parquet files to a local directory or cloud storage
-
-Each batch of rows is committed as a single Parquet snapshot so the lake stays
-consistent and queryable at all times.
+- Catalog: metadata stored in a PostgreSQL database
+- Data: row data written as Parquet files (local directory or S3/GCS/Azure)
 
 Prerequisites:
 1. Postgres server with logical replication enabled (wal_level = logical)
-2. A publication created in Postgres:
-     CREATE PUBLICATION my_pub FOR ALL TABLES;
-3. A separate PostgreSQL database to act as the DuckLake catalog:
-     CREATE DATABASE ducklake_catalog;
-4. A local data directory or an S3/GCS/Azure bucket for Parquet files
+2. A publication created in Postgres (CREATE PUBLICATION my_pub FOR ALL TABLES;)
+3. A PostgreSQL database for the DuckLake catalog
+4. A local directory or object-storage bucket for Parquet files
 
-Usage (local data):
+Usage:
     cargo run --bin ducklake -p etl-examples -- \
         --db-host localhost \
         --db-port 5432 \
@@ -28,28 +23,11 @@ Usage (local data):
         --db-username postgres \
         --db-password mypassword \
         --catalog-url postgres://user:pass@localhost:5432/ducklake_catalog \
-        --data-path ./lake_data/ \
+        --data-path file:///absolute/path/to/lake_data \
         --publication my_pub
 
-Usage (S3-compatible storage):
-    cargo run --bin ducklake -p etl-examples -- \
-        --db-host localhost \
-        --db-port 5432 \
-        --db-name mydb \
-        --db-username postgres \
-        --db-password mypassword \
-        --catalog-url postgres://user:pass@localhost:5432/ducklake_catalog \
-        --data-path s3://my-bucket/lake/ \
-        --publication my_pub \
-        --s3-access-key-id AKIAIOSFODNN7EXAMPLE \
-        --s3-secret-access-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-        --s3-region us-east-1
-
-The pipeline will automatically:
-- Create DuckLake tables matching your Postgres schema
-- Perform an initial bulk copy of every table in the publication
-- Stream real-time INSERT / UPDATE / DELETE changes via logical replication
-- Name tables by combining schema and table: public.orders → public_orders
+Plain local paths such as `./lake_data/` are also accepted and normalized to
+absolute `file://` URLs before the destination is created.
 
 */
 
@@ -62,12 +40,14 @@ use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
 use etl_destinations::ducklake::{DuckLakeDestination, S3Config};
 use std::error::Error;
+use std::path::PathBuf;
 use std::sync::Once;
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use url::Url;
 
-/// Ensures the crypto provider is only initialized once.
+/// Ensures crypto provider is only initialized once.
 static INIT_CRYPTO: Once = Once::new();
 
 /// Installs the default cryptographic provider for rustls.
@@ -79,14 +59,11 @@ fn install_crypto_provider() {
     });
 }
 
-/// Replicates a Postgres publication into a DuckLake data lake.
 #[derive(Debug, Parser)]
 #[command(name = "ducklake", version, about, arg_required_else_help = true)]
 struct AppArgs {
-    /// Postgres connection parameters
     #[clap(flatten)]
     db_args: DbArgs,
-    /// DuckLake destination parameters
     #[clap(flatten)]
     ducklake_args: DuckLakeArgs,
     /// Postgres publication name (must be created beforehand with CREATE PUBLICATION)
@@ -94,13 +71,12 @@ struct AppArgs {
     publication: String,
 }
 
-/// Postgres database connection configuration
 #[derive(Debug, Args)]
 struct DbArgs {
     /// Host on which Postgres is running (e.g., localhost or IP address)
     #[arg(long)]
     db_host: String,
-    /// Port on which Postgres is running
+    /// Port on which Postgres is running (default: 5432)
     #[arg(long, default_value = "5432")]
     db_port: u16,
     /// Postgres database name to connect to
@@ -114,17 +90,18 @@ struct DbArgs {
     db_password: Option<String>,
 }
 
-/// DuckLake destination configuration
 #[derive(Debug, Args)]
 struct DuckLakeArgs {
-    /// PostgreSQL connection string for the DuckLake catalog database
-    /// (e.g., postgres://user:pass@localhost:5432/ducklake_catalog)
-    #[arg(long)]
-    catalog_url: String,
-    /// Where to store Parquet files: a local directory (./lake_data/) or a
-    /// cloud URI (s3://bucket/prefix/, gs://bucket/prefix/, az://container/prefix/)
-    #[arg(long)]
-    data_path: String,
+    /// DuckLake catalog URL (e.g., postgres://user:pass@host/db or file:///tmp/catalog.ducklake)
+    ///
+    /// Plain local paths are accepted and converted to absolute `file://` URLs.
+    #[arg(long, value_parser = parse_ducklake_url)]
+    catalog_url: Url,
+    /// Local directory or cloud URI for Parquet files (e.g., file:///tmp/lake_data or s3://bucket/)
+    ///
+    /// Plain local paths are accepted and converted to absolute `file://` URLs.
+    #[arg(long, value_parser = parse_ducklake_url)]
+    data_path: Url,
     /// DuckDB connection pool size
     #[arg(long, default_value = "4")]
     pool_size: u32,
@@ -134,47 +111,32 @@ struct DuckLakeArgs {
     /// Maximum number of concurrent table sync workers during initial copy
     #[arg(long, default_value = "4")]
     max_table_sync_workers: u16,
-    /// Postgres schema for DuckLake metadata tables (e.g., ducklake).
-    /// Uses the catalog's default schema when not set.
-    #[arg(long)]
-    metadata_schema: Option<String>,
-    /// S3 access key ID (required for private S3-compatible buckets)
-    #[arg(long)]
+
+    // S3 / S3-compatible storage credentials (required when --data-path is an s3:// URI)
+    /// S3 access key ID
+    #[arg(long, requires = "s3_secret_access_key")]
     s3_access_key_id: Option<String>,
     /// S3 secret access key
-    #[arg(long)]
+    #[arg(long, requires = "s3_access_key_id")]
     s3_secret_access_key: Option<String>,
-    /// S3 region (e.g., us-east-1)
+    /// S3 region (default: us-east-1)
     #[arg(long, default_value = "us-east-1")]
     s3_region: String,
-    /// Custom S3 endpoint, e.g. 127.0.0.1:5000/s3 for Supabase Storage
+    /// S3-compatible endpoint, e.g. `127.0.0.1:5000/s3` for Supabase Storage
     #[arg(long)]
     s3_endpoint: Option<String>,
-    /// S3 URL style: path (MinIO/Supabase) or vhost (AWS S3)
+    /// S3 URL style: `path` (for MinIO / Supabase Storage) or `vhost` (AWS default)
     #[arg(long, default_value = "path")]
     s3_url_style: String,
-    /// Enable TLS for the S3 connection
+    /// Use SSL/TLS for the S3 connection (disable for local S3-compatible services)
     #[arg(long, default_value = "false")]
     s3_use_ssl: bool,
+
+    /// Postgres schema used for DuckLake metadata tables (e.g. `ducklake`)
+    #[arg(long)]
+    metadata_schema: Option<String>,
 }
 
-impl DuckLakeArgs {
-    /// Builds an [`S3Config`] if S3 credentials were provided.
-    fn s3_config(&self) -> Option<S3Config> {
-        let access_key_id = self.s3_access_key_id.clone()?;
-        let secret_access_key = self.s3_secret_access_key.clone().unwrap_or_default();
-        Some(S3Config {
-            access_key_id,
-            secret_access_key,
-            region: self.s3_region.clone(),
-            endpoint: self.s3_endpoint.clone(),
-            url_style: self.s3_url_style.clone(),
-            use_ssl: self.s3_use_ssl,
-        })
-    }
-}
-
-/// Entry point — handles error reporting and process exit.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     if let Err(e) = main_impl().await {
@@ -185,7 +147,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Initialize structured logging with configurable log levels via RUST_LOG.
 fn init_tracing() {
     tracing_subscriber::registry()
         .with(
@@ -204,7 +165,28 @@ fn set_log_level() {
     }
 }
 
-/// Main implementation — sets up and runs the ETL pipeline.
+fn parse_ducklake_url(value: &str) -> Result<Url, String> {
+    if value.contains("://") {
+        return Url::parse(value).map_err(|e| e.to_string());
+    }
+
+    if let Ok(url) = Url::parse(value) {
+        return Ok(url);
+    }
+
+    let path = PathBuf::from(value);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path)
+    };
+
+    Url::from_file_path(&path)
+        .map_err(|_| format!("failed to convert path `{}` to a file url", path.display()))
+}
+
 async fn main_impl() -> Result<(), Box<dyn Error>> {
     set_log_level();
     init_tracing();
@@ -225,8 +207,6 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         keepalive: TcpKeepaliveConfig::default(),
     };
 
-    // Use an in-memory store for tracking replication state.
-    // For persistent state across restarts, swap this for a PostgresStore.
     let store = MemoryStore::new();
 
     let pipeline_config = PipelineConfig {
@@ -237,7 +217,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
             max_fill_ms: args.ducklake_args.max_batch_fill_duration_ms,
             memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
         },
-        table_error_retry_delay_ms: 10_000,
+        table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.ducklake_args.max_table_sync_workers,
         memory_refresh_interval_ms: 100,
@@ -247,8 +227,16 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
     };
 
-    let s3_config = args.ducklake_args.s3_config();
-    let destination = DuckLakeDestination::new(
+    let s3_config = args.ducklake_args.s3_access_key_id.map(|key_id| S3Config {
+        access_key_id: key_id,
+        secret_access_key: args.ducklake_args.s3_secret_access_key.unwrap(),
+        region: args.ducklake_args.s3_region,
+        endpoint: args.ducklake_args.s3_endpoint,
+        url_style: args.ducklake_args.s3_url_style,
+        use_ssl: args.ducklake_args.s3_use_ssl,
+    });
+
+    let ducklake_destination = DuckLakeDestination::new(
         args.ducklake_args.catalog_url,
         args.ducklake_args.data_path,
         args.ducklake_args.pool_size,
@@ -257,32 +245,34 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         store.clone(),
     )?;
 
-    let mut pipeline = Pipeline::new(pipeline_config, store, destination);
+    let mut pipeline = Pipeline::new(pipeline_config, store, ducklake_destination);
 
-    info!("Starting DuckLake CDC pipeline — connecting to Postgres and initializing replication...");
+    info!(
+        "Starting DuckLake CDC pipeline - connecting to Postgres and initializing replication..."
+    );
 
     pipeline.start().await?;
 
-    info!("Pipeline started, data replication is now active. Press Ctrl+C to stop.");
+    info!("pipeline started, data replication is now active, press ctrl+c to stop");
 
     let shutdown_signal = async {
         signal::ctrl_c()
             .await
             .expect("Failed to install Ctrl+C handler");
-        info!("Received Ctrl+C signal, initiating graceful shutdown...");
+        info!("received ctrl+c signal, initiating graceful shutdown");
     };
 
     tokio::select! {
         result = pipeline.wait() => {
-            info!("Pipeline completed (this usually indicates an error condition).");
+            info!("pipeline completed normally (this usually indicates an error condition)");
             result?;
         }
         _ = shutdown_signal => {
-            info!("Gracefully shutting down pipeline and cleaning up resources.");
+            info!("gracefully shutting down pipeline and cleaning up resources");
         }
     }
 
-    info!("Pipeline stopped, all resources cleaned up.");
+    info!("pipeline stopped, all resources cleaned up");
 
     Ok(())
 }

@@ -1,22 +1,30 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{NaiveDate, NaiveTime};
 use duckdb::types::{TimeUnit, Value};
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlResult};
+use etl::etl_error;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{ArrayCell, Cell, Event, TableId, TableName, TableRow};
-use etl::etl_error;
+use parking_lot::Mutex;
 use r2d2::Pool;
-use tracing::{debug, info, warn};
+use rand::Rng;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
+use tracing::{debug, info, warn};
+use url::Url;
+
+use crate::ducklake::S3Config;
+use crate::ducklake::config::build_setup_sql;
 use crate::ducklake::schema::build_create_table_sql_ducklake;
 
 /// The DuckDB catalog alias used in every `lake.<table>` qualified name.
-const LAKE_CATALOG: &str = "lake";
-
+pub(super) const LAKE_CATALOG: &str = "lake";
 /// Delimiter used to join schema and table name in the DuckLake table name.
 const TABLE_NAME_DELIMITER: &str = "_";
 /// Escape string for underscores within schema/table names to prevent collisions.
@@ -58,158 +66,7 @@ impl r2d2::ManageConnection for DuckLakeConnectionManager {
     }
 }
 
-/// Converts a standard `postgres://` or `postgresql://` URI into the libpq
-/// key=value format that DuckLake's PostgreSQL catalog backend expects.
-///
-/// DuckLake does **not** accept URI-style connection strings — it only
-/// understands libpq key=value pairs (e.g. `host=localhost dbname=mydb`).
-/// Passing a URI causes DuckDB to treat the string as a file path, resulting
-/// in "Cannot open file" errors.
-///
-/// Non-postgres strings are returned unchanged.
-fn normalize_catalog_url(catalog_url: &str) -> String {
-    let rest = catalog_url
-        .strip_prefix("postgres://")
-        .or_else(|| catalog_url.strip_prefix("postgresql://"));
-
-    let Some(rest) = rest else {
-        return catalog_url.to_string();
-    };
-
-    // Split userinfo from host/path: "user:pass@host:port/dbname"
-    let (userinfo, host_path) = rest.split_once('@').unwrap_or(("", rest));
-    let (host_port, dbname_and_query) = host_path.split_once('/').unwrap_or((host_path, ""));
-    let (host, port) = host_port.split_once(':').unwrap_or((host_port, "5432"));
-    let (user, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
-
-    // Split dbname from query string: "mydb?sslmode=disable&connect_timeout=10"
-    let (dbname, query) = dbname_and_query.split_once('?').unwrap_or((dbname_and_query, ""));
-
-    let mut parts = Vec::new();
-    if !host.is_empty() {
-        parts.push(format!("host={host}"));
-    }
-    if !port.is_empty() && port != "5432" {
-        parts.push(format!("port={port}"));
-    }
-    if !dbname.is_empty() {
-        parts.push(format!("dbname={dbname}"));
-    }
-    if !user.is_empty() {
-        parts.push(format!("user={user}"));
-    }
-    if !password.is_empty() {
-        // Quote the password and escape any single quotes / backslashes inside it,
-        // as required by the libpq keyword=value format when values contain
-        // characters that could otherwise confuse the parser.
-        let escaped = password.replace('\\', "\\\\").replace('\'', "\\'");
-        parts.push(format!("password='{escaped}'"));
-    }
-    // Convert URL query params (key=value&...) to libpq key=value pairs.
-    for param in query.split('&').filter(|s| !s.is_empty()) {
-        parts.push(param.to_string());
-    }
-    // DuckLake PostgreSQL catalog prefix is "postgres:" (no slashes)
-    format!("postgres:{}", parts.join(" "))
-}
-
-/// S3-compatible storage credentials for DuckDB's httpfs extension.
-///
-/// Used when `data_path` points to an S3, GCS, or Azure URI. The `endpoint`
-/// field supports an optional path prefix (e.g. `localhost:5000/s3` for
-/// Supabase Storage or other S3-compatible services mounted at a sub-path).
-#[derive(Debug, Clone)]
-pub struct S3Config {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    /// AWS region or equivalent (e.g. `"us-east-1"`).
-    pub region: String,
-    /// Host, host:port, or host:port/path of the S3-compatible endpoint.
-    /// Defaults to AWS S3 if not set.
-    pub endpoint: Option<String>,
-    /// `"path"` (default for MinIO / Supabase Storage) or `"vhost"` (AWS S3 default).
-    pub url_style: String,
-    /// Whether to use HTTPS. Set to `false` for local S3-compatible services.
-    pub use_ssl: bool,
-}
-
-/// Builds the one-time setup SQL executed for each new pool connection.
-///
-/// - Always installs and loads the `ducklake` extension.
-/// - Installs the `postgres` extension when the catalog is PostgreSQL-backed
-///   (`postgres:` prefix after normalisation).
-/// - Installs `httpfs` and configures S3 credentials when the data path uses
-///   a cloud URI scheme (`s3://`, `gs://`, `az://`).
-fn build_setup_sql(catalog_url: &str, data_path: &str, s3: Option<&S3Config>, metadata_schema: Option<&str>) -> String {
-    let normalized = normalize_catalog_url(catalog_url);
-
-    let needs_postgres = normalized.starts_with("postgres:");
-    let needs_httpfs = data_path.starts_with("s3://")
-        || data_path.starts_with("gs://")
-        || data_path.starts_with("az://");
-
-    let mut sql = String::from("INSTALL ducklake; LOAD ducklake;");
-    if needs_postgres {
-        sql.push_str(" INSTALL postgres; LOAD postgres;");
-    }
-    if needs_httpfs {
-        sql.push_str(" INSTALL httpfs; LOAD httpfs;");
-        if let Some(s3) = s3 {
-            // Escape values for embedding in SQL string literals.
-            let key = s3.access_key_id.replace('\'', "''");
-            let secret = s3.secret_access_key.replace('\'', "''");
-            let region = s3.region.replace('\'', "''");
-            let url_style = s3.url_style.replace('\'', "''");
-            let use_ssl = if s3.use_ssl { "true" } else { "false" };
-
-            let endpoint_clause = match &s3.endpoint {
-                Some(ep) => format!(", ENDPOINT '{}'", ep.replace('\'', "''")),
-                None => String::new(),
-            };
-
-            sql.push_str(&format!(
-                " CREATE OR REPLACE SECRET ducklake_s3 (\
-                    TYPE S3, \
-                    KEY_ID '{key}', \
-                    SECRET '{secret}', \
-                    REGION '{region}'{endpoint_clause}, \
-                    URL_STYLE '{url_style}', \
-                    USE_SSL {use_ssl}\
-                );"
-            ));
-        }
-    }
-    // Escape single quotes for embedding in a SQL string literal ('' = literal ').
-    let sql_normalized = normalized.replace('\'', "''");
-    let sql_data_path = data_path.replace('\'', "''");
-
-    let metadata_schema_clause = match metadata_schema {
-        Some(schema) => format!(", METADATA_SCHEMA '{}'", schema.replace('\'', "''")),
-        None => String::new(),
-    };
-
-    sql.push_str(&format!(
-        " ATTACH 'ducklake:{sql_normalized}' AS {LAKE_CATALOG} (DATA_PATH '{sql_data_path}'{metadata_schema_clause});"
-    ));
-    sql
-}
-
 // ── destination ───────────────────────────────────────────────────────────────
-
-/// Converts a Postgres [`TableName`] to a DuckLake table name string.
-///
-/// Escapes underscores in schema and table name components by doubling them,
-/// then joins the two parts with a single `_`. This matches the convention
-/// used by other destinations in this crate.
-///
-/// # Example
-/// - `public.my_table` → `public_my__table`
-/// - `my_schema.orders` → `my__schema_orders`
-pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> DuckLakeTableName {
-    let escaped_schema = table_name.schema.replace(TABLE_NAME_DELIMITER, TABLE_NAME_ESCAPE);
-    let escaped_table = table_name.name.replace(TABLE_NAME_DELIMITER, TABLE_NAME_ESCAPE);
-    format!("{escaped_schema}{TABLE_NAME_DELIMITER}{escaped_table}")
-}
 
 /// A DuckLake destination that implements the ETL [`Destination`] trait.
 ///
@@ -223,21 +80,20 @@ pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> DuckLakeTabl
 #[derive(Clone)]
 pub struct DuckLakeDestination<S> {
     pool: Pool<DuckLakeConnectionManager>,
+    blocking_slots: Arc<Semaphore>,
     store: S,
     /// Cache of table names whose DDL has already been executed.
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
 }
 
-impl<S> DuckLakeDestination<S>
-where
-    S: StateStore + SchemaStore + Send + Sync,
-{
+impl<S> DuckLakeDestination<S> {
     /// Creates a new DuckLake destination.
     ///
-    /// - `catalog_url`: PostgreSQL connection string used as the DuckLake
-    ///   catalog (e.g. `postgres://user:pass@localhost:5432/mydb`).
-    /// - `data_path`: Where Parquet files are stored. Can be a local directory
-    ///   (`./lake_data/`) or a cloud URI (`s3://bucket/prefix/`,
+    /// - `catalog_url`: DuckLake catalog location. Use a PostgreSQL URL
+    ///   (`postgres://user:pass@localhost:5432/mydb`) or a local file URL
+    ///   (`file:///tmp/catalog.ducklake`).
+    /// - `data_path`: Where Parquet files are stored. Use a local file URL
+    ///   (`file:///tmp/lake_data`) or a cloud URL (`s3://bucket/prefix/`,
     ///   `gs://bucket/prefix/`, `az://container/prefix/`).
     /// - `pool_size`: Number of concurrent DuckDB connections. `4` is a
     ///   reasonable default; higher values allow more tables to be written in
@@ -247,49 +103,77 @@ where
     /// - `metadata_schema`: Optional Postgres schema for DuckLake metadata tables
     ///   (e.g. `"ducklake"`). Uses the catalog default schema when not set.
     pub fn new(
-        catalog_url: impl Into<String>,
-        data_path: impl Into<String>,
+        catalog_url: Url,
+        data_path: Url,
         pool_size: u32,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
         store: S,
     ) -> EtlResult<Self> {
-        let catalog_url = catalog_url.into();
-        let data_path = data_path.into();
+        let setup_sql = build_setup_sql(
+            &catalog_url,
+            &data_path,
+            s3.as_ref(),
+            metadata_schema.as_deref(),
+        )?;
 
-        let setup_sql = build_setup_sql(&catalog_url, &data_path, s3.as_ref(), metadata_schema.as_deref());
         let manager = DuckLakeConnectionManager {
             setup_sql: Arc::new(setup_sql),
         };
 
-        let pool = Pool::builder().max_size(pool_size).build(manager).map_err(|e| {
-            etl_error!(
-                ErrorKind::DestinationConnectionFailed,
-                "Failed to build DuckLake connection pool",
-                source: e
-            )
-        })?;
+        let pool = Pool::builder()
+            .max_size(pool_size)
+            .build(manager)
+            .map_err(|e| {
+                etl_error!(
+                    ErrorKind::DestinationConnectionFailed,
+                    "Failed to build DuckLake connection pool",
+                    source: e
+                )
+            })?;
 
         Ok(Self {
             pool,
+            blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
             store,
             created_tables: Arc::new(Mutex::new(HashSet::new())),
         })
     }
+}
 
+impl<S> Destination for DuckLakeDestination<S>
+where
+    S: StateStore + SchemaStore + Send + Sync,
+{
+    fn name() -> &'static str {
+        "ducklake"
+    }
+
+    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+        self.truncate_table_inner(table_id).await
+    }
+
+    async fn write_table_rows(
+        &self,
+        table_id: TableId,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        self.write_table_rows_inner(table_id, table_rows).await
+    }
+
+    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+        self.write_events_inner(events).await
+    }
+}
+
+impl<S> DuckLakeDestination<S>
+where
+    S: StateStore + SchemaStore + Send + Sync,
+{
     /// Deletes all rows from the destination table without dropping it.
     async fn truncate_table_inner(&self, table_id: TableId) -> EtlResult<()> {
         let table_name = self.ensure_table_exists(table_id).await?;
-        let pool = self.pool.clone();
-
-        tokio::task::spawn_blocking(move || -> EtlResult<()> {
-            let conn = pool.get().map_err(|e| {
-                etl_error!(
-                    ErrorKind::DestinationConnectionFailed,
-                    "Failed to get DuckLake connection from pool",
-                    source: e
-                )
-            })?;
+        self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
             conn.execute_batch(&format!("DELETE FROM {LAKE_CATALOG}.\"{table_name}\""))
                 .map_err(|e| {
                     etl_error!(
@@ -301,7 +185,6 @@ where
             Ok(())
         })
         .await
-        .map_err(|_| etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake blocking task panicked"))?
     }
 
     /// Bulk-inserts rows into the destination table inside a single transaction.
@@ -309,9 +192,9 @@ where
     /// Wrapping all inserts in one `BEGIN` / `COMMIT` ensures they are written
     /// as a single Parquet snapshot rather than one file per row.
     ///
-    /// If the COMMIT is rejected by DuckLake due to a write-write conflict
-    /// (which happens when parallel copy partitions commit simultaneously),
-    /// the transaction is rolled back and retried with exponential backoff.
+    /// If a write attempt fails, the transaction is retried with exponential
+    /// backoff. The current implementation preserves the existing broad retry
+    /// behavior rather than matching only DuckLake commit conflicts.
     async fn write_table_rows_inner(
         &self,
         table_id: TableId,
@@ -323,34 +206,27 @@ where
             return Ok(());
         }
 
-        // Convert to Values before moving into spawn_blocking so the same data
-        // can be reused across retry attempts without needing Clone on Cell.
+        // Convert to Values before retrying so each blocking attempt can reuse
+        // the same rows without needing Clone on Cell.
         let all_values: Vec<Vec<Value>> = table_rows
             .into_iter()
             .map(|row| row.into_values().into_iter().map(cell_to_value).collect())
             .collect();
-        let pool = self.pool.clone();
-
-        tokio::task::spawn_blocking(move || -> EtlResult<()> {
-            let conn = pool.get().map_err(|e| {
-                etl_error!(
-                    ErrorKind::DestinationConnectionFailed,
-                    "Failed to get DuckLake connection from pool",
-                    source: e
-                )
-            })?;
-            insert_rows_with_retry(&conn, &table_name, &all_values)
-        })
+        insert_rows_with_retry(
+            self.pool.clone(),
+            Arc::clone(&self.blocking_slots),
+            table_name,
+            all_values,
+        )
         .await
-        .map_err(|_| etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake blocking task panicked"))?
     }
 
     /// Writes streaming CDC events to the destination.
     ///
     /// Insert, Update, and Delete events are grouped by table and written in
-    /// parallel, each table in its own `spawn_blocking` task with its own pool
-    /// connection and transaction. Truncate events are deduplicated and
-    /// processed after the per-table writes.
+    /// parallel, each table in its own async task. Each DuckDB attempt acquires
+    /// one blocking slot before entering `spawn_blocking`. Truncate events are
+    /// deduplicated and processed after the per-table writes.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -360,29 +236,50 @@ where
             // Accumulate non-truncate events, stopping at the first Truncate.
             while let Some(event) = event_iter.peek() {
                 if matches!(event, Event::Truncate(_)) {
+                    // Handled later
                     break;
                 }
 
                 let event = event_iter.next().unwrap();
                 match event {
                     Event::Insert(insert) => {
-                        let values =
-                            insert.table_row.into_values().into_iter().map(cell_to_value).collect();
-                        table_id_to_rows.entry(insert.table_id).or_default().push(values);
+                        let values = insert
+                            .table_row
+                            .into_values()
+                            .into_iter()
+                            .map(cell_to_value)
+                            .collect();
+                        table_id_to_rows
+                            .entry(insert.table_id)
+                            .or_default()
+                            .push(values);
                     }
                     Event::Update(update) => {
-                        let values =
-                            update.table_row.into_values().into_iter().map(cell_to_value).collect();
-                        table_id_to_rows.entry(update.table_id).or_default().push(values);
+                        let values = update
+                            .table_row
+                            .into_values()
+                            .into_iter()
+                            .map(cell_to_value)
+                            .collect();
+                        table_id_to_rows
+                            .entry(update.table_id)
+                            .or_default()
+                            .push(values);
                     }
                     Event::Delete(delete) => {
                         let Some((_, old_row)) = delete.old_table_row else {
                             info!("delete event has no old row, skipping");
                             continue;
                         };
-                        let values =
-                            old_row.into_values().into_iter().map(cell_to_value).collect();
-                        table_id_to_rows.entry(delete.table_id).or_default().push(values);
+                        let values = old_row
+                            .into_values()
+                            .into_iter()
+                            .map(cell_to_value)
+                            .collect();
+                        table_id_to_rows
+                            .entry(delete.table_id)
+                            .or_default()
+                            .push(values);
                     }
                     event => {
                         debug!(event_type = %event.event_type(), "skipping unsupported event type");
@@ -390,41 +287,26 @@ where
                 }
             }
 
-            // One spawn_blocking task per table — different tables use separate
-            // pool connections and commit independent Parquet snapshots.
+            // One async task per table. Each write attempt acquires one
+            // blocking slot, then uses a separate pool connection and commits
+            // an independent Parquet snapshot.
             if !table_id_to_rows.is_empty() {
-                let mut join_set = tokio::task::JoinSet::new();
+                let mut join_set = JoinSet::new();
 
                 for (table_id, rows) in table_id_to_rows {
                     let table_name = self.ensure_table_exists(table_id).await?;
                     let pool = self.pool.clone();
+                    let blocking_slots = Arc::clone(&self.blocking_slots);
 
-                    join_set.spawn(tokio::task::spawn_blocking(move || -> EtlResult<()> {
-                        let conn = pool.get().map_err(|e| {
-                            etl_error!(
-                                ErrorKind::DestinationConnectionFailed,
-                                "Failed to get DuckLake connection from pool",
-                                source: e
-                            )
-                        })?;
-                        insert_rows_with_retry(&conn, &table_name, &rows)
-                    }));
+                    join_set.spawn(async move {
+                        insert_rows_with_retry(pool, blocking_slots, table_name, rows).await
+                    });
                 }
 
                 while let Some(result) = join_set.join_next().await {
-                    result
-                        .map_err(|_| {
-                            etl_error!(
-                                ErrorKind::ApplyWorkerPanic,
-                                "DuckLake blocking task panicked"
-                            )
-                        })?
-                        .map_err(|_| {
-                            etl_error!(
-                                ErrorKind::ApplyWorkerPanic,
-                                "DuckLake blocking task panicked"
-                            )
-                        })??;
+                    result.map_err(|_| {
+                        etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake write task panicked")
+                    })??;
                 }
             }
 
@@ -466,7 +348,7 @@ where
 
         // Fast path: already created.
         {
-            let cache = self.created_tables.lock().unwrap();
+            let cache = self.created_tables.lock();
             if cache.contains(&table_name) {
                 return Ok(table_name);
             }
@@ -477,7 +359,7 @@ where
         // catalog to create the table in.
         let ddl = build_create_table_sql_ducklake(&table_name, &table_schema.column_schemas);
         let qualified_ddl = ddl.replace(
-            &format!("\"{}\"", table_name),
+            &format!("{table_name:?}"),
             &format!("{LAKE_CATALOG}.\"{table_name}\""),
         );
 
@@ -485,26 +367,22 @@ where
         let created_tables = Arc::clone(&self.created_tables);
         let table_name_clone = table_name.clone();
 
-        tokio::task::spawn_blocking(move || -> EtlResult<()> {
-            let conn = pool.get().map_err(|e| {
-                etl_error!(
-                    ErrorKind::DestinationConnectionFailed,
-                    "Failed to get DuckLake connection from pool",
-                    source: e
-                )
-            })?;
-            conn.execute_batch(&qualified_ddl).map_err(|e| {
-                etl_error!(
-                    ErrorKind::DestinationQueryFailed,
-                    "DuckLake CREATE TABLE failed",
-                    source: e
-                )
-            })?;
-            created_tables.lock().unwrap().insert(table_name_clone);
-            Ok(())
-        })
-        .await
-        .map_err(|_| etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake blocking task panicked"))??;
+        run_duckdb_blocking(
+            pool,
+            Arc::clone(&self.blocking_slots),
+            move |conn| -> EtlResult<()> {
+                conn.execute_batch(&qualified_ddl).map_err(|e| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake CREATE TABLE failed",
+                        source: e
+                    )
+                })?;
+                created_tables.lock().insert(table_name_clone);
+                Ok(())
+            },
+        )
+        .await?;
 
         Ok(table_name)
     }
@@ -526,75 +404,139 @@ where
             .await?;
         Ok(ducklake_table_name)
     }
+
+    /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a
+    /// permit that matches the DuckDB connection pool capacity.
+    async fn run_duckdb_blocking<R, F>(&self, operation: F) -> EtlResult<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&duckdb::Connection) -> EtlResult<R> + Send + 'static,
+    {
+        run_duckdb_blocking(
+            self.pool.clone(),
+            Arc::clone(&self.blocking_slots),
+            operation,
+        )
+        .await
+    }
 }
 
-impl<S> Destination for DuckLakeDestination<S>
-where
-    S: StateStore + SchemaStore + Send + Sync,
-{
-    fn name() -> &'static str {
-        "ducklake"
-    }
-
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table_inner(table_id).await
-    }
-
-    async fn write_table_rows(
-        &self,
-        table_id: TableId,
-        table_rows: Vec<TableRow>,
-    ) -> EtlResult<()> {
-        self.write_table_rows_inner(table_id, table_rows).await
-    }
-
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.write_events_inner(events).await
-    }
+/// Converts a Postgres [`TableName`] to a DuckLake table name string.
+///
+/// Escapes underscores in schema and table name components by doubling them,
+/// then joins the two parts with a single `_`. This matches the convention
+/// used by other destinations in this crate.
+///
+/// # Example
+/// - `public.my_table` → `public_my__table`
+/// - `my_schema.orders` → `my__schema_orders`
+pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> DuckLakeTableName {
+    let escaped_schema = table_name
+        .schema
+        .replace(TABLE_NAME_DELIMITER, TABLE_NAME_ESCAPE);
+    let escaped_table = table_name
+        .name
+        .replace(TABLE_NAME_DELIMITER, TABLE_NAME_ESCAPE);
+    format!("{escaped_schema}{TABLE_NAME_DELIMITER}{escaped_table}")
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Maximum number of times a conflicting COMMIT is retried before giving up.
+/// Maximum number of times a failed write attempt is retried before giving up.
 const MAX_COMMIT_RETRIES: u32 = 10;
 /// Initial backoff duration before the first retry.
 const INITIAL_RETRY_DELAY_MS: u64 = 50;
 /// Upper bound on backoff duration.
 const MAX_RETRY_DELAY_MS: u64 = 2_000;
 
+/// Runs one DuckDB operation on Tokio's blocking pool after acquiring a permit
+/// that matches the DuckDB connection pool capacity.
+async fn run_duckdb_blocking<R, F>(
+    pool: Pool<DuckLakeConnectionManager>,
+    blocking_slots: Arc<Semaphore>,
+    operation: F,
+) -> EtlResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce(&duckdb::Connection) -> EtlResult<R> + Send + 'static,
+{
+    let permit = blocking_slots.acquire_owned().await.map_err(|_| {
+        etl_error!(
+            ErrorKind::ApplyWorkerPanic,
+            "DuckLake blocking slot acquisition failed"
+        )
+    })?;
+
+    tokio::task::spawn_blocking(move || -> EtlResult<R> {
+        // Please if you modify the code inside this blocking task do not add any
+        // blocking operations that could delay other tasks waiting on this slot.
+        let _permit = permit;
+        let conn = pool.get().map_err(|e| {
+            etl_error!(
+                ErrorKind::DestinationConnectionFailed,
+                "Failed to get DuckLake connection from pool",
+                source: e
+            )
+        })?;
+        operation(&conn)
+    })
+    .await
+    .map_err(|_| {
+        etl_error!(
+            ErrorKind::ApplyWorkerPanic,
+            "DuckLake blocking task panicked"
+        )
+    })?
+}
+
 /// Calls [`insert_rows`] and retries with exponential backoff on failure.
 ///
-/// DuckLake uses optimistic concurrency: when several transactions (e.g.
-/// parallel table-copy partitions) try to COMMIT at the same time, one
-/// succeeds and the rest receive a write-write conflict error. The safe
-/// recovery is to roll back and retry the entire `BEGIN → INSERT → COMMIT`
-/// sequence with a short random-jitter delay, which is exactly what this
-/// function does.
-fn insert_rows_with_retry(
-    conn: &duckdb::Connection,
-    table_name: &str,
-    all_values: &[Vec<Value>],
+/// The current implementation preserves the existing broad retry behavior:
+/// any failed write attempt is retried until the retry budget is exhausted.
+async fn insert_rows_with_retry(
+    pool: Pool<DuckLakeConnectionManager>,
+    blocking_slots: Arc<Semaphore>,
+    table_name: DuckLakeTableName,
+    all_values: Vec<Vec<Value>>,
 ) -> EtlResult<()> {
-    let mut delay = std::time::Duration::from_millis(INITIAL_RETRY_DELAY_MS);
+    let all_values = Arc::new(all_values);
+    let mut delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS);
 
     for attempt in 0..=MAX_COMMIT_RETRIES {
-        match insert_rows(conn, table_name, all_values) {
+        let attempt_table_name = table_name.clone();
+        let attempt_values = Arc::clone(&all_values);
+
+        match run_duckdb_blocking(pool.clone(), Arc::clone(&blocking_slots), move |conn| {
+            insert_rows(
+                conn,
+                &attempt_table_name,
+                attempt_values.as_ref().as_slice(),
+            )
+        })
+        .await
+        {
             Ok(()) => return Ok(()),
             Err(e) if attempt < MAX_COMMIT_RETRIES => {
+                // Apply full-jitter: sleep between 50 % and 150 % of the
+                // calculated delay so concurrent retriers spread out instead
+                // of staying in lock-step and repeatedly colliding.
+                let jitter_ratio = rand::rng().random_range(0.5..=1.5_f64);
+                let jittered = delay.mul_f64(jitter_ratio);
                 warn!(
                     attempt = attempt + 1,
                     max = MAX_COMMIT_RETRIES,
-                    table = table_name,
-                    error = %e,
-                    "DuckLake commit conflict, retrying"
+                    table = %table_name,
+                    error = ?e,
+                    "DuckLake write attempt failed, retrying"
                 );
-                std::thread::sleep(delay);
-                delay = std::cmp::min(delay * 2, std::time::Duration::from_millis(MAX_RETRY_DELAY_MS));
+                tokio::time::sleep(jittered).await;
+                delay = std::cmp::min(delay * 2, Duration::from_millis(MAX_RETRY_DELAY_MS));
             }
             Err(e) => return Err(e),
         }
     }
-    unreachable!()
+
+    Ok(())
 }
 
 /// Inserts all rows in `all_values` into `lake."table_name"` as a **single
@@ -631,7 +573,7 @@ fn insert_rows(
 
     // Mirror the DuckLake target schema without copying any data.
     conn.execute_batch(&format!(
-        "CREATE OR REPLACE TEMP TABLE \"{staging}\" AS \
+        "CREATE OR REPLACE TEMP TABLE {staging:?} AS \
          SELECT * FROM {LAKE_CATALOG}.\"{table_name}\" LIMIT 0;"
     ))
     .map_err(|e| {
@@ -672,13 +614,13 @@ fn insert_rows(
     })();
 
     if let Err(e) = load_result {
-        let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{staging}\""));
+        let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging:?}"));
         return Err(e);
     }
 
     // One INSERT SELECT = one Parquet file in DuckLake.
     conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
-        let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{staging}\""));
+        let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging:?}"));
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake BEGIN TRANSACTION failed",
@@ -688,7 +630,7 @@ fn insert_rows(
 
     let insert_result = conn
         .execute_batch(&format!(
-            "INSERT INTO {LAKE_CATALOG}.\"{table_name}\" SELECT * FROM \"{staging}\";"
+            "INSERT INTO {LAKE_CATALOG}.\"{table_name}\" SELECT * FROM {staging:?};"
         ))
         .map_err(|e| {
             etl_error!(
@@ -710,7 +652,7 @@ fn insert_rows(
     };
 
     // Always drop the staging table.
-    let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{staging}\""));
+    let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging:?}"));
 
     commit_result
 }
@@ -733,11 +675,12 @@ fn cell_to_value(cell: Cell) -> Value {
         Cell::F64(f) => Value::Double(f),
         // NUMERIC stored as VARCHAR to avoid precision loss.
         Cell::Numeric(n) => Value::Text(n.to_string()),
-        Cell::Date(d) => {
-            Value::Date32(d.signed_duration_since(epoch_date).num_days() as i32)
-        }
+        Cell::Date(d) => Value::Date32(d.signed_duration_since(epoch_date).num_days() as i32),
         Cell::Time(t) => {
-            let micros = t.signed_duration_since(epoch_time).num_microseconds().unwrap_or(0);
+            let micros = t
+                .signed_duration_since(epoch_time)
+                .num_microseconds()
+                .unwrap_or(0);
             Value::Time64(TimeUnit::Microsecond, micros)
         }
         Cell::Timestamp(dt) => {
@@ -756,30 +699,38 @@ fn cell_to_value(cell: Cell) -> Value {
 /// Converts an [`ArrayCell`] (with nullable elements) to a `Value::List`.
 fn array_cell_to_value(arr: ArrayCell) -> Value {
     let values = match arr {
-        ArrayCell::Bool(v) => {
-            v.into_iter().map(|o| o.map(Value::Boolean).unwrap_or(Value::Null)).collect()
-        }
-        ArrayCell::String(v) => {
-            v.into_iter().map(|o| o.map(Value::Text).unwrap_or(Value::Null)).collect()
-        }
-        ArrayCell::I16(v) => {
-            v.into_iter().map(|o| o.map(Value::SmallInt).unwrap_or(Value::Null)).collect()
-        }
-        ArrayCell::I32(v) => {
-            v.into_iter().map(|o| o.map(Value::Int).unwrap_or(Value::Null)).collect()
-        }
-        ArrayCell::U32(v) => {
-            v.into_iter().map(|o| o.map(Value::UInt).unwrap_or(Value::Null)).collect()
-        }
-        ArrayCell::I64(v) => {
-            v.into_iter().map(|o| o.map(Value::BigInt).unwrap_or(Value::Null)).collect()
-        }
-        ArrayCell::F32(v) => {
-            v.into_iter().map(|o| o.map(Value::Float).unwrap_or(Value::Null)).collect()
-        }
-        ArrayCell::F64(v) => {
-            v.into_iter().map(|o| o.map(Value::Double).unwrap_or(Value::Null)).collect()
-        }
+        ArrayCell::Bool(v) => v
+            .into_iter()
+            .map(|o| o.map(Value::Boolean).unwrap_or(Value::Null))
+            .collect(),
+        ArrayCell::String(v) => v
+            .into_iter()
+            .map(|o| o.map(Value::Text).unwrap_or(Value::Null))
+            .collect(),
+        ArrayCell::I16(v) => v
+            .into_iter()
+            .map(|o| o.map(Value::SmallInt).unwrap_or(Value::Null))
+            .collect(),
+        ArrayCell::I32(v) => v
+            .into_iter()
+            .map(|o| o.map(Value::Int).unwrap_or(Value::Null))
+            .collect(),
+        ArrayCell::U32(v) => v
+            .into_iter()
+            .map(|o| o.map(Value::UInt).unwrap_or(Value::Null))
+            .collect(),
+        ArrayCell::I64(v) => v
+            .into_iter()
+            .map(|o| o.map(Value::BigInt).unwrap_or(Value::Null))
+            .collect(),
+        ArrayCell::F32(v) => v
+            .into_iter()
+            .map(|o| o.map(Value::Float).unwrap_or(Value::Null))
+            .collect(),
+        ArrayCell::F64(v) => v
+            .into_iter()
+            .map(|o| o.map(Value::Double).unwrap_or(Value::Null))
+            .collect(),
         ArrayCell::Numeric(v) => v
             .into_iter()
             .map(|o| o.map(|n| Value::Text(n.to_string())).unwrap_or(Value::Null))
@@ -811,10 +762,8 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
         ArrayCell::Timestamp(v) => v
             .into_iter()
             .map(|o| {
-                o.map(|dt| {
-                    Value::Timestamp(TimeUnit::Microsecond, dt.and_utc().timestamp_micros())
-                })
-                .unwrap_or(Value::Null)
+                o.map(|dt| Value::Timestamp(TimeUnit::Microsecond, dt.and_utc().timestamp_micros()))
+                    .unwrap_or(Value::Null)
             })
             .collect(),
         ArrayCell::TimestampTz(v) => v
@@ -832,9 +781,10 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
             .into_iter()
             .map(|o| o.map(|j| Value::Text(j.to_string())).unwrap_or(Value::Null))
             .collect(),
-        ArrayCell::Bytes(v) => {
-            v.into_iter().map(|o| o.map(Value::Blob).unwrap_or(Value::Null)).collect()
-        }
+        ArrayCell::Bytes(v) => v
+            .into_iter()
+            .map(|o| o.map(Value::Blob).unwrap_or(Value::Null))
+            .collect(),
     };
     Value::List(values)
 }
@@ -862,79 +812,6 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_catalog_url_local_file() {
-        // Local file paths are passed through unchanged.
-        assert_eq!(normalize_catalog_url("metadata.ducklake"), "metadata.ducklake");
-        assert_eq!(normalize_catalog_url("/abs/path/catalog.ducklake"), "/abs/path/catalog.ducklake");
-    }
-
-    #[test]
-    fn test_normalize_catalog_url_postgres_uri() {
-        let result = normalize_catalog_url("postgres://bnj@localhost:5432/ducklake_catalog");
-        assert_eq!(result, "postgres:host=localhost dbname=ducklake_catalog user=bnj");
-    }
-
-    #[test]
-    fn test_normalize_catalog_url_postgres_uri_with_query_params() {
-        let result = normalize_catalog_url(
-            "postgres://user:pass@localhost:5432/mydb?sslmode=disable&connect_timeout=10",
-        );
-        assert_eq!(
-            result,
-            "postgres:host=localhost dbname=mydb user=user password='pass' sslmode=disable connect_timeout=10"
-        );
-    }
-
-    #[test]
-    fn test_normalize_catalog_url_postgres_uri_with_password() {
-        let result = normalize_catalog_url("postgres://user:secret@db.example.com:5433/mydb");
-        assert_eq!(
-            result,
-            "postgres:host=db.example.com port=5433 dbname=mydb user=user password='secret'"
-        );
-    }
-
-    #[test]
-    fn test_normalize_catalog_url_already_libpq() {
-        // Already in libpq format — returned unchanged.
-        let libpq = "postgres:host=localhost dbname=mydb user=bnj";
-        assert_eq!(normalize_catalog_url(libpq), libpq);
-    }
-
-    #[test]
-    fn test_build_setup_sql_local() {
-        let sql = build_setup_sql("metadata.ducklake", "./data/", None, None);
-        assert!(sql.contains("INSTALL ducklake"));
-        assert!(sql.contains("LOAD ducklake"));
-        assert!(!sql.contains("postgres"));
-        assert!(!sql.contains("httpfs"));
-        assert!(sql.contains("ducklake:metadata.ducklake"));
-        assert!(sql.contains("DATA_PATH './data/'"));
-    }
-
-    #[test]
-    fn test_build_setup_sql_postgres_local_data() {
-        let sql = build_setup_sql("postgres://bnj@localhost:5432/ducklake_catalog", "./data/", None, None);
-        assert!(sql.contains("INSTALL postgres"));
-        assert!(sql.contains("LOAD postgres"));
-        assert!(!sql.contains("httpfs"));
-        // URL must be converted to libpq format, not passed as-is.
-        assert!(!sql.contains("postgres://"));
-        assert!(sql.contains("ducklake:postgres:host=localhost"));
-        assert!(sql.contains("DATA_PATH './data/'"));
-    }
-
-    #[test]
-    fn test_build_setup_sql_postgres_s3_data() {
-        let sql = build_setup_sql("postgres://user:pass@host/db", "s3://my-bucket/lake/", None, None);
-        assert!(sql.contains("INSTALL postgres"));
-        assert!(sql.contains("INSTALL httpfs"));
-        assert!(sql.contains("LOAD httpfs"));
-        assert!(!sql.contains("postgres://"));
-        assert!(sql.contains("DATA_PATH 's3://my-bucket/lake/'"));
-    }
-
-    #[test]
     fn test_cell_to_value_primitives() {
         assert_eq!(cell_to_value(Cell::Null), Value::Null);
         assert_eq!(cell_to_value(Cell::Bool(true)), Value::Boolean(true));
@@ -944,6 +821,6 @@ mod tests {
         );
         assert_eq!(cell_to_value(Cell::I32(42)), Value::Int(42));
         assert_eq!(cell_to_value(Cell::I64(-1)), Value::BigInt(-1));
-        assert_eq!(cell_to_value(Cell::F64(3.14)), Value::Double(3.14));
+        assert_eq!(cell_to_value(Cell::F64(3.46)), Value::Double(3.46));
     }
 }

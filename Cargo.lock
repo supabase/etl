@@ -1889,7 +1889,9 @@ dependencies = [
  "iceberg",
  "iceberg-catalog-rest",
  "metrics",
+ "parking_lot",
  "parquet",
+ "pg_escape",
  "prost",
  "r2d2",
  "rand 0.9.2",
@@ -1899,8 +1901,10 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-postgres",
  "tonic",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -1915,6 +1919,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

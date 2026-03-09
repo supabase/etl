@@ -66,19 +66,21 @@ pub fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
 /// CDC columns (`cdc_operation` and `cdc_lsn`) are appended at the end and must already
 /// be included in `column_schemas` (added by `modify_schema_with_cdc_columns` before calling
 /// this function).
-pub fn build_create_table_sql_ducklake(table_name: &str, column_schemas: &[ColumnSchema]) -> String {
+pub fn build_create_table_sql_ducklake(
+    table_name: &str,
+    column_schemas: &[ColumnSchema],
+) -> String {
     let col_defs: Vec<String> = column_schemas
         .iter()
         .map(|col| {
             let duckdb_type = postgres_column_type_to_ducklake_sql(&col.typ);
             let nullability = if col.nullable { "" } else { " NOT NULL" };
-            format!("  \"{}\" {}{}", col.name, duckdb_type, nullability)
+            format!("  {:?} {}{}", col.name, duckdb_type, nullability)
         })
         .collect();
 
     format!(
-        "CREATE TABLE IF NOT EXISTS \"{}\" (\n{}\n)",
-        table_name,
+        "CREATE TABLE IF NOT EXISTS {table_name:?} (\n{}\n)",
         col_defs.join(",\n")
     )
 }
@@ -91,12 +93,21 @@ mod tests {
     fn test_scalar_type_mapping() {
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::BOOL), "BOOLEAN");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TEXT), "VARCHAR");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT2), "SMALLINT");
+        assert_eq!(
+            postgres_scalar_type_to_ducklake_sql(&Type::INT2),
+            "SMALLINT"
+        );
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT4), "INTEGER");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT8), "BIGINT");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::FLOAT4), "FLOAT");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::FLOAT8), "DOUBLE");
-        assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC), "VARCHAR");
+        assert_eq!(
+            postgres_scalar_type_to_ducklake_sql(&Type::FLOAT8),
+            "DOUBLE"
+        );
+        assert_eq!(
+            postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC),
+            "VARCHAR"
+        );
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::DATE), "DATE");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TIME), "TIME");
         assert_eq!(

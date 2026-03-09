@@ -88,9 +88,12 @@ cargo run --bin ducklake -p etl-examples -- \
     --db-username postgres \
     --db-password mypassword \
     --catalog-url postgres://user:pass@localhost:5432/ducklake_catalog \
-    --data-path ./lake_data/ \
+    --data-path file:///absolute/path/to/lake_data \
     --publication my_pub
 ```
+
+The CLI also accepts plain local paths such as `./lake_data/` and normalizes
+them to absolute `file://` URLs before constructing the destination.
 
 ### Run (S3 / S3-compatible data)
 
@@ -123,8 +126,8 @@ automatically loads the `httpfs` DuckDB extension for cloud storage access.
 | `--db-name` | *(required)* | Postgres database name |
 | `--db-username` | *(required)* | Postgres user (must have REPLICATION) |
 | `--db-password` | — | Postgres password (omit for trust auth) |
-| `--catalog-url` | *(required)* | PostgreSQL connection string for the DuckLake catalog |
-| `--data-path` | *(required)* | Local directory or cloud URI for Parquet files |
+| `--catalog-url` | *(required)* | DuckLake catalog URL (`postgres://...` or `file://...`) |
+| `--data-path` | *(required)* | Local `file://` URL or cloud URI for Parquet files |
 | `--pool-size` | `4` | DuckDB connection pool size |
 | `--max-batch-fill-duration-ms` | `5000` | Max time to wait before flushing a batch |
 | `--max-table-sync-workers` | `4` | Concurrent workers during initial copy |
@@ -145,8 +148,8 @@ lake at any time — even while the pipeline is running:
 ```bash
 duckdb :memory: -c "
   INSTALL ducklake; LOAD ducklake;
-  ATTACH 'ducklake:postgres://user:pass@localhost:5432/ducklake_catalog'
-    AS lake (DATA_PATH './lake_data/');
+  ATTACH 'ducklake:postgres:host=''localhost'' port=''5432'' dbname=''ducklake_catalog'' user=''user'' password=''pass'''
+    AS lake (DATA_PATH 'file:///absolute/path/to/lake_data');
   SELECT * FROM lake.public_orders;
   SELECT COUNT(*) FROM lake.public_customers;
 "

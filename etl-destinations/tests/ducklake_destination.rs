@@ -17,8 +17,8 @@
 //! ```
 //! duckdb :memory: -c "
 //!   INSTALL ducklake; LOAD ducklake;
-//!   ATTACH 'ducklake:/path/printed/catalog.ducklake' AS lake
-//!     (DATA_PATH '/path/printed/data/');
+//!   ATTACH 'ducklake:file:///path/printed/catalog.ducklake' AS lake
+//!     (DATA_PATH 'file:///path/printed/data');
 //!   SELECT * FROM lake.public_users;
 //! "
 //! ```
@@ -32,7 +32,11 @@ use etl::types::{
     Cell, ColumnSchema, Event, TableId, TableName, TableRow, TableSchema, Type as PgType,
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
-use std::path::PathBuf;
+use pg_escape::{quote_identifier, quote_literal};
+use std::f64::consts::PI;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use url::Url;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -43,11 +47,18 @@ fn make_test_dir(test_name: &str) -> PathBuf {
         .prefix(&format!("etl_ducklake_{test_name}_"))
         .tempdir()
         .expect("failed to create temp dir")
-        .into_path(); // `into_path` prevents auto-cleanup on drop
+        .keep(); // `into_path` prevents auto-cleanup on drop
 
-    println!("[{test_name}] catalog : {}", dir.join("catalog.ducklake").display());
+    println!(
+        "[{test_name}] catalog : {}",
+        dir.join("catalog.ducklake").display()
+    );
     println!("[{test_name}] data    : {}", dir.join("data").display());
     dir
+}
+
+fn path_to_file_url(path: &Path) -> Url {
+    Url::from_file_path(path).expect("failed to convert path to file url")
 }
 
 fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
@@ -76,11 +87,14 @@ fn make_rich_schema(table_id: u32) -> TableSchema {
 }
 
 /// Opens a verification connection to the same DuckLake catalog and returns it.
-fn open_lake_conn(catalog: &str, data: &str) -> Connection {
+fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     let conn = Connection::open_in_memory().expect("failed to open in-memory DuckDB");
     conn.execute_batch(&format!(
         "INSTALL ducklake; LOAD ducklake; \
-         ATTACH 'ducklake:{catalog}' AS lake (DATA_PATH '{data}');"
+         ATTACH {} AS {} (DATA_PATH {});",
+        quote_literal(&format!("ducklake:{}", catalog.as_str())),
+        quote_identifier("lake"),
+        quote_literal(data.as_str())
     ))
     .expect("failed to attach DuckLake catalog");
     conn
@@ -88,7 +102,11 @@ fn open_lake_conn(catalog: &str, data: &str) -> Connection {
 
 fn count_rows(conn: &Connection, table_name: &str) -> i64 {
     conn.query_row(
-        &format!("SELECT COUNT(*) FROM lake.\"{table_name}\""),
+        &format!(
+            "SELECT COUNT(*) FROM {}.{}",
+            quote_identifier("lake"),
+            quote_identifier(table_name)
+        ),
         [],
         |r| r.get(0),
     )
@@ -106,8 +124,8 @@ async fn test_write_table_rows_basic() {
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
 
-    let catalog_str = catalog.to_str().unwrap();
-    let data_str = data.to_str().unwrap();
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
 
     let table_id = TableId::new(1);
     let schema = make_schema(1, "public", "users");
@@ -116,7 +134,9 @@ async fn test_write_table_rows_basic() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(catalog_str, data_str, 1, store).unwrap();
+    let destination =
+        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .unwrap();
     destination
         .write_table_rows(
             table_id,
@@ -129,12 +149,16 @@ async fn test_write_table_rows_basic() {
         .await
         .expect("write_table_rows failed");
 
-    let conn = open_lake_conn(catalog_str, data_str);
+    let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(count_rows(&conn, &table_name), 3);
 
     let (id, name): (i32, Option<String>) = conn
         .query_row(
-            &format!("SELECT id, name FROM lake.\"{table_name}\" WHERE id = 1"),
+            &format!(
+                "SELECT id, name FROM {}.{} WHERE id = 1",
+                quote_identifier("lake"),
+                quote_identifier(&table_name)
+            ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -151,8 +175,8 @@ async fn test_write_table_rows_empty_creates_table() {
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
 
-    let catalog_str = catalog.to_str().unwrap();
-    let data_str = data.to_str().unwrap();
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
 
     let table_id = TableId::new(2);
     let schema = make_schema(2, "public", "events");
@@ -161,14 +185,20 @@ async fn test_write_table_rows_empty_creates_table() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(catalog_str, data_str, 1, store).unwrap();
+    let destination =
+        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .unwrap();
     destination
         .write_table_rows(table_id, vec![])
         .await
         .expect("empty write failed");
 
-    let conn = open_lake_conn(catalog_str, data_str);
-    assert_eq!(count_rows(&conn, &table_name), 0, "table should exist but be empty");
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(
+        count_rows(&conn, &table_name),
+        0,
+        "table should exist but be empty"
+    );
 }
 
 /// `truncate_table` deletes all rows while leaving the table schema intact.
@@ -179,8 +209,8 @@ async fn test_truncate_clears_rows() {
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
 
-    let catalog_str = catalog.to_str().unwrap();
-    let data_str = data.to_str().unwrap();
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
 
     let table_id = TableId::new(3);
     let schema = make_schema(3, "public", "logs");
@@ -189,7 +219,9 @@ async fn test_truncate_clears_rows() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(catalog_str, data_str, 1, store).unwrap();
+    let destination =
+        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .unwrap();
     destination
         .write_table_rows(
             table_id,
@@ -201,23 +233,36 @@ async fn test_truncate_clears_rows() {
         .await
         .unwrap();
 
-    destination.truncate_table(table_id).await.expect("truncate failed");
+    destination
+        .truncate_table(table_id)
+        .await
+        .expect("truncate failed");
 
-    let conn = open_lake_conn(catalog_str, data_str);
-    assert_eq!(count_rows(&conn, &table_name), 0, "table should be empty after truncate");
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(
+        count_rows(&conn, &table_name),
+        0,
+        "table should be empty after truncate"
+    );
 
     // Confirm the schema is still intact.
     let col_count: i64 = conn
         .query_row(
             &format!(
                 "SELECT COUNT(*) FROM information_schema.columns \
-                 WHERE table_name = '{table_name}' AND table_schema = 'lake'"
+                 WHERE table_catalog = {} AND table_schema = {} AND table_name = {}",
+                quote_literal("lake"),
+                quote_literal("main"),
+                quote_literal(&table_name),
             ),
             [],
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(col_count, 2, "table should still have 2 columns after truncate");
+    assert_eq!(
+        col_count, 2,
+        "table should still have 2 columns after truncate"
+    );
 }
 
 /// `write_events` appends Insert, Update, and Delete rows to the lake.
@@ -230,8 +275,8 @@ async fn test_write_events() {
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
 
-    let catalog_str = catalog.to_str().unwrap();
-    let data_str = data.to_str().unwrap();
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
 
     let table_id = TableId::new(4);
     let schema = make_schema(4, "public", "products");
@@ -240,7 +285,9 @@ async fn test_write_events() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(catalog_str, data_str, 1, store).unwrap();
+    let destination =
+        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .unwrap();
 
     let lsn = PgLsn::from(100u64);
     destination
@@ -249,19 +296,13 @@ async fn test_write_events() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 table_id,
-                table_row: TableRow::new(vec![
-                    Cell::I32(1),
-                    Cell::String("Widget".to_string()),
-                ]),
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 table_id,
-                table_row: TableRow::new(vec![
-                    Cell::I32(2),
-                    Cell::String("Gadget".to_string()),
-                ]),
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("Gadget".to_string())]),
                 old_table_row: None,
             }),
             Event::Delete(DeleteEvent {
@@ -277,8 +318,59 @@ async fn test_write_events() {
         .await
         .expect("write_events failed");
 
-    let conn = open_lake_conn(catalog_str, data_str);
+    let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(count_rows(&conn, &table_name), 3);
+}
+
+/// Concurrent async callers should serialize cleanly behind one DuckDB slot.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_writes_with_single_slot_complete() {
+    let dir = make_test_dir("concurrent_writes_single_slot");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let table_id_a = TableId::new(6);
+    let table_id_b = TableId::new(7);
+    let schema_a = make_schema(6, "public", "alpha");
+    let schema_b = make_schema(7, "public", "beta");
+    let table_name_a = table_name_to_ducklake_table_name(&schema_a.name);
+    let table_name_b = table_name_to_ducklake_table_name(&schema_b.name);
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema_a).await.unwrap();
+    store.store_table_schema(schema_b).await.unwrap();
+
+    let destination = Arc::new(
+        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .unwrap(),
+    );
+
+    let rows_a: Vec<TableRow> = (0..50)
+        .map(|i| TableRow::new(vec![Cell::I32(i), Cell::String(format!("alpha-{i}"))]))
+        .collect();
+    let rows_b: Vec<TableRow> = (0..50)
+        .map(|i| TableRow::new(vec![Cell::I32(i), Cell::String(format!("beta-{i}"))]))
+        .collect();
+
+    let task_a = {
+        let destination = Arc::clone(&destination);
+        tokio::spawn(async move { destination.write_table_rows(table_id_a, rows_a).await })
+    };
+    let task_b = {
+        let destination = Arc::clone(&destination);
+        tokio::spawn(async move { destination.write_table_rows(table_id_b, rows_b).await })
+    };
+
+    task_a.await.unwrap().unwrap();
+    task_b.await.unwrap().unwrap();
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(count_rows(&conn, &table_name_a), 50);
+    assert_eq!(count_rows(&conn, &table_name_b), 50);
 }
 
 /// Verifies that common Postgres types survive the write → read cycle.
@@ -289,8 +381,8 @@ async fn test_type_mapping_round_trip() {
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
 
-    let catalog_str = catalog.to_str().unwrap();
-    let data_str = data.to_str().unwrap();
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
 
     let table_id = TableId::new(5);
     let schema = make_rich_schema(5);
@@ -299,14 +391,16 @@ async fn test_type_mapping_round_trip() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination = DuckLakeDestination::new(catalog_str, data_str, 1, store).unwrap();
+    let destination =
+        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .unwrap();
     destination
         .write_table_rows(
             table_id,
             vec![TableRow::new(vec![
                 Cell::I32(42),
                 Cell::String("hello".to_string()),
-                Cell::F64(3.14),
+                Cell::F64(PI),
                 Cell::Bool(true),
                 Cell::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()),
             ])],
@@ -314,12 +408,14 @@ async fn test_type_mapping_round_trip() {
         .await
         .expect("write failed");
 
-    let conn = open_lake_conn(catalog_str, data_str);
+    let conn = open_lake_conn(&catalog_url, &data_url);
     let row: (i32, String, f64, bool, String) = conn
         .query_row(
             &format!(
                 "SELECT id, label, score, active, CAST(birthday AS VARCHAR) \
-                 FROM lake.\"{table_name}\""
+                 FROM {}.{}",
+                quote_identifier("lake"),
+                quote_identifier(&table_name)
             ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
@@ -328,7 +424,7 @@ async fn test_type_mapping_round_trip() {
 
     assert_eq!(row.0, 42);
     assert_eq!(row.1, "hello");
-    assert!((row.2 - 3.14).abs() < 1e-9);
+    assert!((row.2 - PI).abs() < 1e-9);
     assert!(row.3);
     assert_eq!(row.4, "2024-06-15");
 }

@@ -27,3 +27,4 @@ rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 tokio = { workspace = true, features = ["macros", "signal"] }
 tracing = { workspace = true, default-features = true }
 tracing-subscriber = { workspace = true, default-features = true, features = ["env-filter"] }
+url = { workspace = true }
