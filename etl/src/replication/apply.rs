@@ -437,20 +437,26 @@ impl ApplyLoopState {
         self.replication_progress.last_received_lsn
     }
 
+    /// Returns `true` if the apply loop is totally idle, meaning that:
+    /// - It's not in the middle of a transaction.
+    /// - It doesn't have any events in the batch.
+    /// - It is not waiting for a batch to be flushed.
+    fn is_idle(&self) -> bool {
+        !self.handling_transaction()
+            && !self.has_pending_batch()
+            && !self.has_pending_flush_result()
+    }
+
     /// Returns the effective flush LSN to report to PostgreSQL.
     ///
-    /// When idle (no active transaction, empty batch, and no in-flight apply results), returns the
-    /// last received LSN since no actual flushes occur. Otherwise, returns the last flush LSN from
-    /// completed transactions.
+    /// When idle, returns the last received LSN since no actual flushes occur. Otherwise,
+    /// returns the last flush LSN from completed transactions.
     ///
     /// Note that when a transaction is now started, the last flush lsn will be used, and it might
     /// jump back compared to the last received lsn that we sent before, however this is fine since the
     /// status update logic guarantees monotonically increasing LSNs.
     fn effective_flush_lsn(&self) -> PgLsn {
-        if self.pending_flush_result.is_none()
-            && !self.handling_transaction()
-            && self.events_batch.is_empty()
-        {
+        if self.is_idle() {
             self.replication_progress.last_received_lsn
         } else {
             self.replication_progress.last_flush_lsn
@@ -485,8 +491,13 @@ impl ApplyLoopState {
         tx_ordinal
     }
 
-    /// Returns `true` if there is a pending flush.
-    fn has_pending_flush(&self) -> bool {
+    /// Returns `true` if there is a pending batch of events waiting to be flushed.
+    fn has_pending_batch(&self) -> bool {
+        !self.events_batch.is_empty()
+    }
+
+    /// Returns `true` if there is a pending flush result waiting to be returned.
+    fn has_pending_flush_result(&self) -> bool {
         self.pending_flush_result.is_some()
     }
 }
@@ -811,23 +822,13 @@ where
             return Ok(());
         }
 
-        // If we are processing a transaction, or if the batch has pending data, we defer shutdown
-        // until we hit a transaction boundary (e.g. a commit message). When that is encountered,
         // the batch will be force flushed and graceful shutdown will begin.
-        if self.state.handling_transaction() || !self.state.events_batch.is_empty() {
+        // If we are not in idle, we defer the shutdown until the system is able to gracefully shutdown
+        // and complete outstanding work.
+        if !self.state.is_idle() {
             info!(
                 %worker_type,
-                "shutdown signal received during transaction/non-empty batch, deferring until transaction boundary",
-            );
-            self.state.shutdown_state = ShutdownState::Deferred;
-
-            return Ok(());
-        }
-
-        if self.state.has_pending_flush() {
-            info!(
-                %worker_type,
-                "shutdown signal received with in-flight apply results, waiting for destination acknowledgements",
+                "shutdown signal received during non-idle time, deferring shutdown until idle",
             );
 
             self.state.shutdown_state = ShutdownState::Deferred;
@@ -940,7 +941,7 @@ where
             // If we are in deferred shutdown but there is still a pending batch, which could happen
             // if the shutdown is received while a batch is being built but can't batch flushed, we want
             // to flush it and then wait again for its result.
-            if !self.state.events_batch.is_empty() {
+            if self.state.has_pending_batch() {
                 self.flush_batch().await?;
             }
 
@@ -1041,7 +1042,7 @@ where
         let early_flush_requested = result.end_batch.is_some();
         let should_flush = batch_size_reached || early_flush_requested;
 
-        if should_flush && !self.state.events_batch.is_empty() {
+        if should_flush && self.state.has_pending_batch() {
             let reason = if batch_size_reached {
                 "max batch bytes reached"
             } else {
@@ -1083,13 +1084,13 @@ where
         self.state.reset_flush_deadline();
 
         // If the batch is empty, we don't need to do anything.
-        if self.state.events_batch.is_empty() {
+        if !self.state.has_pending_batch() {
             return Ok(());
         }
 
         // If there is a pending flush, we don't want to flush the batch. In this case, we will wait
         // for the result to be received from the destination.
-        if self.state.has_pending_flush() {
+        if self.state.has_pending_flush_result() {
             self.state.processing_paused = true;
 
             return Ok(());
@@ -1607,16 +1608,9 @@ where
     /// Processes syncing tables outside a transaction.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
-    /// Only processes when outside a transaction and the batch is empty.
     async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<ApplyLoopAction> {
-        if self.state.handling_transaction() {
-            debug!("skipping table sync processing because of in progress transaction");
-
-            return Ok(ApplyLoopAction::Continue);
-        }
-
-        if !self.state.events_batch.is_empty() {
-            debug!("skipping table sync processing because batch is not empty");
+        if !self.state.is_idle() {
+            debug!("skipping table sync processing because apply loop is not idle");
 
             return Ok(ApplyLoopAction::Continue);
         }
