@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use etl::destination::Destination;
+use etl::destination::{BatchFlushResult, Destination};
 use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
 use etl::state::table::TableReplicationPhaseType;
@@ -487,10 +487,10 @@ impl Destination for BenchDestination {
         }
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events(&self, events: Vec<Event>, flush_result: BatchFlushResult<()>) {
         match self {
-            BenchDestination::Null(dest) => dest.write_events(events).await,
-            BenchDestination::BigQuery(dest) => dest.write_events(events).await,
+            BenchDestination::Null(dest) => dest.write_events(events, flush_result).await,
+            BenchDestination::BigQuery(dest) => dest.write_events(events, flush_result).await,
         }
     }
 }
@@ -515,7 +515,7 @@ impl Destination for NullDestination {
         Ok(())
     }
 
-    async fn write_events(&self, _events: Vec<Event>) -> EtlResult<()> {
-        Ok(())
+    async fn write_events(&self, _events: Vec<Event>, flush_result: BatchFlushResult<()>) {
+        let _ = flush_result.send_ok(());
     }
 }

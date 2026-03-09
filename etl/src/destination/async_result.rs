@@ -186,7 +186,7 @@ mod tests {
         flush_result.send_ok(7_u64).unwrap();
 
         let completed = pending_result.await;
-        let (commit_end_lsn, result) = completed.into_parts();
+        let (commit_end_lsn, _metrics, result) = completed.into_parts();
 
         assert_eq!(commit_end_lsn, Some(PgLsn::from(42)));
         assert_eq!(result.unwrap(), 7);
