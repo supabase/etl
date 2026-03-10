@@ -21,6 +21,34 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{debug, info};
 
+/// Suffix for changelog tables
+const ICEBERG_CHANGELOG_TABLE_SUFFIX: &str = "changelog";
+/// CDC operation column name
+const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
+/// CDC operation column name
+const SEQUENCE_NUMBER_COLUMN_NAME: &str = "sequence_number";
+
+/// Type alias for Iceberg table names.
+type IcebergTableName = String;
+
+/// Converts a source [`TableName`] into an Iceberg changelog table name.
+pub fn table_name_to_iceberg_table_name(
+    table_name: &TableName,
+    single_destination_namespace: bool,
+) -> EtlResult<IcebergTableName> {
+    if single_destination_namespace {
+        return Ok(format!(
+            "{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}",
+            try_stringify_table_name(table_name)?
+        ));
+    }
+
+    Ok(format!(
+        "{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}",
+        table_name.name
+    ))
+}
+
 /// CDC operation types for Iceberg changelog tables.
 ///
 /// Represents the type of change operation that occurred in the source database.
@@ -51,35 +79,6 @@ impl fmt::Display for IcebergOperationType {
         }
     }
 }
-
-/// Type alias for Iceberg table names.
-type IcebergTableName = String;
-
-/// Suffix for changelog tables
-const ICEBERG_CHANGELOG_TABLE_SUFFIX: &str = "changelog";
-
-/// Converts a source [`TableName`] into an Iceberg changelog table name.
-pub fn table_name_to_iceberg_table_name(
-    table_name: &TableName,
-    single_destination_namespace: bool,
-) -> EtlResult<IcebergTableName> {
-    if single_destination_namespace {
-        return Ok(format!(
-            "{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}",
-            try_stringify_table_name(table_name)?
-        ));
-    }
-
-    Ok(format!(
-        "{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}",
-        table_name.name
-    ))
-}
-
-/// CDC operation column name
-const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
-/// CDC operation column name
-const SEQUENCE_NUMBER_COLUMN_NAME: &str = "sequence_number";
 
 /// An iceberg destination that implements the ETL [`Destination`] trait.
 ///
