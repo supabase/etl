@@ -357,6 +357,9 @@ struct ApplyLoopState {
     max_batch_fill_duration: Duration,
     /// Destination write result waiting to be applied to replication progress.
     pending_flush_result: Option<PendingBatchFlushResult<()>>,
+    /// The action that is being accumulated from multiple code paths until we are ready to act on
+    /// it.
+    pending_action: Option<ApplyLoopAction>,
     /// Set to `true` to stop the deadline and message branches until the in-flight flush resolves.
     processing_paused: bool,
 }
@@ -377,6 +380,7 @@ impl ApplyLoopState {
             flush_deadline: None,
             max_batch_fill_duration,
             pending_flush_result: None,
+            pending_action: None,
             processing_paused: false,
         }
     }
@@ -500,6 +504,31 @@ impl ApplyLoopState {
     fn has_pending_flush_result(&self) -> bool {
         self.pending_flush_result.is_some()
     }
+
+    /// Merges a new action into the current pending action, if any.
+    fn merge_into_pending_action(&mut self, new_pending_action: ApplyLoopAction) {
+        self.pending_action = match self.pending_action {
+            Some(pending_action) => Some(pending_action.merge(new_pending_action)),
+            None => Some(new_pending_action),
+        }
+    }
+
+    /// Returns `true` whether a branch in the apply loop should defer the result and rather put it
+    /// into `pending_result` for it to be used once the loop cleanly completes.
+    ///
+    /// The rationale for the two conditions is:
+    /// - `has_pending_flush_result` -> when we have a terminating result, we can't return it until
+    ///   there is a pending flush in progress, otherwise the system will prematurely end before
+    ///   state transitions can occur.
+    /// - `WaitingForPrimaryKeepAlive` -> when we have a terminating result, we can't return it since
+    ///   we are waiting for a keep alive, and then we will return it.
+    fn should_defer_action(&self) -> bool {
+        self.has_pending_flush_result()
+            || matches!(
+                self.shutdown_state,
+                ShutdownState::WaitingForPrimaryKeepAlive { .. }
+            )
+    }
 }
 
 /// Main apply loop implementation that processes replication events.
@@ -604,9 +633,6 @@ where
 
         let mut connection_updates_rx = replication_client.connection_updates_rx();
 
-        // If the loop produces a result while waiting for shutdown acknowledgement,
-        // we store it here and return it once the keepalive is received.
-        let mut pending_result: Option<ApplyLoopResult> = None;
         loop {
             // If waiting for shutdown acknowledgement, the loop is now just waiting for the keep alive
             // message before shutting off.
@@ -615,8 +641,14 @@ where
             {
                 let message = events_stream.next().await;
                 if self.try_complete_shutdown(message, acked_flush_lsn)? {
-                    // Return the pending result if one was stored, otherwise default to Paused.
-                    return Ok(pending_result.unwrap_or(ApplyLoopResult::Paused));
+                    // Return the pending result (constructed from the action, if any), otherwise default
+                    // to pausing.
+                    return Ok(self
+                        .state
+                        .pending_action
+                        .unwrap_or(ApplyLoopAction::Pause)
+                        .to_result()
+                        .unwrap_or(ApplyLoopResult::Paused));
                 }
 
                 continue;
@@ -671,16 +703,19 @@ where
                 // After resolving, processing_paused is cleared so the deadline and message branches
                 // resume, allowing the accumulated batch to be flushed on the next iteration.
                 apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
+                    // We are taking the pending action (if any), since we will merge it with the one
+                    // that is going to result from the `handle_flush_result`.
+                    let pending_apply = self.state.pending_action.take();
                     let action = self
-                        .handle_flush_result(events_stream.as_mut(), apply_result)
+                        .handle_flush_result(events_stream.as_mut(), apply_result, pending_apply)
                         .await?;
 
-                    if let Some(result) = action.to_result() {
-                        if matches!(self.state.shutdown_state, ShutdownState::WaitingForPrimaryKeepAlive { .. }) {
-                            pending_result = Some(result);
-                        } else {
-                            return Ok(result);
-                        }
+                    // If we should defer the action, we store it and continue the loop.
+                    // If the action is not deferrable, we just check if it's terminal and return.
+                    if self.state.should_defer_action() {
+                        self.state.merge_into_pending_action(action);
+                    } else if let Some(result) = action.to_result() {
+                        return Ok(result);
                     }
                 }
 
@@ -706,12 +741,12 @@ where
                         )
                         .await?;
 
-                    if let Some(result) = action.to_result() {
-                        if matches!(self.state.shutdown_state, ShutdownState::WaitingForPrimaryKeepAlive { .. }) {
-                            pending_result = Some(result);
-                        } else {
-                            return Ok(result);
-                        }
+                    // If we should defer the action, we store it and continue the loop.
+                    // If the action is not deferrable, we just check if it's terminal and return.
+                    if self.state.should_defer_action() {
+                        self.state.merge_into_pending_action(action);
+                    } else if let Some(result) = action.to_result() {
+                        return Ok(result);
                     }
                 }
             }
@@ -882,6 +917,7 @@ where
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         flush_result: CompletedBatchFlushResult<()>,
+        pending_action: Option<ApplyLoopAction>,
     ) -> EtlResult<ApplyLoopAction> {
         let (commit_end_lsn, metrics, result) = flush_result.into_parts();
 
@@ -906,7 +942,8 @@ where
         )
         .record(metrics.dispatched_at.elapsed().as_secs_f64());
 
-        let mut action = ApplyLoopAction::Continue;
+        // We take the current pending action, or we default to continue.
+        let mut action = pending_action.unwrap_or(ApplyLoopAction::Continue);
 
         // We process the syncing tables with the last end lsn that the batch contains.
         //
@@ -1109,12 +1146,6 @@ where
             .await;
         self.state.pending_flush_result = Some(pending_flush_result);
 
-        // If shutdown is deferred and we're no longer mid-transaction, pause processing so the
-        // loop waits for this flush to resolve before initiating graceful shutdown.
-        if self.state.shutdown_state.is_deferred() && !self.state.handling_transaction() {
-            self.state.processing_paused = true;
-        }
-
         Ok(())
     }
 
@@ -1296,8 +1327,12 @@ where
 
         // If shutdown was deferred, we merge [`ApplyLoopAction::Pause`] so the apply loop pauses
         // after this commit and a flush is forced (if no pending flush is in flight).
+        //
+        // We also stop processing, so that the system will from now on exclusively consume results
+        // from the pending flush results.
         if self.state.shutdown_state.is_deferred() {
             action = action.merge(ApplyLoopAction::Pause);
+            self.state.processing_paused = true;
         }
 
         let tx_ordinal = self.state.next_tx_ordinal();
