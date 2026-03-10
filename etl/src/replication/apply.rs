@@ -919,6 +919,14 @@ where
         flush_result: CompletedBatchFlushResult<()>,
         pending_action: Option<ApplyLoopAction>,
     ) -> EtlResult<ApplyLoopAction> {
+        // We store the existing processing state, that we can use to determine whether we want to
+        // flush or not.
+        let processing_paused = self.state.processing_paused;
+
+        // We clear the state, since now we have processed the pending batch.
+        self.state.pending_flush_result = None;
+        self.state.processing_paused = false;
+
         let (commit_end_lsn, metrics, result) = flush_result.into_parts();
 
         // If there was an error in the flushing, we return it immediately.
@@ -958,9 +966,22 @@ where
             action = action.merge(synchronize_action);
         }
 
-        // If shutdown was deferred waiting for in-flight results, the flush resolving here is the
-        // signal to initiate graceful shutdown.
-        if self.state.shutdown_state.is_deferred() {
+        let synchronize_action = self.process_syncing_tables_when_idle().await?;
+        action = action.merge(synchronize_action);
+
+        // If processing was paused, this is likely because a new batch is ready to be flushed but could
+        // not be flushed because of a pending flush result. If that's the case, we now want to flush
+        // that batch. Also, very important, we check if the action is terminating, because if we are
+        // told to terminate, we don't want to enqueue the existing batch.
+        if !action.is_terminating() && processing_paused {
+            self.flush_batch("pending flush result received").await?;
+        }
+
+        // If, after handling a flush result, we are told to shut down, and we are idle, we can immediately
+        // initiate the graceful shutdown. The reason why we check for idle is so that we do not shut down
+        // if there are outstanding batches to flush, since those will be terminated cleanly at commit
+        // boundaries when processed.
+        if self.state.shutdown_state.is_deferred() && self.state.is_idle() {
             info!(
                 worker_type = %self.worker_context.worker_type(),
                 "batch flush result resolved, initiating graceful shutdown",
@@ -969,22 +990,8 @@ where
             self.initiate_graceful_shutdown(events_stream.as_mut())
                 .await?;
 
-            // If there is still a pending batch (e.g. shutdown arrived while a batch was
-            // accumulating and couldn't be flushed immediately), flush it now before waiting
-            // for the next result.
-            if self.state.has_pending_batch() {
-                self.flush_batch("deferred shutdown flush").await?;
-            }
-
             return Ok(action);
         }
-
-        let synchronize_action = self.process_syncing_tables_when_idle().await?;
-        action = action.merge(synchronize_action);
-
-        // Clear the in-flight state so the loop resumes normal processing.
-        self.state.pending_flush_result = None;
-        self.state.processing_paused = false;
 
         Ok(action)
     }
@@ -1101,10 +1108,6 @@ where
     /// mid-transaction), this will either wait for in-flight destination acknowledgements or
     /// initiate graceful shutdown immediately if none are pending.
     async fn flush_batch(&mut self, reason: &str) -> EtlResult<()> {
-        // We reset the deadline for the batch, since we are now flushing a new batch. The new deadline
-        // will start as soon as we process a new element.
-        self.state.reset_flush_deadline();
-
         // If the batch is empty, we don't need to do anything.
         if !self.state.has_pending_batch() {
             return Ok(());
@@ -1145,6 +1148,10 @@ where
             .write_events(events_batch, flush_result)
             .await;
         self.state.pending_flush_result = Some(pending_flush_result);
+
+        // We reset the deadline for the batch, since we are now flushing a new batch. The new deadline
+        // will start as soon as we process a new element.
+        self.state.reset_flush_deadline();
 
         Ok(())
     }
@@ -1328,8 +1335,8 @@ where
         // If shutdown was deferred, we merge [`ApplyLoopAction::Pause`] so the apply loop pauses
         // after this commit and a flush is forced (if no pending flush is in flight).
         //
-        // We also stop processing, so that the system will from now on exclusively consume results
-        // from the pending flush results.
+        // We also stop processing, so that the system will from now on just wait for new flush results,
+        // but it will stop consuming new messages.
         if self.state.shutdown_state.is_deferred() {
             action = action.merge(ApplyLoopAction::Pause);
             self.state.processing_paused = true;
