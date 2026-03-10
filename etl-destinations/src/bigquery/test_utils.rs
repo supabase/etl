@@ -5,7 +5,8 @@
 
 use std::time::Duration;
 
-use crate::bigquery::{BigQueryDestination, table_name_to_bigquery_table_id};
+use crate::bigquery::BigQueryDestination;
+use crate::bigquery::table_name_to_bigquery_table_id;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{PipelineId, TableName};
@@ -178,7 +179,7 @@ impl BigQueryDatabase {
     /// Returns all rows from the table in the test dataset, polling until BigQuery
     /// surfaces the streamed data or a short retry budget is exhausted.
     pub async fn query_table(&self, table_name: TableName) -> Option<Vec<TableRow>> {
-        let table_id = table_name_to_bigquery_table_id(&table_name);
+        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
         let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
 
         let query = format!("select * from {full_table_path}");

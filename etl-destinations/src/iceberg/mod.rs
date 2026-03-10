@@ -8,9 +8,8 @@ mod schema;
 pub mod test_utils;
 
 pub use client::IcebergClient;
-pub use core::{
-    DestinationNamespace, IcebergDestination, IcebergOperationType,
-    table_name_to_iceberg_table_name,
-};
+#[cfg(feature = "test-utils")]
+pub use core::table_name_to_iceberg_table_name;
+pub use core::{DestinationNamespace, IcebergDestination, IcebergOperationType};
 pub use encoding::UNIX_EPOCH;
 pub use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
