@@ -1182,7 +1182,7 @@ where
         // [`ApplyLoopAction::Pause`] so the apply loop pauses after this commit. This allows
         // [`Self::flush_batch`] to perform the status update and wait for PostgreSQL
         // acknowledgement before shutting down.
-        if matches!(self.state.shutdown_state, ShutdownState::Deferred) {
+        if self.state.shutdown_state.is_deferred() {
             action = action.merge(ApplyLoopAction::Pause);
         }
 
