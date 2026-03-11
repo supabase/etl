@@ -3,6 +3,27 @@
 FROM lukemathwalker/cargo-chef:latest-rust-1.88.0-slim-bookworm AS chef
 WORKDIR /app
 
+# Fetch DuckDB extensions during the Docker build so they do not need to live
+# in the repository or the local build context.
+FROM debian:bookworm-slim AS duckdb-extensions
+ARG TARGETPLATFORM
+RUN apt-get update && \
+    apt-get install -y \
+    ca-certificates \
+    curl \
+    gzip && \
+    rm -rf /var/lib/apt/lists/*
+COPY scripts/vendor_duckdb_extensions.sh /usr/local/bin/vendor_duckdb_extensions.sh
+RUN chmod +x /usr/local/bin/vendor_duckdb_extensions.sh && \
+    case "$TARGETPLATFORM" in \
+      "linux/amd64") DUCKDB_PLATFORM="linux_amd64" ;; \
+      "linux/arm64") DUCKDB_PLATFORM="linux_arm64" ;; \
+      *) echo "unsupported duckdb extension platform: $TARGETPLATFORM" >&2; exit 1 ;; \
+    esac && \
+    /usr/local/bin/vendor_duckdb_extensions.sh \
+      --output-root /duckdb_extensions \
+      --platform "$DUCKDB_PLATFORM"
+
 # Install system dependencies
 FROM chef AS planner
 COPY . .
@@ -46,6 +67,7 @@ USER nonroot:nonroot
 
 # Copy binary; configuration must be provided at runtime via mounted volume or environment overrides
 COPY --from=builder /app/target/release/etl-api ./etl-api
+COPY --from=duckdb-extensions /duckdb_extensions ./duckdb_extensions
 
 # Use exec form for proper signal handling
 ENTRYPOINT ["./etl-api"]

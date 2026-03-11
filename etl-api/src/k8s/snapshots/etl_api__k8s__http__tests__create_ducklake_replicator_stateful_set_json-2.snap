@@ -1,0 +1,216 @@
+---
+source: etl-api/src/k8s/http.rs
+expression: stateful_set_json
+---
+{
+  "apiVersion": "apps/v1",
+  "kind": "StatefulSet",
+  "metadata": {
+    "labels": {
+      "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
+      "etl.supabase.com/app-type": "etl-replicator-app"
+    },
+    "name": "abcdefghijklmnopqrst-42-replicator-stateful-set",
+    "namespace": "etl-data-plane"
+  },
+  "spec": {
+    "replicas": 1,
+    "selector": {
+      "matchLabels": {
+        "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
+        "etl.supabase.com/app-type": "etl-replicator-app"
+      }
+    },
+    "template": {
+      "metadata": {
+        "annotations": {
+          "etl.supabase.com/restarted-at": "[timestamp]"
+        },
+        "labels": {
+          "etl.supabase.com/app-name": "abcdefghijklmnopqrst-42-replicator-app",
+          "etl.supabase.com/app-type": "etl-replicator-app"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "env": [
+              {
+                "name": "APP_ENVIRONMENT",
+                "value": "staging"
+              },
+              {
+                "name": "APP_VERSION",
+                "value": "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e"
+              },
+              {
+                "name": "RUST_LOG",
+                "value": "info"
+              },
+              {
+                "name": "RUST_BACKTRACE",
+                "value": "1"
+              },
+              {
+                "name": "APP_SENTRY__DSN",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "dsn",
+                    "name": "replicator-sentry-dsn",
+                    "optional": true
+                  }
+                }
+              },
+              {
+                "name": "APP_SUPABASE__API_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "key",
+                    "name": "supabase-api-key",
+                    "optional": true
+                  }
+                }
+              },
+              {
+                "name": "APP_SUPABASE__CONFIGCAT_SDK_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "key",
+                    "name": "replicator-configcat-sdk-key",
+                    "optional": true
+                  }
+                }
+              },
+              {
+                "name": "APP_PIPELINE__PG_CONNECTION__PASSWORD",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "password",
+                    "name": "abcdefghijklmnopqrst-42-postgres-password"
+                  }
+                }
+              },
+              {
+                "name": "APP_DESTINATION__DUCKLAKE__S3_ACCESS_KEY_ID",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "s3-access-key-id",
+                    "name": "abcdefghijklmnopqrst-42-ducklake",
+                    "optional": true
+                  }
+                }
+              },
+              {
+                "name": "APP_DESTINATION__DUCKLAKE__S3_SECRET_ACCESS_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "s3-secret-access-key",
+                    "name": "abcdefghijklmnopqrst-42-ducklake",
+                    "optional": true
+                  }
+                }
+              }
+            ],
+            "image": "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e",
+            "name": "abcdefghijklmnopqrst-42-replicator",
+            "ports": [
+              {
+                "containerPort": 9000,
+                "name": "metrics",
+                "protocol": "TCP"
+              }
+            ],
+            "resources": {
+              "limits": {
+                "cpu": "250m",
+                "memory": "300Mi"
+              },
+              "requests": {
+                "cpu": "125m",
+                "memory": "250Mi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/app/configuration",
+                "name": "replicator-config-file"
+              },
+              {
+                "mountPath": "/app/logs",
+                "name": "logs"
+              }
+            ]
+          }
+        ],
+        "initContainers": [
+          {
+            "env": [
+              {
+                "name": "LOGFLARE_API_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "key": "key",
+                    "name": "replicator-logflare-api-key"
+                  }
+                }
+              }
+            ],
+            "image": "timberio/vector:0.46.1-distroless-libc",
+            "name": "abcdefghijklmnopqrst-42-vector",
+            "resources": {
+              "limits": {
+                "cpu": "150m",
+                "memory": "230Mi"
+              },
+              "requests": {
+                "cpu": "75m",
+                "memory": "192Mi"
+              }
+            },
+            "restartPolicy": "Always",
+            "volumeMounts": [
+              {
+                "mountPath": "/etc/vector",
+                "name": "vector-config-file"
+              },
+              {
+                "mountPath": "/var/log",
+                "name": "logs"
+              }
+            ]
+          }
+        ],
+        "nodeSelector": {
+          "etl.supabase.com/node-role": "workloads"
+        },
+        "terminationGracePeriodSeconds": 300,
+        "tolerations": [
+          {
+            "effect": "NoSchedule",
+            "key": "etl.supabase.com/node-role",
+            "operator": "Equal",
+            "value": "workloads"
+          }
+        ],
+        "volumes": [
+          {
+            "configMap": {
+              "name": "abcdefghijklmnopqrst-42-replicator-config"
+            },
+            "name": "replicator-config-file"
+          },
+          {
+            "configMap": {
+              "name": "replicator-vector-config"
+            },
+            "name": "vector-config-file"
+          },
+          {
+            "emptyDir": {},
+            "name": "logs"
+          }
+        ]
+      }
+    }
+  }
+}

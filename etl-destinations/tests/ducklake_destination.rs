@@ -16,7 +16,7 @@
 //!
 //! ```
 //! duckdb :memory: -c "
-//!   INSTALL ducklake; LOAD ducklake;
+//!   LOAD '/absolute/path/to/ducklake.duckdb_extension';
 //!   ATTACH 'ducklake:file:///path/printed/catalog.ducklake' AS lake
 //!     (DATA_PATH 'file:///path/printed/data');
 //!   SELECT * FROM lake.public_users;
@@ -24,7 +24,7 @@
 //! ```
 
 use chrono::NaiveDate;
-use duckdb::Connection;
+use duckdb::{Config, Connection};
 use etl::destination::Destination;
 use etl::store::both::memory::MemoryStore;
 use etl::store::schema::SchemaStore;
@@ -61,6 +61,59 @@ fn path_to_file_url(path: &Path) -> Url {
     Url::from_file_path(path).expect("failed to convert path to file url")
 }
 
+fn open_verification_connection() -> Connection {
+    if cfg!(target_os = "linux") {
+        return Connection::open_in_memory_with_flags(
+            Config::default()
+                .enable_autoload_extension(false)
+                .expect("failed to disable DuckDB extension autoload"),
+        )
+        .expect("failed to open in-memory DuckDB");
+    }
+
+    Connection::open_in_memory().expect("failed to open in-memory DuckDB")
+}
+
+fn ducklake_load_sql() -> String {
+    if cfg!(target_os = "linux") {
+        let platform_dir = match std::env::consts::ARCH {
+            "x86_64" => "linux_amd64",
+            "aarch64" => "linux_arm64",
+            arch => panic!("unsupported linux architecture for DuckDB test extensions: {arch}"),
+        };
+        let env_override = std::env::var_os("ETL_DUCKDB_EXTENSION_ROOT").map(PathBuf::from);
+        let candidate_roots = env_override
+            .into_iter()
+            .chain([
+                PathBuf::from("/app/duckdb_extensions"),
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/duckdb/extensions"),
+            ])
+            .collect::<Vec<_>>();
+
+        for root in candidate_roots {
+            let extension_dir = root.join("1.4.4").join(platform_dir);
+            let extension_path = extension_dir.join("ducklake.duckdb_extension");
+            let json_extension_path = extension_dir.join("json.duckdb_extension");
+            let parquet_extension_path = extension_dir.join("parquet.duckdb_extension");
+
+            if extension_path.is_file()
+                && json_extension_path.is_file()
+                && parquet_extension_path.is_file()
+            {
+                return format!(
+                    "LOAD {}; LOAD {}; LOAD {};",
+                    quote_literal(&extension_path.display().to_string()),
+                    quote_literal(&json_extension_path.display().to_string()),
+                    quote_literal(&parquet_extension_path.display().to_string())
+                );
+            }
+        }
+    }
+
+    "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet;"
+        .to_string()
+}
+
 fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
     TableSchema::new(
         TableId::new(table_id),
@@ -88,10 +141,11 @@ fn make_rich_schema(table_id: u32) -> TableSchema {
 
 /// Opens a verification connection to the same DuckLake catalog and returns it.
 fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
-    let conn = Connection::open_in_memory().expect("failed to open in-memory DuckDB");
+    let conn = open_verification_connection();
     conn.execute_batch(&format!(
-        "INSTALL ducklake; LOAD ducklake; \
+        "{} \
          ATTACH {} AS {} (DATA_PATH {});",
+        ducklake_load_sql(),
         quote_literal(&format!("ducklake:{}", catalog.as_str())),
         quote_identifier("lake"),
         quote_literal(data.as_str())
@@ -268,7 +322,7 @@ async fn test_truncate_clears_rows() {
     );
 }
 
-/// `write_events` appends Insert, Update, and Delete rows to the lake.
+/// `write_events` applies inserts, updates, and deletes to the current table state.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
@@ -306,8 +360,14 @@ async fn test_write_events() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 table_id,
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("Gadget".to_string())]),
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Gadget".to_string())]),
                 old_table_row: None,
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                table_id,
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_string())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
@@ -315,7 +375,7 @@ async fn test_write_events() {
                 table_id,
                 old_table_row: Some((
                     false,
-                    TableRow::new(vec![Cell::I32(3), Cell::String("Doohickey".to_string())]),
+                    TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_string())]),
                 )),
             }),
         ])
@@ -323,7 +383,21 @@ async fn test_write_events() {
         .expect("write_events failed");
 
     let conn = open_lake_conn(&catalog_url, &data_url);
-    assert_eq!(count_rows(&conn, &table_name), 3);
+    assert_eq!(count_rows(&conn, &table_name), 1);
+
+    let (id, name): (i32, String) = conn
+        .query_row(
+            &format!(
+                "SELECT id, name FROM {}.{}",
+                quote_identifier("lake"),
+                quote_identifier(&table_name)
+            ),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("state query failed");
+    assert_eq!(id, 1);
+    assert_eq!(name, "Gadget");
 }
 
 /// Concurrent async callers should serialize cleanly behind one DuckDB slot.

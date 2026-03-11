@@ -1836,6 +1836,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-actix-web",
+ "url",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
@@ -1960,6 +1961,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]

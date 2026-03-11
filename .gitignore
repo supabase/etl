@@ -32,3 +32,6 @@ pyvenv.cfg
 
 # Serena files
 .serena
+
+# Optional local DuckDB extension vendoring.
+vendor/duckdb/extensions/

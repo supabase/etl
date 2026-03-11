@@ -14,7 +14,7 @@ egress = ["etl/egress", "etl-destinations/egress"]
 [dependencies]
 etl = { workspace = true }
 etl-config = { workspace = true, features = ["supabase"] }
-etl-destinations = { workspace = true, features = ["bigquery", "iceberg"] }
+etl-destinations = { workspace = true, features = ["bigquery", "iceberg", "ducklake"] }
 etl-telemetry = { workspace = true }
 
 configcat = { workspace = true }
@@ -33,6 +33,7 @@ sqlx = { workspace = true, features = [
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing = { workspace = true, default-features = true }
+url = { workspace = true }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemalloc-ctl = { workspace = true }

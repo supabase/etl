@@ -1,17 +1,19 @@
 use std::collections::{HashMap, HashSet};
+use std::error::Error as StdError;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{NaiveDate, NaiveTime};
+use duckdb::Config;
 use duckdb::types::{TimeUnit, Value};
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{ArrayCell, Cell, Event, TableId, TableName, TableRow};
+use etl::types::{ArrayCell, Cell, Event, TableId, TableName, TableRow, TableSchema};
 use parking_lot::Mutex;
-use pg_escape::quote_identifier;
+use pg_escape::{quote_identifier, quote_literal};
 use r2d2::Pool;
 use rand::Rng;
 use tokio::sync::Semaphore;
@@ -21,7 +23,7 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::ducklake::S3Config;
-use crate::ducklake::config::build_setup_sql;
+use crate::ducklake::config::{build_setup_sql, current_duckdb_extension_strategy};
 use crate::ducklake::schema::build_create_table_sql_ducklake;
 
 /// The DuckDB catalog alias used in every `lake.<table>` qualified name.
@@ -30,9 +32,37 @@ pub(super) const LAKE_CATALOG: &str = "lake";
 const TABLE_NAME_DELIMITER: &str = "_";
 /// Escape string for underscores within schema/table names to prevent collisions.
 const TABLE_NAME_ESCAPE: &str = "__";
+/// Maximum number of rows per SQL `INSERT ... VALUES` batch when nested values
+/// force the staging path to bypass DuckDB's appender API.
+const SQL_INSERT_BATCH_SIZE: usize = 256;
+/// Maximum number of primary-key predicates per SQL `DELETE` batch.
+///
+/// We intentionally keep this at one row per statement for CDC deletes. This
+/// avoids relying on DuckLake's inlining heuristics and keeps each delete
+/// operation as small and predictable as possible inside the transaction.
+const SQL_DELETE_BATCH_SIZE: usize = 1;
 
 /// Alias for DuckLake table names.
 type DuckLakeTableName = String;
+
+/// Prepared row payload reused across retry attempts.
+enum PreparedRows {
+    Appender(Vec<Vec<Value>>),
+    SqlLiterals(Vec<String>),
+}
+
+/// Event-level table mutations that must be applied in order.
+enum TableMutation {
+    Upsert(TableRow),
+    Delete(TableRow),
+    Replace(TableRow),
+}
+
+/// Prepared table mutations ready for execution and retries.
+enum PreparedTableMutation {
+    Upsert(PreparedRows),
+    Delete(Vec<String>),
+}
 
 // ── connection manager ────────────────────────────────────────────────────────
 
@@ -45,6 +75,9 @@ struct DuckLakeConnectionManager {
     /// SQL executed immediately after a new connection is opened.
     /// Loads required extensions and attaches the DuckLake catalog.
     setup_sql: Arc<String>,
+    /// Disables DuckDB extension autoload/autoinstall when vendored Linux
+    /// extensions are required.
+    disable_extension_autoload: bool,
 }
 
 impl r2d2::ManageConnection for DuckLakeConnectionManager {
@@ -52,7 +85,13 @@ impl r2d2::ManageConnection for DuckLakeConnectionManager {
     type Error = duckdb::Error;
 
     fn connect(&self) -> Result<duckdb::Connection, duckdb::Error> {
-        let conn = duckdb::Connection::open_in_memory()?;
+        let conn = if self.disable_extension_autoload {
+            duckdb::Connection::open_in_memory_with_flags(
+                Config::default().enable_autoload_extension(false)?,
+            )?
+        } else {
+            duckdb::Connection::open_in_memory()?
+        };
         conn.execute_batch(&self.setup_sql)?;
         Ok(conn)
     }
@@ -65,6 +104,21 @@ impl r2d2::ManageConnection for DuckLakeConnectionManager {
     fn has_broken(&self, _conn: &mut duckdb::Connection) -> bool {
         false
     }
+}
+
+/// Formats a DuckDB query failure so the displayed [`EtlError`] includes
+/// both the SQL statement and the underlying DuckDB error message.
+fn format_query_error_detail(sql: &str, error: &duckdb::Error) -> String {
+    let compact_sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("sql: {compact_sql}; source: {error}")
+}
+
+/// Returns whether a DuckLake DDL error indicates another transaction already
+/// created the requested table.
+fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) -> bool {
+    let message = error.to_string();
+    message.contains("has been created by another transaction already")
+        && message.contains(&format!("attempting to create table \"{table_name}\""))
 }
 
 // ── destination ───────────────────────────────────────────────────────────────
@@ -82,6 +136,7 @@ impl r2d2::ManageConnection for DuckLakeConnectionManager {
 pub struct DuckLakeDestination<S> {
     pool: Pool<DuckLakeConnectionManager>,
     blocking_slots: Arc<Semaphore>,
+    table_creation_slots: Arc<Semaphore>,
     store: S,
     /// Cache of table names whose DDL has already been executed.
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
@@ -103,6 +158,11 @@ impl<S> DuckLakeDestination<S> {
     ///   and the bucket is not publicly accessible.
     /// - `metadata_schema`: Optional Postgres schema for DuckLake metadata tables
     ///   (e.g. `"ducklake"`). Uses the catalog default schema when not set.
+    /// - On Linux, DuckDB extensions are loaded from vendored local files when
+    ///   a vendored directory is available. The root directory can be forced
+    ///   with `ETL_DUCKDB_EXTENSION_ROOT`. Otherwise, DuckDB uses the legacy
+    ///   online `INSTALL` flow. On macOS and Windows, DuckDB always uses the
+    ///   legacy online `INSTALL` flow.
     ///
     /// Pool initialization is blocking because `r2d2` eagerly opens and
     /// validates connections. This constructor offloads that work to Tokio's
@@ -115,6 +175,12 @@ impl<S> DuckLakeDestination<S> {
         metadata_schema: Option<String>,
         store: S,
     ) -> EtlResult<Self> {
+        let extension_strategy = current_duckdb_extension_strategy()?;
+        if let crate::ducklake::config::DuckDbExtensionStrategy::VendoredLinux { platform_dir } =
+            extension_strategy
+        {
+            info!(platform = platform_dir, "using vendored duckdb extensions");
+        }
         let setup_sql = build_setup_sql(
             &catalog_url,
             &data_path,
@@ -124,6 +190,7 @@ impl<S> DuckLakeDestination<S> {
 
         let manager = DuckLakeConnectionManager {
             setup_sql: Arc::new(setup_sql),
+            disable_extension_autoload: extension_strategy.disables_autoload(),
         };
 
         let pool =
@@ -146,6 +213,7 @@ impl<S> DuckLakeDestination<S> {
         Ok(Self {
             pool,
             blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
+            table_creation_slots: Arc::new(Semaphore::new(1)),
             store,
             created_tables: Arc::new(Mutex::new(HashSet::new())),
         })
@@ -217,17 +285,12 @@ where
             return Ok(());
         }
 
-        // Convert to Values before retrying so each blocking attempt can reuse
-        // the same rows without needing Clone on Cell.
-        let all_values: Vec<Vec<Value>> = table_rows
-            .into_iter()
-            .map(|row| row.into_values().into_iter().map(cell_to_value).collect())
-            .collect();
+        let prepared_rows = prepare_rows(table_rows);
         insert_rows_with_retry(
             self.pool.clone(),
             Arc::clone(&self.blocking_slots),
             table_name,
-            all_values,
+            prepared_rows,
         )
         .await
     }
@@ -242,7 +305,7 @@ where
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
-            let mut table_id_to_rows: HashMap<TableId, Vec<Vec<Value>>> = HashMap::new();
+            let mut table_id_to_mutations: HashMap<TableId, Vec<TableMutation>> = HashMap::new();
 
             // Accumulate non-truncate events, stopping at the first Truncate.
             while let Some(event) = event_iter.peek() {
@@ -254,43 +317,36 @@ where
                 let event = event_iter.next().unwrap();
                 match event {
                     Event::Insert(insert) => {
-                        let values = insert
-                            .table_row
-                            .into_values()
-                            .into_iter()
-                            .map(cell_to_value)
-                            .collect();
-                        table_id_to_rows
+                        table_id_to_mutations
                             .entry(insert.table_id)
                             .or_default()
-                            .push(values);
+                            .push(TableMutation::Upsert(insert.table_row));
                     }
                     Event::Update(update) => {
-                        let values = update
-                            .table_row
-                            .into_values()
-                            .into_iter()
-                            .map(cell_to_value)
-                            .collect();
-                        table_id_to_rows
-                            .entry(update.table_id)
-                            .or_default()
-                            .push(values);
+                        let table_id = update.table_id;
+                        let table_row = update.table_row;
+                        let old_table_row = update.old_table_row;
+                        let mutations = table_id_to_mutations.entry(table_id).or_default();
+                        if let Some((_, old_row)) = old_table_row {
+                            // TODO not sure about this
+                            mutations.push(TableMutation::Delete(old_row));
+                            mutations.push(TableMutation::Upsert(table_row));
+                        } else {
+                            debug!(
+                                "update event has no old row, deleting by primary key from new row"
+                            );
+                            mutations.push(TableMutation::Replace(table_row));
+                        }
                     }
                     Event::Delete(delete) => {
                         let Some((_, old_row)) = delete.old_table_row else {
                             info!("delete event has no old row, skipping");
                             continue;
                         };
-                        let values = old_row
-                            .into_values()
-                            .into_iter()
-                            .map(cell_to_value)
-                            .collect();
-                        table_id_to_rows
+                        table_id_to_mutations
                             .entry(delete.table_id)
                             .or_default()
-                            .push(values);
+                            .push(TableMutation::Delete(old_row));
                     }
                     event => {
                         debug!(event_type = %event.event_type(), "skipping unsupported event type");
@@ -301,16 +357,24 @@ where
             // One async task per table. Each write attempt acquires one
             // blocking slot, then uses a separate pool connection and commits
             // an independent Parquet snapshot.
-            if !table_id_to_rows.is_empty() {
+            if !table_id_to_mutations.is_empty() {
                 let mut join_set = JoinSet::new();
 
-                for (table_id, rows) in table_id_to_rows {
+                for (table_id, mutations) in table_id_to_mutations {
                     let table_name = self.ensure_table_exists(table_id).await?;
+                    let table_schema = self.get_table_schema(table_id).await?;
                     let pool = self.pool.clone();
                     let blocking_slots = Arc::clone(&self.blocking_slots);
+                    let prepared_mutations = prepare_table_mutations(&table_schema, mutations)?;
 
                     join_set.spawn(async move {
-                        insert_rows_with_retry(pool, blocking_slots, table_name, rows).await
+                        apply_table_mutations_with_retry(
+                            pool,
+                            blocking_slots,
+                            table_name,
+                            prepared_mutations,
+                        )
+                        .await
                     });
                 }
 
@@ -365,6 +429,25 @@ where
             }
         }
 
+        let _table_creation_permit = self
+            .table_creation_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "DuckLake table creation semaphore closed"
+                )
+            })?;
+
+        {
+            let cache = self.created_tables.lock();
+            if cache.contains(&table_name) {
+                return Ok(table_name);
+            }
+        }
+
         // `build_create_table_sql_ducklake` generates `CREATE TABLE IF NOT EXISTS "name" (...)`.
         // Prefix the table name with the catalog alias so DuckLake knows which
         // catalog to create the table in.
@@ -383,20 +466,42 @@ where
             pool,
             Arc::clone(&self.blocking_slots),
             move |conn| -> EtlResult<()> {
-                conn.execute_batch(&qualified_ddl).map_err(|e| {
-                    etl_error!(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake CREATE TABLE failed",
-                        source: e
-                    )
-                })?;
-                created_tables.lock().insert(table_name_clone);
+                match conn.execute_batch(&qualified_ddl) {
+                    Ok(()) => {
+                        created_tables.lock().insert(table_name_clone);
+                    }
+                    Err(e) if is_create_table_conflict(&e, &table_name_clone) => {
+                        created_tables.lock().insert(table_name_clone);
+                    }
+                    Err(e) => {
+                        return Err(etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake CREATE TABLE failed",
+                            format_query_error_detail(&qualified_ddl, &e),
+                            source: e
+                        ));
+                    }
+                }
                 Ok(())
             },
         )
         .await?;
 
         Ok(table_name)
+    }
+
+    /// Returns the current source schema for `table_id`.
+    async fn get_table_schema(&self, table_id: TableId) -> EtlResult<Arc<TableSchema>> {
+        self.store
+            .get_table_schema(&table_id)
+            .await?
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::MissingTableSchema,
+                    "Table schema not found",
+                    format!("No schema found for table {table_id}")
+                )
+            })
     }
 
     /// Returns the stored destination table name for `table_id`, creating and
@@ -460,6 +565,8 @@ const MAX_COMMIT_RETRIES: u32 = 10;
 const INITIAL_RETRY_DELAY_MS: u64 = 50;
 /// Upper bound on backoff duration.
 const MAX_RETRY_DELAY_MS: u64 = 2_000;
+/// Minimum retry delay for transient delete-file visibility failures.
+const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
 
 /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a permit
 /// that matches the DuckDB connection pool capacity.
@@ -509,21 +616,17 @@ async fn insert_rows_with_retry(
     pool: Pool<DuckLakeConnectionManager>,
     blocking_slots: Arc<Semaphore>,
     table_name: DuckLakeTableName,
-    all_values: Vec<Vec<Value>>,
+    prepared_rows: PreparedRows,
 ) -> EtlResult<()> {
-    let all_values = Arc::new(all_values);
+    let prepared_rows = Arc::new(prepared_rows);
     let mut delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS);
 
     for attempt in 0..=MAX_COMMIT_RETRIES {
         let attempt_table_name = table_name.clone();
-        let attempt_values = Arc::clone(&all_values);
+        let attempt_rows = Arc::clone(&prepared_rows);
 
         match run_duckdb_blocking(pool.clone(), Arc::clone(&blocking_slots), move |conn| {
-            insert_rows(
-                conn,
-                &attempt_table_name,
-                attempt_values.as_ref().as_slice(),
-            )
+            insert_rows(conn, &attempt_table_name, attempt_rows.as_ref())
         })
         .await
         {
@@ -551,7 +654,196 @@ async fn insert_rows_with_retry(
     Ok(())
 }
 
-/// Inserts all rows in `all_values` into `lake."table_name"` as a **single
+/// Applies an ordered mutation sequence atomically and retries on failure.
+async fn apply_table_mutations_with_retry(
+    pool: Pool<DuckLakeConnectionManager>,
+    blocking_slots: Arc<Semaphore>,
+    table_name: DuckLakeTableName,
+    prepared_mutations: Vec<PreparedTableMutation>,
+) -> EtlResult<()> {
+    if prepared_mutations.is_empty() {
+        return Ok(());
+    }
+
+    let prepared_mutations = Arc::new(prepared_mutations);
+    let mut delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS);
+
+    for attempt in 0..=MAX_COMMIT_RETRIES {
+        let attempt_table_name = table_name.clone();
+        let attempt_mutations = Arc::clone(&prepared_mutations);
+
+        match run_duckdb_blocking(pool.clone(), Arc::clone(&blocking_slots), move |conn| {
+            apply_table_mutations(conn, &attempt_table_name, attempt_mutations.as_slice())
+        })
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < MAX_COMMIT_RETRIES => {
+                let is_transient_delete_file_404 = is_transient_ducklake_delete_file_not_found(&e);
+                let base_delay = if is_transient_delete_file_404 {
+                    std::cmp::max(
+                        delay,
+                        Duration::from_millis(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
+                    )
+                } else {
+                    delay
+                };
+                let jitter_ratio = rand::rng().random_range(0.5..=1.5_f64);
+                let jittered = base_delay.mul_f64(jitter_ratio);
+                if is_transient_delete_file_404 {
+                    debug!(
+                        attempt = attempt + 1,
+                        max = MAX_COMMIT_RETRIES,
+                        table = %table_name,
+                        delay_ms = jittered.as_millis() as u64,
+                        error = ?e,
+                        "ducklake delete file not visible yet, retrying"
+                    );
+                } else {
+                    warn!(
+                        attempt = attempt + 1,
+                        max = MAX_COMMIT_RETRIES,
+                        table = %table_name,
+                        error = ?e,
+                        "ducklake table mutation attempt failed, retrying"
+                    );
+                }
+                tokio::time::sleep(jittered).await;
+                delay = std::cmp::min(
+                    base_delay * 2,
+                    Duration::from_millis(
+                        MAX_RETRY_DELAY_MS.max(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
+                    ),
+                );
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns whether the error chain matches DuckLake's transient object-store
+/// visibility failure for delete parquet files.
+fn is_transient_ducklake_delete_file_not_found(error: &etl::error::EtlError) -> bool {
+    let mut current: Option<&(dyn StdError + 'static)> = Some(error);
+    while let Some(source) = current {
+        let message = source.to_string();
+        if message.contains("delete.parquet")
+            && message.contains("404 (Not Found)")
+            && message.contains("HTTP Error")
+        {
+            return true;
+        }
+        current = source.source();
+    }
+
+    false
+}
+
+/// Groups ordered row mutations into retryable DuckDB operations.
+fn prepare_table_mutations(
+    table_schema: &TableSchema,
+    mutations: Vec<TableMutation>,
+) -> EtlResult<Vec<PreparedTableMutation>> {
+    let mut prepared_mutations = Vec::new();
+    let mut upsert_rows = Vec::new();
+    let mut delete_predicates = Vec::new();
+
+    for mutation in mutations {
+        match mutation {
+            TableMutation::Upsert(row) => {
+                if !delete_predicates.is_empty() {
+                    prepared_mutations.push(PreparedTableMutation::Delete(std::mem::take(
+                        &mut delete_predicates,
+                    )));
+                }
+                upsert_rows.push(row);
+            }
+            TableMutation::Delete(row) => {
+                if !upsert_rows.is_empty() {
+                    prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(
+                        std::mem::take(&mut upsert_rows),
+                    )));
+                }
+                delete_predicates.push(delete_predicate_from_row(table_schema, &row)?);
+            }
+            TableMutation::Replace(row) => {
+                if !upsert_rows.is_empty() {
+                    prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(
+                        std::mem::take(&mut upsert_rows),
+                    )));
+                }
+                if !delete_predicates.is_empty() {
+                    prepared_mutations.push(PreparedTableMutation::Delete(std::mem::take(
+                        &mut delete_predicates,
+                    )));
+                }
+
+                prepared_mutations.push(PreparedTableMutation::Delete(vec![
+                    delete_predicate_from_row(table_schema, &row)?,
+                ]));
+                prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(vec![row])));
+            }
+        }
+    }
+
+    if !upsert_rows.is_empty() {
+        prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(upsert_rows)));
+    }
+    if !delete_predicates.is_empty() {
+        prepared_mutations.push(PreparedTableMutation::Delete(delete_predicates));
+    }
+
+    Ok(prepared_mutations)
+}
+
+/// Builds a `WHERE` clause from the primary-key values stored in `row`.
+fn delete_predicate_from_row(table_schema: &TableSchema, row: &TableRow) -> EtlResult<String> {
+    if !table_schema.has_primary_keys() {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "DuckLake delete requires a primary key",
+            format!("Table '{}' has no primary key columns", table_schema.name)
+        ));
+    }
+
+    if row.values().len() != table_schema.column_schemas.len() {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "DuckLake row shape does not match schema",
+            format!(
+                "Expected {} values for table '{}', got {}",
+                table_schema.column_schemas.len(),
+                table_schema.name,
+                row.values().len()
+            )
+        ));
+    }
+
+    let mut predicates = Vec::new();
+
+    for (column_schema, value) in table_schema
+        .column_schemas
+        .iter()
+        .zip(row.values())
+        .filter(|(column_schema, _)| column_schema.primary)
+    {
+        let quoted_column = quote_identifier(&column_schema.name).into_owned();
+        let predicate = match value {
+            Cell::Null => format!("{quoted_column} IS NULL"),
+            _ => format!(
+                "{quoted_column} = {}",
+                cell_to_sql_literal(cell_to_owned(value))
+            ),
+        };
+        predicates.push(predicate);
+    }
+
+    Ok(predicates.join(" AND "))
+}
+
+/// Inserts all prepared rows into `lake."table_name"` as a **single
 /// Parquet data file**.
 ///
 /// ## Why staging?
@@ -572,9 +864,99 @@ async fn insert_rows_with_retry(
 fn insert_rows(
     conn: &duckdb::Connection,
     table_name: &str,
-    all_values: &[Vec<Value>],
+    prepared_rows: &PreparedRows,
 ) -> EtlResult<()> {
-    if all_values.is_empty() {
+    let row_count = match prepared_rows {
+        PreparedRows::Appender(values) => values.len(),
+        PreparedRows::SqlLiterals(values) => values.len(),
+    };
+
+    if row_count == 0 {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake BEGIN TRANSACTION failed",
+            source: e
+        )
+    })?;
+
+    match apply_upsert_mutation(conn, table_name, prepared_rows) {
+        Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK");
+            etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", source: e)
+        }),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+/// Applies a per-table CDC mutation sequence in one transaction.
+fn apply_table_mutations(
+    conn: &duckdb::Connection,
+    table_name: &str,
+    prepared_mutations: &[PreparedTableMutation],
+) -> EtlResult<()> {
+    if prepared_mutations.is_empty() {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake BEGIN TRANSACTION failed",
+            source: e
+        )
+    })?;
+
+    let result = prepared_mutations
+        .iter()
+        .try_for_each(|mutation| apply_table_mutation(conn, table_name, mutation));
+
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
+            let _ = conn.execute_batch("ROLLBACK");
+            etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", source: e)
+        }),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
+/// Applies one prepared table mutation inside an open transaction.
+fn apply_table_mutation(
+    conn: &duckdb::Connection,
+    table_name: &str,
+    prepared_mutation: &PreparedTableMutation,
+) -> EtlResult<()> {
+    match prepared_mutation {
+        PreparedTableMutation::Upsert(prepared_rows) => {
+            apply_upsert_mutation(conn, table_name, prepared_rows)
+        }
+        PreparedTableMutation::Delete(predicates) => {
+            apply_delete_mutation(conn, table_name, predicates.as_slice())
+        }
+    }
+}
+
+/// Applies one upsert batch inside an open DuckLake transaction.
+fn apply_upsert_mutation(
+    conn: &duckdb::Connection,
+    table_name: &str,
+    prepared_rows: &PreparedRows,
+) -> EtlResult<()> {
+    let row_count = match prepared_rows {
+        PreparedRows::Appender(values) => values.len(),
+        PreparedRows::SqlLiterals(values) => values.len(),
+    };
+
+    if row_count == 0 {
         return Ok(());
     }
 
@@ -596,51 +978,45 @@ fn insert_rows(
         )
     })?;
 
-    // Bulk-load all rows into staging via the Appender (fast, purely in-memory).
-    let load_result = (|| {
-        let mut appender = conn.appender(&staging).map_err(|e| {
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake staging appender creation failed",
-                source: e
-            )
-        })?;
-        for values in all_values {
-            appender
-                .append_row(duckdb::appender_params_from_iter(values))
-                .map_err(|e| {
-                    etl_error!(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake staging append_row failed",
-                        source: e
-                    )
-                })?;
+    let load_result = match prepared_rows {
+        PreparedRows::Appender(all_values) => (|| {
+            let mut appender = conn.appender(&staging).map_err(|e| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake staging appender creation failed",
+                    source: e
+                )
+            })?;
+            for values in all_values {
+                appender
+                    .append_row(duckdb::appender_params_from_iter(values))
+                    .map_err(|e| {
+                        etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake staging append_row failed",
+                            source: e
+                        )
+                    })?;
+            }
+            appender.flush().map_err(|e| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake staging appender flush failed",
+                    source: e
+                )
+            })
+        })(),
+        PreparedRows::SqlLiterals(row_literals) => {
+            insert_rows_into_staging_with_sql(conn, &staging, row_literals.as_slice())
         }
-        appender.flush().map_err(|e| {
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake staging appender flush failed",
-                source: e
-            )
-        })
-    })();
+    };
 
-    if let Err(e) = load_result {
+    if let Err(error) = load_result {
         let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging:?}"));
-        return Err(e);
+        return Err(error);
     }
 
-    // One INSERT SELECT = one Parquet file in DuckLake.
-    conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
-        let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging:?}"));
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake BEGIN TRANSACTION failed",
-            source: e
-        )
-    })?;
-
-    let insert_result = conn
+    let result = conn
         .execute_batch(&format!(
             "INSERT INTO {LAKE_CATALOG}.\"{table_name}\" SELECT * FROM {staging:?};"
         ))
@@ -652,21 +1028,340 @@ fn insert_rows(
             )
         });
 
-    let commit_result = match insert_result {
-        Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
-            let _ = conn.execute_batch("ROLLBACK");
-            etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", source: e)
-        }),
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
-    };
-
-    // Always drop the staging table.
     let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging:?}"));
 
-    commit_result
+    result
+}
+
+/// Applies one delete batch inside an open DuckLake transaction.
+fn apply_delete_mutation(
+    conn: &duckdb::Connection,
+    table_name: &str,
+    predicates: &[String],
+) -> EtlResult<()> {
+    if predicates.is_empty() {
+        return Ok(());
+    }
+
+    for chunk in predicates.chunks(SQL_DELETE_BATCH_SIZE) {
+        conn.execute_batch(&format!(
+            "DELETE FROM {LAKE_CATALOG}.\"{table_name}\" WHERE {};",
+            chunk
+                .iter()
+                .map(|predicate| format!("({predicate})"))
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        ))
+        .map_err(|e| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake DELETE failed",
+                source: e
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Inserts rows into the local staging table using SQL literals.
+fn insert_rows_into_staging_with_sql(
+    conn: &duckdb::Connection,
+    staging: &str,
+    row_literals: &[String],
+) -> EtlResult<()> {
+    for chunk in row_literals.chunks(SQL_INSERT_BATCH_SIZE) {
+        conn.execute_batch(&format!(
+            "INSERT INTO {staging:?} VALUES {};",
+            chunk.join(", ")
+        ))
+        .map_err(|e| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake staging row insert failed",
+                source: e
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Converts table rows into a retryable payload for DuckDB writes.
+fn prepare_rows(table_rows: Vec<TableRow>) -> PreparedRows {
+    if table_rows
+        .iter()
+        .any(|row| row.values().iter().any(cell_requires_sql_literals))
+    {
+        return PreparedRows::SqlLiterals(
+            table_rows
+                .into_iter()
+                .map(table_row_to_sql_literal)
+                .collect(),
+        );
+    }
+
+    PreparedRows::Appender(
+        table_rows
+            .into_iter()
+            .map(|row| row.into_values().into_iter().map(cell_to_value).collect())
+            .collect(),
+    )
+}
+
+/// Returns whether a cell must bypass the DuckDB appender path.
+fn cell_requires_sql_literals(cell: &Cell) -> bool {
+    matches!(cell, Cell::Array(_))
+}
+
+/// Serializes a row into a SQL `VALUES (...)` tuple.
+fn table_row_to_sql_literal(row: TableRow) -> String {
+    format!(
+        "({})",
+        row.into_values()
+            .into_iter()
+            .map(cell_to_sql_literal)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Converts a [`Cell`] into a DuckDB SQL literal expression.
+fn cell_to_sql_literal(cell: Cell) -> String {
+    match cell {
+        Cell::Null => "NULL".to_string(),
+        Cell::Bool(b) => {
+            if b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
+        Cell::String(s) => quote_literal(&s),
+        Cell::I16(i) => i.to_string(),
+        Cell::I32(i) => i.to_string(),
+        Cell::U32(u) => u.to_string(),
+        Cell::I64(i) => i.to_string(),
+        Cell::F32(f) => float_literal(f as f64, false),
+        Cell::F64(f) => float_literal(f, true),
+        Cell::Numeric(n) => quote_literal(&n.to_string()),
+        Cell::Date(d) => format!("DATE '{}'", d.format("%Y-%m-%d")),
+        Cell::Time(t) => format!("TIME '{}'", t.format("%H:%M:%S%.6f")),
+        Cell::Timestamp(dt) => {
+            format!("TIMESTAMP '{}'", dt.format("%Y-%m-%d %H:%M:%S%.6f"))
+        }
+        Cell::TimestampTz(dt) => {
+            format!("TIMESTAMPTZ '{}'", dt.format("%Y-%m-%d %H:%M:%S%.6f%:z"))
+        }
+        Cell::Uuid(u) => format!("CAST({} AS UUID)", quote_literal(&u.to_string())),
+        Cell::Json(j) => format!("CAST({} AS JSON)", quote_literal(&j.to_string())),
+        Cell::Bytes(b) => format!("from_hex('{}')", encode_hex(&b)),
+        Cell::Array(arr) => array_cell_to_sql_literal(arr),
+    }
+}
+
+/// Clones a [`Cell`] from a borrowed row reference.
+fn cell_to_owned(cell: &Cell) -> Cell {
+    match cell {
+        Cell::Null => Cell::Null,
+        Cell::Bool(value) => Cell::Bool(*value),
+        Cell::String(value) => Cell::String(value.clone()),
+        Cell::I16(value) => Cell::I16(*value),
+        Cell::I32(value) => Cell::I32(*value),
+        Cell::U32(value) => Cell::U32(*value),
+        Cell::I64(value) => Cell::I64(*value),
+        Cell::F32(value) => Cell::F32(*value),
+        Cell::F64(value) => Cell::F64(*value),
+        Cell::Numeric(value) => Cell::Numeric(value.clone()),
+        Cell::Date(value) => Cell::Date(*value),
+        Cell::Time(value) => Cell::Time(*value),
+        Cell::Timestamp(value) => Cell::Timestamp(*value),
+        Cell::TimestampTz(value) => Cell::TimestampTz(*value),
+        Cell::Uuid(value) => Cell::Uuid(*value),
+        Cell::Json(value) => Cell::Json(value.clone()),
+        Cell::Bytes(value) => Cell::Bytes(value.clone()),
+        Cell::Array(value) => Cell::Array(array_cell_to_owned(value)),
+    }
+}
+
+/// Clones an [`ArrayCell`] from a borrowed row reference.
+fn array_cell_to_owned(cell: &ArrayCell) -> ArrayCell {
+    match cell {
+        ArrayCell::Bool(values) => ArrayCell::Bool(values.clone()),
+        ArrayCell::String(values) => ArrayCell::String(values.clone()),
+        ArrayCell::I16(values) => ArrayCell::I16(values.clone()),
+        ArrayCell::I32(values) => ArrayCell::I32(values.clone()),
+        ArrayCell::U32(values) => ArrayCell::U32(values.clone()),
+        ArrayCell::I64(values) => ArrayCell::I64(values.clone()),
+        ArrayCell::F32(values) => ArrayCell::F32(values.clone()),
+        ArrayCell::F64(values) => ArrayCell::F64(values.clone()),
+        ArrayCell::Numeric(values) => ArrayCell::Numeric(values.clone()),
+        ArrayCell::Date(values) => ArrayCell::Date(values.clone()),
+        ArrayCell::Time(values) => ArrayCell::Time(values.clone()),
+        ArrayCell::Timestamp(values) => ArrayCell::Timestamp(values.clone()),
+        ArrayCell::TimestampTz(values) => ArrayCell::TimestampTz(values.clone()),
+        ArrayCell::Uuid(values) => ArrayCell::Uuid(values.clone()),
+        ArrayCell::Json(values) => ArrayCell::Json(values.clone()),
+        ArrayCell::Bytes(values) => ArrayCell::Bytes(values.clone()),
+    }
+}
+
+/// Converts an [`ArrayCell`] into a DuckDB list literal expression.
+fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
+    let values: Vec<String> = match arr {
+        ArrayCell::Bool(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| {
+                    if value {
+                        "TRUE".to_string()
+                    } else {
+                        "FALSE".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::String(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| quote_literal(&value))
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::I16(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| value.to_string())
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::I32(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| value.to_string())
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::U32(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| value.to_string())
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::I64(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| value.to_string())
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::F32(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| float_literal(value as f64, false))
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::F64(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| float_literal(value, true))
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::Numeric(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| quote_literal(&value.to_string()))
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::Date(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| format!("DATE '{}'", value.format("%Y-%m-%d")))
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::Time(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| format!("TIME '{}'", value.format("%H:%M:%S%.6f")))
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::Timestamp(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| format!("TIMESTAMP '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f")))
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::TimestampTz(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| format!("TIMESTAMPTZ '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f%:z")))
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::Uuid(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| format!("CAST({} AS UUID)", quote_literal(&value.to_string())))
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::Json(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| format!("CAST({} AS JSON)", quote_literal(&value.to_string())))
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+        ArrayCell::Bytes(v) => v
+            .into_iter()
+            .map(|o| {
+                o.map(|value| format!("from_hex('{}')", encode_hex(&value)))
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
+            .collect(),
+    };
+
+    format!("[{}]", values.join(", "))
+}
+
+/// Returns a DuckDB SQL literal for a floating-point value.
+fn float_literal(value: f64, is_double: bool) -> String {
+    if value.is_nan() {
+        return if is_double {
+            "CAST('NaN' AS DOUBLE)".to_string()
+        } else {
+            "CAST('NaN' AS FLOAT)".to_string()
+        };
+    }
+    if value == f64::INFINITY {
+        return if is_double {
+            "CAST('Infinity' AS DOUBLE)".to_string()
+        } else {
+            "CAST('Infinity' AS FLOAT)".to_string()
+        };
+    }
+    if value == f64::NEG_INFINITY {
+        return if is_double {
+            "CAST('-Infinity' AS DOUBLE)".to_string()
+        } else {
+            "CAST('-Infinity' AS FLOAT)".to_string()
+        };
+    }
+
+    value.to_string()
+}
+
+/// Encodes bytes as uppercase hexadecimal for DuckDB's `from_hex`.
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
 }
 
 /// Converts a [`Cell`] to a [`duckdb::types::Value`] for use with parameterized
@@ -804,6 +1499,7 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use etl::types::{ColumnSchema, Type as PgType};
 
     #[test]
     fn test_table_name_escaping() {
@@ -834,5 +1530,148 @@ mod tests {
         assert_eq!(cell_to_value(Cell::I32(42)), Value::Int(42));
         assert_eq!(cell_to_value(Cell::I64(-1)), Value::BigInt(-1));
         assert_eq!(cell_to_value(Cell::F64(3.46)), Value::Double(3.46));
+    }
+
+    #[test]
+    fn test_format_query_error_detail_compacts_sql_and_includes_source() {
+        let sql = "CREATE TABLE lake.\"orders\" (\n  \"id\" INTEGER NOT NULL\n)";
+        let error = duckdb::Error::DuckDBFailure(
+            duckdb::ffi::Error::new(1),
+            Some("parser error".to_string()),
+        );
+
+        assert_eq!(
+            format_query_error_detail(sql, &error),
+            "sql: CREATE TABLE lake.\"orders\" ( \"id\" INTEGER NOT NULL ); source: parser error"
+        );
+    }
+
+    #[test]
+    fn test_is_create_table_conflict_matches_ducklake_commit_conflict() {
+        let error = duckdb::Error::DuckDBFailure(
+            duckdb::ffi::Error::new(1),
+            Some(
+                "TransactionContext Error: Failed to commit: Failed to commit DuckLake transaction. Transaction conflict - attempting to create table \"public_users\" in schema \"main\" - but this table has been created by another transaction already".to_string(),
+            ),
+        );
+
+        assert!(is_create_table_conflict(&error, "public_users"));
+        assert!(!is_create_table_conflict(&error, "public_orders"));
+    }
+
+    #[test]
+    fn test_array_cell_to_sql_literal_preserves_nulls() {
+        assert_eq!(
+            array_cell_to_sql_literal(ArrayCell::I32(vec![Some(1), None, Some(3)])),
+            "[1, NULL, 3]"
+        );
+        assert_eq!(
+            array_cell_to_sql_literal(ArrayCell::Json(vec![
+                Some(serde_json::json!({"a": 1})),
+                None,
+            ])),
+            "[CAST('{\"a\":1}' AS JSON), NULL]"
+        );
+    }
+
+    #[test]
+    fn test_prepare_rows_uses_sql_literals_for_arrays() {
+        let prepared = prepare_rows(vec![TableRow::new(vec![
+            Cell::I32(1),
+            Cell::Array(ArrayCell::I32(vec![Some(1), None, Some(3)])),
+        ])]);
+
+        match prepared {
+            PreparedRows::SqlLiterals(rows) => {
+                assert_eq!(rows, vec!["(1, [1, NULL, 3])"]);
+            }
+            PreparedRows::Appender(_) => panic!("expected sql literal fallback"),
+        }
+    }
+
+    #[test]
+    fn test_delete_predicate_from_row_uses_only_primary_key_columns() {
+        let table_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("tenant_id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ],
+        );
+        let row = TableRow::new(vec![
+            Cell::I32(7),
+            Cell::I32(42),
+            Cell::String("alice".to_string()),
+        ]);
+
+        assert_eq!(
+            delete_predicate_from_row(&table_schema, &row).unwrap(),
+            "tenant_id = 7 AND id = 42"
+        );
+    }
+
+    #[test]
+    fn test_prepare_table_mutations_replace_emits_delete_then_upsert() {
+        let table_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ],
+        );
+        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]);
+
+        let prepared =
+            prepare_table_mutations(&table_schema, vec![TableMutation::Replace(row)]).unwrap();
+
+        assert_eq!(prepared.len(), 2);
+        match &prepared[0] {
+            PreparedTableMutation::Delete(predicates) => {
+                assert_eq!(predicates, &vec!["id = 1".to_string()]);
+            }
+            PreparedTableMutation::Upsert(_) => panic!("expected delete first"),
+        }
+        match &prepared[1] {
+            PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
+                assert_eq!(rows.len(), 1);
+            }
+            PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
+                panic!("expected appender payload")
+            }
+            PreparedTableMutation::Delete(_) => panic!("expected upsert second"),
+        }
+    }
+
+    #[test]
+    fn test_is_transient_ducklake_delete_file_not_found_matches_delete_parquet_404() {
+        let error = etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake DELETE failed",
+            source: duckdb::Error::DuckDBFailure(
+                duckdb::ffi::Error::new(1),
+                Some(
+                    "HTTP Error: Unable to connect to URL \"https://example.com/path/ducklake-123-delete.parquet\": 404 (Not Found).".to_string(),
+                ),
+            )
+        );
+
+        assert!(is_transient_ducklake_delete_file_not_found(&error));
+    }
+
+    #[test]
+    fn test_is_transient_ducklake_delete_file_not_found_ignores_other_errors() {
+        let error = etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake DELETE failed",
+            source: duckdb::Error::DuckDBFailure(
+                duckdb::ffi::Error::new(1),
+                Some("Transaction conflict".to_string()),
+            )
+        );
+
+        assert!(!is_transient_ducklake_delete_file_not_found(&error));
     }
 }

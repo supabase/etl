@@ -13,3 +13,4 @@ logs/
 .DS_Store
 Thumbs.db
 venv/
+vendor/duckdb/extensions/
