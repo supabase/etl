@@ -37,15 +37,11 @@ pub static malloc_conf: &[u8] =
 use crate::core::start_replicator_with_config;
 use crate::error::{ReplicatorError, ReplicatorResult};
 use crate::error_notification::ErrorNotificationClient;
-use crate::init::{
-    config, crypto, error_notification as init_error_notification,
-    feature_flags as init_feature_flags, metrics as init_metrics, sentry as init_sentry,
-    tracing as init_tracing,
-};
 use ::sentry::ClientInitGuard;
 use ::tracing::{debug, error};
 use etl_config::shared::ReplicatorConfig;
 use std::process::ExitCode;
+use tracing::info;
 
 mod core;
 mod error;
@@ -86,28 +82,24 @@ fn try_main() -> ReplicatorResult<()> {
     // the cost of building the async runtime unless startup can actually proceed.
 
     // Install rustls crypto provider before any TLS operations.
-    crypto::init();
+    init::crypto::init();
 
     // Load the replicator config.
-    let replicator_config = config::init()?;
+    let replicator_config = init::config::init()?;
 
     // We initialize all long-lived resources that have to stay in scope in order for them to work.
     let _long_lived_process_resources = LongLivedProcessResources {
-        _log_flusher: init_tracing::init(&replicator_config)?,
-        _sentry_guard: init_sentry::init(&replicator_config)?,
+        _log_flusher: init::tracing::init(&replicator_config)?,
+        _sentry_guard: init::sentry::init(&replicator_config)?,
     };
 
-    debug!(
-        pipeline_id = replicator_config.pipeline.id,
-        project_ref = replicator_config.project_ref(),
-        "replicator bootstrap initialized"
-    );
+    info!("replicator bootstrap initialized");
 
     // We prepare the notification client used to send errors.
-    let notification_client = init_error_notification::init(&replicator_config);
+    let notification_client = init::error_notification::init(&replicator_config);
 
     // We initialize the Prometheus recorder.
-    init_metrics::init(&replicator_config)?;
+    init::metrics::init(&replicator_config)?;
 
     debug!("starting tokio runtime");
 
@@ -135,7 +127,9 @@ async fn async_main(
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
     // Keep the feature flags client alive for the full async runtime lifetime.
-    let _feature_flags_client = init_feature_flags::init(&replicator_config)?;
+    let _feature_flags_client = init::feature_flags::init(&replicator_config)?;
+
+    info!("replicator bootstrap completed");
 
     if let Err(err) =
         start_replicator_with_config(replicator_config, notification_client.clone()).await
