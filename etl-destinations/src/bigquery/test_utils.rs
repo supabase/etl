@@ -7,7 +7,8 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
-use crate::bigquery::{BigQueryDestination, table_name_to_bigquery_table_id};
+use crate::bigquery::BigQueryDestination;
+use crate::bigquery::table_name_to_bigquery_table_id;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{PipelineId, TableName};

@@ -6,10 +6,10 @@ static REGISTER_METRICS: Once = Once::new();
 
 // Core metrics - only what's essential for debugging
 pub const ETL_BQ_APPEND_BATCHES_BATCH_SIZE: &str = "etl_bq_append_batches_batch_size";
-pub const ETL_BQ_APPEND_BATCHES_BATCH_RETRIES_TOTAL: &str =
-    "etl_bq_append_batches_batch_retries_total";
 pub const ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL: &str =
     "etl_bq_append_batches_batch_errors_total";
+pub const ETL_BQ_APPEND_BATCHES_BATCH_RETRIES_TOTAL: &str =
+    "etl_bq_append_batches_batch_retries_total";
 pub const ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL: &str =
     "etl_bq_append_batches_batch_row_errors_total";
 
@@ -26,15 +26,15 @@ pub fn register_metrics() {
         );
 
         describe_counter!(
-            ETL_BQ_APPEND_BATCHES_BATCH_RETRIES_TOTAL,
+            ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
             Unit::Count,
-            "Total batch retries, labeled by error_code and attempt"
+            "Total append_batches errors from BigQuery, labeled by error_code"
         );
 
         describe_counter!(
-            ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
+            ETL_BQ_APPEND_BATCHES_BATCH_RETRIES_TOTAL,
             Unit::Count,
-            "Total append_batches errors from BigQuery, labeled by error_code and retryable"
+            "Total append_batches retries for transient BigQuery errors"
         );
 
         describe_counter!(

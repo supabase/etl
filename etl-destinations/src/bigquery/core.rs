@@ -11,7 +11,6 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
     Cell, Event, PipelineId, ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow,
-    generate_sequence_number,
 };
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
@@ -549,26 +548,28 @@ where
         let table_rows_batches = split_table_rows(table_rows, target_batches);
         let sequenced_bigquery_table_id_string = sequenced_bigquery_table_id.to_string();
 
-        // Create table batches from the split rows.
-        let mut table_batches = Vec::with_capacity(table_rows_batches.len());
-        for table_rows in table_rows_batches {
+        // Create append requests from the split rows.
+        let mut append_requests = Vec::with_capacity(table_rows_batches.len());
+        for (batch_index, table_rows) in table_rows_batches.into_iter().enumerate() {
             if !table_rows.is_empty() {
-                let table_batch = self.client.create_table_batch(
+                let append_request = self.client.create_batch_append_request(
+                    self.pipeline_id,
+                    batch_index,
                     &self.dataset_id,
                     &sequenced_bigquery_table_id_string,
                     table_descriptor.clone(),
                     table_rows,
                 )?;
-                table_batches.push(table_batch);
+                append_requests.push(append_request);
             }
         }
 
         #[allow(unused_variables)]
-        let (bytes_sent, bytes_received) = if table_batches.is_empty() {
+        let (bytes_sent, bytes_received) = if append_requests.is_empty() {
             (0, 0)
         } else {
             self.client
-                .append_table_batches(self.pipeline_id, table_batches)
+                .append_table_batches(self.pipeline_id, append_requests)
                 .await?
         };
 
@@ -826,8 +827,7 @@ where
                 let event = events_iter.next().unwrap();
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_number =
-                            generate_sequence_number(insert.start_lsn, insert.commit_lsn);
+                        let sequence_key = insert.event_sequence_key().to_string();
                         insert
                             .table_row
                             .values_mut()
@@ -835,7 +835,7 @@ where
                         insert
                             .table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_key));
 
                         let table_id = insert.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -844,8 +844,7 @@ where
                         entry.1.push(insert.table_row);
                     }
                     Event::Update(mut update) => {
-                        let sequence_number =
-                            generate_sequence_number(update.start_lsn, update.commit_lsn);
+                        let sequence_key = update.event_sequence_key().to_string();
                         update
                             .table_row
                             .values_mut()
@@ -853,7 +852,7 @@ where
                         update
                             .table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_key));
 
                         let table_id = update.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -862,19 +861,15 @@ where
                         entry.1.push(update.table_row);
                     }
                     Event::Delete(delete) => {
+                        let sequence_key = delete.event_sequence_key().to_string();
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
                             info!("delete event has no row, skipping");
                             continue;
                         };
-
-                        let sequence_number =
-                            generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
                             .values_mut()
                             .push(BigQueryOperationType::Delete.into_cell());
-                        old_table_row
-                            .values_mut()
-                            .push(Cell::String(sequence_number));
+                        old_table_row.values_mut().push(Cell::String(sequence_key));
 
                         let table_id = delete.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -891,45 +886,38 @@ where
 
             // Process accumulated events for each table.
             if !table_id_to_data.is_empty() {
-                // Prepare batch metadata for all tables before streaming.
-                // This collects (sequenced_table_id, table_descriptor, rows) for retry support.
-                let mut prepared_data: Vec<(String, TableDescriptor, Vec<BigQueryTableRow>)> =
-                    Vec::with_capacity(table_id_to_data.len());
+                let mut append_requests = Vec::with_capacity(table_id_to_data.len());
 
-                for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
+                for (batch_index, (_, (replicated_table_schema, table_rows))) in
+                    table_id_to_data.into_iter().enumerate()
+                {
                     let (sequenced_bigquery_table_id, table_descriptor) = self
                         .prepare_table_for_streaming(&replicated_table_schema, true)
                         .await?;
+                    let sequenced_bigquery_table_id_string =
+                        sequenced_bigquery_table_id.to_string();
                     let table_rows = table_rows
                         .into_iter()
                         .map(BigQueryTableRow::try_from)
                         .collect::<EtlResult<Vec<BigQueryTableRow>>>()?;
 
-                    prepared_data.push((
-                        sequenced_bigquery_table_id.to_string(),
+                    let append_request = self.client.create_batch_append_request(
+                        self.pipeline_id,
+                        batch_index,
+                        &self.dataset_id,
+                        &sequenced_bigquery_table_id_string,
                         table_descriptor,
                         table_rows,
-                    ));
-                }
-
-                // Create table batches from prepared data.
-                let mut table_batches = Vec::with_capacity(prepared_data.len());
-                for (table_id, descriptor, rows) in prepared_data {
-                    let table_batch = self.client.create_table_batch(
-                        &self.dataset_id,
-                        &table_id,
-                        descriptor,
-                        rows,
                     )?;
-                    table_batches.push(table_batch);
+                    append_requests.push(append_request);
                 }
 
                 #[allow(unused_variables)]
-                let (bytes_sent, bytes_received) = if table_batches.is_empty() {
+                let (bytes_sent, bytes_received) = if append_requests.is_empty() {
                     (0, 0)
                 } else {
                     self.client
-                        .append_table_batches(self.pipeline_id, table_batches)
+                        .append_table_batches(self.pipeline_id, append_requests)
                         .await?
                 };
 

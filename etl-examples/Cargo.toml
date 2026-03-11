@@ -11,10 +11,7 @@ homepage.workspace = true
 etl = { workspace = true }
 etl-destinations = { workspace = true, features = ["bigquery"] }
 
-clap = { workspace = true, default-features = true, features = [
-    "std",
-    "derive",
-] }
+clap = { workspace = true, default-features = true, features = ["std", "derive"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 tokio = { workspace = true, features = ["macros", "signal"] }
 tracing = { workspace = true, default-features = true }

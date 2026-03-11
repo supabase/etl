@@ -16,10 +16,19 @@ pub struct BeginEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction will commit.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// Transaction start timestamp in Postgres format.
     pub timestamp: i64,
     /// Transaction ID for tracking and coordination.
     pub xid: u32,
+}
+
+impl BeginEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
 }
 
 /// Transaction commit event from Postgres logical replication.
@@ -33,12 +42,21 @@ pub struct CommitEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction committed.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// Transaction commit flags from Postgres.
     pub flags: i8,
     /// Final LSN position after the transaction.
     pub end_lsn: PgLsn,
     /// Transaction commit timestamp in Postgres format.
     pub timestamp: i64,
+}
+
+impl CommitEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
 }
 
 /// Row insertion event from Postgres logical replication.
@@ -52,10 +70,19 @@ pub struct InsertEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// The replicated table schema for this event.
     pub replicated_table_schema: ReplicatedTableSchema,
     /// Complete row data for the inserted row.
     pub table_row: TableRow,
+}
+
+impl InsertEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
 }
 
 /// Row update event from Postgres logical replication.
@@ -70,6 +97,8 @@ pub struct UpdateEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// The replicated table schema for this event.
     pub replicated_table_schema: ReplicatedTableSchema,
     /// New row data after the update.
@@ -80,6 +109,13 @@ pub struct UpdateEvent {
     /// or the complete row data (`false`). This depends on the Postgres
     /// `REPLICA IDENTITY` setting for the table.
     pub old_table_row: Option<(bool, TableRow)>,
+}
+
+impl UpdateEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
 }
 
 /// Row deletion event from Postgres logical replication.
@@ -93,6 +129,8 @@ pub struct DeleteEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// The replicated table schema for this event.
     pub replicated_table_schema: ReplicatedTableSchema,
     /// Data from the deleted row.
@@ -101,6 +139,13 @@ pub struct DeleteEvent {
     /// or the complete row data (`false`). This depends on the Postgres
     /// `REPLICA IDENTITY` setting for the table.
     pub old_table_row: Option<(bool, TableRow)>,
+}
+
+impl DeleteEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
 }
 
 /// Table truncation event from Postgres logical replication.
@@ -115,10 +160,19 @@ pub struct TruncateEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// Truncate operation options from Postgres.
     pub options: i8,
     /// List of schemas for tables that were truncated in this operation.
     pub truncated_tables: Vec<ReplicatedTableSchema>,
+}
+
+impl TruncateEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
 }
 
 /// Relation (schema) event from Postgres logical replication.
@@ -134,8 +188,17 @@ pub struct RelationEvent {
     pub start_lsn: PgLsn,
     /// LSN position where the transaction of this event will commit.
     pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
     /// The replicated table schema containing the table schema and replication mask.
     pub replicated_table_schema: ReplicatedTableSchema,
+}
+
+impl RelationEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
 }
 
 /// Represents a single replication event from Postgres logical replication.
@@ -162,6 +225,32 @@ pub enum Event {
     Relation(RelationEvent),
     /// Unsupported event type that cannot be processed.
     Unsupported,
+}
+
+/// Pair used to build a CDC sequence key for destinations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventSequenceKey {
+    /// Commit LSN identifying transaction order across transactions.
+    pub commit_lsn: PgLsn,
+    /// Zero-based ordinal identifying order within the same transaction.
+    pub tx_ordinal: u64,
+}
+
+impl EventSequenceKey {
+    /// Creates a new sequence key from commit LSN and transaction-local ordinal.
+    pub fn new(commit_lsn: PgLsn, tx_ordinal: u64) -> Self {
+        Self {
+            commit_lsn,
+            tx_ordinal,
+        }
+    }
+}
+
+impl fmt::Display for EventSequenceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let commit_lsn = u64::from(self.commit_lsn);
+        write!(f, "{commit_lsn:016x}/{:016x}", self.tx_ordinal)
+    }
 }
 
 impl Event {

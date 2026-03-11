@@ -334,6 +334,8 @@ struct ApplyLoopState {
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
     current_tx_events: u64,
+    /// Next zero-based ordinal to assign to transaction-scoped events.
+    next_tx_ordinal: u64,
     /// The current shutdown state tracking graceful shutdown progress.
     shutdown_state: ShutdownState,
     /// The deadline by which the current batch must be flushed.
@@ -361,6 +363,7 @@ impl ApplyLoopState {
             events_batch_bytes: 0,
             current_tx_begin_ts: None,
             current_tx_events: 0,
+            next_tx_ordinal: 0,
             shutdown_state: ShutdownState::NoShutdown,
             batch_flush_deadline: None,
             max_batch_fill_duration,
@@ -411,6 +414,11 @@ impl ApplyLoopState {
         self.replication_progress.last_received_lsn
     }
 
+    /// Returns `true` if the apply loop is idle.
+    fn is_idle(&self) -> bool {
+        !self.handling_transaction() && self.events_batch.is_empty()
+    }
+
     /// Returns the effective flush LSN to report to PostgreSQL.
     ///
     /// When idle (no active transaction and empty batch), returns the last received LSN since no
@@ -420,7 +428,7 @@ impl ApplyLoopState {
     /// jump back compared to the last received lsn that we sent before, however this is fine since the
     /// status update logic guarantees monotonically increasing LSNs.
     fn effective_flush_lsn(&self) -> PgLsn {
-        if !self.handling_transaction() && self.events_batch.is_empty() {
+        if self.is_idle() {
             self.replication_progress.last_received_lsn
         } else {
             self.replication_progress.last_flush_lsn
@@ -430,6 +438,29 @@ impl ApplyLoopState {
     /// Returns true if the apply loop is in the middle of processing a transaction.
     fn handling_transaction(&self) -> bool {
         self.remote_final_lsn.is_some()
+    }
+
+    /// Resets transaction-local ordinal assignment.
+    fn reset_tx_ordinal(&mut self) {
+        self.next_tx_ordinal = 0;
+    }
+
+    /// Returns and advances the next transaction-local ordinal.
+    fn next_tx_ordinal(&mut self) -> u64 {
+        let tx_ordinal = self.next_tx_ordinal;
+        self.next_tx_ordinal = match self.next_tx_ordinal.checked_add(1) {
+            Some(next_tx_ordinal) => next_tx_ordinal,
+            None => {
+                warn!(
+                    current_tx_ordinal = self.next_tx_ordinal,
+                    "transaction-local ordinal overflow detected; subsequent events may reuse the same ordinal"
+                );
+
+                self.next_tx_ordinal
+            }
+        };
+
+        tx_ordinal
     }
 }
 
@@ -1188,8 +1219,10 @@ where
 
         self.state.current_tx_begin_ts = Some(Instant::now());
         self.state.current_tx_events = 0;
+        self.state.reset_tx_ordinal();
 
-        let event = parse_event_from_begin_message(start_lsn, final_lsn, message);
+        let tx_ordinal = self.state.next_tx_ordinal();
+        let event = parse_event_from_begin_message(start_lsn, final_lsn, tx_ordinal, message);
 
         Ok(HandleMessageResult::return_event(Event::Begin(event)))
     }
@@ -1259,7 +1292,8 @@ where
             action = action.merge(ApplyLoopAction::Pause);
         }
 
-        let event = parse_event_from_commit_message(start_lsn, commit_lsn, message);
+        let tx_ordinal = self.state.next_tx_ordinal();
+        let event = parse_event_from_commit_message(start_lsn, commit_lsn, tx_ordinal, message);
 
         let mut result = HandleMessageResult {
             event: Some(Event::Commit(event)),
@@ -1294,6 +1328,7 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
+        let tx_ordinal = self.state.next_tx_ordinal();
 
         if !self
             .should_apply_changes(table_id, remote_final_lsn)
@@ -1329,6 +1364,7 @@ where
         let relation_event = RelationEvent {
             start_lsn,
             commit_lsn: remote_final_lsn,
+            tx_ordinal,
             replicated_table_schema,
         };
 
@@ -1352,6 +1388,7 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
+        let tx_ordinal = self.state.next_tx_ordinal();
 
         if !self
             .should_apply_changes(table_id, remote_final_lsn)
@@ -1372,6 +1409,7 @@ where
             replicated_table_schema,
             start_lsn,
             remote_final_lsn,
+            tx_ordinal,
             message,
             self.pipeline_id,
         )?;
@@ -1394,6 +1432,7 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
+        let tx_ordinal = self.state.next_tx_ordinal();
 
         if !self
             .should_apply_changes(table_id, remote_final_lsn)
@@ -1414,6 +1453,7 @@ where
             replicated_table_schema,
             start_lsn,
             remote_final_lsn,
+            tx_ordinal,
             message,
             self.pipeline_id,
         )?;
@@ -1436,6 +1476,7 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
+        let tx_ordinal = self.state.next_tx_ordinal();
 
         if !self
             .should_apply_changes(table_id, remote_final_lsn)
@@ -1456,6 +1497,7 @@ where
             replicated_table_schema,
             start_lsn,
             remote_final_lsn,
+            tx_ordinal,
             message,
             self.pipeline_id,
         )?;
@@ -1476,6 +1518,7 @@ where
                 "Transaction must be active before processing TRUNCATE message"
             );
         };
+        let tx_ordinal = self.state.next_tx_ordinal();
 
         // Collect the replicated schemas for tables we are allowed to apply changes to.
         let mut truncated_tables = Vec::with_capacity(message.rel_ids().len());
@@ -1505,6 +1548,7 @@ where
         let event = parse_event_from_truncate_message(
             start_lsn,
             remote_final_lsn,
+            tx_ordinal,
             message,
             truncated_tables,
         );

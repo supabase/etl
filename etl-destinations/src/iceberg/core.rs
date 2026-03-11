@@ -8,6 +8,7 @@ use std::{
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
+use crate::table_name::try_stringify_table_name;
 use etl::destination::Destination;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
@@ -54,11 +55,6 @@ impl fmt::Display for IcebergOperationType {
 
 /// Type alias for Iceberg table names.
 type IcebergTableName = String;
-
-/// Delimiter separating schema from table name in iceberg table identifiers.
-const ICEBERG_TABLE_ID_DELIMITER: &str = "_";
-/// Replacement string for escaping underscores in Postgres names.
-const ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
 /// Suffix for changelog tables
 const ICEBERG_CHANGELOG_TABLE_SUFFIX: &str = "changelog";
 
@@ -75,21 +71,18 @@ const SEQUENCE_NUMBER_COLUMN_NAME: &str = "sequence_number";
 pub fn table_name_to_iceberg_table_name(
     table_name: &TableName,
     single_destination_namespace: bool,
-) -> IcebergTableName {
+) -> EtlResult<IcebergTableName> {
     if single_destination_namespace {
-        let escaped_schema = table_name.schema.replace(
-            ICEBERG_TABLE_ID_DELIMITER,
-            ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
-        );
-        let escaped_table = table_name.name.replace(
-            ICEBERG_TABLE_ID_DELIMITER,
-            ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
-        );
-
-        format!("{escaped_schema}_{escaped_table}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}")
-    } else {
-        format!("{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}", table_name.name)
+        return Ok(format!(
+            "{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}",
+            try_stringify_table_name(table_name)?
+        ));
     }
+
+    Ok(format!(
+        "{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}",
+        table_name.name
+    ))
 }
 
 /// An iceberg destination that implements the ETL [`Destination`] trait.
@@ -288,8 +281,7 @@ where
                 let event = events_iter.next().unwrap();
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_number =
-                            generate_sequence_number(insert.start_lsn, insert.commit_lsn);
+                        let sequence_key = insert.event_sequence_key().to_string();
                         insert
                             .table_row
                             .values_mut()
@@ -297,7 +289,7 @@ where
                         insert
                             .table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_key));
 
                         let table_id = insert.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -306,8 +298,7 @@ where
                         entry.1.push(insert.table_row);
                     }
                     Event::Update(mut update) => {
-                        let sequence_number =
-                            generate_sequence_number(update.start_lsn, update.commit_lsn);
+                        let sequence_key = update.event_sequence_key().to_string();
                         update
                             .table_row
                             .values_mut()
@@ -315,7 +306,7 @@ where
                         update
                             .table_row
                             .values_mut()
-                            .push(Cell::String(sequence_number));
+                            .push(Cell::String(sequence_key));
 
                         let table_id = update.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -324,19 +315,15 @@ where
                         entry.1.push(update.table_row);
                     }
                     Event::Delete(delete) => {
+                        let sequence_key = delete.event_sequence_key().to_string();
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
                             info!("delete event has no row, skipping");
                             continue;
                         };
-
-                        let sequence_number =
-                            generate_sequence_number(delete.start_lsn, delete.commit_lsn);
                         old_table_row
                             .values_mut()
                             .push(IcebergOperationType::Delete.into());
-                        old_table_row
-                            .values_mut()
-                            .push(Cell::String(sequence_number));
+                        old_table_row.values_mut().push(Cell::String(sequence_key));
 
                         let table_id = delete.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -458,7 +445,7 @@ where
         let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
 
         let iceberg_table_name =
-            table_name_to_iceberg_table_name(table_name, inner.namespace.is_single());
+            table_name_to_iceberg_table_name(table_name, inner.namespace.is_single())?;
         let iceberg_table_name = match &existing_metadata {
             Some(metadata) => metadata.destination_table_id.clone(),
             None => iceberg_table_name,

@@ -43,10 +43,7 @@ arrow = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 chrono = { workspace = true }
-gcp-bigquery-client = { workspace = true, optional = true, features = [
-    "rust-tls",
-    "aws-lc-rs",
-] }
+gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }

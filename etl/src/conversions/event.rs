@@ -130,11 +130,13 @@ fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
 pub fn parse_event_from_begin_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     begin_body: &protocol::BeginBody,
 ) -> BeginEvent {
     BeginEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         timestamp: begin_body.timestamp(),
         xid: begin_body.xid(),
     }
@@ -147,11 +149,13 @@ pub fn parse_event_from_begin_message(
 pub fn parse_event_from_commit_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     commit_body: &protocol::CommitBody,
 ) -> CommitEvent {
     CommitEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         flags: commit_body.flags(),
         end_lsn: commit_body.end_lsn().into(),
         timestamp: commit_body.timestamp(),
@@ -186,6 +190,7 @@ pub fn parse_event_from_insert_message(
     replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     insert_body: &protocol::InsertBody,
     pipeline_id: PipelineId,
 ) -> EtlResult<InsertEvent> {
@@ -216,6 +221,7 @@ pub fn parse_event_from_insert_message(
     Ok(InsertEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         replicated_table_schema,
         table_row,
     })
@@ -231,6 +237,7 @@ pub fn parse_event_from_update_message(
     replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     update_body: &protocol::UpdateBody,
     pipeline_id: PipelineId,
 ) -> EtlResult<UpdateEvent> {
@@ -282,6 +289,7 @@ pub fn parse_event_from_update_message(
     Ok(UpdateEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         replicated_table_schema,
         table_row,
         old_table_row,
@@ -298,6 +306,7 @@ pub fn parse_event_from_delete_message(
     replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     delete_body: &protocol::DeleteBody,
     pipeline_id: PipelineId,
 ) -> EtlResult<DeleteEvent> {
@@ -338,6 +347,7 @@ pub fn parse_event_from_delete_message(
     Ok(DeleteEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         replicated_table_schema,
         old_table_row,
     })
@@ -350,12 +360,14 @@ pub fn parse_event_from_delete_message(
 pub fn parse_event_from_truncate_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
+    tx_ordinal: u64,
     truncate_body: &protocol::TruncateBody,
     truncated_tables: Vec<ReplicatedTableSchema>,
 ) -> TruncateEvent {
     TruncateEvent {
         start_lsn,
         commit_lsn,
+        tx_ordinal,
         options: truncate_body.options(),
         truncated_tables,
     }
