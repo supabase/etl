@@ -18,14 +18,14 @@ use tracing_appender::{
 };
 use tracing_log::NormalizeEvent;
 use tracing_log::{LogTracer, log_tracer::SetLoggerError};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt as tracing_fmt;
 use tracing_subscriber::fmt::{
-    FmtContext, FormattedFields, MakeWriter,
+    FmtContext, FormattedFields, MakeWriter, fmt,
     format::{self, FormatEvent, FormatFields, Writer},
     time::FormatTime,
 };
 use tracing_subscriber::registry::{LookupSpan, SpanRef};
-use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt};
 
 /// JSON field name for project identification in logs.
 const PROJECT_KEY_IN_LOG: &str = "project";
@@ -354,12 +354,12 @@ fn configure_prod_tracing(filter: EnvFilter, app_name: &str) -> Result<LogFlushe
     // when writing to the file. This is important for performance.
     let (file_appender, guard) = tracing_appender::non_blocking(file_appender);
 
-    let subscriber = Registry::default().with(filter).with(
-        tracing_fmt::layer()
-            .fmt_fields(format::JsonFields::new())
-            .event_format(JsonContextFormatter::new(tracing_fmt::time::SystemTime))
-            .with_writer(move || file_appender.make_writer()),
-    );
+    let subscriber = fmt()
+        .with_env_filter(filter)
+        .fmt_fields(format::JsonFields::new())
+        .event_format(JsonContextFormatter::new(tracing_fmt::time::SystemTime))
+        .with_writer(move || file_appender.make_writer())
+        .finish();
 
     set_global_default(subscriber)?;
 
@@ -378,11 +378,11 @@ fn configure_dev_tracing(filter: EnvFilter) -> Result<LogFlusher, TracingError> 
         .with_file(false)
         .with_target(true);
 
-    let subscriber = Registry::default().with(filter).with(
-        tracing_fmt::layer()
-            .event_format(format)
-            .with_writer(io::stdout),
-    );
+    let subscriber = fmt()
+        .with_env_filter(filter)
+        .event_format(format)
+        .with_writer(io::stdout)
+        .finish();
 
     set_global_default(subscriber)?;
 
