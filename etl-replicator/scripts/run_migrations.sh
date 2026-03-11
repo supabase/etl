@@ -30,10 +30,10 @@ DB_HOST="${POSTGRES_HOST:=localhost}"
 # Set up the database URL
 export DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
 
-echo "🔄 Running etl state store migrations..."
+echo "🔄 Running postgres state store migrations..."
 
 # Create the etl schema if it doesn't exist
-# This matches the behavior in etl/src/migrations.rs
+# This matches the behavior in etl/src/store/both/postgres.rs
 psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "create schema if not exists etl;" > /dev/null
 
 # Create a temporary sqlx-cli compatible database URL that sets the search_path
@@ -45,4 +45,4 @@ MIGRATION_URL="${DATABASE_URL}?${SQLX_MIGRATIONS_OPTS}"
 sqlx database create --database-url "${DATABASE_URL}"
 sqlx migrate run --source etl/migrations --database-url "${MIGRATION_URL}"
 
-echo "✨ ETL state store migrations complete! Ready to go!"
+echo "✨ Postgres state store migrations complete! Ready to go!"

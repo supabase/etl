@@ -54,7 +54,9 @@ fn create_database_pool(config: &PgConnectionConfig) -> PgPool {
 ///
 /// Creates a dedicated connection to the source database, ensures the `etl`
 /// schema exists, and applies all pending migrations inside that schema so
-/// the `_sqlx_migrations` metadata table stays out of `public`.
+/// the `_sqlx_migrations` metadata table stays out of `public`. ETL uses this
+/// state store to persist replication state needed to run and resume
+/// replication.
 async fn apply_migrations(connection_config: &PgConnectionConfig) -> Result<(), sqlx::Error> {
     let options: PgConnectOptions = connection_config.with_db(Some(&ETL_MIGRATION_OPTIONS));
 
