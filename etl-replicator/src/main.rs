@@ -37,7 +37,6 @@ pub static malloc_conf: &[u8] =
 use crate::core::start_replicator_with_config;
 use crate::error::{ReplicatorError, ReplicatorResult};
 use crate::error_notification::ErrorNotificationClient;
-use ::sentry::ClientInitGuard;
 use ::tracing::{debug, error};
 use etl_config::shared::ReplicatorConfig;
 use std::process::ExitCode;
@@ -52,12 +51,6 @@ mod sentry;
 
 /// The name of the environment variable which contains version information for this replicator.
 const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
-
-/// Long-lived process resources that must remain in scope until shutdown.
-struct LongLivedProcessResources {
-    _log_flusher: etl_telemetry::tracing::LogFlusher,
-    _sentry_guard: Option<ClientInitGuard>,
-}
 
 /// Entry point for the replicator service.
 ///
@@ -87,11 +80,9 @@ fn try_main() -> ReplicatorResult<()> {
     // Load the replicator config.
     let replicator_config = init::config::init()?;
 
-    // We initialize all long-lived resources that have to stay in scope in order for them to work.
-    let _long_lived_process_resources = LongLivedProcessResources {
-        _log_flusher: init::tracing::init(&replicator_config)?,
-        _sentry_guard: init::sentry::init(&replicator_config)?,
-    };
+    // Keep the tracing and sentry guards alive until process shutdown.
+    let _log_flusher = init::tracing::init(&replicator_config)?;
+    let _sentry_guard = init::sentry::init(&replicator_config)?;
 
     info!("replicator bootstrap initialized");
 

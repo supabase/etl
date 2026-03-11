@@ -185,6 +185,7 @@ where
         }
 
         map.end().map_err(|_| stdfmt::Error)?;
+
         let output = String::from_utf8(output).map_err(|_| stdfmt::Error)?;
         writeln!(writer, "{output}")
     }
@@ -264,6 +265,8 @@ impl tracing::field::Visit for JsonFieldVisitor {
     }
 
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn stdfmt::Debug) {
+        // `tracing-log` forwards log crate metadata as synthetic `log.*` fields.
+        // These are not user event payload, so we skip them here.
         if field.name().starts_with("log.") {
             return;
         }
