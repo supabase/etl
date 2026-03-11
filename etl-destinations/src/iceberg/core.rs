@@ -128,18 +128,21 @@ impl DestinationNamespace {
 /// destination struct cloneable.
 #[derive(Debug)]
 struct Inner {
-    /// Cache of table names we already created/verified in the namespace.
+    /// Cache of source tables we already created/verified in the destination.
     ///
     /// Prevents redundant table existence checks and creation attempts.
     /// Tables are added to this cache after successful creation or verification.
-    created_tables: HashSet<IcebergTableName>,
-
+    ///
+    /// This cache is intentionally keyed by source [`TableId`] instead of the rendered Iceberg
+    /// table name. In a single destination namespace, distinct source tables from different
+    /// schemas can still render to the same destination table name. That collision should surface
+    /// as a destination error from Iceberg.
+    created_tables: HashSet<TableId>,
     /// Cache of namespaces we already created/verified in the destination
     ///
     /// Prevents redundant namespace existence checks and creation attempts.
     /// Namespaces are added to this cache after successful creation or verification.
     created_namespaces: HashSet<String>,
-
     /// Namespace where the tables will be replicated. Depending on the variant either
     /// all tables will go in one namespace or there will be one namespace per
     /// source schema.
@@ -199,14 +202,15 @@ where
             );
         };
 
-        let namespace = schema_to_namespace(&table_schema.name.schema);
-        let namespace = inner.namespace.get_or(&namespace);
+        let source_table_name = table_schema.name.clone();
+        let namespace = schema_to_namespace(&source_table_name.schema);
+        let namespace = inner.namespace.get_or(&namespace).to_string();
 
         self.client
-            .drop_table_if_exists(namespace, iceberg_table_name.clone())
+            .drop_table_if_exists(&namespace, iceberg_table_name.clone())
             .await
             .map_err(iceberg_error_to_etl_error)?;
-        inner.created_tables.remove(&iceberg_table_name);
+        inner.created_tables.remove(&table_id);
 
         // We recreate the table with the same schema.
         self.prepare_table_for_streaming(&mut inner, table_id)
@@ -408,7 +412,13 @@ where
         let namespace = self.create_namespace_if_missing(inner, namespace).await?;
 
         let iceberg_table_name = self
-            .create_table_if_missing(inner, iceberg_table_name, &namespace, &table_schema)
+            .create_table_if_missing(
+                inner,
+                table_id,
+                iceberg_table_name,
+                &namespace,
+                &table_schema,
+            )
             .await?;
 
         Ok((namespace, iceberg_table_name))
@@ -455,11 +465,12 @@ where
     async fn create_table_if_missing(
         &self,
         inner: &mut Inner,
+        table_id: TableId,
         iceberg_table_name: String,
         namespace: &str,
         table_schema: &TableSchema,
     ) -> EtlResult<String> {
-        if inner.created_tables.contains(&iceberg_table_name) {
+        if inner.created_tables.contains(&table_id) {
             return Ok(iceberg_table_name);
         }
 
@@ -472,7 +483,7 @@ where
             .await
             .map_err(iceberg_error_to_etl_error)?;
 
-        inner.created_tables.insert(iceberg_table_name.clone());
+        inner.created_tables.insert(table_id);
 
         Ok(iceberg_table_name)
     }
