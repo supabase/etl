@@ -1,5 +1,3 @@
-//! Cryptographic provider initialization for the replicator.
-
 use std::sync::Once;
 
 /// Ensures crypto provider is only initialized once.

@@ -1,5 +1,3 @@
-//! Sentry initialization for the replicator.
-
 use ::sentry::ClientInitGuard;
 use etl_config::Environment;
 use etl_config::shared::ReplicatorConfig;

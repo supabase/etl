@@ -1,5 +1,3 @@
-//! Metrics initialization for the replicator.
-
 use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
 

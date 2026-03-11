@@ -1,5 +1,3 @@
-//! Feature-flag client initialization.
-
 use etl_config::shared::ReplicatorConfig;
 use tracing::debug;
 

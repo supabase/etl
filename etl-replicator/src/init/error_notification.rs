@@ -1,5 +1,3 @@
-//! Error notification client initialization.
-
 use etl_config::shared::ReplicatorConfig;
 use secrecy::ExposeSecret;
 use tracing::warn;

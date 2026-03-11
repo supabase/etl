@@ -1,5 +1,3 @@
-//! Tracing initialization for the replicator.
-
 use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::tracing::{LogFlusher, init_tracing_with_top_level_fields};
 
