@@ -34,13 +34,19 @@ pub async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
-    info!("starting replicator service");
+    let pipeline_id = replicator_config.pipeline.id;
+
+    info!(
+        pipeline_id,
+        project_ref = replicator_config.project_ref(),
+        "starting replicator service"
+    );
 
     log_config(&replicator_config);
 
     // We initialize the state store, which for the replicator is not configurable.
     let state_store = init_store(
-        replicator_config.pipeline.id,
+        pipeline_id,
         replicator_config.pipeline.pg_connection.clone(),
         notification_client,
     )
@@ -64,7 +70,7 @@ pub async fn start_replicator_with_config(
                 service_account_key.expose_secret(),
                 *max_staleness_mins,
                 *connection_pool_size,
-                replicator_config.pipeline.id,
+                pipeline_id,
                 state_store.clone(),
             )
             .await?;
@@ -142,7 +148,7 @@ pub async fn start_replicator_with_config(
         }
     }
 
-    info!("replicator service completed");
+    info!(pipeline_id, "replicator service completed");
 
     Ok(())
 }
@@ -288,6 +294,8 @@ where
     pipeline.start().await?;
 
     metrics::spawn_metrics_tasks(pipeline.id());
+
+    info!(pipeline_id = pipeline.id(), "replicator startup completed");
 
     // Spawn a task to listen for shutdown signals and trigger shutdown.
     let shutdown_tx = pipeline.shutdown_tx();
