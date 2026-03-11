@@ -87,8 +87,8 @@ pub async fn create_test_source_database(
 
 /// Runs ETL migrations on the source database.
 ///
-/// Sets up the `etl` schema and runs replicator migrations to create the state
-/// store tables needed for ETL operations.
+/// Sets up the `etl` schema and runs Postgres state store migrations to create the
+/// tables ETL uses to persist the replication state needed for ETL operations.
 ///
 /// # Panics
 /// Panics if database connection fails, schema creation fails, or migrations fail.
@@ -111,8 +111,8 @@ pub async fn run_etl_migrations_on_source_database(source_db_config: &PgConnecti
         .await
         .expect("failed to set search path");
 
-    // Run replicator migrations to create the state store tables.
-    sqlx::migrate!("../etl-replicator/migrations")
+    // Run etl migrations to create the state store tables.
+    sqlx::migrate!("../etl/migrations")
         .run(&source_pool)
         .await
         .expect("failed to run etl migrations");
