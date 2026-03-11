@@ -3,7 +3,7 @@ use etl_api::config::ApiConfig;
 use etl_config::{Environment, load_config};
 use secrecy::ExposeSecret;
 use std::sync::Arc;
-use tracing::info;
+use tracing::debug;
 
 /// Initializes Sentry error tracking and performance monitoring for the API.
 ///
@@ -12,7 +12,7 @@ pub fn init() -> Result<Option<sentry::ClientInitGuard>> {
     if let Ok(config) = load_config::<ApiConfig>()
         && let Some(sentry_config) = &config.sentry
     {
-        info!("initializing sentry with supplied dsn");
+        debug!("initializing sentry with supplied dsn");
 
         let environment = Environment::load()?;
         let guard = sentry::init(sentry::ClientOptions {
@@ -36,7 +36,8 @@ pub fn init() -> Result<Option<sentry::ClientInitGuard>> {
         return Ok(Some(guard));
     }
 
-    info!("sentry not configured for api, skipping initialization");
+    debug!("sentry not configured for api, skipping initialization");
+
     Ok(None)
 }
 

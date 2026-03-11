@@ -18,6 +18,7 @@ pub fn init(replicator_config: &ReplicatorConfig) -> Option<ErrorNotificationCli
                 warn!(
                     "missing supabase api url and/or key, failure notifications will not be sent"
                 );
+
                 None
             }
         },
