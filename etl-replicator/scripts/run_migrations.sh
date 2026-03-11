@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-if [ ! -d "etl-replicator/migrations" ]; then
-  echo >&2 "❌ Error: 'etl-replicator/migrations' folder not found."
+if [ ! -d "etl/migrations" ]; then
+  echo >&2 "❌ Error: 'etl/migrations' folder not found."
   echo >&2 "Please run this script from the 'etl' directory."
   exit 1
 fi
@@ -30,10 +30,10 @@ DB_HOST="${POSTGRES_HOST:=localhost}"
 # Set up the database URL
 export DATABASE_URL=postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
 
-echo "🔄 Running replicator state store migrations..."
+echo "🔄 Running etl state store migrations..."
 
 # Create the etl schema if it doesn't exist
-# This matches the behavior in etl-replicator/src/migrations.rs
+# This matches the behavior in etl/src/migrations.rs
 psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -c "create schema if not exists etl;" > /dev/null
 
 # Create a temporary sqlx-cli compatible database URL that sets the search_path
@@ -43,6 +43,6 @@ MIGRATION_URL="${DATABASE_URL}?${SQLX_MIGRATIONS_OPTS}"
 
 # Run migrations with the modified URL
 sqlx database create --database-url "${DATABASE_URL}"
-sqlx migrate run --source etl-replicator/migrations --database-url "${MIGRATION_URL}"
+sqlx migrate run --source etl/migrations --database-url "${MIGRATION_URL}"
 
-echo "✨ Replicator state store migrations complete! Ready to go!"
+echo "✨ ETL state store migrations complete! Ready to go!"

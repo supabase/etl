@@ -171,7 +171,7 @@ cargo sqlx prepare
 
 ### ETL Replicator Migrations
 
-Located in `etl-replicator/migrations/`, these create the replicator's state store schema (`etl` schema) for tracking replication state, table schemas, and mappings.
+Located in `etl/migrations/`, these create the ETL state store schema (`etl` schema) for tracking replication state, table schemas, and mappings.
 
 **Running replicator migrations:**
 
@@ -181,10 +181,10 @@ Located in `etl-replicator/migrations/`, these create the replicator's state sto
 
 # Or manually with SQLx CLI (requires setting search_path)
 psql $DATABASE_URL -c "create schema if not exists etl;"
-sqlx migrate run --source etl-replicator/migrations --database-url "${DATABASE_URL}?options=-csearch_path%3Detl"
+sqlx migrate run --source etl/migrations --database-url "${DATABASE_URL}?options=-csearch_path%3Detl"
 ```
 
-**Important:** Migrations are run automatically when using the `etl-replicator` binary (see `etl-replicator/src/migrations.rs:16`). However, if you integrate the `etl` crate directly into your own application as a library, you should run these migrations manually before starting your pipeline. This design decision ensures:
+**Important:** Migrations are run automatically when the Postgres-backed ETL state store is initialized (see `etl/src/store/both/postgres.rs` and `etl/src/migrations.rs`). However, if you integrate the `etl` crate directly into your own application and want to prepare the source database ahead of time, you can also run these migrations manually. This design decision ensures:
 - The standalone replicator binary works out-of-the-box
 - Library users have explicit control over when migrations run
 - CI/CD pipelines can pre-apply migrations independently

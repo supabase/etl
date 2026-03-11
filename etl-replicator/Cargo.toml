@@ -25,7 +25,7 @@ secrecy = { workspace = true }
 sentry = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tracing = { workspace = true, default-features = true }

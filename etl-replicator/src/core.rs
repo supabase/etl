@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::error::{ReplicatorError, ReplicatorResult};
 use crate::error_notification::{ErrorNotificationClient, ErrorNotifyingStateStore};
-use crate::migrations::migrate_state_store;
+use crate::metrics;
 use crate::sentry::set_destination_tag;
 use etl::pipeline::Pipeline;
 use etl::store::both::postgres::PostgresStore;
@@ -258,19 +258,17 @@ fn log_batch_config(config: &BatchConfig) {
     );
 }
 
-/// Initializes the state store with migrations.
+/// Initializes the state store.
 ///
-/// Runs necessary database migrations on the state store and creates a
-/// [`PostgresStore`] instance for the given pipeline and connection configuration.
+/// Creates a [`PostgresStore`] instance for the given pipeline and connection
+/// configuration. The pipeline itself owns state-store migration startup.
 async fn init_store(
     pipeline_id: PipelineId,
     pg_connection_config: PgConnectionConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<impl StateStore + SchemaStore + CleanupStore + Clone> {
-    migrate_state_store(&pg_connection_config).await?;
-
     Ok(ErrorNotifyingStateStore::new(
-        PostgresStore::new(pipeline_id, pg_connection_config),
+        PostgresStore::new(pipeline_id, pg_connection_config).await?,
         notification_client,
     ))
 }
@@ -288,6 +286,8 @@ where
 {
     // Start the pipeline.
     pipeline.start().await?;
+
+    metrics::spawn_metrics_tasks(pipeline.id());
 
     // Spawn a task to listen for shutdown signals and trigger shutdown.
     let shutdown_tx = pipeline.shutdown_tx();
