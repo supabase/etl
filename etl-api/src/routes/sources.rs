@@ -2,10 +2,12 @@ use crate::config::ApiConfig;
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::source::{FullApiSourceConfig, StoredSourceConfig, StrippedApiSourceConfig};
 use crate::db;
-use crate::db::connect_to_source_database_from_api;
-use crate::db::sources::{SourcesDbError, validate_trusted_username};
-use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
+use crate::db::sources::SourcesDbError;
+use crate::k8s::TrustedRootCertsCache;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
+use crate::validation::{
+    ValidationContext, ValidationError, validate_source as run_source_validation,
+};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
@@ -35,10 +37,10 @@ pub enum SourceError {
     Database(#[from] sqlx::Error),
 
     #[error(transparent)]
-    TrustedRootCerts(#[from] TrustedRootCertsError),
+    Validation(#[from] ValidationError),
 
-    #[error("Invalid source username: connected as '{0}' but expected '{1}'")]
-    InvalidUsername(String, String),
+    #[error("Source validation failed: {0}")]
+    ValidationFailed(String),
 }
 
 impl SourceError {
@@ -47,7 +49,7 @@ impl SourceError {
             // Do not expose internal database details in error messages
             SourceError::SourcesDb(SourcesDbError::Database(_))
             | SourceError::Database(_)
-            | SourceError::TrustedRootCerts(_) => "internal server error".to_string(),
+            | SourceError::Validation(_) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -61,8 +63,8 @@ impl ResponseError for SourceError {
             SourceError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             SourceError::TenantId(_) => StatusCode::BAD_REQUEST,
             SourceError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            SourceError::TrustedRootCerts(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            SourceError::InvalidUsername(_, _) => StatusCode::FORBIDDEN,
+            SourceError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SourceError::ValidationFailed(_) => StatusCode::FORBIDDEN,
         }
     }
 
@@ -76,6 +78,27 @@ impl ResponseError for SourceError {
             .insert_header(ContentType::json())
             .body(body)
     }
+}
+
+async fn validate_source_config(
+    source_config: StoredSourceConfig,
+    api_config: &ApiConfig,
+    trusted_root_certs_cache: &TrustedRootCertsCache,
+) -> Result<(), SourceError> {
+    if api_config.source.trusted_username.is_none() {
+        return Ok(());
+    }
+
+    let ctx =
+        ValidationContext::build_from_source(source_config, api_config, trusted_root_certs_cache)
+            .await?;
+    let failures = run_source_validation(&ctx).await?;
+
+    if let Some(failure) = failures.into_iter().next() {
+        return Err(SourceError::ValidationFailed(failure.to_string()));
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -128,6 +151,7 @@ pub struct ReadSourcesResponse {
     responses(
         (status = 200, description = "Source created successfully", body = CreateSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 403, description = "Source profile validation failed", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Sources"
@@ -144,17 +168,12 @@ pub async fn create_source(
     let tenant_id = extract_tenant_id(&req)?;
     let source = source.into_inner();
 
-    // Validate username if configured.
-    if api_config.source.trusted_username.is_some() {
-        let tls_config = trusted_root_certs_cache
-            .get_tls_config(api_config.source.tls_enabled)
-            .await?;
-        let stored_config: StoredSourceConfig = source.config.clone().into();
-        let source_config = stored_config.into_connection_config(tls_config);
-        let source_pool = connect_to_source_database_from_api(&source_config).await?;
-
-        validate_trusted_username(&source_pool, &api_config.source.trusted_username).await?;
-    }
+    validate_source_config(
+        source.config.clone().into(),
+        api_config.as_ref(),
+        trusted_root_certs_cache.as_ref(),
+    )
+    .await?;
 
     let id = db::sources::create_source(
         &**pool,
@@ -218,6 +237,7 @@ pub async fn read_source(
     responses(
         (status = 200, description = "Source updated successfully"),
         (status = 404, description = "Source not found", body = ErrorMessage),
+        (status = 403, description = "Source profile validation failed", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Sources"
@@ -236,17 +256,12 @@ pub async fn update_source(
     let source_id = source_id.into_inner();
     let source = source.into_inner();
 
-    // Validate username if configured.
-    if api_config.source.trusted_username.is_some() {
-        let tls_config = trusted_root_certs_cache
-            .get_tls_config(api_config.source.tls_enabled)
-            .await?;
-        let stored_config: StoredSourceConfig = source.config.clone().into();
-        let source_config = stored_config.into_connection_config(tls_config);
-        let source_pool = connect_to_source_database_from_api(&source_config).await?;
-
-        validate_trusted_username(&source_pool, &api_config.source.trusted_username).await?;
-    }
+    validate_source_config(
+        source.config.clone().into(),
+        api_config.as_ref(),
+        trusted_root_certs_cache.as_ref(),
+    )
+    .await?;
 
     db::sources::update_source(
         &**pool,

@@ -3,7 +3,8 @@ mod support;
 use etl_api::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
 use etl_api::configs::pipeline::FullApiPipelineConfig;
 use etl_api::validation::{
-    FailureType, ValidationContext, validate_destination, validate_pipeline,
+    FailureType, ValidationContext, validate_destination, validate_destination_pipeline,
+    validate_pipeline, validate_source,
 };
 use etl_config::shared::BatchConfig;
 use etl_config::{Environment, SerializableSecretString};
@@ -180,6 +181,111 @@ async fn validate_pipeline_wal_level_success() {
         wal_failure.is_none(),
         "WAL level should be logical in test DB"
     );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_source_with_trusted_username_mismatch() {
+    let config = get_test_db_config();
+    let pool = create_pg_database(&config).await;
+    let environment = Environment::load().expect("Failed to load environment");
+    let ctx = ValidationContext::builder(environment)
+        .source_pool(pool)
+        .trusted_username(Some("different_user".to_string()))
+        .build();
+
+    let failures = validate_source(&ctx).await.unwrap();
+
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].name, "Invalid source username");
+    assert_eq!(failures[0].failure_type, FailureType::Critical);
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_destination_includes_source_validation() {
+    let (ctx, _pool, config) = create_validation_context_with_source().await;
+    let environment = Environment::load().expect("Failed to load environment");
+    let ctx = ValidationContext::builder(environment)
+        .source_pool(
+            ctx.source_pool
+                .expect("source pool should be present for validation"),
+        )
+        .trusted_username(Some("different_user".to_string()))
+        .build();
+
+    let failures = validate_destination(
+        &ctx,
+        &create_bigquery_config("fake-project", "fake-dataset", "{}"),
+    )
+    .await
+    .unwrap();
+
+    let source_failure = failures
+        .iter()
+        .find(|failure| failure.name == "Invalid source username");
+    assert!(
+        source_failure.is_some(),
+        "Expected source validation failure"
+    );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_pipeline_includes_source_validation() {
+    let (ctx, _pool, config) = create_validation_context_with_source().await;
+    let environment = Environment::load().expect("Failed to load environment");
+    let ctx = ValidationContext::builder(environment)
+        .source_pool(
+            ctx.source_pool
+                .expect("source pool should be present for validation"),
+        )
+        .trusted_username(Some("different_user".to_string()))
+        .build();
+
+    let failures = validate_pipeline(&ctx, &create_pipeline_config("test_pub"))
+        .await
+        .unwrap();
+
+    let source_failure = failures
+        .iter()
+        .find(|failure| failure.name == "Invalid source username");
+    assert!(
+        source_failure.is_some(),
+        "Expected source validation failure"
+    );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_destination_pipeline_runs_source_validation_once() {
+    let (ctx, _pool, config) = create_validation_context_with_source().await;
+    let environment = Environment::load().expect("Failed to load environment");
+    let ctx = ValidationContext::builder(environment)
+        .source_pool(
+            ctx.source_pool
+                .expect("source pool should be present for validation"),
+        )
+        .trusted_username(Some("different_user".to_string()))
+        .build();
+
+    let failures = validate_destination_pipeline(
+        &ctx,
+        &create_bigquery_config("fake-project", "fake-dataset", "{}"),
+        &create_pipeline_config("missing_publication"),
+    )
+    .await
+    .unwrap();
+
+    let source_failures = failures
+        .iter()
+        .filter(|failure| failure.name == "Invalid source username")
+        .count();
+    assert_eq!(source_failures, 1, "Expected source validation to run once");
 
     drop_pg_database(&config).await;
 }

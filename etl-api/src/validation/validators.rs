@@ -14,6 +14,155 @@ use crate::configs::pipeline::FullApiPipelineConfig;
 
 use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
 
+const REQUIRED_SOURCE_ROLE_MEMBERSHIPS: [(&str, bool); 2] =
+    [("pg_monitor", false), ("pg_read_all_data", false)];
+
+/// Validates the connected source role profile for ETL.
+#[derive(Debug)]
+pub struct SourceValidator;
+
+#[async_trait]
+impl Validator for SourceValidator {
+    async fn validate(
+        &self,
+        ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError> {
+        let Some(expected_username) = ctx.trusted_username.as_ref() else {
+            return Ok(vec![]);
+        };
+
+        let source_pool = ctx
+            .source_pool
+            .as_ref()
+            .expect("source pool required for source validation");
+
+        let current_user: String = sqlx::query_scalar("select current_user")
+            .fetch_one(source_pool)
+            .await?;
+
+        if current_user != *expected_username {
+            return Ok(vec![ValidationFailure::critical(
+                "Invalid source username",
+                format!("connected as '{current_user}' but expected '{expected_username}'"),
+            )]);
+        }
+
+        let actual_memberships: Vec<(String, bool)> = sqlx::query_as(
+            r#"
+            select g.rolname, m.admin_option
+            from pg_roles r
+            join pg_auth_members m on r.oid = m.member
+            join pg_roles g on m.roleid = g.oid
+            where r.rolname = $1
+            order by g.rolname
+            "#,
+        )
+        .bind(expected_username)
+        .fetch_all(source_pool)
+        .await?;
+
+        let expected_memberships = REQUIRED_SOURCE_ROLE_MEMBERSHIPS
+            .iter()
+            .map(|(role_name, admin_option)| (role_name.to_string(), *admin_option))
+            .collect::<Vec<_>>();
+
+        if actual_memberships != expected_memberships {
+            return Ok(vec![ValidationFailure::critical(
+                "Invalid source role memberships",
+                format!(
+                    "expected exactly [{}], found [{}]",
+                    format_role_memberships(&expected_memberships),
+                    format_role_memberships(&actual_memberships),
+                ),
+            )]);
+        }
+
+        let role = sqlx::query_as::<_, (bool, bool, bool, bool, bool, bool, i32, bool, bool)>(
+            r#"
+            select
+                rolcreaterole,
+                rolcanlogin,
+                rolsuper,
+                rolinherit,
+                rolcreatedb,
+                rolreplication,
+                rolconnlimit,
+                rolbypassrls,
+                rolvaliduntil is null
+            from pg_roles
+            where rolname = $1
+            "#,
+        )
+        .bind(expected_username)
+        .fetch_optional(source_pool)
+        .await?;
+
+        let Some((
+            rolcreaterole,
+            rolcanlogin,
+            rolsuper,
+            rolinherit,
+            rolcreatedb,
+            rolreplication,
+            rolconnlimit,
+            rolbypassrls,
+            rolvaliduntil_is_null,
+        )) = role
+        else {
+            return Ok(vec![ValidationFailure::critical(
+                "Invalid source role attributes",
+                "role not found",
+            )]);
+        };
+
+        let mut mismatches = Vec::new();
+        if rolcreaterole {
+            mismatches.push("rolcreaterole=true (expected false)".to_string());
+        }
+        if !rolcanlogin {
+            mismatches.push("rolcanlogin=false (expected true)".to_string());
+        }
+        if rolsuper {
+            mismatches.push("rolsuper=true (expected false)".to_string());
+        }
+        if !rolinherit {
+            mismatches.push("rolinherit=false (expected true)".to_string());
+        }
+        if rolcreatedb {
+            mismatches.push("rolcreatedb=true (expected false)".to_string());
+        }
+        if !rolreplication {
+            mismatches.push("rolreplication=false (expected true)".to_string());
+        }
+        if rolconnlimit != -1 {
+            mismatches.push(format!("rolconnlimit={rolconnlimit} (expected -1)"));
+        }
+        if !rolbypassrls {
+            mismatches.push("rolbypassrls=false (expected true)".to_string());
+        }
+        if !rolvaliduntil_is_null {
+            mismatches.push("rolvaliduntil is set (expected null)".to_string());
+        }
+
+        if mismatches.is_empty() {
+            Ok(vec![])
+        } else {
+            Ok(vec![ValidationFailure::critical(
+                "Invalid source role attributes",
+                mismatches.join(", "),
+            )])
+        }
+    }
+}
+
+fn format_role_memberships(memberships: &[(String, bool)]) -> String {
+    memberships
+        .iter()
+        .map(|(role_name, admin_option)| format!("{role_name} (admin_option={admin_option})"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Validates that the required publication exists in the source database.
 #[derive(Debug)]
 pub struct PublicationExistsValidator {

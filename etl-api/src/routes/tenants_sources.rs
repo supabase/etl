@@ -13,8 +13,15 @@ use utoipa::ToSchema;
 use crate::configs::source::FullApiSourceConfig;
 use crate::db;
 use crate::db::tenants_sources::TenantSourceDbError;
+use crate::k8s::TrustedRootCertsCache;
 use crate::routes::ErrorMessage;
-use crate::{configs::encryption::EncryptionKey, db::tenants::TenantsDbError};
+use crate::validation::{
+    ValidationContext, ValidationError, validate_source as run_source_validation,
+};
+use crate::{
+    config::ApiConfig, configs::encryption::EncryptionKey, configs::source::StoredSourceConfig,
+    db::tenants::TenantsDbError,
+};
 
 #[derive(Debug, Error)]
 enum TenantSourceError {
@@ -23,6 +30,12 @@ enum TenantSourceError {
 
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
+
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
+
+    #[error("Source validation failed: {0}")]
+    ValidationFailed(String),
 }
 
 impl TenantSourceError {
@@ -32,7 +45,8 @@ impl TenantSourceError {
             TenantSourceError::TenantSourceDb(TenantSourceDbError::Database(_))
             | TenantSourceError::TenantSourceDb(TenantSourceDbError::Sources(_))
             | TenantSourceError::TenantSourceDb(TenantSourceDbError::Tenants(_))
-            | TenantSourceError::Database(_) => "internal server error".to_string(),
+            | TenantSourceError::Database(_)
+            | TenantSourceError::Validation(_) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -45,9 +59,10 @@ impl ResponseError for TenantSourceError {
             TenantSourceError::TenantSourceDb(TenantSourceDbError::Tenants(
                 TenantsDbError::Conflict(_),
             )) => StatusCode::CONFLICT,
-            TenantSourceError::TenantSourceDb(_) | TenantSourceError::Database(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            TenantSourceError::TenantSourceDb(_)
+            | TenantSourceError::Database(_)
+            | TenantSourceError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            TenantSourceError::ValidationFailed(_) => StatusCode::FORBIDDEN,
         }
     }
 
@@ -61,6 +76,27 @@ impl ResponseError for TenantSourceError {
             .insert_header(ContentType::json())
             .body(body)
     }
+}
+
+async fn validate_source_config(
+    source_config: StoredSourceConfig,
+    api_config: &ApiConfig,
+    trusted_root_certs_cache: &TrustedRootCertsCache,
+) -> Result<(), TenantSourceError> {
+    if api_config.source.trusted_username.is_none() {
+        return Ok(());
+    }
+
+    let ctx =
+        ValidationContext::build_from_source(source_config, api_config, trusted_root_certs_cache)
+            .await?;
+    let failures = run_source_validation(&ctx).await?;
+
+    if let Some(failure) = failures.into_iter().next() {
+        return Err(TenantSourceError::ValidationFailed(failure.to_string()));
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -93,6 +129,7 @@ pub struct CreateTenantSourceResponse {
     responses(
         (status = 200, description = "Tenant and source created successfully", body = CreateTenantSourceResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 403, description = "Source profile validation failed", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Tenants & Sources"
@@ -100,6 +137,8 @@ pub struct CreateTenantSourceResponse {
 #[post("/tenants-sources")]
 pub async fn create_tenant_and_source(
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     tenant_and_source: Json<CreateTenantSourceRequest>,
     encryption_key: Data<EncryptionKey>,
     root_span: RootSpan,
@@ -107,6 +146,13 @@ pub async fn create_tenant_and_source(
     let tenant_and_source = tenant_and_source.into_inner();
 
     root_span.record("project", &tenant_and_source.tenant_id);
+
+    validate_source_config(
+        tenant_and_source.source_config.clone().into(),
+        api_config.as_ref(),
+        trusted_root_certs_cache.as_ref(),
+    )
+    .await?;
 
     let mut txn = pool.begin().await?;
     let (tenant_id, source_id) = db::tenants_sources::create_tenant_and_source(

@@ -5,13 +5,16 @@ use etl_api::routes::sources::{
     UpdateSourceRequest,
 };
 use etl_config::SerializableSecretString;
+use etl_config::shared::PgConnectionConfig;
 use etl_postgres::sqlx::test_utils::create_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 use secrecy::ExposeSecret;
 use uuid::Uuid;
 
-use crate::support::database::get_test_db_config;
+use crate::support::database::{
+    create_trusted_source_database, drop_trusted_source_database, get_test_db_config,
+};
 use crate::support::mocks::create_default_image;
 use crate::support::mocks::destinations::create_destination;
 use crate::support::mocks::pipelines::new_pipeline_config;
@@ -23,6 +26,19 @@ use crate::support::mocks::tenants::create_tenant;
 use crate::support::test_app::{spawn_test_app, spawn_test_app_with_trusted_username};
 
 mod support;
+
+fn source_config_from_db_config(source_db_config: &PgConnectionConfig) -> FullApiSourceConfig {
+    FullApiSourceConfig {
+        host: source_db_config.host.clone(),
+        port: source_db_config.port,
+        name: source_db_config.name.clone(),
+        username: source_db_config.username.clone(),
+        password: source_db_config
+            .password
+            .as_ref()
+            .map(|password| SerializableSecretString::from(password.expose_secret().to_string())),
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn source_can_be_created() {
@@ -269,28 +285,11 @@ async fn source_with_active_pipeline_cannot_be_deleted() {
 async fn source_creation_with_matching_trusted_username_succeeds() {
     init_test_tracing();
 
-    // Arrange
-    let mut source_db_config = get_test_db_config();
-    source_db_config.name = format!("test_source_db_{}", Uuid::new_v4());
-
-    let trusted_username = source_db_config.username.clone();
-    let app = spawn_test_app_with_trusted_username(Some(trusted_username)).await;
+    let trusted_source = create_trusted_source_database().await;
+    let app =
+        spawn_test_app_with_trusted_username(Some(trusted_source.trusted_username.clone())).await;
     let tenant_id = &create_tenant(&app).await;
-
-    // Create the actual source database.
-    let _source_pool = create_pg_database(&source_db_config).await;
-
-    // Create a source config that connects to the test database with the trusted username.
-    let source_config = FullApiSourceConfig {
-        host: source_db_config.host.clone(),
-        port: source_db_config.port,
-        name: source_db_config.name.clone(),
-        username: source_db_config.username.clone(),
-        password: source_db_config
-            .password
-            .as_ref()
-            .map(|p| SerializableSecretString::from(p.expose_secret().to_string())),
-    };
+    let source_config = source_config_from_db_config(&trusted_source.trusted_config);
 
     let source = CreateSourceRequest {
         name: new_name(),
@@ -306,6 +305,8 @@ async fn source_creation_with_matching_trusted_username_succeeds() {
         "Expected successful source creation with matching trusted username, got status: {}",
         response.status()
     );
+
+    drop_trusted_source_database(trusted_source).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -324,16 +325,7 @@ async fn source_creation_with_non_matching_trusted_username_fails() {
     let _source_pool = create_pg_database(&source_db_config).await;
 
     // Create a source config that connects to the test database with the actual username.
-    let source_config = FullApiSourceConfig {
-        host: source_db_config.host.clone(),
-        port: source_db_config.port,
-        name: source_db_config.name.clone(),
-        username: source_db_config.username.clone(),
-        password: source_db_config
-            .password
-            .as_ref()
-            .map(|p| SerializableSecretString::from(p.expose_secret().to_string())),
-    };
+    let source_config = source_config_from_db_config(&source_db_config);
 
     let source = CreateSourceRequest {
         name: new_name(),
@@ -355,28 +347,11 @@ async fn source_creation_with_non_matching_trusted_username_fails() {
 async fn source_update_with_matching_trusted_username_succeeds() {
     init_test_tracing();
 
-    // Arrange
-    let mut source_db_config = get_test_db_config();
-    source_db_config.name = format!("test_source_db_{}", Uuid::new_v4());
-
-    let trusted_username = source_db_config.username.clone();
-    let app = spawn_test_app_with_trusted_username(Some(trusted_username)).await;
+    let trusted_source = create_trusted_source_database().await;
+    let app =
+        spawn_test_app_with_trusted_username(Some(trusted_source.trusted_username.clone())).await;
     let tenant_id = &create_tenant(&app).await;
-
-    // Create the actual source database.
-    let _source_pool = create_pg_database(&source_db_config).await;
-
-    // Create initial source.
-    let source_config = FullApiSourceConfig {
-        host: source_db_config.host.clone(),
-        port: source_db_config.port,
-        name: source_db_config.name.clone(),
-        username: source_db_config.username.clone(),
-        password: source_db_config
-            .password
-            .as_ref()
-            .map(|p| SerializableSecretString::from(p.expose_secret().to_string())),
-    };
+    let source_config = source_config_from_db_config(&trusted_source.trusted_config);
 
     let source = CreateSourceRequest {
         name: new_name(),
@@ -407,4 +382,32 @@ async fn source_update_with_matching_trusted_username_succeeds() {
         "Expected successful source update with matching trusted username, got status: {}",
         response.status()
     );
+
+    drop_trusted_source_database(trusted_source).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_creation_with_matching_trusted_username_but_invalid_role_profile_fails() {
+    init_test_tracing();
+
+    let mut source_db_config = get_test_db_config();
+    source_db_config.name = format!("test_source_db_{}", Uuid::new_v4());
+
+    let trusted_username = source_db_config.username.clone();
+    let app = spawn_test_app_with_trusted_username(Some(trusted_username)).await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let _source_pool = create_pg_database(&source_db_config).await;
+
+    let source = CreateSourceRequest {
+        name: new_name(),
+        config: source_config_from_db_config(&source_db_config),
+    };
+
+    let response = app.create_source(tenant_id, &source).await;
+    let status = response.status();
+    let body = response.text().await.expect("failed to read response body");
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.contains("Invalid source role"));
 }

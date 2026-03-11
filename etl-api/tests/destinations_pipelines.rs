@@ -4,11 +4,15 @@ use etl_api::routes::destinations_pipelines::{
     UpdateDestinationPipelineRequest,
 };
 use etl_api::routes::pipelines::ReadPipelineResponse;
+use etl_config::SerializableSecretString;
+use etl_config::shared::PgConnectionConfig;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
+use secrecy::ExposeSecret;
 
 use crate::support::database::{
-    create_test_source_database, run_etl_migrations_on_source_database,
+    create_test_source_database, create_trusted_source_database, drop_trusted_source_database,
+    revoke_role_membership, run_etl_migrations_on_source_database,
 };
 use crate::{
     support::mocks::create_default_image,
@@ -18,12 +22,27 @@ use crate::{
         updated_iceberg_supabase_destination_config, updated_name,
     },
     support::mocks::pipelines::{new_pipeline_config, updated_pipeline_config},
-    support::mocks::sources::create_source,
+    support::mocks::sources::{create_source, create_source_with_config},
     support::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
-    support::test_app::spawn_test_app,
+    support::test_app::{spawn_test_app, spawn_test_app_with_trusted_username},
 };
 
 mod support;
+
+fn source_config_from_db_config(
+    source_db_config: &PgConnectionConfig,
+) -> etl_api::configs::source::FullApiSourceConfig {
+    etl_api::configs::source::FullApiSourceConfig {
+        host: source_db_config.host.clone(),
+        port: source_db_config.port,
+        name: source_db_config.name.clone(),
+        username: source_db_config.username.clone(),
+        password: source_db_config
+            .password
+            .as_ref()
+            .map(|password| SerializableSecretString::from(password.expose_secret().to_string())),
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bigquery_destination_and_pipeline_can_be_created() {
@@ -171,6 +190,46 @@ async fn tenant_cannot_create_more_than_max_destinations_pipelines() {
 
     // Assert
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_pipeline_creation_fails_when_trusted_source_profile_has_drifted() {
+    init_test_tracing();
+
+    let trusted_source = create_trusted_source_database().await;
+    let app =
+        spawn_test_app_with_trusted_username(Some(trusted_source.trusted_username.clone())).await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_id = create_source_with_config(
+        &app,
+        tenant_id,
+        "Trusted Source".to_string(),
+        source_config_from_db_config(&trusted_source.trusted_config),
+    )
+    .await;
+    create_default_image(&app).await;
+
+    revoke_role_membership(
+        &trusted_source.admin_config,
+        &trusted_source.trusted_username,
+        "pg_monitor",
+    )
+    .await;
+
+    let request = CreateDestinationPipelineRequest {
+        destination_name: new_name(),
+        destination_config: new_bigquery_destination_config(),
+        source_id,
+        pipeline_config: new_pipeline_config(),
+    };
+    let response = app.create_destination_pipeline(tenant_id, &request).await;
+    let status = response.status();
+    let body = response.text().await.expect("failed to read response body");
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body.contains("Invalid source role memberships"));
+
+    drop_trusted_source_database(trusted_source).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
