@@ -105,11 +105,13 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let users_table = table_name_to_iceberg_table_name(
         &database_schema.users_schema().name,
         single_destination_namespace,
-    );
+    )
+    .unwrap();
     let orders_table = table_name_to_iceberg_table_name(
         &database_schema.orders_schema().name,
         single_destination_namespace,
-    );
+    )
+    .unwrap();
 
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
 
@@ -329,11 +331,13 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     let users_table = table_name_to_iceberg_table_name(
         &database_schema.users_schema().name,
         single_destination_namespace,
-    );
+    )
+    .unwrap();
     let orders_table = table_name_to_iceberg_table_name(
         &database_schema.orders_schema().name,
         single_destination_namespace,
-    );
+    )
+    .unwrap();
 
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
 
@@ -572,11 +576,13 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     let users_table = table_name_to_iceberg_table_name(
         &database_schema.users_schema().name,
         single_destination_namespace,
-    );
+    )
+    .unwrap();
     let orders_table = table_name_to_iceberg_table_name(
         &database_schema.orders_schema().name,
         single_destination_namespace,
-    );
+    )
+    .unwrap();
 
     let actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
     let actual_orders = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;

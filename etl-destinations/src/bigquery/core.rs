@@ -22,37 +22,12 @@ use crate::bigquery::encoding::BigQueryTableRow;
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 use crate::bigquery::metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
+use crate::table_name::try_stringify_table_name;
 use metrics::histogram;
 
-/// Delimiter separating schema from table name in BigQuery table identifiers.
-const BIGQUERY_TABLE_ID_DELIMITER: &str = "_";
-/// Replacement string for escaping underscores in Postgres names.
-const BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
-
-/// Returns the [`BigQueryTableId`] for a supplied [`TableName`].
-///
-/// Escapes underscores in schema and table names to prevent collisions when combining them.
-/// Original underscores become double underscores, and a single underscore separates schema from table.
-/// This ensures that `a_b.c` and `a.b_c` map to different BigQuery table names.
-///
-/// We opted for this escaping strategy since it's easy to undo on the reading end. Just split at a
-/// single `_` and revert each `__` into `_`.
-///
-/// BigQuery accepts up to 1024 UTF-8 characters, whereas Postgres names operate with a maximum size
-/// determined by `NAMEDATALEN`. We assume that most people are running this as default value, which
-/// is 63, meaning that in the worst case of a schema name and table name containing only _, the resulting
-/// string will be made up of (63 * 2) + 1 + (63 * 2) = 253 characters which is much less than 1024.
-pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> BigQueryTableId {
-    let escaped_schema = table_name.schema.replace(
-        BIGQUERY_TABLE_ID_DELIMITER,
-        BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
-    );
-    let escaped_table = table_name.name.replace(
-        BIGQUERY_TABLE_ID_DELIMITER,
-        BIGQUERY_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
-    );
-
-    format!("{escaped_schema}_{escaped_table}")
+/// Converts a source [`TableName`] into a BigQuery table identifier.
+pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> EtlResult<BigQueryTableId> {
+    try_stringify_table_name(table_name)
 }
 
 /// A BigQuery table identifier with version sequence for truncate operations.
@@ -386,7 +361,7 @@ where
             })?;
 
         // We determine the BigQuery table ID for the table together with the current sequence number.
-        let bigquery_table_id = table_name_to_bigquery_table_id(&table_schema.name);
+        let bigquery_table_id = table_name_to_bigquery_table_id(&table_schema.name)?;
         let sequenced_bigquery_table_id = self
             .get_or_create_sequenced_bigquery_table_id(table_id, &bigquery_table_id)
             .await?;
@@ -967,41 +942,6 @@ fn split_table_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_table_name_to_bigquery_table_id_no_underscores() {
-        let table_name = TableName::new("schema".to_string(), "table".to_string());
-        assert_eq!(table_name_to_bigquery_table_id(&table_name), "schema_table");
-    }
-
-    #[test]
-    fn test_table_name_to_bigquery_table_id_with_underscores() {
-        let table_name = TableName::new("a_b".to_string(), "c_d".to_string());
-        assert_eq!(table_name_to_bigquery_table_id(&table_name), "a__b_c__d");
-    }
-
-    #[test]
-    fn test_table_name_to_bigquery_table_id_collision_prevention() {
-        // These two cases previously collided to "a_b_c"
-        let table_name1 = TableName::new("a_b".to_string(), "c".to_string());
-        let table_name2 = TableName::new("a".to_string(), "b_c".to_string());
-
-        let id1 = table_name_to_bigquery_table_id(&table_name1);
-        let id2 = table_name_to_bigquery_table_id(&table_name2);
-
-        assert_eq!(id1, "a__b_c");
-        assert_eq!(id2, "a_b__c");
-        assert_ne!(id1, id2, "Table IDs should not collide");
-    }
-
-    #[test]
-    fn test_table_name_to_bigquery_table_id_multiple_underscores() {
-        let table_name = TableName::new("a__b".to_string(), "c__d".to_string());
-        assert_eq!(
-            table_name_to_bigquery_table_id(&table_name),
-            "a____b_c____d"
-        );
-    }
 
     #[test]
     fn test_sequenced_bigquery_table_id_from_str_valid() {
