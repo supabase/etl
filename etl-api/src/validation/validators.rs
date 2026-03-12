@@ -26,7 +26,6 @@ struct SourceRoleAudit {
     rolcanlogin: bool,
     rolreplication: bool,
     rolbypassrls: bool,
-    rolsuper: bool,
     rolcreaterole: bool,
     rolcreatedb: bool,
     rolinherit: bool,
@@ -65,6 +64,9 @@ impl Validator for SourceValidator {
             )]);
         }
 
+        // This validation is best effort: it relies on catalog metadata and
+        // privilege checks to confirm the trusted role profile without running
+        // invasive probes against the customer database.
         let audit = sqlx::query_as::<_, SourceRoleAudit>(
             r#"
             with target as (
@@ -74,7 +76,6 @@ impl Validator for SourceValidator {
                 rolcanlogin,
                 rolreplication,
                 rolbypassrls,
-                rolsuper,
                 rolcreaterole,
                 rolcreatedb,
                 rolinherit,
@@ -111,7 +112,9 @@ impl Validator for SourceValidator {
               t.rolcanlogin,
               t.rolreplication,
               t.rolbypassrls,
-              t.rolsuper,
+              -- Enable this once we want to validate if the role allows event trigger creation. If then
+              -- it is true, it means that event triggers can be created.
+              -- t.rolsuper,
               t.rolcreaterole,
               t.rolcreatedb,
               t.rolinherit,
@@ -156,19 +159,21 @@ impl Validator for SourceValidator {
         let has_required_role_attributes = audit.rolcanlogin
             && audit.rolreplication
             && audit.rolbypassrls
-            // Enable this once we want to validate if the role allows event triggers creation.
-            // && audit.rolsuper
             && !audit.rolcreaterole
             && !audit.rolcreatedb
             && audit.rolinherit
             && audit.rolconnlimit == -1
             && audit.rolvaliduntil_is_null;
 
+        // Enable this once we want to validate if the role allows event trigger creation.
+        // let has_required_role_attributes =
+        //     has_required_role_attributes && audit.can_create_event_triggers;
+
         let mut failures = Vec::new();
         if !has_required_role_attributes {
             failures.push(ValidationFailure::critical(
                 "Invalid source role attributes",
-                "trusted source role does not match the required ETL profile",
+                "Trusted source role does not match the required ETL profile",
             ));
         }
 
@@ -184,7 +189,7 @@ impl Validator for SourceValidator {
             failures.push(ValidationFailure::critical(
                 "Invalid source etl schema permissions",
                 format!(
-                    "trusted source role does not have the required permissions for schema {ETL_SCHEMA_NAME}"
+                    "Trusted source role does not have the required permissions for schema {ETL_SCHEMA_NAME}"
                 ),
             ));
         }
