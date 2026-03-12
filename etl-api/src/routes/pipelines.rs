@@ -27,7 +27,7 @@ use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::core::{
     create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
-    delete_pipeline_resources_in_k8s,
+    delete_pipeline_resources_in_k8s, is_replicator_pod_stopped,
 };
 use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache, TrustedRootCertsError};
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
@@ -982,7 +982,6 @@ pub async fn get_pipeline_status(
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
-
     let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
     let status = pod_status.into();
 
@@ -1331,12 +1330,18 @@ pub async fn update_pipeline_version(
         return Ok(HttpResponse::Ok().finish());
     }
 
+    if is_replicator_pod_stopped(k8s_client.as_ref(), tenant_id, replicator.id).await? {
+        txn.commit().await?;
+
+        return Ok(HttpResponse::Ok().finish());
+    }
+
     let tls_config = trusted_root_certs_cache
         .get_tls_config(api_config.source.tls_enabled)
         .await?;
 
-    // We update the pipeline in K8s if client is available.
-    // TODO: check if the pipeline is running, so that we avoid creating it if it's shutdown.
+    // Keep stopped pipelines stopped. The new image is persisted in the database and will be
+    // applied the next time the pipeline is started.
     create_or_update_pipeline_resources_in_k8s(
         k8s_client.as_ref(),
         tenant_id,
