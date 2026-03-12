@@ -12,9 +12,7 @@ use etl::store::state::StateStore;
 use etl::types::PipelineId;
 use etl::{config::IcebergConfig, destination::Destination};
 use etl_config::Environment;
-use etl_config::shared::{
-    BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
-};
+use etl_config::shared::{DestinationConfig, PgConnectionConfig, ReplicatorConfig};
 use etl_destinations::iceberg::{
     DestinationNamespace, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
 };
@@ -24,7 +22,7 @@ use etl_destinations::{
 };
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{debug, info, warn};
+use tracing::{error, info, warn};
 
 /// Starts the replicator service with the provided configuration.
 ///
@@ -34,13 +32,11 @@ pub async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
-    info!("starting replicator service");
-
-    log_config(&replicator_config);
+    let pipeline_id = replicator_config.pipeline.id;
 
     // We initialize the state store, which for the replicator is not configurable.
     let state_store = init_store(
-        replicator_config.pipeline.id,
+        pipeline_id,
         replicator_config.pipeline.pg_connection.clone(),
         notification_client,
     )
@@ -64,7 +60,7 @@ pub async fn start_replicator_with_config(
                 service_account_key.expose_secret(),
                 *max_staleness_mins,
                 *connection_pool_size,
-                replicator_config.pipeline.id,
+                pipeline_id,
                 state_store.clone(),
             )
             .await?;
@@ -142,8 +138,6 @@ pub async fn start_replicator_with_config(
         }
     }
 
-    info!("replicator service completed");
-
     Ok(())
 }
 
@@ -166,98 +160,6 @@ pub fn create_props(
     props
 }
 
-fn log_config(config: &ReplicatorConfig) {
-    log_destination_config(&config.destination);
-    log_pipeline_config(&config.pipeline);
-}
-
-fn log_destination_config(config: &DestinationConfig) {
-    match config {
-        DestinationConfig::BigQuery {
-            project_id,
-            dataset_id,
-            service_account_key: _,
-            max_staleness_mins,
-            connection_pool_size,
-        } => {
-            debug!(
-                project_id,
-                dataset_id,
-                max_staleness_mins,
-                connection_pool_size,
-                "using bigquery destination config"
-            )
-        }
-        DestinationConfig::Iceberg {
-            config:
-                IcebergConfig::Supabase {
-                    namespace,
-                    project_ref,
-                    catalog_token: _,
-                    warehouse_name,
-                    s3_access_key_id: _,
-                    s3_secret_access_key: _,
-                    s3_region,
-                },
-        } => {
-            debug!(
-                namespace,
-                project_ref, warehouse_name, s3_region, "using supabase iceberg destination config"
-            )
-        }
-        DestinationConfig::Iceberg {
-            config:
-                IcebergConfig::Rest {
-                    catalog_uri,
-                    warehouse_name,
-                    namespace,
-                    s3_access_key_id: _,
-                    s3_secret_access_key: _,
-                    s3_endpoint,
-                },
-        } => {
-            debug!(
-                catalog_uri,
-                warehouse_name,
-                namespace,
-                s3_endpoint,
-                "using generic rest iceberg destination config"
-            )
-        }
-    }
-}
-
-fn log_pipeline_config(config: &PipelineConfig) {
-    debug!(
-        pipeline_id = config.id,
-        publication_name = config.publication_name,
-        table_error_retry_delay_ms = config.table_error_retry_delay_ms,
-        max_table_sync_workers = config.max_table_sync_workers,
-        "pipeline config"
-    );
-    log_pg_connection_config(&config.pg_connection);
-    log_batch_config(&config.batch);
-}
-
-fn log_pg_connection_config(config: &PgConnectionConfig) {
-    debug!(
-        host = config.host,
-        port = config.port,
-        dbname = config.name,
-        username = config.username,
-        tls_enabled = config.tls.enabled,
-        "source postgres connection config",
-    );
-}
-
-fn log_batch_config(config: &BatchConfig) {
-    debug!(
-        max_fill_ms = config.max_fill_ms,
-        memory_budget_ratio = config.memory_budget_ratio,
-        "batch config"
-    );
-}
-
 /// Initializes the state store.
 ///
 /// Creates a [`PostgresStore`] instance for the given pipeline and connection
@@ -267,6 +169,8 @@ async fn init_store(
     pg_connection_config: PgConnectionConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<impl StateStore + SchemaStore + CleanupStore + Clone> {
+    info!("initializing postgres state store");
+
     Ok(ErrorNotifyingStateStore::new(
         PostgresStore::new(pipeline_id, pg_connection_config).await?,
         notification_client,
@@ -287,6 +191,8 @@ where
     // Start the pipeline.
     pipeline.start().await?;
 
+    // We spawn metrics collection after the pipeline was started, so that if we crash before starting
+    // we don't keep emitting metrics that make it look as if the system is running.
     metrics::spawn_metrics_tasks(pipeline.id());
 
     // Spawn a task to listen for shutdown signals and trigger shutdown.
@@ -296,8 +202,15 @@ where
         //
         // If the process is killed before shutdown completes, the pipeline may become corrupted,
         // depending on the state store and destination implementations.
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+        let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
+            error!("failed to register sigterm handler, shutting down pipeline");
+
+            if let Err(err) = shutdown_tx.shutdown() {
+                warn!(error = %err, "failed to send shutdown signal");
+            }
+
+            return;
+        };
 
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -308,12 +221,9 @@ where
             }
         }
 
-        if let Err(e) = shutdown_tx.shutdown() {
-            warn!(error = ?e, "failed to send shutdown signal");
-            return;
+        if let Err(err) = shutdown_tx.shutdown() {
+            warn!(error = %err, "failed to send shutdown signal");
         }
-
-        info!("pipeline shutdown successfully")
     });
 
     // Wait for the pipeline to finish (either normally or via shutdown).

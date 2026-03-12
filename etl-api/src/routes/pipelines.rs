@@ -1336,6 +1336,7 @@ pub async fn update_pipeline_version(
         .await?;
 
     // We update the pipeline in K8s if client is available.
+    // TODO: check if the pipeline is running, so that we avoid creating it if it's shutdown.
     create_or_update_pipeline_resources_in_k8s(
         k8s_client.as_ref(),
         tenant_id,

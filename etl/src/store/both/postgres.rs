@@ -62,6 +62,9 @@ async fn apply_migrations(connection_config: &PgConnectionConfig) -> Result<(), 
 
     let mut conn = PgConnection::connect_with(&options).await?;
 
+    // Suppress routine DDL notices so startup logs stay focused on phase-level events.
+    conn.execute("set client_min_messages = warning;").await?;
+
     // Create the `etl` schema if it doesn't exist.
     conn.execute("create schema if not exists etl;").await?;
 
@@ -70,12 +73,12 @@ async fn apply_migrations(connection_config: &PgConnectionConfig) -> Result<(), 
     // schema.
     conn.execute("set search_path = 'etl';").await?;
 
-    info!("applying postgres state store migrations");
+    debug!("applying postgres state store migrations");
 
     let migrator = sqlx::migrate!("./migrations");
     migrator.run_direct(&mut conn).await?;
 
-    info!("postgres state store migrations successfully applied");
+    debug!("postgres state store migrations successfully applied");
 
     Ok(())
 }
