@@ -99,13 +99,12 @@ impl Validator for SourceValidator {
             ),
             etl_table_ownership as (
               -- Determine whether the trusted role controls every existing ETL table.
+              -- pg_has_role(..., 'USAGE') means the owning role's privileges are
+              -- immediately available without requiring SET ROLE, which matches
+              -- how ETL connects and operates.
               select
-                count(*) as total_etl_tables,
-                count(*) filter (
-                  where pg_get_userbyid(relowner) = $1
-                     or pg_has_role($1, relowner, 'USAGE')
-                     or pg_has_role($1, relowner, 'SET')
-                ) as manageable_etl_tables
+                coalesce(bool_and(pg_has_role($1, relowner, 'USAGE')), true)
+                  as controls_all_existing_etl_tables
               from etl_tables
             )
             select
@@ -131,10 +130,7 @@ impl Validator for SourceValidator {
               end as etl_schema_create,
               case
                 when exists(select 1 from etl_schema)
-                then (
-                  select total_etl_tables = manageable_etl_tables
-                  from etl_table_ownership
-                )
+                then (select controls_all_existing_etl_tables from etl_table_ownership)
                 else null
               end as controls_all_existing_etl_tables,
               case
@@ -160,16 +156,13 @@ impl Validator for SourceValidator {
         let has_required_role_attributes = audit.rolcanlogin
             && audit.rolreplication
             && audit.rolbypassrls
-            && !audit.rolsuper
+            // Enable this once we want to validate if the role allows event triggers creation.
+            // && audit.rolsuper
             && !audit.rolcreaterole
             && !audit.rolcreatedb
             && audit.rolinherit
             && audit.rolconnlimit == -1
             && audit.rolvaliduntil_is_null;
-
-        // Enable this once we decide to enforce event trigger capability.
-        // let has_required_role_attributes =
-        //     has_required_role_attributes && audit.can_create_event_triggers;
 
         let mut failures = Vec::new();
         if !has_required_role_attributes {
