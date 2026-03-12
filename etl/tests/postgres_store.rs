@@ -64,7 +64,9 @@ async fn test_state_store_operations() {
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
 
     // Test initial state - should be empty
     let state = store.get_table_replication_state(table_id).await.unwrap();
@@ -131,7 +133,9 @@ async fn test_state_store_rollback() {
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
 
     // Set initial state
     let init_phase = TableReplicationPhase::Init;
@@ -201,7 +205,9 @@ async fn test_state_store_load_states() {
     let table_id1 = TableId::new(12345);
     let table_id2 = TableId::new(67890);
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
 
     // Add some states directly to the database
     let init_phase = TableReplicationPhase::Init;
@@ -217,7 +223,9 @@ async fn test_state_store_load_states() {
         .unwrap();
 
     // Create a new store instance (simulating restart)
-    let new_store = PostgresStore::new(pipeline_id, database.config.clone());
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
 
     // Initially empty (not loaded yet)
     let states = new_store.get_table_replication_states().await.unwrap();
@@ -241,7 +249,9 @@ async fn test_schema_store_operations() {
     let database = spawn_source_database().await;
     let pipeline_id = 1;
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
     let table_schema = create_sample_table_schema();
     let table_id = table_schema.id;
 
@@ -295,7 +305,9 @@ async fn test_schema_store_load_schemas() {
     let database = spawn_source_database().await;
     let pipeline_id = 1;
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
     let table_schema1 = create_sample_table_schema();
     let table_schema2 = create_another_table_schema();
 
@@ -310,7 +322,9 @@ async fn test_schema_store_load_schemas() {
         .unwrap();
 
     // Create a new store instance (simulating restart)
-    let new_store = PostgresStore::new(pipeline_id, database.config.clone());
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
 
     // Initially empty (not loaded yet)
     let schemas = new_store.get_table_schemas().await.unwrap();
@@ -350,7 +364,9 @@ async fn test_schema_store_versioning() {
     let database = spawn_source_database().await;
     let pipeline_id = 1;
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
     let mut table_schema = create_sample_table_schema();
 
     // Store initial schema at snapshot 0
@@ -416,7 +432,9 @@ async fn test_schema_store_upsert_replaces_columns() {
     let database = spawn_source_database().await;
     let pipeline_id = 1;
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
 
     // Create initial schema with 3 columns
     let table_id = TableId::new(12345);
@@ -461,7 +479,9 @@ async fn test_schema_store_upsert_replaces_columns() {
 
     // Verify columns were replaced, not accumulated
     // Need to clear cache and reload from DB to verify DB state
-    let new_store = PostgresStore::new(pipeline_id, database.config.clone());
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
     let schema = new_store
         .get_table_schema(&table_id, SnapshotId::max())
         .await
@@ -493,7 +513,9 @@ async fn test_schema_cache_eviction() {
     let database = spawn_source_database().await;
     let pipeline_id = 1;
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
 
     // Store 3 schema versions for table 1
     let table_id_1 = TableId::new(12345);
@@ -558,7 +580,9 @@ async fn test_schema_cache_eviction() {
     );
 
     // Evicted schemas should still be loadable from DB
-    let new_store = PostgresStore::new(pipeline_id, database.config.clone());
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
     let schema_0 = new_store
         .get_table_schema(&table_id_1, SnapshotId::initial())
         .await
@@ -577,8 +601,12 @@ async fn test_multiple_pipelines_isolation() {
     let pipeline_id2 = 2;
     let table_id = TableId::new(12345);
 
-    let store1 = PostgresStore::new(pipeline_id1, database.config.clone());
-    let store2 = PostgresStore::new(pipeline_id2, database.config.clone());
+    let store1 = PostgresStore::new(pipeline_id1, database.config.clone())
+        .await
+        .unwrap();
+    let store2 = PostgresStore::new(pipeline_id2, database.config.clone())
+        .await
+        .unwrap();
 
     // Test state isolation
     let init_phase = TableReplicationPhase::Init;
@@ -662,7 +690,9 @@ async fn test_multiple_pipelines_isolation() {
     );
 
     // Verify isolation persists after loading from database
-    let new_store1 = PostgresStore::new(pipeline_id1, database.config.clone());
+    let new_store1 = PostgresStore::new(pipeline_id1, database.config.clone())
+        .await
+        .unwrap();
     new_store1.load_destination_tables_metadata().await.unwrap();
     assert_eq!(
         new_store1
@@ -682,7 +712,9 @@ async fn test_errored_state_with_different_retry_policies() {
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
 
     // Test Errored state with NoRetry policy
     let errored_no_retry = TableReplicationPhase::Errored {
@@ -722,7 +754,9 @@ async fn test_state_transitions_and_history() {
     let pipeline_id = 1;
     let table_id = TableId::new(12345);
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
 
     // Create a series of state transitions
     let init_phase = TableReplicationPhase::Init;
@@ -797,7 +831,9 @@ async fn test_cleanup_deletes_state_schema_and_metadata_for_table() {
     let database = spawn_source_database().await;
     let pipeline_id = 1;
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
 
     // Test idempotency: cleanup on non-existent table should succeed
     let nonexistent_table_id = TableId::new(99999);
@@ -924,7 +960,9 @@ async fn test_cleanup_deletes_state_schema_and_metadata_for_table() {
     );
 
     // Create a new store instance and load from DB to ensure persistence
-    let new_store = PostgresStore::new(pipeline_id, database.config.clone());
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
     new_store.load_table_replication_states().await.unwrap();
     new_store.load_table_schemas().await.unwrap();
     new_store.load_destination_tables_metadata().await.unwrap();
@@ -1007,7 +1045,9 @@ async fn test_replication_mask_loads_correctly_from_string_bytea() {
     .unwrap();
 
     // Load metadata using the store
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
     store.load_destination_tables_metadata().await.unwrap();
 
     // Verify the loaded replication mask matches what was inserted
@@ -1075,7 +1115,9 @@ async fn test_replication_mask_various_patterns() {
     }
 
     // Load all metadata using the store
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
     store.load_destination_tables_metadata().await.unwrap();
 
     // Verify each test case
@@ -1117,14 +1159,18 @@ async fn test_replication_mask_roundtrip() {
         original_mask.clone(),
     );
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone());
+    let store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
     store
         .store_destination_table_metadata(table_id, metadata)
         .await
         .unwrap();
 
     // Create a fresh store and load from database
-    let new_store = PostgresStore::new(pipeline_id, database.config.clone());
+    let new_store = PostgresStore::new(pipeline_id, database.config.clone())
+        .await
+        .unwrap();
     new_store.load_destination_tables_metadata().await.unwrap();
 
     // Verify the loaded mask matches the original

@@ -94,7 +94,7 @@ PostgreSQL 18+ containers store data under `/var/lib/postgresql/<major>/data`, s
 
 If you prefer manual setup or have an existing PostgreSQL instance:
 
-**Important:** The etl-api and etl-replicator migrations can run on **separate databases**. You might have:
+**Important:** The etl-api migrations and Postgres state store migrations can run on **separate databases**. You might have:
 - The etl-api using its own dedicated Postgres instance for the control plane
 - The etl-replicator state store on the same database you're replicating from (source database)
 - Or both on the same database (for simpler local development setups)
@@ -168,11 +168,11 @@ cd etl-api
 cargo sqlx prepare
 ```
 
-### ETL Migrations
+### Postgres State Store Migrations
 
-Located in `etl/migrations/`, these create the etl state store schema (`etl` schema) for tracking replication state, table schemas, and mappings.
+Located in `etl/migrations/`, these create the Postgres state store schema (`etl` schema) that ETL uses to persist the replication state, table schemas, and mappings required to run and resume replication.
 
-**Running etl migrations:**
+**Running Postgres state store migrations:**
 
 ```bash
 # From project root
@@ -183,18 +183,18 @@ psql $DATABASE_URL -c "create schema if not exists etl;"
 sqlx migrate run --source etl/migrations --database-url "${DATABASE_URL}?options=-csearch_path%3Detl"
 ```
 
-**Important:** Migrations are run automatically when using the `etl-replicator` binary (see `etl-replicator/src/migrations.rs:16`). However, if you integrate the `etl` crate directly into your own application as a library, you should run these migrations manually before starting your pipeline. This design decision ensures:
+**Important:** Migrations are run automatically when the Postgres-backed state store ETL uses for replication is initialized (see `etl/src/store/both/postgres.rs`). However, if you integrate the `etl` crate directly into your own application and want to prepare the source database ahead of time, you can also run these migrations manually. This design decision ensures:
 - The standalone replicator binary works out-of-the-box
 - Library users have explicit control over when migrations run
 - CI/CD pipelines can pre-apply migrations independently
 
 **When to run migrations manually:**
 - Integrating `etl` as a library in your own application
-- Pre-creating the state store schema before deployment
+- Pre-creating the replication state store schema before deployment
 - Testing migrations independently
 - CI/CD pipelines that separate migration and deployment steps
 
-**Creating a new etl migration:**
+**Creating a new Postgres state store migration:**
 
 ```bash
 cd etl

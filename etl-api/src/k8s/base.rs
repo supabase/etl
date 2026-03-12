@@ -89,6 +89,7 @@ impl From<&str> for PodPhase {
 ///
 /// Combines the pod's phase, deletion timestamp, and exit status to determine
 /// the operational state from the API's perspective.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PodStatus {
     /// Pod has successfully stopped and no longer exists.
     Stopped,

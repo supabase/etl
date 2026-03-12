@@ -1751,6 +1751,7 @@ version = "0.1.0"
 dependencies = [
  "etl-config",
  "metrics-exporter-prometheus",
+ "serde",
  "serde_json",
  "thiserror 2.0.17",
  "tokio",

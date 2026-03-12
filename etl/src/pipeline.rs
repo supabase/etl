@@ -9,7 +9,6 @@ use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
-use crate::migrations::apply_etl_migrations;
 use crate::replication::client::PgReplicationClient;
 use crate::replication::masks::ReplicationMasksCache;
 use crate::state::table::TableReplicationPhase;
@@ -113,27 +112,16 @@ where
 
     /// Starts the pipeline and begins replication processing.
     ///
-    /// This method runs any pending migrations, initializes the connection to Postgres,
-    /// loads destination table metadata and schemas, creates the worker pool for table synchronization,
-    /// and starts the apply worker for processing replication stream events.
+    /// This method initializes the connection to Postgres, loads destination
+    /// table metadata and schemas, creates the worker pool for table
+    /// synchronization, and starts the apply worker for processing replication
+    /// stream events.
     pub async fn start(&mut self) -> EtlResult<()> {
         info!(
             publication_name = %self.config.publication_name,
             pipeline_id = %self.config.id,
             "starting pipeline"
         );
-
-        // Run migrations before starting the pipeline.
-        apply_etl_migrations(&self.config.pg_connection)
-            .await
-            .map_err(|e| {
-                crate::etl_error!(
-                    ErrorKind::SourceError,
-                    "Failed to run state store migrations",
-                    format!("{}", e)
-                )
-            })?;
-
         // We always start memory monitoring to keep total memory snapshots available.
         let memory_monitor = MemoryMonitor::new(
             self.config.id,
