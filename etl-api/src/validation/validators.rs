@@ -8,18 +8,36 @@ use etl_destinations::iceberg::{
     IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
 };
 use secrecy::ExposeSecret;
+use sqlx::FromRow;
 
 use crate::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
 use crate::configs::pipeline::FullApiPipelineConfig;
 
 use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
 
-const REQUIRED_SOURCE_ROLE_MEMBERSHIPS: [(&str, bool); 2] =
-    [("pg_monitor", false), ("pg_read_all_data", false)];
+const ETL_SCHEMA_NAME: &str = "etl";
 
 /// Validates the connected source role profile for ETL.
 #[derive(Debug)]
 pub struct SourceValidator;
+
+#[derive(Debug, FromRow)]
+struct SourceRoleAudit {
+    rolcanlogin: bool,
+    rolreplication: bool,
+    rolbypassrls: bool,
+    rolsuper: bool,
+    rolcreaterole: bool,
+    rolcreatedb: bool,
+    rolinherit: bool,
+    rolconnlimit: i32,
+    rolvaliduntil_is_null: bool,
+    etl_schema_exists: bool,
+    etl_schema_usage: Option<bool>,
+    etl_schema_create: Option<bool>,
+    controls_all_existing_etl_tables: Option<bool>,
+    can_create_schema_if_missing: Option<bool>,
+}
 
 #[async_trait]
 impl Validator for SourceValidator {
@@ -47,120 +65,139 @@ impl Validator for SourceValidator {
             )]);
         }
 
-        let actual_memberships: Vec<(String, bool)> = sqlx::query_as(
+        let audit = sqlx::query_as::<_, SourceRoleAudit>(
             r#"
-            select g.rolname, m.admin_option
-            from pg_roles r
-            join pg_auth_members m on r.oid = m.member
-            join pg_roles g on m.roleid = g.oid
-            where r.rolname = $1
-            order by g.rolname
-            "#,
-        )
-        .bind(expected_username)
-        .fetch_all(source_pool)
-        .await?;
-
-        let expected_memberships = REQUIRED_SOURCE_ROLE_MEMBERSHIPS
-            .iter()
-            .map(|(role_name, admin_option)| (role_name.to_string(), *admin_option))
-            .collect::<Vec<_>>();
-
-        if actual_memberships != expected_memberships {
-            return Ok(vec![ValidationFailure::critical(
-                "Invalid source role memberships",
-                format!(
-                    "expected exactly [{}], found [{}]",
-                    format_role_memberships(&expected_memberships),
-                    format_role_memberships(&actual_memberships),
-                ),
-            )]);
-        }
-
-        let role = sqlx::query_as::<_, (bool, bool, bool, bool, bool, bool, i32, bool, bool)>(
-            r#"
-            select
-                rolcreaterole,
+            with target as (
+              -- Load the direct role attributes for the trusted ETL user.
+              select
+                oid,
                 rolcanlogin,
-                rolsuper,
-                rolinherit,
-                rolcreatedb,
                 rolreplication,
-                rolconnlimit,
                 rolbypassrls,
-                rolvaliduntil is null
-            from pg_roles
-            where rolname = $1
+                rolsuper,
+                rolcreaterole,
+                rolcreatedb,
+                rolinherit,
+                rolconnlimit,
+                rolvaliduntil is null as rolvaliduntil_is_null
+              from pg_roles
+              where rolname = $1
+            ),
+            etl_schema as (
+              -- Check whether the etl schema already exists.
+              select oid
+              from pg_namespace
+              where nspname = $2
+            ),
+            etl_tables as (
+              -- List the existing tables in the etl schema, if present.
+              select
+                c.relowner
+              from pg_class c
+              join etl_schema s on s.oid = c.relnamespace
+              where c.relkind in ('r', 'p')
+            ),
+            etl_table_ownership as (
+              -- Determine whether the trusted role controls every existing ETL table.
+              select
+                count(*) as total_etl_tables,
+                count(*) filter (
+                  where pg_get_userbyid(relowner) = $1
+                     or pg_has_role($1, relowner, 'USAGE')
+                     or pg_has_role($1, relowner, 'SET')
+                ) as manageable_etl_tables
+              from etl_tables
+            )
+            select
+              t.rolcanlogin,
+              t.rolreplication,
+              t.rolbypassrls,
+              t.rolsuper,
+              t.rolcreaterole,
+              t.rolcreatedb,
+              t.rolinherit,
+              t.rolconnlimit,
+              t.rolvaliduntil_is_null,
+              exists(select 1 from etl_schema) as etl_schema_exists,
+              case
+                when exists(select 1 from etl_schema)
+                then has_schema_privilege($1, $2, 'USAGE')
+                else null
+              end as etl_schema_usage,
+              case
+                when exists(select 1 from etl_schema)
+                then has_schema_privilege($1, $2, 'CREATE')
+                else null
+              end as etl_schema_create,
+              case
+                when exists(select 1 from etl_schema)
+                then (
+                  select total_etl_tables = manageable_etl_tables
+                  from etl_table_ownership
+                )
+                else null
+              end as controls_all_existing_etl_tables,
+              case
+                when not exists(select 1 from etl_schema)
+                then has_database_privilege($1, current_database(), 'CREATE')
+                else null
+              end as can_create_schema_if_missing
+            from target t
             "#,
         )
         .bind(expected_username)
+        .bind(ETL_SCHEMA_NAME)
         .fetch_optional(source_pool)
         .await?;
 
-        let Some((
-            rolcreaterole,
-            rolcanlogin,
-            rolsuper,
-            rolinherit,
-            rolcreatedb,
-            rolreplication,
-            rolconnlimit,
-            rolbypassrls,
-            rolvaliduntil_is_null,
-        )) = role
-        else {
+        let Some(audit) = audit else {
             return Ok(vec![ValidationFailure::critical(
                 "Invalid source role attributes",
                 "role not found",
             )]);
         };
 
-        let mut mismatches = Vec::new();
-        if rolcreaterole {
-            mismatches.push("rolcreaterole=true (expected false)".to_string());
-        }
-        if !rolcanlogin {
-            mismatches.push("rolcanlogin=false (expected true)".to_string());
-        }
-        if rolsuper {
-            mismatches.push("rolsuper=true (expected false)".to_string());
-        }
-        if !rolinherit {
-            mismatches.push("rolinherit=false (expected true)".to_string());
-        }
-        if rolcreatedb {
-            mismatches.push("rolcreatedb=true (expected false)".to_string());
-        }
-        if !rolreplication {
-            mismatches.push("rolreplication=false (expected true)".to_string());
-        }
-        if rolconnlimit != -1 {
-            mismatches.push(format!("rolconnlimit={rolconnlimit} (expected -1)"));
-        }
-        if !rolbypassrls {
-            mismatches.push("rolbypassrls=false (expected true)".to_string());
-        }
-        if !rolvaliduntil_is_null {
-            mismatches.push("rolvaliduntil is set (expected null)".to_string());
-        }
+        let has_required_role_attributes = audit.rolcanlogin
+            && audit.rolreplication
+            && audit.rolbypassrls
+            && !audit.rolsuper
+            && !audit.rolcreaterole
+            && !audit.rolcreatedb
+            && audit.rolinherit
+            && audit.rolconnlimit == -1
+            && audit.rolvaliduntil_is_null;
 
-        if mismatches.is_empty() {
-            Ok(vec![])
-        } else {
-            Ok(vec![ValidationFailure::critical(
+        // Enable this once we decide to enforce event trigger capability.
+        // let has_required_role_attributes =
+        //     has_required_role_attributes && audit.can_create_event_triggers;
+
+        let mut failures = Vec::new();
+        if !has_required_role_attributes {
+            failures.push(ValidationFailure::critical(
                 "Invalid source role attributes",
-                mismatches.join(", "),
-            )])
+                "trusted source role does not match the required ETL profile",
+            ));
         }
-    }
-}
 
-fn format_role_memberships(memberships: &[(String, bool)]) -> String {
-    memberships
-        .iter()
-        .map(|(role_name, admin_option)| format!("{role_name} (admin_option={admin_option})"))
-        .collect::<Vec<_>>()
-        .join(", ")
+        let has_required_etl_schema_permissions = if audit.etl_schema_exists {
+            audit.etl_schema_usage == Some(true)
+                && audit.etl_schema_create == Some(true)
+                && audit.controls_all_existing_etl_tables == Some(true)
+        } else {
+            audit.can_create_schema_if_missing == Some(true)
+        };
+
+        if !has_required_etl_schema_permissions {
+            failures.push(ValidationFailure::critical(
+                "Invalid source etl schema permissions",
+                format!(
+                    "trusted source role does not have the required permissions for schema {ETL_SCHEMA_NAME}"
+                ),
+            ));
+        }
+
+        Ok(failures)
+    }
 }
 
 /// Validates that the required publication exists in the source database.

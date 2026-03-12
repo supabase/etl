@@ -5,9 +5,7 @@ use crate::db;
 use crate::db::sources::SourcesDbError;
 use crate::k8s::TrustedRootCertsCache;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
-use crate::validation::{
-    ValidationContext, ValidationError, validate_source as run_source_validation,
-};
+use crate::validation::ValidationError;
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
@@ -39,7 +37,7 @@ pub enum SourceError {
     #[error(transparent)]
     Validation(#[from] ValidationError),
 
-    #[error("Source validation failed: {0}")]
+    #[error("{0}")]
     ValidationFailed(String),
 }
 
@@ -85,17 +83,14 @@ async fn validate_source_config(
     api_config: &ApiConfig,
     trusted_root_certs_cache: &TrustedRootCertsCache,
 ) -> Result<(), SourceError> {
-    if api_config.source.trusted_username.is_none() {
-        return Ok(());
-    }
-
-    let ctx =
-        ValidationContext::build_from_source(source_config, api_config, trusted_root_certs_cache)
-            .await?;
-    let failures = run_source_validation(&ctx).await?;
-
-    if let Some(failure) = failures.into_iter().next() {
-        return Err(SourceError::ValidationFailed(failure.to_string()));
+    if let Some(failure) =
+        crate::routes::validate_source_config(source_config, api_config, trusted_root_certs_cache)
+            .await?
+    {
+        let _ = failure;
+        return Err(SourceError::ValidationFailed(
+            crate::validation::ValidationFailure::trusted_source_permissions_message().to_string(),
+        ));
     }
 
     Ok(())

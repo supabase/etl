@@ -31,10 +31,8 @@ use crate::k8s::core::{
 use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache, TrustedRootCertsError};
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use crate::utils::parse_docker_image_tag;
-use crate::validation::{
-    FailureType, ValidationContext, ValidationError, ValidationFailure,
-    validate_pipeline as run_pipeline_validation, validate_source as run_source_validation,
-};
+use crate::validation;
+use crate::validation::{FailureType, ValidationContext, ValidationError, ValidationFailure};
 use crate::{config::ApiConfig, k8s::PodStatus};
 
 #[derive(Debug, Error)]
@@ -119,9 +117,6 @@ pub enum PipelineError {
 
     #[error(transparent)]
     Validation(#[from] ValidationError),
-
-    #[error("Source validation failed: {0}")]
-    SourceValidationFailed(String),
 }
 
 impl From<PipelinesDbError> for PipelineError {
@@ -196,7 +191,6 @@ impl ResponseError for PipelineError {
             PipelineError::TenantId(_) | PipelineError::NotRollbackable(_) => {
                 StatusCode::BAD_REQUEST
             }
-            PipelineError::SourceValidationFailed(_) => StatusCode::FORBIDDEN,
             PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             PipelineError::PipelineLimitReached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         }
@@ -212,30 +206,6 @@ impl ResponseError for PipelineError {
             .insert_header(ContentType::json())
             .body(body)
     }
-}
-
-async fn validate_stored_source_profile(
-    source: &db::sources::Source,
-    api_config: &ApiConfig,
-    trusted_root_certs_cache: &TrustedRootCertsCache,
-) -> Result<(), PipelineError> {
-    if api_config.source.trusted_username.is_none() {
-        return Ok(());
-    }
-
-    let ctx = ValidationContext::build_from_source(
-        source.config.clone(),
-        api_config,
-        trusted_root_certs_cache,
-    )
-    .await?;
-    let failures = run_source_validation(&ctx).await?;
-
-    if let Some(failure) = failures.into_iter().next() {
-        return Err(PipelineError::SourceValidationFailed(failure.to_string()));
-    }
-
-    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -523,6 +493,7 @@ pub struct ValidationFailureResponse {
 
 impl From<ValidationFailure> for ValidationFailureResponse {
     fn from(failure: ValidationFailure) -> Self {
+        let failure = failure.sanitized_for_output();
         Self {
             name: failure.name,
             reason: failure.reason,
@@ -546,7 +517,6 @@ pub struct ValidatePipelineResponse {
     responses(
         (status = 200, description = "Pipeline created successfully", body = CreatePipelineResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
-        (status = 403, description = "Source profile validation failed", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Pipelines"
@@ -555,8 +525,6 @@ pub struct ValidatePipelineResponse {
 pub async fn create_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     encryption_key: Data<EncryptionKey>,
     pipeline: Json<CreatePipelineRequest>,
     feature_flags_client: Option<Data<configcat::Client>>,
@@ -567,7 +535,7 @@ pub async fn create_pipeline(
     let mut txn = pool.begin().await?;
 
     // Verify source exists
-    let source = db::sources::read_source(
+    db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         pipeline.source_id,
@@ -575,13 +543,6 @@ pub async fn create_pipeline(
     )
     .await?
     .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
-
-    validate_stored_source_profile(
-        &source,
-        api_config.as_ref(),
-        trusted_root_certs_cache.as_ref(),
-    )
-    .await?;
 
     if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
         return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
@@ -822,7 +783,6 @@ pub async fn read_all_pipelines(
     ),
     responses(
         (status = 200, description = "Pipeline started successfully"),
-        (status = 403, description = "Source profile validation failed", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -844,13 +804,6 @@ pub async fn start_pipeline(
     let mut txn = pool.begin().await?;
     let (pipeline, replicator, image, source, destination) =
         read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
-
-    validate_stored_source_profile(
-        &source,
-        api_config.as_ref(),
-        trusted_root_certs_cache.as_ref(),
-    )
-    .await?;
 
     let tls_config = trusted_root_certs_cache
         .get_tls_config(api_config.source.tls_enabled)
@@ -1447,7 +1400,7 @@ pub async fn validate_pipeline(
     )
     .await?;
 
-    let failures = run_pipeline_validation(&ctx, &request.config).await?;
+    let failures = validation::validate_pipeline(&ctx, &request.config).await?;
     let response = ValidatePipelineResponse {
         validation_failures: failures.into_iter().map(Into::into).collect(),
     };

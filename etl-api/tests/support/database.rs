@@ -117,6 +117,15 @@ pub async fn create_trusted_source_database() -> TrustedSourceDatabase {
         .await
         .expect("Failed to create trusted ETL role");
 
+    connection
+        .execute(&*format!(
+            "grant create on database {} to {}",
+            quote_identifier(&admin_config.name),
+            quote_identifier(&trusted_username),
+        ))
+        .await
+        .expect("Failed to grant CREATE on database to trusted ETL role");
+
     grant_role_membership(&mut connection, &trusted_username, "pg_monitor").await;
     grant_role_membership(&mut connection, &trusted_username, "pg_read_all_data").await;
 

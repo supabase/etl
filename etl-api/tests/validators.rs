@@ -3,8 +3,7 @@ mod support;
 use etl_api::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
 use etl_api::configs::pipeline::FullApiPipelineConfig;
 use etl_api::validation::{
-    FailureType, ValidationContext, validate_destination, validate_destination_pipeline,
-    validate_pipeline, validate_source,
+    FailureType, ValidationContext, validate_destination, validate_pipeline, validate_source,
 };
 use etl_config::shared::BatchConfig;
 use etl_config::{Environment, SerializableSecretString};
@@ -257,35 +256,6 @@ async fn validate_pipeline_includes_source_validation() {
         source_failure.is_some(),
         "Expected source validation failure"
     );
-
-    drop_pg_database(&config).await;
-}
-
-#[tokio::test]
-async fn validate_destination_pipeline_runs_source_validation_once() {
-    let (ctx, _pool, config) = create_validation_context_with_source().await;
-    let environment = Environment::load().expect("Failed to load environment");
-    let ctx = ValidationContext::builder(environment)
-        .source_pool(
-            ctx.source_pool
-                .expect("source pool should be present for validation"),
-        )
-        .trusted_username(Some("different_user".to_string()))
-        .build();
-
-    let failures = validate_destination_pipeline(
-        &ctx,
-        &create_bigquery_config("fake-project", "fake-dataset", "{}"),
-        &create_pipeline_config("missing_publication"),
-    )
-    .await
-    .unwrap();
-
-    let source_failures = failures
-        .iter()
-        .filter(|failure| failure.name == "Invalid source username")
-        .count();
-    assert_eq!(source_failures, 1, "Expected source validation to run once");
 
     drop_pg_database(&config).await;
 }

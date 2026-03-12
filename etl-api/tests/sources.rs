@@ -409,5 +409,5 @@ async fn source_creation_with_matching_trusted_username_but_invalid_role_profile
     let body = response.text().await.expect("failed to read response body");
 
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(body.contains("Invalid source role"));
+    assert!(body.contains("doesn't have all required permissions"));
 }

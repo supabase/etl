@@ -5,18 +5,15 @@ use etl_api::routes::pipelines::{
     RollbackTablesResponse, RollbackTablesTarget, RollbackType, SimpleTableReplicationState,
     UpdatePipelineRequest, UpdatePipelineVersionRequest,
 };
-use etl_config::SerializableSecretString;
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
-use secrecy::ExposeSecret;
 use sqlx::PgPool;
 use sqlx::postgres::types::Oid;
 
 use crate::support::database::{
-    create_test_source_database, create_trusted_source_database, drop_trusted_source_database,
-    revoke_role_membership, run_etl_migrations_on_source_database,
+    create_test_source_database, run_etl_migrations_on_source_database,
 };
 use crate::support::k8s_client::MockK8sState;
 use crate::support::mocks::create_image_with_name;
@@ -26,27 +23,12 @@ use crate::support::mocks::pipelines::{
 use crate::{
     support::mocks::create_default_image,
     support::mocks::destinations::create_destination,
-    support::mocks::sources::{create_source, create_source_with_config},
+    support::mocks::sources::create_source,
     support::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
-    support::test_app::{TestApp, spawn_test_app, spawn_test_app_with_k8s_state, spawn_test_app_with_trusted_username},
+    support::test_app::{TestApp, spawn_test_app, spawn_test_app_with_k8s_state},
 };
 
 mod support;
-
-fn source_config_from_db_config(
-    source_db_config: &PgConnectionConfig,
-) -> etl_api::configs::source::FullApiSourceConfig {
-    etl_api::configs::source::FullApiSourceConfig {
-        host: source_db_config.host.clone(),
-        port: source_db_config.port,
-        name: source_db_config.name.clone(),
-        username: source_db_config.username.clone(),
-        password: source_db_config
-            .password
-            .as_ref()
-            .map(|password| SerializableSecretString::from(password.expose_secret().to_string())),
-    }
-}
 
 /// Creates a basic pipeline setup for tests that don't need source databases.
 async fn setup_basic_pipeline() -> (TestApp, String, i64, i64, i64) {
@@ -855,46 +837,6 @@ async fn an_existing_pipeline_can_be_started() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_creation_fails_when_trusted_source_profile_has_drifted() {
-    init_test_tracing();
-
-    let trusted_source = create_trusted_source_database().await;
-    let app =
-        spawn_test_app_with_trusted_username(Some(trusted_source.trusted_username.clone())).await;
-    create_default_image(&app).await;
-    let tenant_id = create_tenant(&app).await;
-    let source_id = create_source_with_config(
-        &app,
-        &tenant_id,
-        "Trusted Source".to_string(),
-        source_config_from_db_config(&trusted_source.trusted_config),
-    )
-    .await;
-    let destination_id = create_destination(&app, &tenant_id).await;
-
-    revoke_role_membership(
-        &trusted_source.admin_config,
-        &trusted_source.trusted_username,
-        "pg_monitor",
-    )
-    .await;
-
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
-    let response = app.create_pipeline(&tenant_id, &pipeline).await;
-    let status = response.status();
-    let body = response.text().await.expect("failed to read response body");
-
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(body.contains("Invalid source role memberships"));
-
-    drop_trusted_source_database(trusted_source).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn an_existing_pipeline_can_be_stopped() {
     init_test_tracing();
     // Arrange
@@ -921,49 +863,6 @@ async fn an_existing_pipeline_can_be_stopped() {
 
     // Assert
     assert!(response.status().is_success());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn pipeline_start_fails_when_trusted_source_profile_has_drifted() {
-    init_test_tracing();
-
-    let trusted_source = create_trusted_source_database().await;
-    let app =
-        spawn_test_app_with_trusted_username(Some(trusted_source.trusted_username.clone())).await;
-    create_default_image(&app).await;
-    let tenant_id = create_tenant(&app).await;
-    let source_id = create_source_with_config(
-        &app,
-        &tenant_id,
-        "Trusted Source".to_string(),
-        source_config_from_db_config(&trusted_source.trusted_config),
-    )
-    .await;
-    let destination_id = create_destination(&app, &tenant_id).await;
-    let pipeline_id = create_pipeline_with_config(
-        &app,
-        &tenant_id,
-        source_id,
-        destination_id,
-        new_pipeline_config(),
-    )
-    .await;
-
-    revoke_role_membership(
-        &trusted_source.admin_config,
-        &trusted_source.trusted_username,
-        "pg_monitor",
-    )
-    .await;
-
-    let response = app.start_pipeline(&tenant_id, pipeline_id).await;
-    let status = response.status();
-    let body = response.text().await.expect("failed to read response body");
-
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(body.contains("Invalid source role memberships"));
-
-    drop_trusted_source_database(trusted_source).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

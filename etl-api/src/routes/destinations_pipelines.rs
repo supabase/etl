@@ -25,9 +25,7 @@ use crate::db::pipelines::{
 use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
-use crate::validation::{
-    ValidationContext, ValidationError, validate_source as run_source_validation,
-};
+use crate::validation::ValidationError;
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -81,9 +79,6 @@ enum DestinationPipelineError {
 
     #[error(transparent)]
     Validation(#[from] ValidationError),
-
-    #[error("Source validation failed: {0}")]
-    ValidationFailed(String),
 }
 
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
@@ -138,7 +133,6 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::PipelineDestinationMismatch(_, _) => {
                 StatusCode::BAD_REQUEST
             }
-            DestinationPipelineError::ValidationFailed(_) => StatusCode::FORBIDDEN,
             DestinationPipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             DestinationPipelineError::PipelineLimitReached { .. } => {
                 StatusCode::UNPROCESSABLE_ENTITY
@@ -156,32 +150,6 @@ impl ResponseError for DestinationPipelineError {
             .insert_header(ContentType::json())
             .body(body)
     }
-}
-
-async fn validate_stored_source_profile(
-    source: &db::sources::Source,
-    api_config: &ApiConfig,
-    trusted_root_certs_cache: &TrustedRootCertsCache,
-) -> Result<(), DestinationPipelineError> {
-    if api_config.source.trusted_username.is_none() {
-        return Ok(());
-    }
-
-    let ctx = ValidationContext::build_from_source(
-        source.config.clone(),
-        api_config,
-        trusted_root_certs_cache,
-    )
-    .await?;
-    let failures = run_source_validation(&ctx).await?;
-
-    if let Some(failure) = failures.into_iter().next() {
-        return Err(DestinationPipelineError::ValidationFailed(
-            failure.to_string(),
-        ));
-    }
-
-    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -237,8 +205,6 @@ pub struct UpdateDestinationPipelineRequest {
 pub async fn create_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
     feature_flags_client: Option<Data<configcat::Client>>,
@@ -249,7 +215,7 @@ pub async fn create_destination_and_pipeline(
     let mut txn = pool.begin().await?;
 
     // Verify source exists
-    let source = db::sources::read_source(
+    db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
@@ -259,13 +225,6 @@ pub async fn create_destination_and_pipeline(
     .ok_or(DestinationPipelineError::SourceNotFound(
         destination_and_pipeline.source_id,
     ))?;
-
-    validate_stored_source_profile(
-        &source,
-        api_config.as_ref(),
-        trusted_root_certs_cache.as_ref(),
-    )
-    .await?;
 
     let max_pipelines = get_max_pipelines_per_tenant(
         feature_flags_client.as_ref(),
@@ -328,8 +287,6 @@ pub async fn create_destination_and_pipeline(
 pub async fn update_destination_and_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    api_config: Data<ApiConfig>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
     destination_and_pipeline: Json<UpdateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
@@ -341,7 +298,7 @@ pub async fn update_destination_and_pipeline(
     let mut txn = pool.begin().await?;
 
     // Verify source exists
-    let source = db::sources::read_source(
+    db::sources::read_source(
         txn.deref_mut(),
         tenant_id,
         destination_and_pipeline.source_id,
@@ -351,13 +308,6 @@ pub async fn update_destination_and_pipeline(
     .ok_or(DestinationPipelineError::SourceNotFound(
         destination_and_pipeline.source_id,
     ))?;
-
-    validate_stored_source_profile(
-        &source,
-        api_config.as_ref(),
-        trusted_root_certs_cache.as_ref(),
-    )
-    .await?;
 
     if !destination_exists(txn.deref_mut(), tenant_id, destination_id).await? {
         return Err(DestinationPipelineError::DestinationNotFound(

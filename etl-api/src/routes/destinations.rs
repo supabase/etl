@@ -12,13 +12,10 @@ use utoipa::ToSchema;
 
 use crate::configs::destination::FullApiDestinationConfig;
 use crate::configs::encryption::EncryptionKey;
-use crate::db;
 use crate::db::destinations::DestinationsDbError;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
-use crate::validation::{
-    FailureType, ValidationContext, ValidationError, ValidationFailure,
-    validate_destination as run_destination_validation,
-};
+use crate::validation::{FailureType, ValidationContext, ValidationError, ValidationFailure};
+use crate::{db, validation};
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
@@ -142,6 +139,7 @@ pub struct ValidationFailureResponse {
 
 impl From<ValidationFailure> for ValidationFailureResponse {
     fn from(failure: ValidationFailure) -> Self {
+        let failure = failure.sanitized_for_output();
         Self {
             name: failure.name,
             reason: failure.reason,
@@ -365,7 +363,7 @@ pub async fn validate_destination(
     let environment = Environment::load()?;
     let ctx = ValidationContext::builder(environment).build();
 
-    let failures = run_destination_validation(&ctx, &request.config).await?;
+    let failures = validation::validate_destination(&ctx, &request.config).await?;
     let response = ValidateDestinationResponse {
         validation_failures: failures.into_iter().map(Into::into).collect(),
     };

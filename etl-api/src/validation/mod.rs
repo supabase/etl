@@ -116,6 +116,12 @@ pub struct ValidationFailure {
 }
 
 impl ValidationFailure {
+    /// Generic name returned when redacting trusted source permission details.
+    pub const TRUSTED_SOURCE_PERMISSIONS_FAILURE_NAME: &str = "Invalid source permissions";
+
+    /// Generic reason returned when redacting trusted source permission details.
+    pub const TRUSTED_SOURCE_PERMISSIONS_FAILURE_REASON: &str = "The source database doesn't have all required permissions for the trusted username role, so ETL can't work properly.";
+
     /// Creates a new critical validation failure.
     pub fn critical(name: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
@@ -132,6 +138,33 @@ impl ValidationFailure {
             reason: reason.into(),
             failure_type: FailureType::Warning,
         }
+    }
+
+    /// Returns the generic trusted source permission message used in API responses.
+    pub fn trusted_source_permissions_message() -> &'static str {
+        Self::TRUSTED_SOURCE_PERMISSIONS_FAILURE_REASON
+    }
+
+    /// Redacts internal trusted source permission details before returning them externally.
+    pub fn sanitized_for_output(self) -> Self {
+        if self.is_trusted_source_permission_failure() {
+            return Self {
+                name: Self::TRUSTED_SOURCE_PERMISSIONS_FAILURE_NAME.to_string(),
+                reason: Self::TRUSTED_SOURCE_PERMISSIONS_FAILURE_REASON.to_string(),
+                failure_type: self.failure_type,
+            };
+        }
+
+        self
+    }
+
+    fn is_trusted_source_permission_failure(&self) -> bool {
+        matches!(
+            self.name.as_str(),
+            "Invalid source username"
+                | "Invalid source role attributes"
+                | "Invalid source etl schema permissions"
+        )
     }
 }
 
@@ -218,26 +251,6 @@ pub async fn validate_pipeline(
     validate_pipeline_internal(ctx, pipeline_config, true).await
 }
 
-/// Validates both destination and pipeline configuration.
-///
-/// Returns a list of validation failures. Empty list means validation passed.
-/// Returns an error if validation could not be completed.
-///
-/// Runs all validators and collects all failures, returning them together
-/// for comprehensive error reporting.
-pub async fn validate_destination_pipeline(
-    ctx: &ValidationContext,
-    destination_config: &FullApiDestinationConfig,
-    pipeline_config: &FullApiPipelineConfig,
-) -> Result<Vec<ValidationFailure>, ValidationError> {
-    let mut failures = validate_source(ctx).await?;
-
-    failures.extend(validate_destination_internal(ctx, destination_config, false).await?);
-    failures.extend(validate_pipeline_internal(ctx, pipeline_config, false).await?);
-
-    Ok(failures)
-}
-
 async fn validate_destination_internal(
     ctx: &ValidationContext,
     destination_config: &FullApiDestinationConfig,
@@ -285,5 +298,25 @@ mod tests {
         let warning = ValidationFailure::warning("test_warning", "Something to note");
         assert_eq!(warning.to_string(), "test_warning: Something to note");
         assert_eq!(warning.failure_type, FailureType::Warning);
+    }
+
+    #[tokio::test]
+    async fn test_validation_failure_sanitized_for_output() {
+        let source_failure =
+            ValidationFailure::critical("Invalid source role attributes", "internal detail");
+        let source_failure = source_failure.sanitized_for_output();
+        assert_eq!(
+            source_failure.name,
+            ValidationFailure::TRUSTED_SOURCE_PERMISSIONS_FAILURE_NAME
+        );
+        assert_eq!(
+            source_failure.reason,
+            ValidationFailure::TRUSTED_SOURCE_PERMISSIONS_FAILURE_REASON
+        );
+
+        let other_failure = ValidationFailure::critical("Publication Not Found", "missing");
+        let other_failure = other_failure.sanitized_for_output();
+        assert_eq!(other_failure.name, "Publication Not Found");
+        assert_eq!(other_failure.reason, "missing");
     }
 }
