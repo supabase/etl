@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::support::database::{
     create_trusted_source_database, drop_trusted_source_database, get_test_db_config,
+    set_role_connection_limit,
 };
 use crate::support::mocks::create_default_image;
 use crate::support::mocks::destinations::create_destination;
@@ -303,6 +304,39 @@ async fn source_creation_with_matching_trusted_username_succeeds() {
     assert!(
         response.status().is_success(),
         "Expected successful source creation with matching trusted username, got status: {}",
+        response.status()
+    );
+
+    drop_trusted_source_database(trusted_source).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_creation_with_finite_connection_limit_trusted_username_succeeds() {
+    init_test_tracing();
+
+    let trusted_source = create_trusted_source_database().await;
+    set_role_connection_limit(
+        &trusted_source.admin_config,
+        &trusted_source.trusted_username,
+        8,
+    )
+    .await;
+
+    let app =
+        spawn_test_app_with_trusted_username(Some(trusted_source.trusted_username.clone())).await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_config = source_config_from_db_config(&trusted_source.trusted_config);
+
+    let source = CreateSourceRequest {
+        name: new_name(),
+        config: source_config,
+    };
+
+    let response = app.create_source(tenant_id, &source).await;
+
+    assert!(
+        response.status().is_success(),
+        "Expected successful source creation with finite connection limit, got status: {}",
         response.status()
     );
 

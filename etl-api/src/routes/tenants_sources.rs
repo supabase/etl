@@ -11,15 +11,15 @@ use tracing_actix_web::RootSpan;
 use utoipa::ToSchema;
 
 use crate::configs::source::FullApiSourceConfig;
-use crate::db;
 use crate::db::tenants_sources::TenantSourceDbError;
 use crate::k8s::TrustedRootCertsCache;
 use crate::routes::ErrorMessage;
-use crate::validation::ValidationError;
+use crate::validation::{ValidationError, ValidationFailure};
 use crate::{
     config::ApiConfig, configs::encryption::EncryptionKey, configs::source::StoredSourceConfig,
     db::tenants::TenantsDbError,
 };
+use crate::{db, routes};
 
 #[derive(Debug, Error)]
 enum TenantSourceError {
@@ -82,12 +82,11 @@ async fn validate_source_config(
     trusted_root_certs_cache: &TrustedRootCertsCache,
 ) -> Result<(), TenantSourceError> {
     if let Some(failure) =
-        crate::routes::validate_source_config(source_config, api_config, trusted_root_certs_cache)
-            .await?
+        routes::validate_source_config(source_config, api_config, trusted_root_certs_cache).await?
     {
         let _ = failure;
         return Err(TenantSourceError::ValidationFailed(
-            crate::validation::ValidationFailure::trusted_source_permissions_message().to_string(),
+            ValidationFailure::trusted_source_permissions_message().to_string(),
         ));
     }
 

@@ -246,7 +246,7 @@ impl PostgresStore {
             etl_error!(
                 ErrorKind::SourceError,
                 "Failed to run Postgres state store migrations",
-                source: err
+                err
             )
         })?;
 

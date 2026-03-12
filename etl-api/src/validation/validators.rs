@@ -29,7 +29,6 @@ struct SourceRoleAudit {
     rolcreaterole: bool,
     rolcreatedb: bool,
     rolinherit: bool,
-    rolconnlimit: i32,
     rolvaliduntil_is_null: bool,
     etl_schema_exists: bool,
     etl_schema_usage: Option<bool>,
@@ -79,7 +78,6 @@ impl Validator for SourceValidator {
                 rolcreaterole,
                 rolcreatedb,
                 rolinherit,
-                rolconnlimit,
                 rolvaliduntil is null as rolvaliduntil_is_null
               from pg_roles
               where rolname = $1
@@ -118,7 +116,6 @@ impl Validator for SourceValidator {
               t.rolcreaterole,
               t.rolcreatedb,
               t.rolinherit,
-              t.rolconnlimit,
               t.rolvaliduntil_is_null,
               exists(select 1 from etl_schema) as etl_schema_exists,
               case
@@ -162,7 +159,6 @@ impl Validator for SourceValidator {
             && !audit.rolcreaterole
             && !audit.rolcreatedb
             && audit.rolinherit
-            && audit.rolconnlimit == -1
             && audit.rolvaliduntil_is_null;
 
         // Enable this once we want to validate if the role allows event trigger creation.
