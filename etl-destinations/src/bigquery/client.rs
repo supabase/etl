@@ -3,6 +3,9 @@ use etl::etl_error;
 use etl::types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type};
 use gcp_bigquery_client::client_builder::ClientBuilder;
 use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
+use gcp_bigquery_client::google::cloud::bigquery::storage::v1::StorageError;
+use gcp_bigquery_client::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode;
+use gcp_bigquery_client::google::rpc::Status as GoogleRpcStatus;
 use gcp_bigquery_client::storage::{
     BatchAppendRequest, BatchAppendResult, ColumnMode, StorageApiConfig,
 };
@@ -16,6 +19,7 @@ use gcp_bigquery_client::{
 use prost::Message;
 use rand::random;
 use std::fmt;
+use tokio::time::{Duration, Instant, sleep};
 use tonic::Code;
 use tracing::{debug, error, info, warn};
 
@@ -35,6 +39,16 @@ const MAX_INFLIGHT_REQUESTS_PER_CONNECTION: usize = 100;
 /// This upper bound ensures reasonable memory usage and prevents overflow when computing
 /// max inflight requests from connection pool size.
 const MAX_SAFE_INFLIGHT_REQUESTS: usize = 100_000;
+/// Maximum time to retry appends while BigQuery propagates a schema change.
+///
+/// Google documents schema update detection as happening on the order of minutes.
+const SCHEMA_PROPAGATION_RETRY_TIMEOUT: Duration = Duration::from_secs(180);
+/// Initial backoff when retrying appends during schema propagation.
+const SCHEMA_PROPAGATION_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// Maximum backoff when retrying appends during schema propagation.
+const SCHEMA_PROPAGATION_MAX_RETRY_DELAY: Duration = Duration::from_secs(15);
+/// Protobuf type name for BigQuery storage errors embedded in gRPC status details.
+const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
 
 /// Special column name for Change Data Capture operations in BigQuery.
 const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
@@ -79,7 +93,6 @@ fn process_single_batch_append_result(
     let bytes_sent = batch_append_result.bytes_sent;
     let mut total_bytes_received = 0;
     let mut row_errors = Vec::new();
-
     for response in batch_append_result.responses {
         match response {
             Ok(response) => {
@@ -315,7 +328,92 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
         ),
     };
 
-    etl_error!(kind, description, err.to_string())
+    let mut detail = err.to_string();
+    if let BQError::TonicStatusError(status) = &err {
+        let storage_error_codes = decode_storage_error_codes(status);
+        if !storage_error_codes.is_empty() {
+            detail.push_str(&format!(
+                " [storage_error_codes={}]",
+                storage_error_codes.join(",")
+            ));
+        }
+    }
+
+    etl_error!(kind, description, detail)
+}
+
+/// Decodes BigQuery Storage error codes from gRPC status details when present.
+fn decode_storage_error_codes(status: &tonic::Status) -> Vec<&'static str> {
+    let Ok(rpc_status) = GoogleRpcStatus::decode(status.details()) else {
+        return Vec::new();
+    };
+
+    rpc_status
+        .details
+        .iter()
+        .filter(|detail| {
+            detail.type_url.rsplit('/').next() == Some(BIGQUERY_STORAGE_ERROR_TYPE_NAME)
+        })
+        .filter_map(|detail| StorageError::decode(detail.value.as_slice()).ok())
+        .filter_map(|storage_error| StorageErrorCode::try_from(storage_error.code).ok())
+        .map(|code| code.as_str_name())
+        .collect()
+}
+
+/// Returns true when the request-level BigQuery error matches the documented schema propagation case.
+///
+/// BigQuery documents `StorageErrorCode::SCHEMA_MISMATCH_EXTRA_FIELDS` as the structured signal
+/// for schema mismatch during appends. We fall back to the observed rename-path message only when
+/// BigQuery does not provide a structured storage error code in the gRPC details.
+fn is_retryable_schema_propagation_error(error: &BQError) -> bool {
+    let BQError::TonicStatusError(status) = error else {
+        return false;
+    };
+
+    if status.code() != Code::InvalidArgument {
+        return false;
+    }
+
+    let storage_error_codes = decode_storage_error_codes(status);
+    if storage_error_codes
+        .iter()
+        .any(|code| *code == StorageErrorCode::SchemaMismatchExtraFields.as_str_name())
+    {
+        return true;
+    }
+
+    let message = status.message().to_ascii_lowercase();
+    message.contains("missing in the proto message")
+        || message.contains("schema_mismatch_extra_field")
+        || message.contains("schema_mismatch_extra_fields")
+}
+
+/// Classifies a request-level append error as retryable or terminal.
+fn append_processing_result_from_request_error(error: BQError) -> AppendProcessingResult {
+    if is_retryable_schema_propagation_error(&error) {
+        AppendProcessingResult::Retry {
+            detail: bq_error_to_etl_error(error)
+                .detail()
+                .unwrap_or("schema propagation error")
+                .to_string(),
+        }
+    } else {
+        AppendProcessingResult::Error(bq_error_to_etl_error(error))
+    }
+}
+
+/// Returns the retry detail when every request error matches the schema propagation case.
+fn retry_detail_from_request_errors(request_errors: &[BQError]) -> Option<String> {
+    let (first_error, remaining_errors) = request_errors.split_first()?;
+    if is_retryable_schema_propagation_error(first_error)
+        && remaining_errors
+            .iter()
+            .all(is_retryable_schema_propagation_error)
+    {
+        Some(first_error.to_string())
+    } else {
+        None
+    }
 }
 
 /// Converts BigQuery row errors to ETL destination errors.
@@ -361,6 +459,18 @@ enum BatchProcessResult {
     RowErrors { errors: Vec<RowError> },
     /// Batch had a request-level error.
     RequestError { error: BQError },
+}
+
+/// Aggregated result of processing a set of append batches.
+enum AppendProcessingResult {
+    Success {
+        bytes_sent: usize,
+        bytes_received: usize,
+    },
+    Retry {
+        detail: String,
+    },
+    Error(EtlError),
 }
 
 /// Client for interacting with Google BigQuery.
@@ -764,8 +874,9 @@ impl BigQueryClient {
     /// Accepts pre-constructed append requests and processes them concurrently.
     ///
     /// Retries for transient request and transport failures are handled inside the
-    /// underlying Storage Write API library. This method only evaluates final per-batch
-    /// outcomes and converts failures into ETL errors.
+    /// underlying Storage Write API library. This method also retries the narrow class of
+    /// schema propagation failures that can happen after DDL, then converts final failures
+    /// into ETL errors.
     pub async fn append_table_batches(
         &self,
         pipeline_id: PipelineId,
@@ -775,32 +886,91 @@ impl BigQueryClient {
             return Ok((0, 0));
         }
 
+        let started_at = Instant::now();
+        let mut attempt = 1;
+        let mut retry_delay = SCHEMA_PROPAGATION_RETRY_DELAY;
+
+        loop {
+            match self
+                .append_table_batches_once(pipeline_id, append_requests.clone())
+                .await?
+            {
+                AppendProcessingResult::Success {
+                    bytes_sent,
+                    bytes_received,
+                } => return Ok((bytes_sent, bytes_received)),
+                AppendProcessingResult::Retry { detail }
+                    if started_at.elapsed() < SCHEMA_PROPAGATION_RETRY_TIMEOUT =>
+                {
+                    warn!(
+                        attempt,
+                        retry_delay_ms = retry_delay.as_millis() as u64,
+                        error_detail = %detail,
+                        "bigquery schema change still propagating, retrying append"
+                    );
+
+                    sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(SCHEMA_PROPAGATION_MAX_RETRY_DELAY);
+                    attempt += 1;
+                }
+                AppendProcessingResult::Retry { detail } => {
+                    return Err(etl_error!(
+                        ErrorKind::DestinationError,
+                        "BigQuery schema propagation timed out",
+                        format!(
+                            "BigQuery did not accept the updated schema within {} seconds after DDL: {}",
+                            SCHEMA_PROPAGATION_RETRY_TIMEOUT.as_secs(),
+                            detail
+                        )
+                    ));
+                }
+                AppendProcessingResult::Error(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Executes a single append attempt and classifies the result.
+    async fn append_table_batches_once(
+        &self,
+        pipeline_id: PipelineId,
+        append_requests: Vec<BatchAppendRequest<BigQueryTableRow>>,
+    ) -> EtlResult<AppendProcessingResult> {
+        if append_requests.is_empty() {
+            return Ok(AppendProcessingResult::Success {
+                bytes_sent: 0,
+                bytes_received: 0,
+            });
+        }
+
         debug!(
             batch_count = append_requests.len(),
             "streaming table batches concurrently"
         );
-
-        let mut total_bytes_sent = 0;
-        let mut total_bytes_received = 0;
 
         let batch_append_results = self
             .client
             .storage()
             .append_table_batches(append_requests)
             .await
-            .map_err(|err| {
-                let error_code = error_code_label(&err);
+            .inspect_err(|err| {
+                let error_code = error_code_label(err);
 
                 counter!(ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
                     "pipeline_id" => pipeline_id.to_string(),
                     "error_code" => error_code
                 )
                 .increment(1);
+            });
 
-                bq_error_to_etl_error(err)
-            })?;
+        let batch_append_results = match batch_append_results {
+            Ok(results) => results,
+            Err(error) => return Ok(append_processing_result_from_request_error(error)),
+        };
 
+        let mut total_bytes_sent = 0;
+        let mut total_bytes_received = 0;
         let mut errors = Vec::new();
+        let mut request_errors = Vec::new();
 
         for batch_append_result in batch_append_results {
             let batch_index = batch_append_result.batch_index;
@@ -846,16 +1016,29 @@ impl BigQueryClient {
                     )
                     .increment(1);
 
-                    errors.push(bq_error_to_etl_error(error));
+                    request_errors.push(error);
                 }
             }
         }
 
-        if !errors.is_empty() {
-            return Err(errors.into());
+        if errors.is_empty()
+            && let Some(detail) = retry_detail_from_request_errors(&request_errors)
+        {
+            return Ok(AppendProcessingResult::Retry { detail });
         }
 
-        Ok((total_bytes_sent, total_bytes_received))
+        for error in request_errors {
+            errors.push(bq_error_to_etl_error(error));
+        }
+
+        if !errors.is_empty() {
+            return Ok(AppendProcessingResult::Error(errors.into()));
+        }
+
+        Ok(AppendProcessingResult::Success {
+            bytes_sent: total_bytes_sent,
+            bytes_received: total_bytes_received,
+        })
     }
 
     /// Invalidates all connections used by the storage write api.
@@ -876,9 +1059,6 @@ impl BigQueryClient {
         table_descriptor: TableDescriptor,
         validated_rows: Vec<BigQueryTableRow>,
     ) -> EtlResult<BatchAppendRequest<BigQueryTableRow>> {
-        // We want to use the default stream from BigQuery since it allows multiple connections to
-        // send data to it. In addition, it's available by default for every table, so it also reduces
-        // complexity.
         let stream_name = StreamName::new_default(
             self.project_id.clone(),
             dataset_id.to_string(),
