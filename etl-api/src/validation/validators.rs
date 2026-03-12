@@ -110,9 +110,6 @@ impl Validator for SourceValidator {
               t.rolcanlogin,
               t.rolreplication,
               t.rolbypassrls,
-              -- Enable this once we want to validate if the role allows event trigger creation. If then
-              -- it is true, it means that event triggers can be created.
-              -- t.rolsuper,
               t.rolcreaterole,
               t.rolcreatedb,
               t.rolinherit,
