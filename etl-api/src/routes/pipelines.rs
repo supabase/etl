@@ -1330,6 +1330,8 @@ pub async fn update_pipeline_version(
         return Ok(HttpResponse::Ok().finish());
     }
 
+    // If a replicator is not running, we don't want to create/update k8s resources. It's fine to just
+    // update the image version in the db.
     if is_replicator_pod_stopped(k8s_client.as_ref(), tenant_id, replicator.id).await? {
         txn.commit().await?;
 
@@ -1340,8 +1342,6 @@ pub async fn update_pipeline_version(
         .get_tls_config(api_config.source.tls_enabled)
         .await?;
 
-    // Keep stopped pipelines stopped. The new image is persisted in the database and will be
-    // applied the next time the pipeline is started.
     create_or_update_pipeline_resources_in_k8s(
         k8s_client.as_ref(),
         tenant_id,
@@ -1354,6 +1354,7 @@ pub async fn update_pipeline_version(
         tls_config,
     )
     .await?;
+
     txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
