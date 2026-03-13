@@ -158,15 +158,11 @@ impl Validator for SourceValidator {
             && audit.rolinherit
             && audit.rolvaliduntil_is_null;
 
-        // Enable this once we want to validate if the role allows event trigger creation.
-        // let has_required_role_attributes =
-        //     has_required_role_attributes && audit.can_create_event_triggers;
-
         let mut failures = Vec::new();
         if !has_required_role_attributes {
             failures.push(ValidationFailure::critical(
                 "Invalid source role attributes",
-                "Trusted source role does not match the required ETL profile",
+                "The source database does not grant the trusted username role all permissions ETL needs to work properly.",
             ));
         }
 
@@ -182,7 +178,7 @@ impl Validator for SourceValidator {
             failures.push(ValidationFailure::critical(
                 "Invalid source etl schema permissions",
                 format!(
-                    "Trusted source role does not have the required permissions for schema {ETL_SCHEMA_NAME}"
+                    "The source database does not grant the trusted username role all permissions ETL needs to manage schema {ETL_SCHEMA_NAME} properly."
                 ),
             ));
         }
