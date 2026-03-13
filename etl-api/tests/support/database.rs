@@ -126,9 +126,6 @@ pub async fn create_trusted_source_database() -> TrustedSourceDatabase {
         .await
         .expect("Failed to grant CREATE on database to trusted ETL role");
 
-    grant_role_membership(&mut connection, &trusted_username, "pg_monitor").await;
-    grant_role_membership(&mut connection, &trusted_username, "pg_read_all_data").await;
-
     let mut trusted_config = admin_config.clone();
     trusted_config.username = trusted_username.clone();
     trusted_config.password = Some(trusted_password.into());
@@ -166,21 +163,6 @@ pub async fn drop_trusted_source_database(database: TrustedSourceDatabase) {
         .expect("Failed to drop trusted ETL role");
 
     drop(trusted_config);
-}
-
-async fn grant_role_membership(
-    connection: &mut PgConnection,
-    role_name: &str,
-    membership_name: &str,
-) {
-    connection
-        .execute(&*format!(
-            "grant {} to {}",
-            quote_identifier(membership_name),
-            quote_identifier(role_name),
-        ))
-        .await
-        .expect("Failed to grant role membership");
 }
 
 /// Runs ETL migrations on the source database.
