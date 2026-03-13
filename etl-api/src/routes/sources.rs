@@ -5,7 +5,7 @@ use crate::db::sources::SourcesDbError;
 use crate::k8s::TrustedRootCertsCache;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use crate::validation::ValidationError;
-use crate::{db, routes};
+use crate::{db, routes::common, routes::utils};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
@@ -83,10 +83,13 @@ async fn validate_source_config(
     api_config: &ApiConfig,
     trusted_root_certs_cache: &TrustedRootCertsCache,
 ) -> Result<(), SourceError> {
-    if let Some(failure) =
-        routes::validate_source_config(source_config, api_config, trusted_root_certs_cache).await?
-    {
-        return Err(SourceError::ValidationFailed(failure.reason));
+    let failures =
+        common::validate_source_config(source_config, api_config, trusted_root_certs_cache).await?;
+
+    if !failures.is_empty() {
+        return Err(SourceError::ValidationFailed(
+            utils::format_validation_failures(failures),
+        ));
     }
 
     Ok(())

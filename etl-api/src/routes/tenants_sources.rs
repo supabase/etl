@@ -19,7 +19,7 @@ use crate::{
     config::ApiConfig, configs::encryption::EncryptionKey, configs::source::StoredSourceConfig,
     db::tenants::TenantsDbError,
 };
-use crate::{db, routes};
+use crate::{db, routes::common, routes::utils};
 
 #[derive(Debug, Error)]
 enum TenantSourceError {
@@ -81,10 +81,13 @@ async fn validate_source_config(
     api_config: &ApiConfig,
     trusted_root_certs_cache: &TrustedRootCertsCache,
 ) -> Result<(), TenantSourceError> {
-    if let Some(failure) =
-        routes::validate_source_config(source_config, api_config, trusted_root_certs_cache).await?
-    {
-        return Err(TenantSourceError::ValidationFailed(failure.reason));
+    let failures =
+        common::validate_source_config(source_config, api_config, trusted_root_certs_cache).await?;
+
+    if !failures.is_empty() {
+        return Err(TenantSourceError::ValidationFailed(
+            utils::format_validation_failures(failures),
+        ));
     }
 
     Ok(())
