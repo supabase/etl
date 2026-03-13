@@ -4,7 +4,7 @@ use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::notifying_store::NotifyingStore;
-use etl::types::{Event, TableRow};
+use etl::types::{Event, ReplicatedTableSchema, TableRow};
 use etl_config::Environment;
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
@@ -469,21 +469,30 @@ impl Destination for BenchDestination {
         "bench_destination"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
         match self {
-            BenchDestination::Null(dest) => dest.truncate_table(table_id).await,
-            BenchDestination::BigQuery(dest) => dest.truncate_table(table_id).await,
+            BenchDestination::Null(dest) => dest.truncate_table(replicated_table_schema).await,
+            BenchDestination::BigQuery(dest) => dest.truncate_table(replicated_table_schema).await,
         }
     }
 
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         match self {
-            BenchDestination::Null(dest) => dest.write_table_rows(table_id, table_rows).await,
-            BenchDestination::BigQuery(dest) => dest.write_table_rows(table_id, table_rows).await,
+            BenchDestination::Null(dest) => {
+                dest.write_table_rows(replicated_table_schema, table_rows)
+                    .await
+            }
+            BenchDestination::BigQuery(dest) => {
+                dest.write_table_rows(replicated_table_schema, table_rows)
+                    .await
+            }
         }
     }
 
@@ -500,13 +509,16 @@ impl Destination for NullDestination {
         "null"
     }
 
-    async fn truncate_table(&self, _table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
         Ok(())
     }
 
     async fn write_table_rows(
         &self,
-        _table_id: TableId,
+        _replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         self.row_count

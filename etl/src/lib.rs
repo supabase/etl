@@ -56,15 +56,15 @@
 //!     store::both::memory::MemoryStore,
 //!     types::{Event, TableRow},
 //! };
-//! use etl_postgres::types::TableId;
+//! use etl_postgres::types::ReplicatedTableSchema;
 //!
 //! #[derive(Clone)]
 //! struct NoopDestination;
 //!
 //! impl Destination for NoopDestination {
 //!     fn name() -> &'static str { "noop" }
-//!     async fn truncate_table(&self, _table_id: TableId) -> EtlResult<()> { Ok(()) }
-//!     async fn write_table_rows(&self, _table_id: TableId, _table_rows: Vec<TableRow>) -> EtlResult<()> { Ok(()) }
+//!     async fn truncate_table(&self, _replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<()> { Ok(()) }
+//!     async fn write_table_rows(&self, _replicated_table_schema: &ReplicatedTableSchema, _table_rows: Vec<TableRow>) -> EtlResult<()> { Ok(()) }
 //!     async fn write_events(&self, _events: Vec<Event>) -> EtlResult<()> { Ok(()) }
 //! }
 //!
