@@ -1,7 +1,7 @@
-//! Validation framework for ETL destinations and pipelines.
+//! Validation framework for ETL sources, destinations, and pipelines.
 //!
 //! Provides a trait-based validation framework for checking configuration
-//! and runtime requirements before creating destinations or pipelines.
+//! and runtime requirements before creating sources, destinations, or pipelines.
 
 mod validators;
 
@@ -14,17 +14,23 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::config::ApiConfig;
 use crate::configs::destination::FullApiDestinationConfig;
 use crate::configs::pipeline::FullApiPipelineConfig;
-use crate::validation::validators::{DestinationValidator, PipelineValidator};
+use crate::configs::source::StoredSourceConfig;
+use crate::db::connect_to_source_database_from_api;
+use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
+use crate::validation::validators::{DestinationValidator, PipelineValidator, SourceValidator};
 
 /// Shared context provided to validators during validation.
 pub struct ValidationContext {
     /// Runtime environment for environment-specific configuration.
     pub environment: Environment,
     /// Connection pool to the source PostgreSQL database.
-    /// Required for pipeline validation, optional for destination validation.
+    /// Required for source and pipeline validation, optional for destination validation.
     pub source_pool: Option<PgPool>,
+    /// Trusted username used to validate the source role profile.
+    pub trusted_username: Option<String>,
 }
 
 impl ValidationContext {
@@ -33,7 +39,28 @@ impl ValidationContext {
         ValidationContextBuilder {
             environment,
             source_pool: None,
+            trusted_username: None,
         }
+    }
+
+    /// Builds a [`ValidationContext`] by connecting to a source database.
+    pub async fn build_from_source(
+        source_config: StoredSourceConfig,
+        api_config: &ApiConfig,
+        trusted_root_certs_cache: &TrustedRootCertsCache,
+    ) -> Result<Self, ValidationError> {
+        let tls_config = trusted_root_certs_cache
+            .get_tls_config(api_config.source.tls_enabled)
+            .await?;
+        let source_pool =
+            connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
+                .await?;
+        let environment = Environment::load()?;
+
+        Ok(Self::builder(environment)
+            .source_pool(source_pool)
+            .trusted_username(api_config.source.trusted_username.clone())
+            .build())
     }
 }
 
@@ -41,6 +68,7 @@ impl ValidationContext {
 pub struct ValidationContextBuilder {
     environment: Environment,
     source_pool: Option<PgPool>,
+    trusted_username: Option<String>,
 }
 
 impl ValidationContextBuilder {
@@ -50,11 +78,18 @@ impl ValidationContextBuilder {
         self
     }
 
+    /// Sets the trusted username used for source role validation.
+    pub fn trusted_username(mut self, trusted_username: Option<String>) -> Self {
+        self.trusted_username = trusted_username;
+        self
+    }
+
     /// Builds the [`ValidationContext`].
     pub fn build(self) -> ValidationContext {
         ValidationContext {
             environment: self.environment,
             source_pool: self.source_pool,
+            trusted_username: self.trusted_username,
         }
     }
 }
@@ -113,6 +148,14 @@ pub enum ValidationError {
     #[error("database query failed: {0}")]
     Database(#[from] sqlx::Error),
 
+    /// Failed to load trusted root certs for source connections.
+    #[error(transparent)]
+    TrustedRootCerts(#[from] TrustedRootCertsError),
+
+    /// Failed to load the application environment.
+    #[error("failed to load environment: {0}")]
+    Environment(#[from] std::io::Error),
+
     /// Failed to connect to BigQuery.
     #[error("bigquery connection failed: {0}")]
     BigQuery(String),
@@ -134,6 +177,17 @@ pub trait Validator: Send + Sync {
     ) -> Result<Vec<ValidationFailure>, ValidationError>;
 }
 
+/// Validates the connected source role profile.
+///
+/// Returns a list of validation failures. Empty list means validation passed.
+/// Returns an error if validation could not be completed.
+pub async fn validate_source(
+    ctx: &ValidationContext,
+) -> Result<Vec<ValidationFailure>, ValidationError> {
+    let validator = SourceValidator;
+    validator.validate(ctx).await
+}
+
 /// Validates destination configuration.
 ///
 /// Returns a list of validation failures. Empty list means validation passed.
@@ -146,8 +200,7 @@ pub async fn validate_destination(
     ctx: &ValidationContext,
     destination_config: &FullApiDestinationConfig,
 ) -> Result<Vec<ValidationFailure>, ValidationError> {
-    let validator = DestinationValidator::new(destination_config.clone());
-    validator.validate(ctx).await
+    validate_destination_internal(ctx, destination_config, true).await
 }
 
 /// Validates pipeline configuration against the source database.
@@ -162,26 +215,39 @@ pub async fn validate_pipeline(
     ctx: &ValidationContext,
     pipeline_config: &FullApiPipelineConfig,
 ) -> Result<Vec<ValidationFailure>, ValidationError> {
-    let validator = PipelineValidator::new(pipeline_config.clone());
-    validator.validate(ctx).await
+    validate_pipeline_internal(ctx, pipeline_config, true).await
 }
 
-/// Validates both destination and pipeline configuration.
-///
-/// Returns a list of validation failures. Empty list means validation passed.
-/// Returns an error if validation could not be completed.
-///
-/// Runs all validators and collects all failures, returning them together
-/// for comprehensive error reporting.
-pub async fn validate_destination_pipeline(
+async fn validate_destination_internal(
     ctx: &ValidationContext,
     destination_config: &FullApiDestinationConfig,
-    pipeline_config: &FullApiPipelineConfig,
+    validate_source_profile: bool,
 ) -> Result<Vec<ValidationFailure>, ValidationError> {
     let mut failures = Vec::new();
 
-    failures.extend(validate_destination(ctx, destination_config).await?);
-    failures.extend(validate_pipeline(ctx, pipeline_config).await?);
+    if validate_source_profile {
+        failures.extend(validate_source(ctx).await?);
+    }
+
+    let validator = DestinationValidator::new(destination_config.clone());
+    failures.extend(validator.validate(ctx).await?);
+
+    Ok(failures)
+}
+
+async fn validate_pipeline_internal(
+    ctx: &ValidationContext,
+    pipeline_config: &FullApiPipelineConfig,
+    validate_source_profile: bool,
+) -> Result<Vec<ValidationFailure>, ValidationError> {
+    let mut failures = Vec::new();
+
+    if validate_source_profile {
+        failures.extend(validate_source(ctx).await?);
+    }
+
+    let validator = PipelineValidator::new(pipeline_config.clone());
+    failures.extend(validator.validate(ctx).await?);
 
     Ok(failures)
 }
