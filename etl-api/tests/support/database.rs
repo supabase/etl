@@ -141,44 +141,6 @@ pub async fn create_trusted_source_database() -> TrustedSourceDatabase {
     }
 }
 
-pub async fn revoke_role_membership(
-    admin_config: &PgConnectionConfig,
-    role_name: &str,
-    membership_name: &str,
-) {
-    let mut connection = PgConnection::connect_with(&admin_config.without_db(None))
-        .await
-        .expect("Failed to connect to Postgres");
-
-    connection
-        .execute(&*format!(
-            "revoke {} from {}",
-            quote_identifier(membership_name),
-            quote_identifier(role_name),
-        ))
-        .await
-        .expect("Failed to revoke role membership");
-}
-
-pub async fn set_role_connection_limit(
-    admin_config: &PgConnectionConfig,
-    role_name: &str,
-    connection_limit: i32,
-) {
-    let mut connection = PgConnection::connect_with(&admin_config.without_db(None))
-        .await
-        .expect("Failed to connect to Postgres");
-
-    connection
-        .execute(&*format!(
-            "alter role {} connection limit {}",
-            quote_identifier(role_name),
-            connection_limit,
-        ))
-        .await
-        .expect("Failed to update role connection limit");
-}
-
 pub async fn drop_trusted_source_database(database: TrustedSourceDatabase) {
     let TrustedSourceDatabase {
         admin_pool,

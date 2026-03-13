@@ -493,7 +493,6 @@ pub struct ValidationFailureResponse {
 
 impl From<ValidationFailure> for ValidationFailureResponse {
     fn from(failure: ValidationFailure) -> Self {
-        let failure = failure.sanitized_for_output();
         Self {
             name: failure.name,
             reason: failure.reason,

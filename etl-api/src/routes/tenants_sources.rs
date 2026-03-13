@@ -14,7 +14,7 @@ use crate::configs::source::FullApiSourceConfig;
 use crate::db::tenants_sources::TenantSourceDbError;
 use crate::k8s::TrustedRootCertsCache;
 use crate::routes::ErrorMessage;
-use crate::validation::{ValidationError, ValidationFailure};
+use crate::validation::ValidationError;
 use crate::{
     config::ApiConfig, configs::encryption::EncryptionKey, configs::source::StoredSourceConfig,
     db::tenants::TenantsDbError,
@@ -84,10 +84,7 @@ async fn validate_source_config(
     if let Some(failure) =
         routes::validate_source_config(source_config, api_config, trusted_root_certs_cache).await?
     {
-        let _ = failure;
-        return Err(TenantSourceError::ValidationFailed(
-            ValidationFailure::trusted_source_permissions_message().to_string(),
-        ));
+        return Err(TenantSourceError::ValidationFailed(failure.reason));
     }
 
     Ok(())
