@@ -26,6 +26,7 @@
 use chrono::NaiveDate;
 use duckdb::{Config, Connection};
 use etl::destination::Destination;
+use etl::error::ErrorKind;
 use etl::store::both::memory::MemoryStore;
 use etl::store::schema::SchemaStore;
 use etl::types::{
@@ -262,6 +263,159 @@ async fn test_write_table_rows_basic() {
         .unwrap();
     assert_eq!(id, 1);
     assert_eq!(name.as_deref(), Some("Alice"));
+}
+
+/// `pool_size = 0` should fail fast with a configuration error.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ducklake_rejects_zero_pool_size() {
+    let dir = make_test_dir("ducklake_rejects_zero_pool_size");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let err = DuckLakeDestination::new(
+        path_to_file_url(&catalog),
+        path_to_file_url(&data),
+        0,
+        None,
+        None,
+        None,
+        MemoryStore::new(),
+    )
+    .await
+    .err()
+    .expect("pool_size = 0 should fail");
+
+    assert_eq!(err.kind(), ErrorKind::ConfigError);
+}
+
+/// Repeated writes should reuse the warm pooled DuckDB connection.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_write_table_rows_reuses_warm_pooled_connection() {
+    reset_ducklake_test_hooks();
+
+    let dir = make_test_dir("write_table_rows_reuses_warm_pooled_connection");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let table_id = TableId::new(21);
+    let schema = make_schema(21, "public", "pooled_copy");
+    let table_name = table_name_to_ducklake_table_name(&schema.name);
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(destination.connection_open_count_for_tests(), 1);
+
+    destination
+        .write_table_rows(
+            table_id,
+            vec![TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("first".to_string()),
+            ])],
+        )
+        .await
+        .unwrap();
+    assert_eq!(destination.connection_open_count_for_tests(), 1);
+
+    destination
+        .write_table_rows(
+            table_id,
+            vec![TableRow::new(vec![
+                Cell::I32(2),
+                Cell::String("second".to_string()),
+            ])],
+        )
+        .await
+        .unwrap();
+    assert_eq!(destination.connection_open_count_for_tests(), 1);
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(count_rows(&conn, &table_name), 2);
+}
+
+/// A failed write attempt should discard the pooled DuckDB connection and replace it.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_write_table_rows_replaces_broken_pooled_connection_after_retry() {
+    reset_ducklake_test_hooks();
+
+    let dir = make_test_dir("write_table_rows_replaces_broken_pooled_connection_after_retry");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let table_id = TableId::new(22);
+    let schema = make_schema(22, "public", "pooled_retry");
+    let table_name = table_name_to_ducklake_table_name(&schema.name);
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(destination.connection_open_count_for_tests(), 1);
+
+    arm_fail_after_copy_batch_commit_once_for_tests(&table_name);
+    destination
+        .write_table_rows(
+            table_id,
+            vec![TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("first".to_string()),
+            ])],
+        )
+        .await
+        .unwrap();
+    assert_eq!(destination.connection_open_count_for_tests(), 2);
+
+    destination
+        .write_table_rows(
+            table_id,
+            vec![TableRow::new(vec![
+                Cell::I32(2),
+                Cell::String("second".to_string()),
+            ])],
+        )
+        .await
+        .unwrap();
+    assert_eq!(destination.connection_open_count_for_tests(), 2);
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(count_rows(&conn, &table_name), 2);
+
+    reset_ducklake_test_hooks();
 }
 
 /// A post-commit retry should not duplicate table-copy rows.
@@ -770,7 +924,7 @@ async fn test_write_events_replay_is_idempotent() {
 
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 4);
+    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
 
     let (id, name): (i32, String) = conn
         .query_row(
@@ -989,8 +1143,8 @@ async fn test_write_events_mixed_multi_table_batches() {
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(count_rows(&conn, &table_name_a), 1);
     assert_eq!(count_rows(&conn, &table_name_b), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name_a, "mutation"), 2);
-    assert_eq!(count_applied_batches(&conn, &table_name_b, "mutation"), 2);
+    assert_eq!(count_applied_batches(&conn, &table_name_a, "mutation"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name_b, "mutation"), 1);
 
     let name_a: String = conn
         .query_row(
@@ -1096,7 +1250,7 @@ async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
 
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 4);
+    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
 
     let name: String = conn
         .query_row(
