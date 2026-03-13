@@ -38,7 +38,7 @@ use etl::config::{
 };
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
-use etl_destinations::ducklake::{DuckLakeDestination, S3Config};
+use etl_destinations::ducklake::{DuckDbLogConfig, DuckLakeDestination, S3Config};
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Once;
@@ -135,6 +135,13 @@ struct DuckLakeArgs {
     /// Postgres schema used for DuckLake metadata tables (e.g. `ducklake`)
     #[arg(long)]
     metadata_schema: Option<String>,
+
+    /// Shared DuckDB log storage path used by `CALL enable_logging(storage_path = ...)`.
+    #[arg(long, requires = "duckdb_log_dump_path")]
+    duckdb_log_storage_path: Option<String>,
+    /// CSV file written from `duckdb_logs` during graceful shutdown.
+    #[arg(long, requires = "duckdb_log_storage_path")]
+    duckdb_log_dump_path: Option<String>,
 }
 
 #[tokio::main]
@@ -153,7 +160,11 @@ fn init_tracing() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "ducklake=info".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_line_number(true)
+                .with_file(true),
+        )
         .init();
 }
 
@@ -190,6 +201,7 @@ fn parse_ducklake_url(value: &str) -> Result<Url, String> {
 async fn main_impl() -> Result<(), Box<dyn Error>> {
     set_log_level();
     init_tracing();
+    // etl_telemetry::metrics::init_metrics(None)?;
     install_crypto_provider();
 
     let args = AppArgs::parse();
@@ -242,6 +254,17 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.ducklake_args.pool_size,
         s3_config,
         args.ducklake_args.metadata_schema,
+        match (
+            args.ducklake_args.duckdb_log_storage_path,
+            args.ducklake_args.duckdb_log_dump_path,
+        ) {
+            (Some(storage_path), Some(dump_path)) => Some(DuckDbLogConfig {
+                storage_path,
+                dump_path,
+            }),
+            (None, None) => None,
+            _ => unreachable!("clap should enforce paired duckdb log arguments"),
+        },
         store.clone(),
     )
     .await?;

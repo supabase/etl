@@ -95,6 +95,37 @@ cargo run --bin ducklake -p etl-examples -- \
 The CLI also accepts plain local paths such as `./lake_data/` and normalizes
 them to absolute `file://` URLs before constructing the destination.
 
+### Example configuration
+
+This is a fuller local example that also enables a dedicated DuckDB log dump on
+shutdown:
+
+```bash
+cargo run --bin ducklake -p etl-examples -- \
+    --db-host postgres.etl-data-plane.svc.cluster.local \
+    --db-port 5432 \
+    --db-name mydb \
+    --db-username postgres \
+    --db-password password \
+    --catalog-url "postgres://postgres:password@postgres.etl-data-plane.svc.cluster.local:5432/mydb?sslmode=disable" \
+    --data-path /Users/bnj/misc/parquet_files \
+    --publication my_pub \
+    --metadata-schema ducklake \
+    --pool-size 4 \
+    --max-batch-fill-duration-ms 5000 \
+    --max-table-sync-workers 4 \
+    --duckdb-log-storage-path /tmp/duckdb_logs \
+    --duckdb-log-dump-path /tmp/duckdb_logs_dump.csv
+```
+
+In this example:
+
+- `--catalog-url` points to the PostgreSQL database that stores DuckLake metadata.
+- `--data-path` is a plain local path and will be normalized to a `file://` URL.
+- `--metadata-schema ducklake` keeps DuckLake metadata tables in a dedicated Postgres schema.
+- `--duckdb-log-storage-path` enables `CALL enable_logging(storage_path = ...)` for each DuckDB connection.
+- `--duckdb-log-dump-path` writes a CSV dump of `SELECT * FROM duckdb_logs` during graceful shutdown.
+
 ### Run (S3 / S3-compatible data)
 
 ```bash
@@ -139,6 +170,8 @@ automatically loads the `httpfs` DuckDB extension for cloud storage access.
 | `--s3-url-style` | `path` | URL style: `path` (MinIO/Supabase) or `vhost` (AWS) |
 | `--s3-use-ssl` | `false` | Enable TLS for the S3 connection |
 | `--metadata-schema` | — | Postgres schema for DuckLake metadata tables (e.g. `ducklake`) |
+| `--duckdb-log-storage-path` | — | Enables DuckDB file-backed logging for each DuckDB connection |
+| `--duckdb-log-dump-path` | — | CSV file written from `duckdb_logs` during graceful shutdown |
 
 ### Query the replicated data
 

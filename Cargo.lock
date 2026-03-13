@@ -1916,6 +1916,7 @@ dependencies = [
  "clap",
  "etl",
  "etl-destinations",
+ "etl-telemetry",
  "rustls",
  "tokio",
  "tracing",

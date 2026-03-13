@@ -1,6 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::error::Error as StdError;
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "test-utils")]
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use chrono::{NaiveDate, NaiveTime};
@@ -14,16 +20,18 @@ use etl::store::state::StateStore;
 use etl::types::{ArrayCell, Cell, Event, TableId, TableName, TableRow, TableSchema};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
-use r2d2::Pool;
 use rand::Rng;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+use tokio_postgres::types::PgLsn;
 
-use tracing::{debug, info, warn};
+use tracing::{Level, debug, info, warn};
 use url::Url;
 
 use crate::ducklake::S3Config;
-use crate::ducklake::config::{build_setup_sql, current_duckdb_extension_strategy};
+use crate::ducklake::config::{
+    DuckDbLogConfig, build_setup_sql, current_duckdb_extension_strategy,
+};
 use crate::ducklake::schema::build_create_table_sql_ducklake;
 
 /// The DuckDB catalog alias used in every `lake.<table>` qualified name.
@@ -37,10 +45,19 @@ const TABLE_NAME_ESCAPE: &str = "__";
 const SQL_INSERT_BATCH_SIZE: usize = 256;
 /// Maximum number of primary-key predicates per SQL `DELETE` batch.
 ///
-/// We intentionally keep this at one row per statement for CDC deletes. This
-/// avoids relying on DuckLake's inlining heuristics and keeps each delete
-/// operation as small and predictable as possible inside the transaction.
-const SQL_DELETE_BATCH_SIZE: usize = 1;
+/// Keep this small so each delete statement remains cheap while still avoiding
+/// one round-trip per deleted row.
+const SQL_DELETE_BATCH_SIZE: usize = 8;
+/// Maximum number of contiguous non-insert CDC mutations grouped into one
+/// atomic DuckLake transaction.
+const NON_INSERT_MUTATION_BATCH_SIZE: usize = 8;
+/// ETL-managed marker table storing per-table applied CDC batches.
+const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
+/// Inline small marker-table writes in the DuckLake metadata catalog instead of
+/// creating Parquet files for this metadata-like table.
+const APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT: usize = 32;
+/// Enables the expensive post-commit row-count diagnostics when set.
+const BATCH_DIAGNOSTICS_ENV_VAR: &str = "ETL_DUCKLAKE_BATCH_DIAGNOSTICS";
 
 /// Alias for DuckLake table names.
 type DuckLakeTableName = String;
@@ -53,15 +70,109 @@ enum PreparedRows {
 
 /// Event-level table mutations that must be applied in order.
 enum TableMutation {
-    Upsert(TableRow),
+    Insert(TableRow),
     Delete(TableRow),
+    Update {
+        delete_row: TableRow,
+        upsert_row: TableRow,
+    },
     Replace(TableRow),
 }
 
 /// Prepared table mutations ready for execution and retries.
 enum PreparedTableMutation {
     Upsert(PreparedRows),
-    Delete(Vec<String>),
+    Delete {
+        predicates: Vec<String>,
+        origin: &'static str,
+    },
+}
+
+/// Event-level table mutation annotated with source LSNs for idempotent replay.
+struct TrackedTableMutation {
+    start_lsn: PgLsn,
+    commit_lsn: PgLsn,
+    mutation: TableMutation,
+}
+
+/// Truncate event metadata preserved for idempotent replay.
+#[derive(Clone, Copy)]
+struct TrackedTruncateEvent {
+    start_lsn: PgLsn,
+    commit_lsn: PgLsn,
+    options: i8,
+}
+
+/// Stable hash used to derive per-table batch identifiers.
+struct BatchIdHasher(u64);
+
+impl BatchIdHasher {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+
+    fn new() -> Self {
+        Self(Self::OFFSET_BASIS)
+    }
+}
+
+impl Default for BatchIdHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Hasher for BatchIdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+}
+
+/// Atomic DuckLake batch kinds persisted in the replay marker table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DuckLakeTableBatchKind {
+    Copy,
+    Mutation,
+    Truncate,
+}
+
+impl DuckLakeTableBatchKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Mutation => "mutation",
+            Self::Truncate => "truncate",
+        }
+    }
+}
+
+/// Deterministic identity for one table batch.
+struct DuckLakeBatchIdentity {
+    batch_id: String,
+    first_start_lsn: Option<PgLsn>,
+    last_commit_lsn: Option<PgLsn>,
+}
+
+/// Prepared per-table work executed atomically in one DuckLake transaction.
+enum PreparedDuckLakeTableBatchAction {
+    Mutation(Vec<PreparedTableMutation>),
+    Truncate,
+}
+
+/// Prepared atomic DuckLake table batch with replay metadata.
+struct PreparedDuckLakeTableBatch {
+    table_name: DuckLakeTableName,
+    batch_id: String,
+    batch_kind: DuckLakeTableBatchKind,
+    first_start_lsn: Option<PgLsn>,
+    last_commit_lsn: Option<PgLsn>,
+    action: PreparedDuckLakeTableBatchAction,
 }
 
 // ── connection manager ────────────────────────────────────────────────────────
@@ -69,8 +180,8 @@ enum PreparedTableMutation {
 /// Custom r2d2 connection manager that opens an in-memory DuckDB connection and
 /// attaches the DuckLake catalog on every `connect()` call.
 ///
-/// Each pool connection is independent and attaches the same catalog, which is
-/// safe: DuckLake (backed by a PostgreSQL catalog) supports concurrent writers.
+/// Each opened connection is independent and attaches the same catalog, which
+/// is safe: DuckLake (backed by a PostgreSQL catalog) supports concurrent writers.
 struct DuckLakeConnectionManager {
     /// SQL executed immediately after a new connection is opened.
     /// Loads required extensions and attaches the DuckLake catalog.
@@ -80,11 +191,9 @@ struct DuckLakeConnectionManager {
     disable_extension_autoload: bool,
 }
 
-impl r2d2::ManageConnection for DuckLakeConnectionManager {
-    type Connection = duckdb::Connection;
-    type Error = duckdb::Error;
-
-    fn connect(&self) -> Result<duckdb::Connection, duckdb::Error> {
+impl DuckLakeConnectionManager {
+    /// Opens one fully initialized DuckDB connection and attaches the lake catalog.
+    fn open_connection(&self) -> Result<duckdb::Connection, duckdb::Error> {
         let conn = if self.disable_extension_autoload {
             duckdb::Connection::open_in_memory_with_flags(
                 Config::default().enable_autoload_extension(false)?,
@@ -94,6 +203,15 @@ impl r2d2::ManageConnection for DuckLakeConnectionManager {
         };
         conn.execute_batch(&self.setup_sql)?;
         Ok(conn)
+    }
+}
+
+impl r2d2::ManageConnection for DuckLakeConnectionManager {
+    type Connection = duckdb::Connection;
+    type Error = duckdb::Error;
+
+    fn connect(&self) -> Result<duckdb::Connection, duckdb::Error> {
+        self.open_connection()
     }
 
     fn is_valid(&self, conn: &mut duckdb::Connection) -> Result<(), duckdb::Error> {
@@ -125,21 +243,25 @@ fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) -> bool {
 
 /// A DuckLake destination that implements the ETL [`Destination`] trait.
 ///
-/// Writes data to a DuckLake data lake. Each DuckDB connection in the pool
-/// attaches the same DuckLake catalog, allowing tables to be written in parallel.
-/// Data is persisted as Parquet files at `data_path`; metadata is tracked in a
-/// PostgreSQL catalog database.
+/// Writes data to a DuckLake data lake. Each DuckDB operation opens a fresh
+/// in-memory connection, attaches the same DuckLake catalog, and is bounded by
+/// a semaphore so tables can still be written in parallel. Data is persisted as
+/// Parquet files at `data_path`; metadata is tracked in a PostgreSQL catalog
+/// database.
 ///
 /// All writes are wrapped in explicit transactions so that each batch of rows
 /// is committed as a single Parquet snapshot rather than one file per row.
 #[derive(Clone)]
 pub struct DuckLakeDestination<S> {
-    pool: Pool<DuckLakeConnectionManager>,
+    manager: Arc<DuckLakeConnectionManager>,
     blocking_slots: Arc<Semaphore>,
     table_creation_slots: Arc<Semaphore>,
     store: S,
+    duckdb_log: Option<Arc<DuckDbLogConfig>>,
     /// Cache of table names whose DDL has already been executed.
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+    /// Cache tracking whether the ETL batch marker table already exists.
+    applied_batches_table_created: Arc<Mutex<bool>>,
 }
 
 impl<S> DuckLakeDestination<S> {
@@ -158,21 +280,23 @@ impl<S> DuckLakeDestination<S> {
     ///   and the bucket is not publicly accessible.
     /// - `metadata_schema`: Optional Postgres schema for DuckLake metadata tables
     ///   (e.g. `"ducklake"`). Uses the catalog default schema when not set.
+    /// - `duckdb_log`: Optional DuckDB log storage and shutdown dump paths.
     /// - On Linux, DuckDB extensions are loaded from vendored local files when
     ///   a vendored directory is available. The root directory can be forced
     ///   with `ETL_DUCKDB_EXTENSION_ROOT`. Otherwise, DuckDB uses the legacy
     ///   online `INSTALL` flow. On macOS and Windows, DuckDB always uses the
     ///   legacy online `INSTALL` flow.
     ///
-    /// Pool initialization is blocking because `r2d2` eagerly opens and
-    /// validates connections. This constructor offloads that work to Tokio's
-    /// blocking pool.
+    /// Connection validation is blocking because DuckDB extensions are loaded
+    /// and the lake catalog is attached synchronously. This constructor
+    /// offloads that work to Tokio's blocking pool.
     pub async fn new(
         catalog_url: Url,
         data_path: Url,
         pool_size: u32,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
+        duckdb_log: Option<DuckDbLogConfig>,
         store: S,
     ) -> EtlResult<Self> {
         let extension_strategy = current_duckdb_extension_strategy()?;
@@ -181,41 +305,45 @@ impl<S> DuckLakeDestination<S> {
         {
             info!(platform = platform_dir, "using vendored duckdb extensions");
         }
-        let setup_sql = build_setup_sql(
+        ensure_duckdb_log_paths(duckdb_log.as_ref())?;
+        let setup_sql = Arc::new(build_setup_sql(
             &catalog_url,
             &data_path,
             s3.as_ref(),
             metadata_schema.as_deref(),
-        )?;
+            duckdb_log.as_ref(),
+        )?);
 
-        let manager = DuckLakeConnectionManager {
-            setup_sql: Arc::new(setup_sql),
+        let manager = Arc::new(DuckLakeConnectionManager {
+            setup_sql: Arc::clone(&setup_sql),
             disable_extension_autoload: extension_strategy.disables_autoload(),
-        };
+        });
 
-        let pool =
-            tokio::task::spawn_blocking(move || Pool::builder().max_size(pool_size).build(manager))
-                .await
-                .map_err(|_| {
-                    etl_error!(
-                        ErrorKind::ApplyWorkerPanic,
-                        "DuckLake pool build task panicked"
-                    )
-                })?
-                .map_err(|e| {
-                    etl_error!(
-                        ErrorKind::DestinationConnectionFailed,
-                        "Failed to build DuckLake connection pool",
-                        source: e
-                    )
-                })?;
+        let manager_for_validation = Arc::clone(&manager);
+        tokio::task::spawn_blocking(move || manager_for_validation.open_connection())
+            .await
+            .map_err(|_| {
+                etl_error!(
+                    ErrorKind::ApplyWorkerPanic,
+                    "DuckLake connection validation task panicked"
+                )
+            })?
+            .map_err(|e| {
+                etl_error!(
+                    ErrorKind::DestinationConnectionFailed,
+                    "Failed to open DuckLake connection",
+                    source: e
+                )
+            })?;
 
         Ok(Self {
-            pool,
+            manager,
             blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
             table_creation_slots: Arc::new(Semaphore::new(1)),
             store,
+            duckdb_log: duckdb_log.map(Arc::new),
             created_tables: Arc::new(Mutex::new(HashSet::new())),
+            applied_batches_table_created: Arc::new(Mutex::new(false)),
         })
     }
 }
@@ -226,6 +354,10 @@ where
 {
     fn name() -> &'static str {
         "ducklake"
+    }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.dump_duckdb_logs_inner().await
     }
 
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
@@ -252,16 +384,51 @@ where
     /// Deletes all rows from the destination table without dropping it.
     async fn truncate_table_inner(&self, table_id: TableId) -> EtlResult<()> {
         let table_name = self.ensure_table_exists(table_id).await?;
+        self.ensure_applied_batches_table_exists().await?;
         self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
-            conn.execute_batch(&format!("DELETE FROM {LAKE_CATALOG}.\"{table_name}\""))
-                .map_err(|e| {
+            conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake BEGIN TRANSACTION failed",
+                    source: e
+                )
+            })?;
+
+            let result = (|| -> EtlResult<()> {
+                let delete_table_sql = format!("DELETE FROM {LAKE_CATALOG}.\"{table_name}\";");
+                conn.execute_batch(&delete_table_sql).map_err(|e| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake DELETE failed",
+                        format_query_error_detail(&delete_table_sql, &e),
                         source: e
                     )
                 })?;
-            Ok(())
+
+                clear_applied_batch_markers_for_kind(
+                    conn,
+                    &table_name,
+                    DuckLakeTableBatchKind::Copy,
+                )?;
+                Ok(())
+            })();
+
+            match result {
+                Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
+                    let err = conn.execute_batch("ROLLBACK");
+                    if let Err(err) = err {
+                        tracing::error!(?err, "error rollback");
+                    }
+                    etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", source: e)
+                }),
+                Err(error) => {
+                    let err = conn.execute_batch("ROLLBACK");
+                    if let Err(err) = err {
+                        tracing::error!(?err, "error rollback");
+                    }
+                    Err(error)
+                }
+            }
         })
         .await
     }
@@ -271,9 +438,8 @@ where
     /// Wrapping all inserts in one `BEGIN` / `COMMIT` ensures they are written
     /// as a single Parquet snapshot rather than one file per row.
     ///
-    /// If a write attempt fails, the transaction is retried with exponential
-    /// backoff. The current implementation preserves the existing broad retry
-    /// behavior rather than matching only DuckLake commit conflicts.
+    /// Copy batches are recorded in the replay marker table so a retry after an
+    /// ambiguous post-commit failure can detect already applied rows.
     async fn write_table_rows_inner(
         &self,
         table_id: TableId,
@@ -285,12 +451,13 @@ where
             return Ok(());
         }
 
-        let prepared_rows = prepare_rows(table_rows);
-        insert_rows_with_retry(
-            self.pool.clone(),
+        self.ensure_applied_batches_table_exists().await?;
+        let table_schema = self.get_table_schema(table_id).await?;
+        let prepared_batch = prepare_copy_table_batch(&table_schema, table_name, table_rows)?;
+        apply_table_batch_with_retry(
+            Arc::clone(&self.manager),
             Arc::clone(&self.blocking_slots),
-            table_name,
-            prepared_rows,
+            prepared_batch,
         )
         .await
     }
@@ -299,13 +466,16 @@ where
     ///
     /// Insert, Update, and Delete events are grouped by table and written in
     /// parallel, each table in its own async task. Each DuckDB attempt acquires
-    /// one blocking slot before entering `spawn_blocking`. Truncate events are
-    /// deduplicated and processed after the per-table writes.
+    /// one blocking slot before entering `spawn_blocking`. Each table's ordered
+    /// CDC stream is split into atomic sub-batches, applied on a reused DuckDB
+    /// connection per retry attempt, and recorded in an ETL marker table so
+    /// retries can safely detect already committed work.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
-            let mut table_id_to_mutations: HashMap<TableId, Vec<TableMutation>> = HashMap::new();
+            let mut table_id_to_mutations: HashMap<TableId, Vec<TrackedTableMutation>> =
+                HashMap::new();
 
             // Accumulate non-truncate events, stopping at the first Truncate.
             while let Some(event) = event_iter.peek() {
@@ -320,7 +490,11 @@ where
                         table_id_to_mutations
                             .entry(insert.table_id)
                             .or_default()
-                            .push(TableMutation::Upsert(insert.table_row));
+                            .push(TrackedTableMutation {
+                                start_lsn: insert.start_lsn,
+                                commit_lsn: insert.commit_lsn,
+                                mutation: TableMutation::Insert(insert.table_row),
+                            });
                     }
                     Event::Update(update) => {
                         let table_id = update.table_id;
@@ -328,14 +502,23 @@ where
                         let old_table_row = update.old_table_row;
                         let mutations = table_id_to_mutations.entry(table_id).or_default();
                         if let Some((_, old_row)) = old_table_row {
-                            // TODO not sure about this
-                            mutations.push(TableMutation::Delete(old_row));
-                            mutations.push(TableMutation::Upsert(table_row));
+                            mutations.push(TrackedTableMutation {
+                                start_lsn: update.start_lsn,
+                                commit_lsn: update.commit_lsn,
+                                mutation: TableMutation::Update {
+                                    delete_row: old_row,
+                                    upsert_row: table_row,
+                                },
+                            });
                         } else {
                             debug!(
                                 "update event has no old row, deleting by primary key from new row"
                             );
-                            mutations.push(TableMutation::Replace(table_row));
+                            mutations.push(TrackedTableMutation {
+                                start_lsn: update.start_lsn,
+                                commit_lsn: update.commit_lsn,
+                                mutation: TableMutation::Replace(table_row),
+                            });
                         }
                     }
                     Event::Delete(delete) => {
@@ -346,7 +529,11 @@ where
                         table_id_to_mutations
                             .entry(delete.table_id)
                             .or_default()
-                            .push(TableMutation::Delete(old_row));
+                            .push(TrackedTableMutation {
+                                start_lsn: delete.start_lsn,
+                                commit_lsn: delete.commit_lsn,
+                                mutation: TableMutation::Delete(old_row),
+                            });
                     }
                     event => {
                         debug!(event_type = %event.event_type(), "skipping unsupported event type");
@@ -354,27 +541,21 @@ where
                 }
             }
 
-            // One async task per table. Each write attempt acquires one
-            // blocking slot, then uses a separate pool connection and commits
-            // an independent Parquet snapshot.
             if !table_id_to_mutations.is_empty() {
+                self.ensure_applied_batches_table_exists().await?;
                 let mut join_set = JoinSet::new();
 
                 for (table_id, mutations) in table_id_to_mutations {
                     let table_name = self.ensure_table_exists(table_id).await?;
                     let table_schema = self.get_table_schema(table_id).await?;
-                    let pool = self.pool.clone();
+                    let manager = Arc::clone(&self.manager);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
-                    let prepared_mutations = prepare_table_mutations(&table_schema, mutations)?;
+                    let prepared_batches =
+                        prepare_mutation_table_batches(&table_schema, table_name, mutations)?;
 
                     join_set.spawn(async move {
-                        apply_table_mutations_with_retry(
-                            pool,
-                            blocking_slots,
-                            table_name,
-                            prepared_mutations,
-                        )
-                        .await
+                        apply_table_batches_with_retry(manager, blocking_slots, prepared_batches)
+                            .await
                     });
                 }
 
@@ -385,18 +566,46 @@ where
                 }
             }
 
-            // Collect and deduplicate Truncate events.
-            let mut truncate_table_ids = HashSet::new();
+            // Collect contiguous truncate events while preserving table-local order.
+            let mut truncate_table_ids: HashMap<TableId, Vec<TrackedTruncateEvent>> =
+                HashMap::new();
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate)) = event_iter.next() {
                     for rel_id in truncate.rel_ids {
-                        truncate_table_ids.insert(TableId::new(rel_id));
+                        truncate_table_ids
+                            .entry(TableId::new(rel_id))
+                            .or_default()
+                            .push(TrackedTruncateEvent {
+                                start_lsn: truncate.start_lsn,
+                                commit_lsn: truncate.commit_lsn,
+                                options: truncate.options,
+                            });
                     }
                 }
             }
 
-            for table_id in truncate_table_ids {
-                self.truncate_table_inner(table_id).await?;
+            if !truncate_table_ids.is_empty() {
+                self.ensure_applied_batches_table_exists().await?;
+                let mut join_set = JoinSet::new();
+
+                for (table_id, truncates) in truncate_table_ids {
+                    let table_name = self.ensure_table_exists(table_id).await?;
+                    let manager = Arc::clone(&self.manager);
+                    let blocking_slots = Arc::clone(&self.blocking_slots);
+                    let prepared_batch = prepare_truncate_table_batch(table_name, truncates);
+                    join_set.spawn(async move {
+                        apply_table_batch_with_retry(manager, blocking_slots, prepared_batch).await
+                    });
+                }
+
+                while let Some(result) = join_set.join_next().await {
+                    result.map_err(|_| {
+                        etl_error!(
+                            ErrorKind::ApplyWorkerPanic,
+                            "DuckLake truncate task panicked"
+                        )
+                    })??;
+                }
             }
         }
 
@@ -458,12 +667,12 @@ where
             &format!("{LAKE_CATALOG}.{quoted_table_name}"),
         );
 
-        let pool = self.pool.clone();
+        let manager = Arc::clone(&self.manager);
         let created_tables = Arc::clone(&self.created_tables);
         let table_name_clone = table_name.clone();
 
         run_duckdb_blocking(
-            pool,
+            manager,
             Arc::clone(&self.blocking_slots),
             move |conn| -> EtlResult<()> {
                 match conn.execute_batch(&qualified_ddl) {
@@ -488,6 +697,87 @@ where
         .await?;
 
         Ok(table_name)
+    }
+
+    /// Ensures the ETL-managed replay marker table exists.
+    async fn ensure_applied_batches_table_exists(&self) -> EtlResult<()> {
+        {
+            let created = self.applied_batches_table_created.lock();
+            if *created {
+                return Ok(());
+            }
+        }
+
+        let _table_creation_permit = self
+            .table_creation_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "DuckLake table creation semaphore closed"
+                )
+            })?;
+
+        {
+            let created = self.applied_batches_table_created.lock();
+            if *created {
+                return Ok(());
+            }
+        }
+
+        let ddl = format!(
+            "CREATE TABLE IF NOT EXISTS {LAKE_CATALOG}.\"{APPLIED_BATCHES_TABLE}\" (\
+             table_name VARCHAR NOT NULL, \
+             batch_id VARCHAR NOT NULL, \
+             batch_kind VARCHAR NOT NULL, \
+             first_start_lsn UBIGINT, \
+             last_commit_lsn UBIGINT, \
+             applied_at TIMESTAMPTZ NOT NULL\
+             );"
+        );
+        let created = Arc::clone(&self.applied_batches_table_created);
+        let table_name = APPLIED_BATCHES_TABLE.to_string();
+
+        run_duckdb_blocking(
+            Arc::clone(&self.manager),
+            Arc::clone(&self.blocking_slots),
+            move |conn| -> EtlResult<()> {
+                match conn.execute_batch(&ddl) {
+                    Ok(()) => {}
+                    Err(e) if is_create_table_conflict(&e, &table_name) => {}
+                    Err(e) => {
+                        return Err(etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake CREATE TABLE failed",
+                            format_query_error_detail(&ddl, &e),
+                            source: e
+                        ));
+                    }
+                }
+
+                let set_option_sql = format!(
+                    "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {}, table_name => {});",
+                    APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT,
+                    quote_literal(APPLIED_BATCHES_TABLE),
+                );
+                conn.execute_batch(&set_option_sql).map_err(|e| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake set_option failed",
+                        format_query_error_detail(&set_option_sql, &e),
+                        source: e
+                    )
+                })?;
+
+                *created.lock() = true;
+                Ok(())
+            },
+        )
+        .await?;
+
+        Ok(())
     }
 
     /// Returns the current source schema for `table_id`.
@@ -523,18 +813,28 @@ where
     }
 
     /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a
-    /// permit that matches the DuckDB connection pool capacity.
+    /// permit that matches the configured DuckDB concurrency limit.
     async fn run_duckdb_blocking<R, F>(&self, operation: F) -> EtlResult<R>
     where
         R: Send + 'static,
         F: FnOnce(&duckdb::Connection) -> EtlResult<R> + Send + 'static,
     {
         run_duckdb_blocking(
-            self.pool.clone(),
+            Arc::clone(&self.manager),
             Arc::clone(&self.blocking_slots),
             operation,
         )
         .await
+    }
+
+    /// Dumps file-backed DuckDB logs on destination shutdown when configured.
+    async fn dump_duckdb_logs_inner(&self) -> EtlResult<()> {
+        let Some(duckdb_log) = self.duckdb_log.as_ref().map(Arc::clone) else {
+            return Ok(());
+        };
+
+        self.run_duckdb_blocking(move |conn| dump_duckdb_logs(conn, duckdb_log.as_ref()))
+            .await
     }
 }
 
@@ -559,6 +859,124 @@ pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> DuckLakeTabl
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// Creates parent directories for configured DuckDB log storage paths.
+fn ensure_duckdb_log_paths(duckdb_log: Option<&DuckDbLogConfig>) -> EtlResult<()> {
+    let Some(duckdb_log) = duckdb_log else {
+        return Ok(());
+    };
+
+    ensure_duckdb_log_storage_path(Path::new(&duckdb_log.storage_path))?;
+    ensure_parent_directory(
+        Path::new(&duckdb_log.dump_path),
+        "DuckDB log dump path parent directory creation failed",
+    )?;
+
+    Ok(())
+}
+
+/// Prepares the file-backed storage path used by `CALL enable_logging(...)`.
+fn ensure_duckdb_log_storage_path(storage_path: &Path) -> EtlResult<()> {
+    let is_csv_file = storage_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"));
+
+    if is_csv_file {
+        ensure_parent_directory(
+            storage_path,
+            "DuckDB log storage parent directory creation failed",
+        )
+    } else {
+        fs::create_dir_all(storage_path).map_err(|error| {
+            etl_error!(
+                ErrorKind::ConfigError,
+                "DuckDB log storage directory creation failed",
+                storage_path.display().to_string(),
+                source: error
+            )
+        })
+    }
+}
+
+/// Creates the parent directory of `path` when one is present.
+fn ensure_parent_directory(path: &Path, description: &'static str) -> EtlResult<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(parent).map_err(|error| {
+        etl_error!(
+            ErrorKind::ConfigError,
+            description,
+            parent.display().to_string(),
+            source: error
+        )
+    })
+}
+
+/// Dumps the current `duckdb_logs` relation to the configured CSV file.
+fn dump_duckdb_logs(conn: &duckdb::Connection, duckdb_log: &DuckDbLogConfig) -> EtlResult<()> {
+    let select_sql = "SELECT * FROM duckdb_logs";
+    let mut statement = conn.prepare(select_sql).map_err(|error| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckDB log dump query preparation failed",
+            format_query_error_detail(select_sql, &error),
+            source: error
+        )
+    })?;
+    let mut rows = statement.query([]).map_err(|error| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckDB log dump query failed",
+            format_query_error_detail(select_sql, &error),
+            source: error
+        )
+    })?;
+    let mut row_count = 0usize;
+
+    while rows
+        .next()
+        .map_err(|error| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckDB log dump row fetch failed",
+                format_query_error_detail(select_sql, &error),
+                source: error
+            )
+        })?
+        .is_some()
+    {
+        row_count += 1;
+    }
+    drop(rows);
+    drop(statement);
+
+    let copy_sql = format!(
+        "COPY (SELECT * FROM duckdb_logs) TO {} (FORMAT CSV, HEADER);",
+        quote_literal(&duckdb_log.dump_path)
+    );
+    conn.execute_batch(&copy_sql).map_err(|error| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckDB log dump copy failed",
+            format_query_error_detail(&copy_sql, &error),
+            source: error
+        )
+    })?;
+
+    info!(
+        row_count,
+        dump_path = %duckdb_log.dump_path,
+        "duckdb logs dumped"
+    );
+
+    Ok(())
+}
+
 /// Maximum number of times a failed write attempt is retried before giving up.
 const MAX_COMMIT_RETRIES: u32 = 10;
 /// Initial backoff duration before the first retry.
@@ -569,9 +987,9 @@ const MAX_RETRY_DELAY_MS: u64 = 2_000;
 const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
 
 /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a permit
-/// that matches the DuckDB connection pool capacity.
+/// that matches the configured DuckDB concurrency limit.
 async fn run_duckdb_blocking<R, F>(
-    pool: Pool<DuckLakeConnectionManager>,
+    manager: Arc<DuckLakeConnectionManager>,
     blocking_slots: Arc<Semaphore>,
     operation: F,
 ) -> EtlResult<R>
@@ -590,10 +1008,10 @@ where
         // Please if you modify the code inside this blocking task do not add any
         // blocking operations that could delay other tasks waiting on this slot.
         let _permit = permit;
-        let conn = pool.get().map_err(|e| {
+        let conn = manager.open_connection().map_err(|e| {
             etl_error!(
                 ErrorKind::DestinationConnectionFailed,
-                "Failed to get DuckLake connection from pool",
+                "Failed to open DuckLake connection",
                 source: e
             )
         })?;
@@ -608,72 +1026,28 @@ where
     })?
 }
 
-/// Calls [`insert_rows`] and retries with exponential backoff on failure.
-///
-/// The current implementation preserves the existing broad retry behavior:
-/// any failed write attempt is retried until the retry budget is exhausted.
-async fn insert_rows_with_retry(
-    pool: Pool<DuckLakeConnectionManager>,
+/// Applies all prepared atomic batches for one table, reusing one DuckDB
+/// connection per attempt and skipping already committed segments by marker.
+async fn apply_table_batches_with_retry(
+    manager: Arc<DuckLakeConnectionManager>,
     blocking_slots: Arc<Semaphore>,
-    table_name: DuckLakeTableName,
-    prepared_rows: PreparedRows,
+    batches: Vec<PreparedDuckLakeTableBatch>,
 ) -> EtlResult<()> {
-    let prepared_rows = Arc::new(prepared_rows);
-    let mut delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS);
-
-    for attempt in 0..=MAX_COMMIT_RETRIES {
-        let attempt_table_name = table_name.clone();
-        let attempt_rows = Arc::clone(&prepared_rows);
-
-        match run_duckdb_blocking(pool.clone(), Arc::clone(&blocking_slots), move |conn| {
-            insert_rows(conn, &attempt_table_name, attempt_rows.as_ref())
-        })
-        .await
-        {
-            Ok(()) => return Ok(()),
-            Err(e) if attempt < MAX_COMMIT_RETRIES => {
-                // Apply full-jitter: sleep between 50 % and 150 % of the
-                // calculated delay so concurrent retriers spread out instead
-                // of staying in lock-step and repeatedly colliding.
-                let jitter_ratio = rand::rng().random_range(0.5..=1.5_f64);
-                let jittered = delay.mul_f64(jitter_ratio);
-                warn!(
-                    attempt = attempt + 1,
-                    max = MAX_COMMIT_RETRIES,
-                    table = %table_name,
-                    error = ?e,
-                    "DuckLake write attempt failed, retrying"
-                );
-                tokio::time::sleep(jittered).await;
-                delay = std::cmp::min(delay * 2, Duration::from_millis(MAX_RETRY_DELAY_MS));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    Ok(())
-}
-
-/// Applies an ordered mutation sequence atomically and retries on failure.
-async fn apply_table_mutations_with_retry(
-    pool: Pool<DuckLakeConnectionManager>,
-    blocking_slots: Arc<Semaphore>,
-    table_name: DuckLakeTableName,
-    prepared_mutations: Vec<PreparedTableMutation>,
-) -> EtlResult<()> {
-    if prepared_mutations.is_empty() {
+    if batches.is_empty() {
         return Ok(());
     }
 
-    let prepared_mutations = Arc::new(prepared_mutations);
+    let table_name = batches[0].table_name.clone();
+    let batch_count = batches.len();
+    let batches = Arc::new(batches);
     let mut delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS);
 
     for attempt in 0..=MAX_COMMIT_RETRIES {
-        let attempt_table_name = table_name.clone();
-        let attempt_mutations = Arc::clone(&prepared_mutations);
+        let attempt_batches = Arc::clone(&batches);
 
-        match run_duckdb_blocking(pool.clone(), Arc::clone(&blocking_slots), move |conn| {
-            apply_table_mutations(conn, &attempt_table_name, attempt_mutations.as_slice())
+        match run_duckdb_blocking(Arc::clone(&manager), Arc::clone(&blocking_slots), {
+            let manager = Arc::clone(&manager);
+            move |conn| apply_table_batches(manager.as_ref(), conn, attempt_batches.as_ref())
         })
         .await
         {
@@ -691,10 +1065,134 @@ async fn apply_table_mutations_with_retry(
                 let jitter_ratio = rand::rng().random_range(0.5..=1.5_f64);
                 let jittered = base_delay.mul_f64(jitter_ratio);
                 if is_transient_delete_file_404 {
-                    debug!(
+                    warn!(
                         attempt = attempt + 1,
                         max = MAX_COMMIT_RETRIES,
                         table = %table_name,
+                        batch_count,
+                        delay_ms = jittered.as_millis() as u64,
+                        error = ?e,
+                        "ducklake table batch sequence hit delete-file visibility lag, retrying"
+                    );
+                } else {
+                    warn!(
+                        attempt = attempt + 1,
+                        max = MAX_COMMIT_RETRIES,
+                        table = %table_name,
+                        batch_count,
+                        error = ?e,
+                        "ducklake table batch sequence failed, retrying"
+                    );
+                }
+                tokio::time::sleep(jittered).await;
+                delay = std::cmp::min(
+                    base_delay * 2,
+                    Duration::from_millis(
+                        MAX_RETRY_DELAY_MS.max(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
+                    ),
+                );
+            }
+            Err(e) => {
+                return Err(etl_error!(
+                    ErrorKind::DuckLakeAtomicBatchRetryable,
+                    "DuckLake atomic table batch sequence failed after retries",
+                    format!("table={table_name}, batch_count={batch_count}"),
+                    source: e
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Applies all prepared atomic batches for one table on the same connection.
+fn apply_table_batches(
+    manager: &DuckLakeConnectionManager,
+    conn: &duckdb::Connection,
+    batches: &[PreparedDuckLakeTableBatch],
+) -> EtlResult<()> {
+    for batch in batches {
+        if applied_batch_marker_exists(conn, batch)? {
+            debug!(
+                table = %batch.table_name,
+                batch_id = %batch.batch_id,
+                batch_kind = batch.batch_kind.as_str(),
+                "ducklake table batch already committed, skipping replay"
+            );
+            continue;
+        }
+
+        apply_table_batch(manager, conn, batch).map_err(|error| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake atomic table batch failed",
+                format!(
+                    "table={}, batch_id={}, batch_kind={}",
+                    batch.table_name,
+                    batch.batch_id,
+                    batch.batch_kind.as_str()
+                ),
+                source: error
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Applies one atomic per-table batch and retries on failure.
+async fn apply_table_batch_with_retry(
+    manager: Arc<DuckLakeConnectionManager>,
+    blocking_slots: Arc<Semaphore>,
+    batch: PreparedDuckLakeTableBatch,
+) -> EtlResult<()> {
+    let table_name = batch.table_name.clone();
+    let batch_id = batch.batch_id.clone();
+    let batch_kind = batch.batch_kind;
+    let batch = Arc::new(batch);
+    let mut delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS);
+
+    for attempt in 0..=MAX_COMMIT_RETRIES {
+        let attempt_batch = Arc::clone(&batch);
+
+        match run_duckdb_blocking(Arc::clone(&manager), Arc::clone(&blocking_slots), {
+            let manager = Arc::clone(&manager);
+            move |conn| {
+                if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
+                    debug!(
+                        table = %attempt_batch.table_name,
+                        batch_id = %attempt_batch.batch_id,
+                        batch_kind = batch_kind.as_str(),
+                        "ducklake table batch already committed, skipping replay"
+                    );
+                    return Ok(());
+                }
+
+                apply_table_batch(manager.as_ref(), conn, attempt_batch.as_ref())
+            }
+        })
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < MAX_COMMIT_RETRIES => {
+                let is_transient_delete_file_404 = is_transient_ducklake_delete_file_not_found(&e);
+                let base_delay = if is_transient_delete_file_404 {
+                    std::cmp::max(
+                        delay,
+                        Duration::from_millis(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
+                    )
+                } else {
+                    delay
+                };
+                let jitter_ratio = rand::rng().random_range(0.5..=1.5_f64);
+                let jittered = base_delay.mul_f64(jitter_ratio);
+                if is_transient_delete_file_404 {
+                    warn!(
+                        attempt = attempt + 1,
+                        max = MAX_COMMIT_RETRIES,
+                        table = %table_name,
+                        batch_id = %batch_id,
                         delay_ms = jittered.as_millis() as u64,
                         error = ?e,
                         "ducklake delete file not visible yet, retrying"
@@ -704,6 +1202,7 @@ async fn apply_table_mutations_with_retry(
                         attempt = attempt + 1,
                         max = MAX_COMMIT_RETRIES,
                         table = %table_name,
+                        batch_id = %batch_id,
                         error = ?e,
                         "ducklake table mutation attempt failed, retrying"
                     );
@@ -716,7 +1215,17 @@ async fn apply_table_mutations_with_retry(
                     ),
                 );
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                return Err(etl_error!(
+                    ErrorKind::DuckLakeAtomicBatchRetryable,
+                    "DuckLake atomic table batch failed after retries",
+                    format!(
+                        "table={table_name}, batch_id={batch_id}, batch_kind={}",
+                        batch_kind.as_str()
+                    ),
+                    source: e
+                ));
+            }
         }
     }
 
@@ -741,6 +1250,133 @@ fn is_transient_ducklake_delete_file_not_found(error: &etl::error::EtlError) -> 
     false
 }
 
+/// Prepares ordered atomic batches for one table's CDC mutations.
+///
+/// Contiguous inserts stay batched together, while contiguous non-insert
+/// mutations are grouped into bounded micro-batches.
+fn prepare_mutation_table_batches(
+    table_schema: &TableSchema,
+    table_name: DuckLakeTableName,
+    tracked_mutations: Vec<TrackedTableMutation>,
+) -> EtlResult<Vec<PreparedDuckLakeTableBatch>> {
+    let mut prepared_batches = Vec::new();
+    let mut pending_inserts = Vec::new();
+    let mut pending_non_inserts = Vec::new();
+
+    for tracked_mutation in tracked_mutations {
+        match tracked_mutation.mutation {
+            TableMutation::Insert(_) => {
+                push_prepared_mutation_batch(
+                    &mut prepared_batches,
+                    table_schema,
+                    &table_name,
+                    std::mem::take(&mut pending_non_inserts),
+                )?;
+                pending_inserts.push(tracked_mutation);
+            }
+            TableMutation::Delete(_) | TableMutation::Update { .. } | TableMutation::Replace(_) => {
+                push_prepared_mutation_batch(
+                    &mut prepared_batches,
+                    table_schema,
+                    &table_name,
+                    std::mem::take(&mut pending_inserts),
+                )?;
+                pending_non_inserts.push(tracked_mutation);
+                if pending_non_inserts.len() >= NON_INSERT_MUTATION_BATCH_SIZE {
+                    push_prepared_mutation_batch(
+                        &mut prepared_batches,
+                        table_schema,
+                        &table_name,
+                        std::mem::take(&mut pending_non_inserts),
+                    )?;
+                }
+            }
+        }
+    }
+
+    push_prepared_mutation_batch(
+        &mut prepared_batches,
+        table_schema,
+        &table_name,
+        pending_inserts,
+    )?;
+    push_prepared_mutation_batch(
+        &mut prepared_batches,
+        table_schema,
+        &table_name,
+        pending_non_inserts,
+    )?;
+
+    Ok(prepared_batches)
+}
+
+/// Builds one prepared atomic batch from an ordered slice of tracked mutations.
+fn push_prepared_mutation_batch(
+    prepared_batches: &mut Vec<PreparedDuckLakeTableBatch>,
+    table_schema: &TableSchema,
+    table_name: &str,
+    tracked_mutations: Vec<TrackedTableMutation>,
+) -> EtlResult<()> {
+    if tracked_mutations.is_empty() {
+        return Ok(());
+    }
+
+    let identity = build_mutation_batch_identity(table_name, table_schema, &tracked_mutations)?;
+    let mutations = tracked_mutations
+        .into_iter()
+        .map(|tracked| tracked.mutation)
+        .collect();
+
+    prepared_batches.push(PreparedDuckLakeTableBatch {
+        table_name: table_name.to_string(),
+        batch_id: identity.batch_id,
+        batch_kind: DuckLakeTableBatchKind::Mutation,
+        first_start_lsn: identity.first_start_lsn,
+        last_commit_lsn: identity.last_commit_lsn,
+        action: PreparedDuckLakeTableBatchAction::Mutation(prepare_table_mutations(
+            table_schema,
+            mutations,
+        )?),
+    });
+
+    Ok(())
+}
+
+/// Prepares one retry-safe atomic batch for a table-copy row chunk.
+fn prepare_copy_table_batch(
+    table_schema: &TableSchema,
+    table_name: DuckLakeTableName,
+    table_rows: Vec<TableRow>,
+) -> EtlResult<PreparedDuckLakeTableBatch> {
+    let identity = build_copy_batch_identity(&table_name, table_schema, &table_rows)?;
+    Ok(PreparedDuckLakeTableBatch {
+        table_name,
+        batch_id: identity.batch_id,
+        batch_kind: DuckLakeTableBatchKind::Copy,
+        first_start_lsn: identity.first_start_lsn,
+        last_commit_lsn: identity.last_commit_lsn,
+        action: PreparedDuckLakeTableBatchAction::Mutation(vec![PreparedTableMutation::Upsert(
+            prepare_rows(table_rows),
+        )]),
+    })
+}
+
+/// Prepares the ordered atomic batch for one table's truncate events.
+fn prepare_truncate_table_batch(
+    table_name: DuckLakeTableName,
+    tracked_truncates: Vec<TrackedTruncateEvent>,
+) -> PreparedDuckLakeTableBatch {
+    let identity = build_truncate_batch_identity(&table_name, &tracked_truncates);
+    PreparedDuckLakeTableBatch {
+        table_name,
+        batch_id: identity.batch_id,
+        batch_kind: DuckLakeTableBatchKind::Truncate,
+        first_start_lsn: identity.first_start_lsn,
+        last_commit_lsn: identity.last_commit_lsn,
+        action: PreparedDuckLakeTableBatchAction::Truncate,
+    }
+}
+
 /// Groups ordered row mutations into retryable DuckDB operations.
 fn prepare_table_mutations(
     table_schema: &TableSchema,
@@ -752,11 +1388,12 @@ fn prepare_table_mutations(
 
     for mutation in mutations {
         match mutation {
-            TableMutation::Upsert(row) => {
+            TableMutation::Insert(row) => {
                 if !delete_predicates.is_empty() {
-                    prepared_mutations.push(PreparedTableMutation::Delete(std::mem::take(
-                        &mut delete_predicates,
-                    )));
+                    prepared_mutations.push(PreparedTableMutation::Delete {
+                        predicates: std::mem::take(&mut delete_predicates),
+                        origin: "delete",
+                    });
                 }
                 upsert_rows.push(row);
             }
@@ -768,6 +1405,30 @@ fn prepare_table_mutations(
                 }
                 delete_predicates.push(delete_predicate_from_row(table_schema, &row)?);
             }
+            TableMutation::Update {
+                delete_row,
+                upsert_row,
+            } => {
+                if !upsert_rows.is_empty() {
+                    prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(
+                        std::mem::take(&mut upsert_rows),
+                    )));
+                }
+                if !delete_predicates.is_empty() {
+                    prepared_mutations.push(PreparedTableMutation::Delete {
+                        predicates: std::mem::take(&mut delete_predicates),
+                        origin: "delete",
+                    });
+                }
+
+                prepared_mutations.push(PreparedTableMutation::Delete {
+                    predicates: vec![delete_predicate_from_row(table_schema, &delete_row)?],
+                    origin: "update",
+                });
+                prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(vec![
+                    upsert_row,
+                ])));
+            }
             TableMutation::Replace(row) => {
                 if !upsert_rows.is_empty() {
                     prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(
@@ -775,14 +1436,16 @@ fn prepare_table_mutations(
                     )));
                 }
                 if !delete_predicates.is_empty() {
-                    prepared_mutations.push(PreparedTableMutation::Delete(std::mem::take(
-                        &mut delete_predicates,
-                    )));
+                    prepared_mutations.push(PreparedTableMutation::Delete {
+                        predicates: std::mem::take(&mut delete_predicates),
+                        origin: "delete",
+                    });
                 }
 
-                prepared_mutations.push(PreparedTableMutation::Delete(vec![
-                    delete_predicate_from_row(table_schema, &row)?,
-                ]));
+                prepared_mutations.push(PreparedTableMutation::Delete {
+                    predicates: vec![delete_predicate_from_row(table_schema, &row)?],
+                    origin: "replace",
+                });
                 prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(vec![row])));
             }
         }
@@ -792,7 +1455,10 @@ fn prepare_table_mutations(
         prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(upsert_rows)));
     }
     if !delete_predicates.is_empty() {
-        prepared_mutations.push(PreparedTableMutation::Delete(delete_predicates));
+        prepared_mutations.push(PreparedTableMutation::Delete {
+            predicates: delete_predicates,
+            origin: "delete",
+        });
     }
 
     Ok(prepared_mutations)
@@ -843,39 +1509,244 @@ fn delete_predicate_from_row(table_schema: &TableSchema, row: &TableRow) -> EtlR
     Ok(predicates.join(" AND "))
 }
 
-/// Inserts all prepared rows into `lake."table_name"` as a **single
-/// Parquet data file**.
-///
-/// ## Why staging?
-///
-/// DuckLake creates one Parquet data file **per DML statement** that touches a
-/// table, even inside a transaction.  Calling `stmt.execute()` in a loop
-/// therefore creates one file per row — extremely inefficient.
-///
-/// The solution is to:
-/// 1. Load all rows into a local in-memory DuckDB staging table using the
-///    fast Appender API (no DuckLake involvement, no files written).
-/// 2. Issue a **single** `INSERT INTO lake.t SELECT * FROM staging` inside a
-///    transaction.  DuckLake sees one DML statement → one Parquet file for
-///    the entire batch, regardless of row count.
-///
-/// On any failure the transaction is rolled back and the staging table is
-/// always dropped before returning.
-fn insert_rows(
-    conn: &duckdb::Connection,
+/// Builds a deterministic identity for one ordered mutation batch.
+fn build_mutation_batch_identity(
     table_name: &str,
-    prepared_rows: &PreparedRows,
-) -> EtlResult<()> {
-    let row_count = match prepared_rows {
-        PreparedRows::Appender(values) => values.len(),
-        PreparedRows::SqlLiterals(values) => values.len(),
-    };
+    table_schema: &TableSchema,
+    tracked_mutations: &[TrackedTableMutation],
+) -> EtlResult<DuckLakeBatchIdentity> {
+    let mut hasher = BatchIdHasher::new();
+    "mutation".hash(&mut hasher);
+    table_name.hash(&mut hasher);
 
-    if row_count == 0 {
-        return Ok(());
+    for tracked_mutation in tracked_mutations {
+        u64::from(tracked_mutation.start_lsn).hash(&mut hasher);
+        u64::from(tracked_mutation.commit_lsn).hash(&mut hasher);
+
+        match &tracked_mutation.mutation {
+            TableMutation::Insert(row) => {
+                "insert".hash(&mut hasher);
+                hash_table_row_ref(&mut hasher, row);
+            }
+            TableMutation::Delete(row) => {
+                "delete".hash(&mut hasher);
+                delete_predicate_from_row(table_schema, row)?.hash(&mut hasher);
+            }
+            TableMutation::Update {
+                delete_row,
+                upsert_row,
+            } => {
+                "update".hash(&mut hasher);
+                delete_predicate_from_row(table_schema, delete_row)?.hash(&mut hasher);
+                hash_table_row_ref(&mut hasher, upsert_row);
+            }
+            TableMutation::Replace(row) => {
+                "replace".hash(&mut hasher);
+                delete_predicate_from_row(table_schema, row)?.hash(&mut hasher);
+                hash_table_row_ref(&mut hasher, row);
+            }
+        }
     }
 
+    Ok(build_batch_identity(
+        DuckLakeTableBatchKind::Mutation,
+        tracked_mutations
+            .first()
+            .map(|tracked_mutation| tracked_mutation.start_lsn),
+        tracked_mutations
+            .last()
+            .map(|tracked_mutation| tracked_mutation.commit_lsn),
+        hasher.finish(),
+    ))
+}
+
+/// Builds a deterministic identity for one ordered table-copy batch.
+fn build_copy_batch_identity(
+    table_name: &str,
+    table_schema: &TableSchema,
+    table_rows: &[TableRow],
+) -> EtlResult<DuckLakeBatchIdentity> {
+    let mut hasher = BatchIdHasher::new();
+    "copy".hash(&mut hasher);
+    table_name.hash(&mut hasher);
+
+    for row in table_rows {
+        delete_predicate_from_row(table_schema, row)?.hash(&mut hasher);
+        hash_table_row_ref(&mut hasher, row);
+    }
+
+    Ok(build_batch_identity(
+        DuckLakeTableBatchKind::Copy,
+        None,
+        None,
+        hasher.finish(),
+    ))
+}
+
+/// Builds a deterministic identity for one ordered truncate batch.
+fn build_truncate_batch_identity(
+    table_name: &str,
+    tracked_truncates: &[TrackedTruncateEvent],
+) -> DuckLakeBatchIdentity {
+    let mut hasher = BatchIdHasher::new();
+    "truncate".hash(&mut hasher);
+    table_name.hash(&mut hasher);
+
+    for tracked_truncate in tracked_truncates {
+        u64::from(tracked_truncate.start_lsn).hash(&mut hasher);
+        u64::from(tracked_truncate.commit_lsn).hash(&mut hasher);
+        tracked_truncate.options.hash(&mut hasher);
+    }
+
+    build_batch_identity(
+        DuckLakeTableBatchKind::Truncate,
+        tracked_truncates
+            .first()
+            .map(|tracked_truncate| tracked_truncate.start_lsn),
+        tracked_truncates
+            .last()
+            .map(|tracked_truncate| tracked_truncate.commit_lsn),
+        hasher.finish(),
+    )
+}
+
+/// Builds the final persisted batch identity string.
+fn build_batch_identity(
+    batch_kind: DuckLakeTableBatchKind,
+    first_start_lsn: Option<PgLsn>,
+    last_commit_lsn: Option<PgLsn>,
+    fingerprint: u64,
+) -> DuckLakeBatchIdentity {
+    let first_start_lsn_u64 = first_start_lsn.map(u64::from).unwrap_or_default();
+    let last_commit_lsn_u64 = last_commit_lsn.map(u64::from).unwrap_or_default();
+
+    DuckLakeBatchIdentity {
+        batch_id: format!(
+            "{}:{first_start_lsn_u64:016x}:{last_commit_lsn_u64:016x}:{fingerprint:016x}",
+            batch_kind.as_str()
+        ),
+        first_start_lsn,
+        last_commit_lsn,
+    }
+}
+
+/// Hashes a row using its SQL literal form so retries are independent of appender encoding.
+fn hash_table_row_ref(hasher: &mut BatchIdHasher, row: &TableRow) {
+    table_row_to_sql_literal_ref(row).hash(hasher);
+}
+
+/// Returns whether the atomic batch marker already exists.
+fn applied_batch_marker_exists(
+    conn: &duckdb::Connection,
+    batch: &PreparedDuckLakeTableBatch,
+) -> EtlResult<bool> {
+    let sql = format!(
+        "SELECT 1 FROM {LAKE_CATALOG}.\"{APPLIED_BATCHES_TABLE}\" \
+         WHERE table_name = {} AND batch_id = {} LIMIT 1;",
+        quote_literal(&batch.table_name),
+        quote_literal(&batch.batch_id)
+    );
+    let mut statement = conn.prepare(&sql).map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake marker query prepare failed",
+            format_query_error_detail(&sql, &e),
+            source: e
+        )
+    })?;
+    let mut rows = statement.query([]).map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake marker query failed",
+            format_query_error_detail(&sql, &e),
+            source: e
+        )
+    })?;
+
+    rows.next().map(|row| row.is_some()).map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake marker query row fetch failed",
+            format_query_error_detail(&sql, &e),
+            source: e
+        )
+    })
+}
+
+/// Inserts the atomic batch marker inside the open DuckLake transaction.
+fn insert_applied_batch_marker(
+    conn: &duckdb::Connection,
+    batch: &PreparedDuckLakeTableBatch,
+) -> EtlResult<()> {
+    let sql = format!(
+        "INSERT INTO {LAKE_CATALOG}.\"{APPLIED_BATCHES_TABLE}\" \
+         (table_name, batch_id, batch_kind, first_start_lsn, last_commit_lsn, applied_at) VALUES \
+         ({}, {}, {}, {}, {}, current_timestamp);",
+        quote_literal(&batch.table_name),
+        quote_literal(&batch.batch_id),
+        quote_literal(batch.batch_kind.as_str()),
+        optional_lsn_to_sql_literal(batch.first_start_lsn),
+        optional_lsn_to_sql_literal(batch.last_commit_lsn),
+    );
+    conn.execute_batch(&sql).map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake batch marker insert failed",
+            format_query_error_detail(&sql, &e),
+            source: e
+        )
+    })?;
+    Ok(())
+}
+
+/// Deletes persisted markers for one table and batch kind.
+fn clear_applied_batch_markers_for_kind(
+    conn: &duckdb::Connection,
+    table_name: &str,
+    batch_kind: DuckLakeTableBatchKind,
+) -> EtlResult<()> {
+    let sql = format!(
+        "DELETE FROM {LAKE_CATALOG}.\"{APPLIED_BATCHES_TABLE}\" \
+         WHERE table_name = {} AND batch_kind = {};",
+        quote_literal(table_name),
+        quote_literal(batch_kind.as_str())
+    );
+    conn.execute_batch(&sql).map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake batch marker delete failed",
+            format_query_error_detail(&sql, &e),
+            source: e
+        )
+    })?;
+    Ok(())
+}
+
+/// Applies one atomic per-table batch in a single DuckLake transaction.
+fn apply_table_batch(
+    manager: &DuckLakeConnectionManager,
+    conn: &duckdb::Connection,
+    batch: &PreparedDuckLakeTableBatch,
+) -> EtlResult<()> {
+    let diagnostics_conn = if batch_diagnostics_enabled() && tracing::enabled!(Level::INFO) {
+        match manager.open_connection() {
+            Ok(conn) => Some(conn),
+            Err(error) => {
+                debug!(
+                    table = %batch.table_name,
+                    batch_id = %batch.batch_id,
+                    error = ?error,
+                    "ducklake diagnostics connection open failed"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
+        tracing::error!(?e, "error transaction");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake BEGIN TRANSACTION failed",
@@ -883,50 +1754,86 @@ fn insert_rows(
         )
     })?;
 
-    match apply_upsert_mutation(conn, table_name, prepared_rows) {
-        Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
-            let _ = conn.execute_batch("ROLLBACK");
-            etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", source: e)
-        }),
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
+    let result = (|| -> EtlResult<()> {
+        match &batch.action {
+            PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => {
+                for prepared_mutation in prepared_mutations {
+                    apply_table_mutation(conn, &batch.table_name, prepared_mutation)?;
+                }
+            }
+            PreparedDuckLakeTableBatchAction::Truncate => {
+                apply_truncate_batch_action(conn, &batch.table_name)?;
+            }
+        }
+
+        insert_applied_batch_marker(conn, batch)?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT").map_err(|e| {
+                tracing::error!(?e, "error commit");
+
+                let err = conn.execute_batch("ROLLBACK");
+                if let Err(err) = err {
+                    tracing::error!(?err, "error rollback");
+                }
+                etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", source: e)
+            })?;
+
+            if tracing::enabled!(Level::INFO)
+                && let Some(diagnostics_conn) = diagnostics_conn.as_ref()
+            {
+                let row_count_after =
+                    query_table_row_count(diagnostics_conn, &batch.table_name).ok();
+                info!(
+                    table = %batch.table_name,
+                    batch_id = %batch.batch_id,
+                    batch_kind = batch.batch_kind.as_str(),
+                    first_start_lsn = ?batch.first_start_lsn,
+                    last_commit_lsn = ?batch.last_commit_lsn,
+                    row_count_after,
+                    sub_batch_kind = batch_log_kind(batch),
+                    insert_sub_batch_rows = insert_sub_batch_rows(batch),
+                    "ducklake batch committed"
+                );
+            }
+
+            #[cfg(feature = "test-utils")]
+            maybe_fail_after_committed_batch_for_tests(batch.batch_kind, &batch.table_name)?;
+
+            Ok(())
+        }
+        Err(error) => {
+            let err = conn.execute_batch("ROLLBACK");
+            if let Err(err) = err {
+                tracing::error!(?err, "error rollback");
+            }
+            Err(error)
         }
     }
 }
 
-/// Applies a per-table CDC mutation sequence in one transaction.
-fn apply_table_mutations(
-    conn: &duckdb::Connection,
-    table_name: &str,
-    prepared_mutations: &[PreparedTableMutation],
-) -> EtlResult<()> {
-    if prepared_mutations.is_empty() {
-        return Ok(());
-    }
-
-    conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
+/// Applies the truncate action inside an open transaction.
+fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> EtlResult<()> {
+    let sql = format!("DELETE FROM {LAKE_CATALOG}.\"{table_name}\";");
+    conn.execute_batch(&sql).map_err(|e| {
+        tracing::error!(?e, "error DELETE");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
-            "DuckLake BEGIN TRANSACTION failed",
+            "DuckLake DELETE failed",
+            format_query_error_detail(&sql, &e),
             source: e
         )
     })?;
+    Ok(())
+}
 
-    let result = prepared_mutations
-        .iter()
-        .try_for_each(|mutation| apply_table_mutation(conn, table_name, mutation));
-
-    match result {
-        Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
-            let _ = conn.execute_batch("ROLLBACK");
-            etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", source: e)
-        }),
-        Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(error)
-        }
-    }
+/// Formats an optional LSN for marker-table inserts.
+fn optional_lsn_to_sql_literal(lsn: Option<PgLsn>) -> String {
+    lsn.map(|value| u64::from(value).to_string())
+        .unwrap_or_else(|| "NULL".to_string())
 }
 
 /// Applies one prepared table mutation inside an open transaction.
@@ -939,7 +1846,7 @@ fn apply_table_mutation(
         PreparedTableMutation::Upsert(prepared_rows) => {
             apply_upsert_mutation(conn, table_name, prepared_rows)
         }
-        PreparedTableMutation::Delete(predicates) => {
+        PreparedTableMutation::Delete { predicates, .. } => {
             apply_delete_mutation(conn, table_name, predicates.as_slice())
         }
     }
@@ -962,7 +1869,7 @@ fn apply_upsert_mutation(
 
     // Staging table lives entirely in-memory (regular DuckDB, not DuckLake).
     // TEMP tables are connection-local so there is no cross-connection conflict
-    // even when multiple pool connections run concurrently.
+    // even when multiple DuckDB connections run concurrently.
     let staging = format!("__staging_{table_name}");
 
     // Mirror the DuckLake target schema without copying any data.
@@ -971,6 +1878,8 @@ fn apply_upsert_mutation(
          SELECT * FROM {LAKE_CATALOG}.\"{table_name}\" LIMIT 0;"
     ))
     .map_err(|e| {
+        tracing::error!(?e, "error CREATE TEMP TABLE");
+
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake staging table creation failed",
@@ -981,6 +1890,7 @@ fn apply_upsert_mutation(
     let load_result = match prepared_rows {
         PreparedRows::Appender(all_values) => (|| {
             let mut appender = conn.appender(&staging).map_err(|e| {
+                tracing::error!(?e, "error appender");
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake staging appender creation failed",
@@ -991,6 +1901,7 @@ fn apply_upsert_mutation(
                 appender
                     .append_row(duckdb::appender_params_from_iter(values))
                     .map_err(|e| {
+                        tracing::error!(?e, "error append row");
                         etl_error!(
                             ErrorKind::DestinationQueryFailed,
                             "DuckLake staging append_row failed",
@@ -999,6 +1910,7 @@ fn apply_upsert_mutation(
                     })?;
             }
             appender.flush().map_err(|e| {
+                tracing::error!(?e, "error flush");
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake staging appender flush failed",
@@ -1012,7 +1924,13 @@ fn apply_upsert_mutation(
     };
 
     if let Err(error) = load_result {
-        let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging:?}"));
+        tracing::error!(?error, "error LOAD RESULT");
+
+        let res = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging:?}"));
+        if let Err(e) = res {
+            tracing::error!(?e, "error drop table staging");
+        }
+
         return Err(error);
     }
 
@@ -1021,6 +1939,7 @@ fn apply_upsert_mutation(
             "INSERT INTO {LAKE_CATALOG}.\"{table_name}\" SELECT * FROM {staging:?};"
         ))
         .map_err(|e| {
+            tracing::error!(?e, "error INSERT INTO");
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake INSERT SELECT failed",
@@ -1028,7 +1947,13 @@ fn apply_upsert_mutation(
             )
         });
 
-    let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging:?}"));
+    let res = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging:?}"));
+    if let Err(e) = res {
+        tracing::error!(?e, "error drop table staging");
+    }
+    if let Err(e) = &result {
+        tracing::error!(?e, "error INSERT result");
+    }
 
     result
 }
@@ -1044,15 +1969,16 @@ fn apply_delete_mutation(
     }
 
     for chunk in predicates.chunks(SQL_DELETE_BATCH_SIZE) {
-        conn.execute_batch(&format!(
-            "DELETE FROM {LAKE_CATALOG}.\"{table_name}\" WHERE {};",
-            chunk
-                .iter()
-                .map(|predicate| format!("({predicate})"))
-                .collect::<Vec<_>>()
-                .join(" OR ")
-        ))
-        .map_err(|e| {
+        let where_clause = chunk
+            .iter()
+            .map(|predicate| format!("({predicate})"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        let sql_query =
+            format!("DELETE FROM {LAKE_CATALOG}.\"{table_name}\" WHERE {where_clause};",);
+        conn.execute_batch(&sql_query).map_err(|e| {
+            tracing::error!(?e, "error DELETE FROM");
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake DELETE failed",
@@ -1062,6 +1988,67 @@ fn apply_delete_mutation(
     }
 
     Ok(())
+}
+
+/// Returns whether expensive post-commit batch diagnostics are enabled.
+fn batch_diagnostics_enabled() -> bool {
+    env::var(BATCH_DIAGNOSTICS_ENV_VAR)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Returns the visible row count for one DuckLake table.
+fn query_table_row_count(
+    conn: &duckdb::Connection,
+    table_name: &str,
+) -> Result<i64, duckdb::Error> {
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM {LAKE_CATALOG}.\"{table_name}\";"),
+        [],
+        |row| row.get(0),
+    )
+}
+
+/// Returns the insert row count when the batch is a pure insert sub-batch.
+fn insert_sub_batch_rows(batch: &PreparedDuckLakeTableBatch) -> Option<usize> {
+    let PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) = &batch.action else {
+        return None;
+    };
+
+    if prepared_mutations.len() != 1 {
+        return None;
+    }
+
+    match &prepared_mutations[0] {
+        PreparedTableMutation::Upsert(prepared_rows) => Some(match prepared_rows {
+            PreparedRows::Appender(values) => values.len(),
+            PreparedRows::SqlLiterals(values) => values.len(),
+        }),
+        PreparedTableMutation::Delete { .. } => None,
+    }
+}
+
+/// Classifies a prepared batch for concise INFO logging.
+fn batch_log_kind(batch: &PreparedDuckLakeTableBatch) -> &'static str {
+    match &batch.action {
+        PreparedDuckLakeTableBatchAction::Truncate => "truncate",
+        PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => {
+            match prepared_mutations.as_slice() {
+                [PreparedTableMutation::Upsert(_)] => "insert",
+                [PreparedTableMutation::Delete { origin, .. }] => origin,
+                [
+                    PreparedTableMutation::Delete { origin, .. },
+                    PreparedTableMutation::Upsert(_),
+                ] => origin,
+                _ => "mutation",
+            }
+        }
+    }
 }
 
 /// Inserts rows into the local staging table using SQL literals.
@@ -1076,6 +2063,7 @@ fn insert_rows_into_staging_with_sql(
             chunk.join(", ")
         ))
         .map_err(|e| {
+            tracing::error!(?e, "error insert_rows_into_staging_with_sql");
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake staging row insert failed",
@@ -1116,11 +2104,16 @@ fn cell_requires_sql_literals(cell: &Cell) -> bool {
 
 /// Serializes a row into a SQL `VALUES (...)` tuple.
 fn table_row_to_sql_literal(row: TableRow) -> String {
+    table_row_to_sql_literal_ref(&row)
+}
+
+/// Serializes a borrowed row into a SQL `VALUES (...)` tuple.
+fn table_row_to_sql_literal_ref(row: &TableRow) -> String {
     format!(
         "({})",
-        row.into_values()
-            .into_iter()
-            .map(cell_to_sql_literal)
+        row.values()
+            .iter()
+            .map(|cell| cell_to_sql_literal(cell_to_owned(cell)))
             .collect::<Vec<_>>()
             .join(", ")
     )
@@ -1496,6 +2489,76 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
     Value::List(values)
 }
 
+#[cfg(feature = "test-utils")]
+static FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE: LazyLock<Mutex<Option<String>>> =
+    LazyLock::new(|| Mutex::new(None));
+#[cfg(feature = "test-utils")]
+static FAIL_AFTER_COPY_BATCH_COMMIT_TABLE: LazyLock<Mutex<Option<String>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// Arms a test hook that injects one post-commit failure for the next atomic batch.
+#[cfg(feature = "test-utils")]
+pub fn arm_fail_after_atomic_batch_commit_once_for_tests(table_name: &str) {
+    *FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_string());
+}
+
+/// Arms a test hook that injects one post-commit failure for the next copy batch.
+#[cfg(feature = "test-utils")]
+pub fn arm_fail_after_copy_batch_commit_once_for_tests(table_name: &str) {
+    *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_string());
+}
+
+/// Clears DuckLake destination test hooks.
+#[cfg(feature = "test-utils")]
+pub fn reset_ducklake_test_hooks() {
+    *FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock() = None;
+    *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = None;
+}
+
+/// Injects a synthetic failure after commit so retries must rely on the correct marker path.
+#[cfg(feature = "test-utils")]
+fn maybe_fail_after_committed_batch_for_tests(
+    batch_kind: DuckLakeTableBatchKind,
+    table_name: &str,
+) -> EtlResult<()> {
+    match batch_kind {
+        DuckLakeTableBatchKind::Copy => maybe_fail_after_copy_batch_commit_for_tests(table_name),
+        DuckLakeTableBatchKind::Mutation | DuckLakeTableBatchKind::Truncate => {
+            maybe_fail_after_atomic_batch_commit_for_tests(table_name)
+        }
+    }
+}
+
+/// Injects a synthetic failure after commit so retries must rely on the marker table.
+#[cfg(feature = "test-utils")]
+fn maybe_fail_after_atomic_batch_commit_for_tests(table_name: &str) -> EtlResult<()> {
+    let mut fail_table = FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock();
+    if fail_table.as_deref() == Some(table_name) {
+        *fail_table = None;
+        return Err(etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "ducklake test hook injected post-commit failure"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Injects a synthetic failure after commit so copy retries must rely on the marker table.
+#[cfg(feature = "test-utils")]
+fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<()> {
+    let mut fail_table = FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock();
+    if fail_table.as_deref() == Some(table_name) {
+        *fail_table = None;
+        return Err(etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "ducklake test hook injected copy post-commit failure"
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1629,8 +2692,9 @@ mod tests {
 
         assert_eq!(prepared.len(), 2);
         match &prepared[0] {
-            PreparedTableMutation::Delete(predicates) => {
+            PreparedTableMutation::Delete { predicates, origin } => {
                 assert_eq!(predicates, &vec!["id = 1".to_string()]);
+                assert_eq!(origin, &"replace");
             }
             PreparedTableMutation::Upsert(_) => panic!("expected delete first"),
         }
@@ -1641,8 +2705,416 @@ mod tests {
             PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
                 panic!("expected appender payload")
             }
-            PreparedTableMutation::Delete(_) => panic!("expected upsert second"),
+            PreparedTableMutation::Delete { .. } => panic!("expected upsert second"),
         }
+    }
+
+    #[test]
+    fn test_prepare_table_mutations_update_emits_delete_then_upsert() {
+        let table_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ],
+        );
+        let prepared = prepare_table_mutations(
+            &table_schema,
+            vec![TableMutation::Update {
+                delete_row: TableRow::new(vec![Cell::I32(1), Cell::String("before".to_string())]),
+                upsert_row: TableRow::new(vec![Cell::I32(1), Cell::String("after".to_string())]),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(prepared.len(), 2);
+        match &prepared[0] {
+            PreparedTableMutation::Delete { predicates, origin } => {
+                assert_eq!(predicates, &vec!["id = 1".to_string()]);
+                assert_eq!(origin, &"update");
+            }
+            PreparedTableMutation::Upsert(_) => panic!("expected delete first"),
+        }
+        match &prepared[1] {
+            PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
+                assert_eq!(rows.len(), 1);
+            }
+            PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
+                panic!("expected appender payload")
+            }
+            PreparedTableMutation::Delete { .. } => panic!("expected upsert second"),
+        }
+    }
+
+    #[test]
+    fn test_prepare_mutation_table_batches_insert_only_uses_single_upsert_operation() {
+        let table_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ],
+        );
+        let batches = prepare_mutation_table_batches(
+            &table_schema,
+            "public_users".to_string(),
+            vec![
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(10),
+                    commit_lsn: PgLsn::from(20),
+                    mutation: TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(1),
+                        Cell::String("alice".to_string()),
+                    ])),
+                },
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(10),
+                    commit_lsn: PgLsn::from(20),
+                    mutation: TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(2),
+                        Cell::String("bob".to_string()),
+                    ])),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].batch_kind, DuckLakeTableBatchKind::Mutation);
+        match &batches[0].action {
+            PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
+                assert_eq!(prepared.len(), 1);
+                match &prepared[0] {
+                    PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
+                        assert_eq!(rows.len(), 2);
+                    }
+                    PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
+                        panic!("expected appender payload")
+                    }
+                    PreparedTableMutation::Delete { .. } => panic!("expected upsert"),
+                }
+            }
+            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+        }
+    }
+
+    #[test]
+    fn test_prepare_mutation_table_batches_split_mixed_cdc_at_delete_boundaries() {
+        let table_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ],
+        );
+        let batches = prepare_mutation_table_batches(
+            &table_schema,
+            "public_users".to_string(),
+            vec![
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(100),
+                    commit_lsn: PgLsn::from(110),
+                    mutation: TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(0),
+                        Cell::String("seed".to_string()),
+                    ])),
+                },
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(100),
+                    commit_lsn: PgLsn::from(110),
+                    mutation: TableMutation::Delete(TableRow::new(vec![
+                        Cell::I32(0),
+                        Cell::String("seed".to_string()),
+                    ])),
+                },
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(100),
+                    commit_lsn: PgLsn::from(110),
+                    mutation: TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(999),
+                        Cell::String("tail".to_string()),
+                    ])),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 3);
+
+        match &batches[0].action {
+            PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
+                assert_eq!(prepared.len(), 1);
+                assert!(matches!(
+                    prepared[0],
+                    PreparedTableMutation::Upsert(PreparedRows::Appender(_))
+                ));
+            }
+            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+        }
+
+        match &batches[1].action {
+            PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
+                assert_eq!(prepared.len(), 1);
+                assert!(matches!(prepared[0], PreparedTableMutation::Delete { .. }));
+            }
+            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+        }
+
+        match &batches[2].action {
+            PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
+                assert_eq!(prepared.len(), 1);
+                assert!(matches!(
+                    prepared[0],
+                    PreparedTableMutation::Upsert(PreparedRows::Appender(_))
+                ));
+            }
+            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+        }
+    }
+
+    #[test]
+    fn test_prepare_mutation_table_batches_group_contiguous_deletes() {
+        let table_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ],
+        );
+        let batches = prepare_mutation_table_batches(
+            &table_schema,
+            "public_users".to_string(),
+            vec![
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(100),
+                    commit_lsn: PgLsn::from(110),
+                    mutation: TableMutation::Delete(TableRow::new(vec![
+                        Cell::I32(1),
+                        Cell::String("alice".to_string()),
+                    ])),
+                },
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(110),
+                    commit_lsn: PgLsn::from(120),
+                    mutation: TableMutation::Delete(TableRow::new(vec![
+                        Cell::I32(2),
+                        Cell::String("bob".to_string()),
+                    ])),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        match &batches[0].action {
+            PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
+                assert_eq!(prepared.len(), 1);
+                match &prepared[0] {
+                    PreparedTableMutation::Delete { predicates, origin } => {
+                        assert_eq!(origin, &"delete");
+                        assert_eq!(
+                            predicates,
+                            &vec!["id = 1".to_string(), "id = 2".to_string()]
+                        );
+                    }
+                    PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
+                }
+            }
+            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+        }
+    }
+
+    #[test]
+    fn test_prepare_mutation_table_batches_group_contiguous_updates() {
+        let table_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ],
+        );
+        let batches = prepare_mutation_table_batches(
+            &table_schema,
+            "public_users".to_string(),
+            vec![
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(100),
+                    commit_lsn: PgLsn::from(110),
+                    mutation: TableMutation::Update {
+                        delete_row: TableRow::new(vec![
+                            Cell::I32(1),
+                            Cell::String("before-a".to_string()),
+                        ]),
+                        upsert_row: TableRow::new(vec![
+                            Cell::I32(1),
+                            Cell::String("after-a".to_string()),
+                        ]),
+                    },
+                },
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(110),
+                    commit_lsn: PgLsn::from(120),
+                    mutation: TableMutation::Update {
+                        delete_row: TableRow::new(vec![
+                            Cell::I32(2),
+                            Cell::String("before-b".to_string()),
+                        ]),
+                        upsert_row: TableRow::new(vec![
+                            Cell::I32(2),
+                            Cell::String("after-b".to_string()),
+                        ]),
+                    },
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        match &batches[0].action {
+            PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
+                assert_eq!(prepared.len(), 4);
+                assert!(matches!(prepared[0], PreparedTableMutation::Delete { .. }));
+                assert!(matches!(
+                    prepared[1],
+                    PreparedTableMutation::Upsert(PreparedRows::Appender(_))
+                ));
+                assert!(matches!(prepared[2], PreparedTableMutation::Delete { .. }));
+                assert!(matches!(
+                    prepared[3],
+                    PreparedTableMutation::Upsert(PreparedRows::Appender(_))
+                ));
+            }
+            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+        }
+    }
+
+    #[test]
+    fn test_prepare_mutation_table_batches_split_non_inserts_at_cap() {
+        let table_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ],
+        );
+        let tracked = (0..=NON_INSERT_MUTATION_BATCH_SIZE)
+            .map(|idx| TrackedTableMutation {
+                start_lsn: PgLsn::from(100 + idx as u64),
+                commit_lsn: PgLsn::from(200 + idx as u64),
+                mutation: TableMutation::Delete(TableRow::new(vec![
+                    Cell::I32(idx as i32),
+                    Cell::String(format!("name-{idx}")),
+                ])),
+            })
+            .collect();
+        let batches =
+            prepare_mutation_table_batches(&table_schema, "public_users".to_string(), tracked)
+                .unwrap();
+
+        assert_eq!(batches.len(), 2);
+
+        match &batches[0].action {
+            PreparedDuckLakeTableBatchAction::Mutation(prepared) => match &prepared[0] {
+                PreparedTableMutation::Delete { predicates, .. } => {
+                    assert_eq!(predicates.len(), NON_INSERT_MUTATION_BATCH_SIZE);
+                }
+                PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
+            },
+            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+        }
+
+        match &batches[1].action {
+            PreparedDuckLakeTableBatchAction::Mutation(prepared) => match &prepared[0] {
+                PreparedTableMutation::Delete { predicates, .. } => {
+                    assert_eq!(predicates.len(), 1);
+                }
+                PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
+            },
+            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+        }
+    }
+
+    #[test]
+    fn test_prepare_mutation_table_batches_isolate_update_in_its_own_atomic_batch() {
+        let table_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ],
+        );
+        let batches = prepare_mutation_table_batches(
+            &table_schema,
+            "public_users".to_string(),
+            vec![
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(100),
+                    commit_lsn: PgLsn::from(110),
+                    mutation: TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(0),
+                        Cell::String("seed".to_string()),
+                    ])),
+                },
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(110),
+                    commit_lsn: PgLsn::from(120),
+                    mutation: TableMutation::Update {
+                        delete_row: TableRow::new(vec![
+                            Cell::I32(0),
+                            Cell::String("seed".to_string()),
+                        ]),
+                        upsert_row: TableRow::new(vec![
+                            Cell::I32(0),
+                            Cell::String("grown".to_string()),
+                        ]),
+                    },
+                },
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(120),
+                    commit_lsn: PgLsn::from(130),
+                    mutation: TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(999),
+                        Cell::String("tail".to_string()),
+                    ])),
+                },
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 3);
+
+        match &batches[1].action {
+            PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
+                assert_eq!(prepared.len(), 2);
+                assert!(matches!(prepared[0], PreparedTableMutation::Delete { .. }));
+                assert!(matches!(
+                    prepared[1],
+                    PreparedTableMutation::Upsert(PreparedRows::Appender(_))
+                ));
+            }
+            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+        }
+    }
+
+    #[test]
+    fn test_is_transient_ducklake_delete_file_not_found_ignores_other_errors() {
+        let error = etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake DELETE failed",
+            source: duckdb::Error::DuckDBFailure(
+                duckdb::ffi::Error::new(1),
+                Some("Transaction conflict".to_string()),
+            )
+        );
+
+        assert!(!is_transient_ducklake_delete_file_not_found(&error));
     }
 
     #[test]
@@ -1662,16 +3134,136 @@ mod tests {
     }
 
     #[test]
-    fn test_is_transient_ducklake_delete_file_not_found_ignores_other_errors() {
-        let error = etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake DELETE failed",
-            source: duckdb::Error::DuckDBFailure(
-                duckdb::ffi::Error::new(1),
-                Some("Transaction conflict".to_string()),
-            )
+    fn test_build_mutation_batch_identity_is_deterministic() {
+        let table_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ],
+        );
+        let tracked = vec![
+            TrackedTableMutation {
+                start_lsn: PgLsn::from(100),
+                commit_lsn: PgLsn::from(200),
+                mutation: TableMutation::Insert(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("alice".to_string()),
+                ])),
+            },
+            TrackedTableMutation {
+                start_lsn: PgLsn::from(100),
+                commit_lsn: PgLsn::from(200),
+                mutation: TableMutation::Delete(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("alice".to_string()),
+                ])),
+            },
+        ];
+
+        let first = build_mutation_batch_identity("public_users", &table_schema, &tracked).unwrap();
+        let second =
+            build_mutation_batch_identity("public_users", &table_schema, &tracked).unwrap();
+
+        assert_eq!(first.batch_id, second.batch_id);
+        assert_eq!(first.first_start_lsn, Some(PgLsn::from(100)));
+        assert_eq!(first.last_commit_lsn, Some(PgLsn::from(200)));
+    }
+
+    #[test]
+    fn test_build_mutation_batch_identity_changes_with_order_and_lsn() {
+        let table_schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ],
+        );
+        let original = build_mutation_batch_identity(
+            "public_users",
+            &table_schema,
+            &[
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(100),
+                    commit_lsn: PgLsn::from(200),
+                    mutation: TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(1),
+                        Cell::String("alice".to_string()),
+                    ])),
+                },
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(100),
+                    commit_lsn: PgLsn::from(200),
+                    mutation: TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(2),
+                        Cell::String("bob".to_string()),
+                    ])),
+                },
+            ],
+        )
+        .unwrap();
+        let reordered = build_mutation_batch_identity(
+            "public_users",
+            &table_schema,
+            &[
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(100),
+                    commit_lsn: PgLsn::from(200),
+                    mutation: TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(2),
+                        Cell::String("bob".to_string()),
+                    ])),
+                },
+                TrackedTableMutation {
+                    start_lsn: PgLsn::from(100),
+                    commit_lsn: PgLsn::from(200),
+                    mutation: TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(1),
+                        Cell::String("alice".to_string()),
+                    ])),
+                },
+            ],
+        )
+        .unwrap();
+        let changed_lsn = build_mutation_batch_identity(
+            "public_users",
+            &table_schema,
+            &[TrackedTableMutation {
+                start_lsn: PgLsn::from(101),
+                commit_lsn: PgLsn::from(201),
+                mutation: TableMutation::Insert(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("alice".to_string()),
+                ])),
+            }],
+        )
+        .unwrap();
+
+        assert_ne!(original.batch_id, reordered.batch_id);
+        assert_ne!(original.batch_id, changed_lsn.batch_id);
+    }
+
+    #[test]
+    fn test_build_truncate_batch_identity_changes_with_lsn() {
+        let first = build_truncate_batch_identity(
+            "public_users",
+            &[TrackedTruncateEvent {
+                start_lsn: PgLsn::from(300),
+                commit_lsn: PgLsn::from(400),
+                options: 0,
+            }],
+        );
+        let second = build_truncate_batch_identity(
+            "public_users",
+            &[TrackedTruncateEvent {
+                start_lsn: PgLsn::from(301),
+                commit_lsn: PgLsn::from(401),
+                options: 0,
+            }],
         );
 
-        assert!(!is_transient_ducklake_delete_file_not_found(&error));
+        assert_ne!(first.batch_id, second.batch_id);
     }
 }

@@ -334,6 +334,26 @@ async fn get_start_lsn<S: StateStore>(
     // We try to get or create the slot. Both operations will return an LSN that we can use to start
     // streaming events.
     let slot = replication_client.get_or_create_slot(&slot_name).await?;
+    let start_lsn = slot.get_start_lsn();
+
+    match &slot {
+        GetOrCreateSlotResult::GetSlot(result) => {
+            info!(
+                slot_name,
+                %start_lsn,
+                confirmed_flush_lsn = %result.confirmed_flush_lsn,
+                "apply worker resume position selected from existing replication slot"
+            );
+        }
+        GetOrCreateSlotResult::CreateSlot(result) => {
+            info!(
+                slot_name,
+                %start_lsn,
+                consistent_point = %result.consistent_point,
+                "apply worker resume position selected from new replication slot"
+            );
+        }
+    }
 
     // When we get an existing slot, check if it's been invalidated
     if let GetOrCreateSlotResult::GetSlot(_) = &slot {
@@ -365,7 +385,7 @@ async fn get_start_lsn<S: StateStore>(
     }
 
     // We return the LSN from which we will start streaming events.
-    Ok(slot.get_start_lsn())
+    Ok(start_lsn)
 }
 
 /// Handles the case when the apply worker slot is found to be invalidated.

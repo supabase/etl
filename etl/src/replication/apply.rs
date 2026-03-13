@@ -901,12 +901,14 @@ where
     /// mid-transaction), this will initiate graceful shutdown.
     async fn flush_batch(
         &mut self,
-        events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<ApplyLoopAction> {
         self.state.reset_batch_deadline();
 
         self.send_batch_to_destination().await?;
-        let action = self.process_syncing_tables_after_batch_flush().await?;
+        let action = self
+            .process_syncing_tables_after_batch_flush(events_stream.as_mut())
+            .await?;
 
         // If we're in deferred shutdown and the batch ended with a commit (i.e., we're no longer
         // mid-transaction), initiate graceful shutdown now.
@@ -1391,7 +1393,10 @@ where
     /// Processes syncing tables after a batch has been flushed.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
-    async fn process_syncing_tables_after_batch_flush(&mut self) -> EtlResult<ApplyLoopAction> {
+    async fn process_syncing_tables_after_batch_flush(
+        &mut self,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+    ) -> EtlResult<ApplyLoopAction> {
         // Take the last commit end LSN, which is the highest LSN from any commit message in this
         // batch. Batches can flush mid-transaction, so this may refer to the previous transaction.
         let Some(last_commit_end_lsn) = self.state.last_commit_end_lsn.take() else {
@@ -1406,10 +1411,29 @@ where
             .update_last_flush_lsn(last_commit_end_lsn);
 
         let current_lsn = self.state.replication_progress.last_flush_lsn;
+        let last_received_lsn = self.state.last_received_lsn();
         info!(
             worker_type = %self.worker_context.worker_type(),
             %current_lsn,
             "processing syncing tables after batch flush"
+        );
+
+        events_stream
+            .as_mut()
+            .stream_mut()
+            .send_status_update(
+                last_received_lsn,
+                current_lsn,
+                true,
+                StatusUpdateType::BatchFlush,
+            )
+            .await?;
+
+        info!(
+            worker_type = %self.worker_context.worker_type(),
+            %last_received_lsn,
+            %current_lsn,
+            "reported durable flush lsn to postgres after batch flush"
         );
 
         match &mut self.worker_context {

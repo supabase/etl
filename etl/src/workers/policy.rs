@@ -62,6 +62,7 @@ pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
         // connectivity/capacity failures that are expected to recover without operator intervention.
         ErrorKind::SourceConnectionFailed
         | ErrorKind::DestinationConnectionFailed
+        | ErrorKind::DuckLakeAtomicBatchRetryable
         | ErrorKind::SourceDatabaseShutdown
         | ErrorKind::SourceDatabaseInRecovery => {
             ErrorHandlingPolicy::new(RetryDirective::Timed, None)
@@ -126,5 +127,25 @@ pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
                 "There is no single prescribed solution for this error. The issue may still be recoverable with manual intervention based on the specific context. If it persists after rollback and targeted fixes, please contact support.",
             ),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ErrorKind;
+    use crate::etl_error;
+
+    #[test]
+    fn test_ducklake_atomic_batch_retryable_uses_timed_retry() {
+        let error = etl_error!(
+            ErrorKind::DuckLakeAtomicBatchRetryable,
+            "DuckLake atomic table batch failed after retries"
+        );
+
+        let policy = build_error_handling_policy(&error);
+
+        assert_eq!(policy.retry_directive(), RetryDirective::Timed);
+        assert_eq!(policy.solution(), None);
     }
 }
