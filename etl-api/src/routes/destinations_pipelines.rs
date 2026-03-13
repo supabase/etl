@@ -25,6 +25,7 @@ use crate::db::pipelines::{
 use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
+use crate::validation::ValidationError;
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -76,8 +77,8 @@ enum DestinationPipelineError {
     #[error(transparent)]
     TrustedRootCerts(#[from] TrustedRootCertsError),
 
-    #[error("Failed to load environment: {0}")]
-    Environment(#[from] std::io::Error),
+    #[error(transparent)]
+    Validation(#[from] ValidationError),
 }
 
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
@@ -104,7 +105,8 @@ impl DestinationPipelineError {
             | DestinationPipelineError::ImagesDb(ImagesDbError::Database(_))
             | DestinationPipelineError::SourcesDb(SourcesDbError::Database(_))
             | DestinationPipelineError::PipelinesDb(PipelinesDbError::Database(_))
-            | DestinationPipelineError::Database(_) => "internal server error".to_string(),
+            | DestinationPipelineError::Database(_)
+            | DestinationPipelineError::Validation(_) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
@@ -123,7 +125,7 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::PipelinesDb(_)
             | DestinationPipelineError::Database(_)
             | DestinationPipelineError::TrustedRootCerts(_)
-            | DestinationPipelineError::Environment(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | DestinationPipelineError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationPipelineError::TenantId(_)
             | DestinationPipelineError::SourceNotFound(_)
             | DestinationPipelineError::DestinationNotFound(_)
