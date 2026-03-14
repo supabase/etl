@@ -8,6 +8,17 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
+ducklake = [
+    "dep:duckdb",
+    "dep:parking_lot",
+    "dep:pg_escape",
+    "dep:r2d2",
+    "dep:rand",
+    "dep:tokio-postgres",
+    "dep:tracing",
+    "dep:tokio",
+    "dep:url",
+]
 bigquery = [
     "dep:gcp-bigquery-client",
     "dep:prost",
@@ -40,6 +51,8 @@ test-utils = ["dep:uuid"]
 etl = { workspace = true }
 
 arrow = { workspace = true, optional = true }
+duckdb = { workspace = true, optional = true, features = ["bundled", "r2d2"] }
+r2d2 = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 chrono = { workspace = true }
@@ -47,20 +60,26 @@ gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
+parking_lot = { version = "0.12.5", optional = true }
 parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
+pg_escape = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }
 reqwest = { workspace = true, optional = true, features = ["json"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["sync"] }
+tokio = { workspace = true, optional = true, features = ["rt", "sync", "time"] }
+tokio-postgres = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true, default-features = true }
+url = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true, features = ["v4"] }
 
 [dev-dependencies]
 etl = { workspace = true, features = ["test-utils"] }
 etl-telemetry = { workspace = true }
+duckdb = { workspace = true, features = ["bundled"] }
+tempfile = { workspace = true }
 
 chrono = { workspace = true }
 futures = { workspace = true }

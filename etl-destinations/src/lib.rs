@@ -7,6 +7,8 @@ mod table_name;
 
 #[cfg(feature = "bigquery")]
 pub mod bigquery;
+#[cfg(feature = "ducklake")]
+pub mod ducklake;
 #[cfg(feature = "egress")]
 pub mod egress;
 #[cfg(feature = "iceberg")]
