@@ -353,7 +353,12 @@ struct ApplyLoopState {
     /// The action that is being accumulated from multiple code paths until we are ready to act on
     /// it.
     pending_action: Option<ApplyLoopAction>,
-    /// Set to `true` to stop the deadline and message branches until the in-flight flush resolves.
+    /// Set to `true` after a terminating action so the loop never accepts new messages again.
+    ///
+    /// This tracks both [`ApplyLoopAction::Pause`] and [`ApplyLoopAction::Complete`], since both
+    /// require stopping message intake forever.
+    processing_stopped: bool,
+    /// Set to `true` when a flush was deferred because another flush result was still in flight.
     processing_paused: bool,
 }
 
@@ -374,6 +379,7 @@ impl ApplyLoopState {
             max_batch_fill_duration,
             pending_flush_result: None,
             pending_action: None,
+            processing_stopped: false,
             processing_paused: false,
         }
     }
@@ -500,7 +506,27 @@ impl ApplyLoopState {
         self.pending_action = match self.pending_action {
             Some(pending_action) => Some(pending_action.merge(new_pending_action)),
             None => Some(new_pending_action),
-        }
+        };
+    }
+
+    /// Records the latest action so the loop can stop ingesting messages after termination.
+    fn note_action(&mut self, action: ApplyLoopAction) {
+        self.processing_stopped |= action.is_terminating();
+    }
+
+    /// Returns `true` when the apply loop may still accept new replication messages.
+    fn can_process_messages(&self) -> bool {
+        !self.processing_stopped && !self.processing_paused
+    }
+
+    /// Marks the current pending batch as paused behind an in-flight flush.
+    fn pause_processing(&mut self) {
+        self.processing_paused = true;
+    }
+
+    /// Clears the pause caused by an in-flight flush and returns whether it had been set.
+    fn resume_processing(&mut self) -> bool {
+        std::mem::replace(&mut self.processing_paused, false)
     }
 }
 
@@ -673,12 +699,13 @@ where
                 // PRIORITY 3: Handle the pending destination write result.
                 // This branch polls the stored future by mutable reference, so if another branch wins
                 // the select first we keep the pending result in place for the next iteration.
-                // After resolving, processing_paused is cleared so the deadline and message branches
-                // resume, allowing the accumulated batch to be flushed on the next iteration.
+                // After resolving, any paused flush is retried and message processing only resumes
+                // if no terminating action has already stopped the loop permanently.
                 apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
                     let action = self
                         .handle_flush_result(apply_result)
                         .await?;
+                    self.state.note_action(action);
 
                     // If there is a pending flush, we need that to be done before deciding what
                     // to do with the action. Otherwise, we just return the value.
@@ -692,17 +719,16 @@ where
                 // PRIORITY 4: Handle batch flush timer expiry.
                 // Ensures batches don't wait indefinitely when message rate is low. The timer
                 // is started when the first event enters the batch and reset after each flush.
-                _ = Self::wait_for_batch_deadline(self.state.flush_deadline) => {
+                _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if !self.state.processing_paused => {
                     self.flush_batch("flush deadline reached").await?;
                 }
 
                 // PRIORITY 5: Process incoming replication messages from PostgreSQL.
                 // This is the main work of the apply loop - receiving WAL events and converting
                 // them to destination writes. Has lowest priority so shutdown and flush timer
-                // are always handled promptly. Disabled when processing_paused is set (i.e. a
-                // flush is in flight and the batch is full), so no further data accumulates
-                // until the pending result resolves.
-                maybe_message = events_stream.next(), if !self.state.processing_paused => {
+                // are always handled promptly. Disabled both when a terminating action has already
+                // stopped the loop and when a pending batch is waiting behind an in-flight flush.
+                maybe_message = events_stream.next(), if self.state.can_process_messages() => {
                     let action = self
                         .handle_stream_message(
                             events_stream.as_mut(),
@@ -710,6 +736,7 @@ where
                             &replication_client,
                         )
                         .await?;
+                    self.state.note_action(action);
 
                     // If there is a pending flush, we need that to be done before deciding what
                     // to do with the action. Otherwise, we just return the value.
@@ -890,11 +917,9 @@ where
         &mut self,
         flush_result: CompletedBatchFlushResult<()>,
     ) -> EtlResult<ApplyLoopAction> {
-        let processing_paused = self.state.processing_paused;
-
-        // We clear the state, since now we have processed the pending batch.
+        // We clear the state up front because this flush is no longer in flight.
+        let processing_paused = self.state.resume_processing();
         self.state.pending_flush_result = None;
-        self.state.processing_paused = false;
 
         let (commit_end_lsn, metrics, result) = flush_result.into_parts();
 
@@ -923,6 +948,7 @@ where
         let mut action = self
             .state
             .pending_action
+            .take()
             .unwrap_or(ApplyLoopAction::Continue);
 
         // We process the syncing tables with the last end lsn that the batch contains.
@@ -941,7 +967,8 @@ where
         let synchronize_action = self.process_syncing_tables_when_idle().await?;
         action = action.merge(synchronize_action);
 
-        // If processing was paused, it means that there must be a batch which still has to be flushed.
+        // If processing was paused, there must be a batch that still needs to be flushed now that
+        // the previous in-flight result has resolved.
         if processing_paused {
             self.flush_batch("pending flush result received").await?;
         }
@@ -1067,7 +1094,7 @@ where
         // A flush is already in flight. Pause processing until the result resolves, at which
         // point the loop will resume and dispatch this batch.
         if self.state.has_pending_flush_result() {
-            self.state.processing_paused = true;
+            self.state.pause_processing();
 
             return Ok(());
         }

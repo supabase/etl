@@ -106,7 +106,7 @@ pin_project! {
 }
 
 impl<T> PendingBatchFlushResult<T> {
-    fn into_completed_result(&self, result: EtlResult<T>) -> CompletedBatchFlushResult<T> {
+    fn to_completed_result(&self, result: EtlResult<T>) -> CompletedBatchFlushResult<T> {
         CompletedBatchFlushResult {
             commit_end_lsn: self.commit_end_lsn,
             metrics: self.metrics,
@@ -127,11 +127,11 @@ impl<T> PendingBatchFlushResult<T> {
     /// Tries to receive the result without waiting.
     pub fn try_recv(&mut self) -> Option<CompletedBatchFlushResult<T>> {
         match self.rx.try_recv() {
-            Ok(result) => Some(self.into_completed_result(result)),
+            Ok(result) => Some(self.to_completed_result(result)),
             Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Closed) => Some(self.into_completed_result(Err(etl_error!(
+            Err(TryRecvError::Closed) => Some(self.to_completed_result(Err(etl_error!(
                 ErrorKind::DestinationError,
-                "batch flush result channel closed before sending"
+                "Batch flush result channel closed before sending"
             )))),
         }
     }
