@@ -19,7 +19,7 @@ use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use tokio::pin;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
 
@@ -101,58 +101,29 @@ pub enum ApplyLoopResult {
     Completed,
 }
 
-/// Action that should be taken during the apply loop.
-///
-/// An action defines what to do after one iteration of the apply loop.
-#[derive(Debug, Copy, Clone, Default)]
-pub enum ApplyLoopAction {
-    /// The apply loop can continue on the next element.
-    #[default]
-    Continue,
-    /// The current apply loop invocation should stop and may be resumed later.
+/// Final exit that the current apply loop invocation should eventually take.
+#[derive(Debug, Copy, Clone)]
+enum ExitIntent {
+    /// Stop the current invocation and allow it to be resumed later.
     Pause,
-    /// The current apply loop invocation should stop because it has completed.
+    /// Stop the current invocation permanently.
     Complete,
 }
 
-impl ApplyLoopAction {
-    /// Builds an [`ApplyLoopResult`] given this [`ApplyLoopAction`].
-    ///
-    /// Returns [`Some`] if the action can lead to a result of the loop, [`None`]
-    /// otherwise.
-    pub fn to_result(self) -> Option<ApplyLoopResult> {
-        match self {
-            Self::Continue => None,
-            Self::Pause => Some(ApplyLoopResult::Paused),
-            Self::Complete => Some(ApplyLoopResult::Completed),
+impl ExitIntent {
+    /// Returns the stronger of two exit intents.
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Complete, _) | (_, Self::Complete) => Self::Complete,
+            (Self::Pause, Self::Pause) => Self::Pause,
         }
     }
 
-    /// Returns `true` if the action terminates the current apply loop invocation.
-    pub fn is_terminating(&self) -> bool {
+    /// Builds the final loop result for this exit intent.
+    fn to_result(self) -> ApplyLoopResult {
         match self {
-            Self::Continue => false,
-            Self::Pause | Self::Complete => true,
-        }
-    }
-
-    /// Merges two [`ApplyLoopAction`]s with the following priorities:
-    /// 1. Complete
-    /// 2. Pause
-    /// 3. Continue
-    pub fn merge(self, other: Self) -> Self {
-        match self {
-            Self::Continue => match other {
-                Self::Continue => Self::Continue,
-                Self::Pause => Self::Pause,
-                Self::Complete => Self::Complete,
-            },
-            Self::Pause => match other {
-                Self::Continue => Self::Pause,
-                Self::Pause => Self::Pause,
-                Self::Complete => Self::Complete,
-            },
-            Self::Complete => Self::Complete,
+            Self::Pause => ApplyLoopResult::Paused,
+            Self::Complete => ApplyLoopResult::Completed,
         }
     }
 }
@@ -184,6 +155,7 @@ impl ShutdownState {
 ///
 /// Contains all state and dependencies needed by the apply worker to coordinate
 /// with table sync workers and manage table lifecycle transitions.
+#[derive(Debug)]
 pub struct ApplyWorkerContext<S, D> {
     /// Unique identifier for the pipeline.
     pub pipeline_id: PipelineId,
@@ -209,6 +181,7 @@ pub struct ApplyWorkerContext<S, D> {
 ///
 /// Contains state and dependencies needed by a table sync worker to track
 /// its synchronization progress and coordinate with the apply worker.
+#[derive(Debug)]
 pub struct TableSyncWorkerContext<S> {
     /// Unique identifier for the table being synchronized.
     pub table_id: TableId,
@@ -223,6 +196,7 @@ pub struct TableSyncWorkerContext<S> {
 /// This enum replaces the [`ApplyLoopHook`] trait, providing direct access to
 /// worker-specific resources and enabling different behavior based on the
 /// worker type at various points in the replication cycle.
+#[derive(Debug)]
 pub enum WorkerContext<S, D> {
     /// Context for the apply worker.
     Apply(ApplyWorkerContext<S, D>),
@@ -295,8 +269,8 @@ struct HandleMessageResult {
     end_batch: Option<EndBatch>,
     /// Set when the table has encountered an error.
     table_replication_error: Option<TableReplicationError>,
-    /// The action that this event should have on the loop.
-    action: ApplyLoopAction,
+    /// The exit intent that this event should have on the loop.
+    exit_intent: Option<ExitIntent>,
 }
 
 impl HandleMessageResult {
@@ -350,15 +324,11 @@ struct ApplyLoopState {
     max_batch_fill_duration: Duration,
     /// Destination write result waiting to be applied to replication progress.
     pending_flush_result: Option<PendingBatchFlushResult<()>>,
-    /// The action being accumulated while the loop waits for a pending flush or shutdown
-    /// acknowledgement before it can return.
-    pending_action: Option<ApplyLoopAction>,
-    /// Set to `true` after a terminating action so the loop never accepts new messages again.
+    /// The strongest exit that this apply loop invocation should eventually return.
     ///
-    /// This tracks both [`ApplyLoopAction::Pause`] and [`ApplyLoopAction::Complete`], since both
-    /// terminate the current apply loop invocation even if additional cleanup flushes still need to
-    /// run.
-    processing_stopped: bool,
+    /// Once set, the loop stops ingesting new replication messages and instead drains any
+    /// in-flight flushes and shutdown barriers before returning the final result.
+    exit_intent: Option<ExitIntent>,
     /// Set to `true` when a flush was deferred because another flush result was still in flight.
     ///
     /// While this is set, the loop stops both deadline-driven flush attempts and new message intake
@@ -382,8 +352,7 @@ impl ApplyLoopState {
             flush_deadline: None,
             max_batch_fill_duration,
             pending_flush_result: None,
-            pending_action: None,
-            processing_stopped: false,
+            exit_intent: None,
             processing_paused: false,
         }
     }
@@ -449,9 +418,7 @@ impl ApplyLoopState {
 
     /// Returns `true` if the apply loop is totally idle.
     fn is_idle(&self) -> bool {
-        !self.handling_transaction()
-            && !self.has_pending_batch()
-            && !self.has_pending_flush_result()
+        !self.handling_transaction() && !self.has_unresolved_batch_work()
     }
 
     /// Returns the effective flush LSN to report to PostgreSQL.
@@ -508,22 +475,31 @@ impl ApplyLoopState {
         self.pending_flush_result.is_some()
     }
 
-    /// Merges a new action into the current pending action, if any.
-    fn merge_into_pending_action(&mut self, new_pending_action: ApplyLoopAction) {
-        self.pending_action = match self.pending_action {
-            Some(pending_action) => Some(pending_action.merge(new_pending_action)),
-            None => Some(new_pending_action),
-        };
+    /// Returns `true` if any buffered or in-flight destination batch work is still unresolved.
+    fn has_unresolved_batch_work(&self) -> bool {
+        self.has_pending_batch() || self.has_pending_flush_result()
     }
 
-    /// Records the latest action so the loop can stop ingesting messages after termination.
-    fn note_action(&mut self, action: ApplyLoopAction) {
-        self.processing_stopped |= action.is_terminating();
+    /// Records a new exit intent if one was produced.
+    fn record_exit_intent(&mut self, exit_intent: Option<ExitIntent>) {
+        let Some(exit_intent) = exit_intent else {
+            return;
+        };
+
+        self.exit_intent = match self.exit_intent {
+            Some(current_exit_intent) => Some(current_exit_intent.merge(exit_intent)),
+            None => Some(exit_intent),
+        };
     }
 
     /// Returns `true` when the apply loop may still accept new replication messages.
     fn can_process_messages(&self) -> bool {
-        !self.processing_stopped && !self.processing_paused
+        self.exit_intent.is_none() && !self.processing_paused
+    }
+
+    /// Returns `true` when the batch deadline timer may still trigger a flush for buffered work.
+    fn can_wait_for_deadline(&self) -> bool {
+        !self.processing_paused && self.has_pending_batch()
     }
 
     /// Marks the current pending batch as paused behind an in-flight flush.
@@ -531,9 +507,17 @@ impl ApplyLoopState {
         self.processing_paused = true;
     }
 
-    /// Clears the pause caused by an in-flight flush and returns whether it had been set.
+    /// Resumes processing by clearing the existing pending flush result and enabling processing.
     fn resume_processing(&mut self) -> bool {
-        std::mem::replace(&mut self.processing_paused, false)
+        let prev_processing_paused = std::mem::replace(&mut self.processing_paused, false);
+        self.pending_flush_result = None;
+
+        prev_processing_paused
+    }
+
+    /// Returns the final result requested by this loop, if any.
+    fn exit_result(&self) -> Option<ApplyLoopResult> {
+        self.exit_intent.map(ExitIntent::to_result)
     }
 }
 
@@ -640,125 +624,183 @@ where
         let mut connection_updates_rx = replication_client.connection_updates_rx();
 
         loop {
-            // If waiting for shutdown acknowledgement, the loop is now just waiting for the keep alive
-            // message before shutting off.
-            if let ShutdownState::WaitingForPrimaryKeepAlive { acked_flush_lsn } =
-                self.state.shutdown_state
-            {
-                let message = events_stream.next().await;
-                if self.try_complete_shutdown(message, acked_flush_lsn)? {
-                    // Return the pending result (constructed from the action, if any), otherwise default
-                    // to pausing.
-                    return Ok(self
-                        .state
-                        .pending_action
-                        .unwrap_or(ApplyLoopAction::Pause)
-                        .to_result()
-                        .unwrap_or(ApplyLoopResult::Paused));
+            let iteration_result = match &self.state.shutdown_state {
+                ShutdownState::NoShutdown => {
+                    self.run_active_iteration(
+                        events_stream.as_mut(),
+                        &replication_client,
+                        &mut connection_updates_rx,
+                    )
+                    .await?
                 }
-
-                continue;
-            }
-
-            tokio::select! {
-                biased;
-
-                // PRIORITY 1: Handle shutdown signals.
-                // Shutdown takes highest priority and is intentionally quick and best-effort.
-                // We do not generally defer to transaction boundaries because that adds complexity
-                // without giving exactly-once semantics. The one exception is the catch-up wait
-                // path: if it returns `Pause` after a commit, the normal commit flush machinery
-                // will still flush that commit batch before the loop returns.
-                _ = self.shutdown_rx.changed() => {
-                    self.handle_shutdown_signal(events_stream.as_mut()).await?;
+                ShutdownState::WaitingForPrimaryKeepAlive { acked_flush_lsn } => {
+                    self.run_shutdown_wait_iteration(
+                        events_stream.as_mut(),
+                        &mut connection_updates_rx,
+                        *acked_flush_lsn,
+                    )
+                    .await?
                 }
+            };
 
-                // PRIORITY 2: Handle PostgreSQL connection lifecycle updates.
-                // Closed connections stop the loop and surface a source connection error.
-                changed = connection_updates_rx.changed() => {
-                    if changed.is_err() {
-                        return Err(etl_error!(
-                            ErrorKind::SourceConnectionFailed,
-                            "postgresql connection updates ended during the apply loop"
-                        ));
-                    }
-
-                    // We use `borrow_and_update` to avoid the race condition in which there is a change
-                    // between the `changed()` notification and the borrow. So that if there was, we mark
-                    // the value as seen avoiding `changed()` to be called again in the next iteration.
-                    let update = connection_updates_rx.borrow_and_update().clone();
-                    match update {
-                        PostgresConnectionUpdate::Running => {}
-                        PostgresConnectionUpdate::Terminated => {
-                            return Err(etl_error!(
-                                ErrorKind::SourceConnectionFailed,
-                                "postgresql connection terminated during the apply loop"
-                            ));
-                        }
-                        PostgresConnectionUpdate::Errored { error } => {
-                            return Err(etl_error!(
-                                ErrorKind::SourceConnectionFailed,
-                                "postgresql connection errored during the apply loop",
-                                error.to_string()
-                            ));
-                        }
-                    }
-                }
-
-                // PRIORITY 3: Handle the pending destination write result.
-                // This branch polls the stored future by mutable reference, so if another branch wins
-                // the select first we keep the pending result in place for the next iteration.
-                // After resolving, any queued flush that had paused the loop is retried before we
-                // consider returning from the loop.
-                apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
-                    let action = self
-                        .handle_flush_result(apply_result)
-                        .await?;
-                    if let Some(result) = self.resolve_action(action) {
-                        return Ok(result);
-                    }
-                }
-
-                // PRIORITY 4: Handle batch flush timer expiry.
-                // Ensures batches don't wait indefinitely when message rate is low. The timer
-                // is started when the first event enters the batch and reset only once a flush is
-                // actually dispatched. Disabled while a queued batch is paused behind an in-flight
-                // flush because that retry is driven by the flush-result branch above.
-                _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if !self.state.processing_paused => {
-                    self.flush_batch("flush deadline reached").await?;
-                }
-
-                // PRIORITY 5: Process incoming replication messages from PostgreSQL.
-                // This is the main work of the apply loop - receiving WAL events and converting
-                // them to destination writes. Has lowest priority so shutdown and flush timer
-                // are always handled promptly. Disabled both when a terminating action has already
-                // stopped the loop and when a pending batch is waiting behind an in-flight flush.
-                maybe_message = events_stream.next(), if self.state.can_process_messages() => {
-                    let action = self
-                        .handle_stream_message(
-                            events_stream.as_mut(),
-                            maybe_message,
-                            &replication_client,
-                        )
-                        .await?;
-                    if let Some(result) = self.resolve_action(action) {
-                        return Ok(result);
-                    }
-                }
+            if let Some(result) = iteration_result {
+                return Ok(result);
             }
         }
     }
 
-    /// Records an action and either returns the final loop result or defers it until the
-    /// outstanding flush completes.
-    fn resolve_action(&mut self, action: ApplyLoopAction) -> Option<ApplyLoopResult> {
-        self.state.note_action(action);
+    /// Runs one loop iteration while shutdown is waiting for PostgreSQL to acknowledge the
+    /// requested flush LSN.
+    ///
+    /// In this phase the loop no longer accepts new replication messages and it no longer waits
+    /// for pending destination flushes. Instead it only waits for:
+    /// 1. PostgreSQL connection lifecycle updates.
+    /// 2. PostgreSQL keepalives that may acknowledge the shutdown status update with
+    ///    `wal_end >= acked_flush_lsn`.
+    ///
+    /// Once the keepalive acknowledgement arrives, unresolved batch or flush work causes the loop
+    /// to conservatively return [`ApplyLoopResult::Paused`]. Only quiescent state may reuse the
+    /// stored exit intent.
+    async fn run_shutdown_wait_iteration(
+        &mut self,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
+        acked_flush_lsn: PgLsn,
+    ) -> EtlResult<Option<ApplyLoopResult>> {
+        tokio::select! {
+            biased;
 
-        if self.state.has_pending_flush_result() {
-            self.state.merge_into_pending_action(action);
-            None
-        } else {
-            action.to_result()
+            // PRIORITY 1: Handle PostgreSQL connection lifecycle updates.
+            // A closed or errored source connection always stops the loop immediately.
+            changed = connection_updates_rx.changed() => {
+                Self::handle_connection_update(changed, connection_updates_rx)?;
+            }
+
+            // PRIORITY 2: Wait for the keepalive that acknowledges the shutdown flush LSN.
+            // Once this barrier is reached, shutdown may finish.
+            message = events_stream.next() => {
+                if self.try_complete_shutdown(message, acked_flush_lsn)? {
+                    return Ok(Some(self.finish_shutdown()));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Runs one normal apply-loop iteration while the worker is still actively processing.
+    ///
+    /// This keeps the priority order explicit:
+    /// 1. Shutdown requests.
+    /// 2. PostgreSQL connection lifecycle updates.
+    /// 3. Pending destination flush results.
+    /// 4. Batch flush deadline expiry.
+    /// 5. Incoming replication messages.
+    ///
+    /// Each branch performs its work and then relies on
+    /// [`Self::try_finish_active_iteration`] to decide whether the loop may return yet.
+    async fn run_active_iteration(
+        &mut self,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        replication_client: &PgReplicationClient,
+        connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
+    ) -> EtlResult<Option<ApplyLoopResult>> {
+        tokio::select! {
+            biased;
+
+            // PRIORITY 1: Handle shutdown signals.
+            // Shutdown stops new intake first and then lets the loop drain or wait as needed.
+            _ = self.shutdown_rx.changed() => {
+                self.handle_shutdown_signal(events_stream.as_mut()).await?;
+            }
+
+            // PRIORITY 2: Handle PostgreSQL connection lifecycle updates.
+            // A closed or errored source connection always stops the loop immediately.
+            changed = connection_updates_rx.changed() => {
+                Self::handle_connection_update(changed, connection_updates_rx)?;
+            }
+
+            // PRIORITY 3: Handle the pending destination write result.
+            // Finishing an in-flight flush may advance progress and unblock a queued batch.
+            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
+                self.handle_flush_result(apply_result).await?;
+            }
+
+            // PRIORITY 4: Handle batch flush timer expiry.
+            // This prevents buffered work from waiting forever when traffic is low.
+            _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
+                self.flush_batch("flush deadline reached").await?;
+            }
+
+            // PRIORITY 5: Process incoming replication messages from PostgreSQL.
+            // New WAL messages are only accepted while the loop is still actively ingesting.
+            maybe_message = events_stream.next(), if self.state.can_process_messages() => {
+                self.handle_stream_message(
+                    events_stream.as_mut(),
+                    maybe_message,
+                    replication_client,
+                )
+                .await?;
+            }
+        }
+
+        Ok(self.try_finish_active_iteration())
+    }
+
+    /// Returns the final loop result after PostgreSQL has acknowledged the shutdown status
+    /// update.
+    ///
+    /// If batch construction or destination flush work is still unresolved, shutdown conservatively
+    /// pauses the loop so the next start can replay from the last confirmed durable position.
+    ///
+    /// This preserves the core replication invariant: phase transitions such as
+    /// `catchup -> sync_done` and `sync_done -> ready` must never be inferred from work that has
+    /// not yet been durably acknowledged through the normal flush-result path.
+    fn finish_shutdown(&self) -> ApplyLoopResult {
+        if self.state.has_unresolved_batch_work() {
+            return ApplyLoopResult::Paused;
+        }
+
+        self.state.exit_result().unwrap_or(ApplyLoopResult::Paused)
+    }
+
+    /// Returns the final loop result for the active phase if all exit barriers have been resolved.
+    fn try_finish_active_iteration(&self) -> Option<ApplyLoopResult> {
+        if self.state.shutdown_state.is_requested() || self.state.has_unresolved_batch_work() {
+            return None;
+        }
+
+        self.state.exit_result()
+    }
+
+    /// Processes one PostgreSQL connection lifecycle notification.
+    ///
+    /// `changed()` only tells us that some update exists, so we must still read the latest value
+    /// with `borrow_and_update()` to consume it without missing races between notification and
+    /// observation.
+    fn handle_connection_update(
+        changed: Result<(), watch::error::RecvError>,
+        connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
+    ) -> EtlResult<()> {
+        if changed.is_err() {
+            return Err(etl_error!(
+                ErrorKind::SourceConnectionFailed,
+                "postgresql connection updates ended during the apply loop"
+            ));
+        }
+
+        let update = connection_updates_rx.borrow_and_update().clone();
+        match update {
+            PostgresConnectionUpdate::Running => Ok(()),
+            PostgresConnectionUpdate::Terminated => Err(etl_error!(
+                ErrorKind::SourceConnectionFailed,
+                "postgresql connection terminated during the apply loop"
+            )),
+            PostgresConnectionUpdate::Errored { error } => Err(etl_error!(
+                ErrorKind::SourceConnectionFailed,
+                "postgresql connection errored during the apply loop",
+                error.to_string()
+            )),
         }
     }
 
@@ -797,6 +839,10 @@ where
             ReplicationMessage::PrimaryKeepAlive(keepalive) => {
                 let wal_end = PgLsn::from(keepalive.wal_end());
 
+                // `acked_flush_lsn` is the effective flush LSN included in the status update for
+                // shutdown. We only treat a keepalive as the shutdown acknowledgement once its
+                // `wal_end` has reached or passed that barrier, which guarantees the reply was
+                // produced after PostgreSQL observed at least that replication position.
                 if wal_end >= acked_flush_lsn {
                     info!(
                         %worker_type,
@@ -804,6 +850,7 @@ where
                         %acked_flush_lsn,
                         "received keepalive acknowledgement, safe to shutdown",
                     );
+
                     return Ok(true);
                 }
 
@@ -831,17 +878,16 @@ where
 
     /// Handles a shutdown signal by transitioning to [`ShutdownState::WaitingForPrimaryKeepAlive`].
     ///
-    /// If an in-flight flush result is already ready, it is processed first without waiting.
-    ///
     /// The shutdown procedure is intentionally quick and best-effort. We do not generally defer
     /// shutdown to transaction or catch-up boundaries because the system is still at-least-once
     /// and extra draining logic would add disproportionate complexity.
     ///
     /// Instead, the goal here is to report the best durable position already known by the loop.
     ///
-    /// The only shutdown path that still forces the current commit batch is the catch-up waiting
-    /// path that returns [`ApplyLoopAction::Pause`], since that already fits the normal
-    /// commit/flush flow.
+    /// If a batch is still being built or a destination flush is still in flight, shutdown does
+    /// not try to resolve that work. After PostgreSQL acknowledges the status update, the loop
+    /// returns [`ApplyLoopResult::Paused`] so the next start can replay from the last confirmed
+    /// durable position.
     ///
     /// Note: the shutdown system is best-effort. Graceful shutdown may not complete if we are
     /// blocked on non-interruptible code or if keepalive messages never arrive from the server.
@@ -864,19 +910,9 @@ where
             return Ok(());
         }
 
-        // We try to take the pending flush result and handle it if it's immediately available.
-        if let Some(flush_result) = self.try_take_pending_flush_result() {
-            info!(
-                %worker_type,
-                "shutdown signal received with ready in-flight flush result, processing it before shutdown",
-            );
-
-            // We handle the result and merge it into the pending action, so that it can be properly
-            // returned once the shutdown is completed.
-            let action = self.handle_flush_result(flush_result).await?;
-            self.state.note_action(action);
-            self.state.merge_into_pending_action(action);
-        }
+        // Shutdown always means this apply loop invocation will eventually return, even if a later
+        // quiescent state upgrades the final result from pause to complete.
+        self.state.record_exit_intent(Some(ExitIntent::Pause));
 
         info!(
             %worker_type,
@@ -927,23 +963,30 @@ where
         }
     }
 
-    /// Tries to take a ready pending flush result without waiting.
-    fn try_take_pending_flush_result(&mut self) -> Option<CompletedBatchFlushResult<()>> {
-        self.state
-            .pending_flush_result
-            .as_mut()
-            .and_then(PendingBatchFlushResult::try_recv)
+    /// Processes idle-only table sync transitions when the loop is still running normally.
+    ///
+    /// Once an exit has been requested we intentionally skip this class of work so draining stays
+    /// focused on already-started flushes and shutdown barriers.
+    async fn maybe_process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
+        if self.state.exit_intent.is_some() {
+            return Ok(());
+        }
+
+        let synchronize_action = self.process_syncing_tables_when_idle().await?;
+        self.state.record_exit_intent(synchronize_action);
+
+        Ok(())
     }
 
     /// Handles a completed batch flush result.
     async fn handle_flush_result(
         &mut self,
         flush_result: CompletedBatchFlushResult<()>,
-    ) -> EtlResult<ApplyLoopAction> {
+    ) -> EtlResult<()> {
         // We clear the state up front because this flush is no longer in flight.
         let processing_paused = self.state.resume_processing();
-        self.state.pending_flush_result = None;
 
+        // Explode the result into parts which are used for handling the flush result.
         let (commit_end_lsn, metrics, result) = flush_result.into_parts();
 
         // If there was an error in the flushing, we return it immediately.
@@ -967,13 +1010,6 @@ where
         )
         .record(metrics.dispatched_at.elapsed().as_secs_f64());
 
-        // We take the current pending action, or we default to continue.
-        let mut action = self
-            .state
-            .pending_action
-            .take()
-            .unwrap_or(ApplyLoopAction::Continue);
-
         // We process the syncing tables with the last end lsn that the batch contains.
         //
         // Note that it could be that there is no end lsn for a specific batch, which could happen
@@ -984,11 +1020,10 @@ where
             let synchronize_action = self
                 .process_syncing_tables_after_flush(commit_end_lsn)
                 .await?;
-            action = action.merge(synchronize_action);
+            self.state.record_exit_intent(synchronize_action);
         }
 
-        let synchronize_action = self.process_syncing_tables_when_idle().await?;
-        action = action.merge(synchronize_action);
+        self.maybe_process_syncing_tables_when_idle().await?;
 
         // If processing was paused, there must be a queued batch that still needs to be flushed now
         // that the previous in-flight result has resolved.
@@ -996,7 +1031,7 @@ where
             self.flush_batch("pending flush result received").await?;
         }
 
-        Ok(action)
+        Ok(())
     }
 
     /// Handles a message from the replication stream.
@@ -1007,7 +1042,7 @@ where
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         maybe_message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         replication_client: &PgReplicationClient,
-    ) -> EtlResult<ApplyLoopAction> {
+    ) -> EtlResult<()> {
         // If there is no message anymore, it means that the connection has been closed or had some
         // issues, we must handle this case.
         let Some(message) = maybe_message else {
@@ -1017,11 +1052,8 @@ where
         // If the Postgres had an error, we want to raise it immediately.
         let message = message?;
 
-        let action = self
-            .handle_replication_message_and_flush(events_stream.as_mut(), message)
-            .await?;
-
-        Ok(action)
+        self.handle_replication_message_and_flush(events_stream.as_mut(), message)
+            .await
     }
 
     /// Creates an error for when the replication stream ends unexpectedly.
@@ -1056,7 +1088,7 @@ where
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
-    ) -> EtlResult<ApplyLoopAction> {
+    ) -> EtlResult<()> {
         let result = self
             .handle_replication_message(events_stream.as_mut(), message)
             .await?;
@@ -1092,17 +1124,16 @@ where
             self.flush_batch(reason).await?;
         }
 
-        let mut action = result.action;
+        self.state.record_exit_intent(result.exit_intent);
 
         if let Some(error) = result.table_replication_error {
             let mark_table_errored_action = self.mark_table_errored(error).await?;
-            action = action.merge(mark_table_errored_action);
+            self.state.record_exit_intent(mark_table_errored_action);
         }
 
-        let synchronize_action = self.process_syncing_tables_when_idle().await?;
-        action = action.merge(synchronize_action);
+        self.maybe_process_syncing_tables_when_idle().await?;
 
-        Ok(action)
+        Ok(())
     }
 
     /// Flushes the current batch of events to the destination.
@@ -1335,7 +1366,7 @@ where
         let end_lsn = PgLsn::from(message.end_lsn());
 
         // Process syncing tables after commit (worker-specific behavior).
-        let action = self
+        let exit_intent = self
             .process_syncing_tables_after_commit_event(end_lsn)
             .await?;
 
@@ -1345,14 +1376,14 @@ where
         let mut result = HandleMessageResult {
             event: Some(Event::Commit(event)),
             end_lsn: Some(end_lsn),
-            action,
+            exit_intent,
             ..Default::default()
         };
 
-        // Terminating actions force the current commit batch to end, including the commit event
-        // itself. For shutdown, this is mainly the catch-up wait path returning
-        // [`ApplyLoopAction::Pause`], which lets that case reuse the normal commit flush flow.
-        if action.is_terminating() {
+        // Any requested exit forces the current commit batch to end, including the commit event
+        // itself. For shutdown, this is mainly the catch-up wait path requesting a pause exit,
+        // which lets that case reuse the normal commit flush flow.
+        if exit_intent.is_some() {
             result.end_batch = Some(EndBatch::Inclusive);
         }
 
@@ -1591,7 +1622,7 @@ where
     async fn process_syncing_tables_after_commit_event(
         &mut self,
         lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopAction> {
+    ) -> EtlResult<Option<ExitIntent>> {
         match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
                 apply_worker::process_syncing_tables_after_commit_event(ctx, lsn).await
@@ -1608,7 +1639,7 @@ where
     async fn process_syncing_tables_after_flush(
         &mut self,
         last_commit_end_lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopAction> {
+    ) -> EtlResult<Option<ExitIntent>> {
         // Update replication progress to notify PostgreSQL of durable flush. Only reports progress
         // up to the last completed transaction, which may cause duplicates on restart for partial
         // transactions. Destinations must handle at-least-once delivery semantics.
@@ -1626,7 +1657,7 @@ where
         match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
                 apply_worker::process_syncing_tables_after_flush(ctx, current_lsn).await?;
-                Ok(ApplyLoopAction::Continue)
+                Ok(None)
             }
             WorkerContext::TableSync(ctx) => {
                 table_sync_worker::process_syncing_tables_after_flush(ctx, current_lsn).await
@@ -1637,11 +1668,11 @@ where
     /// Processes syncing tables when the apply loop is idle.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
-    async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<ApplyLoopAction> {
+    async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<Option<ExitIntent>> {
         if !self.state.is_idle() {
             debug!("skipping table sync processing because apply loop is not idle");
 
-            return Ok(ApplyLoopAction::Continue);
+            return Ok(None);
         }
 
         // Use effective flush LSN to report last received LSN when idle.
@@ -1669,7 +1700,7 @@ where
     async fn mark_table_errored(
         &mut self,
         table_replication_error: TableReplicationError,
-    ) -> EtlResult<ApplyLoopAction> {
+    ) -> EtlResult<Option<ExitIntent>> {
         match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
                 apply_worker::mark_table_errored(ctx, table_replication_error).await
@@ -1748,13 +1779,13 @@ mod apply_worker {
     pub(super) async fn process_syncing_tables_after_commit_event<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         current_lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopAction>
+    ) -> EtlResult<Option<ExitIntent>>
     where
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
-            let action = process_single_syncing_table_after_commit(
+            let exit_intent = process_single_syncing_table_after_commit(
                 ctx,
                 table_id,
                 table_replication_phase,
@@ -1762,12 +1793,12 @@ mod apply_worker {
             )
             .await?;
 
-            if action.is_terminating() {
-                return Ok(action);
+            if exit_intent.is_some() {
+                return Ok(exit_intent);
             }
         }
 
-        Ok(ApplyLoopAction::Continue)
+        Ok(None)
     }
 
     /// Processes a single syncing table after commit.
@@ -1779,7 +1810,7 @@ mod apply_worker {
         table_id: TableId,
         table_replication_phase: TableReplicationPhase,
         current_lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopAction>
+    ) -> EtlResult<Option<ExitIntent>>
     where
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
@@ -1852,7 +1883,7 @@ mod apply_worker {
                                     "apply worker unblocked: table sync worker errored, skipping table",
                                 );
 
-                                return Ok(ApplyLoopAction::Continue);
+                                return Ok(None);
                             }
 
                             info!(
@@ -1869,7 +1900,7 @@ mod apply_worker {
                                 "apply worker unblocked: shutdown signal received while waiting for table sync worker",
                             );
 
-                            return Ok(ApplyLoopAction::Pause);
+                            return Ok(Some(ExitIntent::Pause));
                         }
                     }
                 }
@@ -1926,7 +1957,7 @@ mod apply_worker {
             }
         }
 
-        Ok(ApplyLoopAction::Continue)
+        Ok(None)
     }
 
     /// Processes syncing tables after a batch flush.
@@ -2067,13 +2098,13 @@ mod apply_worker {
     pub(super) async fn process_syncing_tables_when_idle<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         current_lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopAction>
+    ) -> EtlResult<Option<ExitIntent>>
     where
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
-            let action = process_single_syncing_table_when_idle(
+            let exit_intent = process_single_syncing_table_when_idle(
                 ctx,
                 table_id,
                 table_replication_phase,
@@ -2081,12 +2112,12 @@ mod apply_worker {
             )
             .await?;
 
-            if action.is_terminating() {
-                return Ok(action);
+            if exit_intent.is_some() {
+                return Ok(exit_intent);
             }
         }
 
-        Ok(ApplyLoopAction::Continue)
+        Ok(None)
     }
 
     /// Processes a single syncing table outside transaction.
@@ -2098,7 +2129,7 @@ mod apply_worker {
         table_id: TableId,
         table_replication_phase: TableReplicationPhase,
         current_lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopAction>
+    ) -> EtlResult<Option<ExitIntent>>
     where
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
@@ -2175,7 +2206,7 @@ mod apply_worker {
                                     "apply worker unblocked: table sync worker errored, skipping table",
                                 );
 
-                                return Ok(ApplyLoopAction::Continue);
+                                return Ok(None);
                             }
 
                             info!(
@@ -2192,7 +2223,7 @@ mod apply_worker {
                                 "apply worker unblocked: shutdown signal received while waiting for table sync worker",
                             );
 
-                            return Ok(ApplyLoopAction::Pause);
+                            return Ok(Some(ExitIntent::Pause));
                         }
                     }
                 }
@@ -2271,7 +2302,7 @@ mod apply_worker {
             }
         }
 
-        Ok(ApplyLoopAction::Continue)
+        Ok(None)
     }
 
     /// Marks a table as errored.
@@ -2280,7 +2311,7 @@ mod apply_worker {
     pub(super) async fn mark_table_errored<S, D>(
         ctx: &ApplyWorkerContext<S, D>,
         table_replication_error: TableReplicationError,
-    ) -> EtlResult<ApplyLoopAction>
+    ) -> EtlResult<Option<ExitIntent>>
     where
         S: StateStore + Clone + Send + Sync + 'static,
     {
@@ -2293,7 +2324,7 @@ mod apply_worker {
         )
         .await?;
 
-        Ok(ApplyLoopAction::Continue)
+        Ok(None)
     }
 
     /// Creates a new table sync worker for the specified table.
@@ -2366,7 +2397,7 @@ mod table_sync_worker {
     pub(super) async fn process_syncing_tables_after_commit_event<S>(
         ctx: &TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopAction> {
+    ) -> EtlResult<Option<ExitIntent>> {
         let worker_type = WorkerType::TableSync {
             table_id: ctx.table_id,
         };
@@ -2382,7 +2413,7 @@ mod table_sync_worker {
                     "catchup target lsn reached after commit, requesting early batch flush before transitioning to sync_done",
                 );
 
-                return Ok(ApplyLoopAction::Complete);
+                return Ok(Some(ExitIntent::Complete));
             }
 
             debug!(
@@ -2394,7 +2425,7 @@ mod table_sync_worker {
             );
         }
 
-        Ok(ApplyLoopAction::Continue)
+        Ok(None)
     }
 
     /// Processes syncing tables after batch flush.
@@ -2404,7 +2435,7 @@ mod table_sync_worker {
     pub(super) async fn process_syncing_tables_after_flush<S>(
         ctx: &mut TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopAction>
+    ) -> EtlResult<Option<ExitIntent>>
     where
         S: StateStore + Clone + Send + Sync + 'static,
     {
@@ -2418,7 +2449,7 @@ mod table_sync_worker {
     pub(super) async fn process_syncing_tables_when_idle<S>(
         ctx: &mut TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopAction>
+    ) -> EtlResult<Option<ExitIntent>>
     where
         S: StateStore + Clone + Send + Sync + 'static,
     {
@@ -2431,7 +2462,7 @@ mod table_sync_worker {
     async fn try_complete_catchup<S>(
         ctx: &mut TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopAction>
+    ) -> EtlResult<Option<ExitIntent>>
     where
         S: StateStore + Clone + Send + Sync + 'static,
     {
@@ -2463,7 +2494,7 @@ mod table_sync_worker {
                     "table sync worker completed: now in sync_done state, apply worker will be unblocked",
                 );
 
-                return Ok(ApplyLoopAction::Complete);
+                return Ok(Some(ExitIntent::Complete));
             }
 
             debug!(
@@ -2475,7 +2506,7 @@ mod table_sync_worker {
             );
         }
 
-        Ok(ApplyLoopAction::Continue)
+        Ok(None)
     }
 
     /// Marks a table as errored.
@@ -2484,12 +2515,12 @@ mod table_sync_worker {
     pub(super) async fn mark_table_errored<S>(
         ctx: &mut TableSyncWorkerContext<S>,
         table_replication_error: TableReplicationError,
-    ) -> EtlResult<ApplyLoopAction>
+    ) -> EtlResult<Option<ExitIntent>>
     where
         S: StateStore + Clone + Send + Sync + 'static,
     {
         if ctx.table_id != table_replication_error.table_id() {
-            return Ok(ApplyLoopAction::Continue);
+            return Ok(None);
         }
 
         let mut inner = ctx.table_sync_worker_state.lock().await;
@@ -2497,6 +2528,6 @@ mod table_sync_worker {
             .set_and_store(table_replication_error.into(), &ctx.state_store)
             .await?;
 
-        Ok(ApplyLoopAction::Complete)
+        Ok(Some(ExitIntent::Complete))
     }
 }

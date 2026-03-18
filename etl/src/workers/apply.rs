@@ -302,9 +302,13 @@ where
         )
         .await?;
 
+        // The apply loop when used via the apply worker, should never complete since it's always
+        // streaming indefinitely.
+        debug_assert!(!matches!(apply_loop_result, ApplyLoopResult::Completed));
+
         match apply_loop_result {
             ApplyLoopResult::Completed => {
-                info!("apply worker apply loop completed successfully");
+                error!("apply worker apply loop completed, but it should never complete");
             }
             ApplyLoopResult::Paused => {
                 info!("apply worker apply loop paused for shutdown");
