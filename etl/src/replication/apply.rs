@@ -664,9 +664,11 @@ where
                 biased;
 
                 // PRIORITY 1: Handle shutdown signals.
-                // Shutdown takes highest priority to ensure graceful termination. When received,
-                // we immediately send the final status update and wait for PostgreSQL
-                // acknowledgement, regardless of the current transaction state.
+                // Shutdown takes highest priority and is intentionally quick and best-effort.
+                // We do not generally defer to transaction boundaries because that adds complexity
+                // without giving exactly-once semantics. The one exception is the catch-up wait
+                // path: if it returns `Pause` after a commit, the normal commit flush machinery
+                // will still flush that commit batch before the loop returns.
                 _ = self.shutdown_rx.changed() => {
                     self.handle_shutdown_signal(events_stream.as_mut()).await?;
                 }
@@ -831,8 +833,15 @@ where
     ///
     /// If an in-flight flush result is already ready, it is processed first without waiting.
     ///
-    /// The goal of the shutdown procedure is to reduce duplicates on restart as much as possible
-    /// by ensuring the replication slot's confirmed LSN reflects the latest flushed data.
+    /// The shutdown procedure is intentionally quick and best-effort. We do not generally defer
+    /// shutdown to transaction or catch-up boundaries because the system is still at-least-once
+    /// and extra draining logic would add disproportionate complexity.
+    ///
+    /// Instead, the goal here is to report the best durable position already known by the loop.
+    ///
+    /// The only shutdown path that still forces the current commit batch is the catch-up waiting
+    /// path that returns [`ApplyLoopAction::Pause`], since that already fits the normal
+    /// commit/flush flow.
     ///
     /// Note: the shutdown system is best-effort. Graceful shutdown may not complete if we are
     /// blocked on non-interruptible code or if keepalive messages never arrive from the server.
@@ -880,6 +889,9 @@ where
 
     /// Initiates graceful shutdown by sending a status update and transitioning to
     /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
+    ///
+    /// The status update uses the best durable position currently known by the loop; it does not
+    /// try to advance shutdown to a transaction-specific target by doing additional draining work.
     async fn initiate_graceful_shutdown(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -1064,12 +1076,13 @@ where
             self.state.set_flush_deadline_if_needed();
         }
 
+        // We check for the batch flushing conditions before deciding whether to flush or not.
         let batch_size_reached =
             self.state.events_batch_bytes >= self.cached_batch_budget.current_batch_size_bytes();
         let early_flush_requested = result.end_batch.is_some();
         let should_flush = batch_size_reached || early_flush_requested;
 
-        if should_flush && self.state.has_pending_batch() {
+        if should_flush {
             let reason = if batch_size_reached {
                 "max batch bytes reached"
             } else {
@@ -1336,8 +1349,9 @@ where
             ..Default::default()
         };
 
-        // If the action results in the apply loop is terminating, we want to end the batch forcibly,
-        // including the commit event itself.
+        // Terminating actions force the current commit batch to end, including the commit event
+        // itself. For shutdown, this is mainly the catch-up wait path returning
+        // [`ApplyLoopAction::Pause`], which lets that case reuse the normal commit flush flow.
         if action.is_terminating() {
             result.end_batch = Some(EndBatch::Inclusive);
         }
