@@ -109,9 +109,9 @@ pub enum ApplyLoopAction {
     /// The apply loop can continue on the next element.
     #[default]
     Continue,
-    /// The apply loop should pause processing.
+    /// The current apply loop invocation should stop and may be resumed later.
     Pause,
-    /// The apply loop should stop processing because it has completed.
+    /// The current apply loop invocation should stop because it has completed.
     Complete,
 }
 
@@ -128,7 +128,7 @@ impl ApplyLoopAction {
         }
     }
 
-    /// Returns `true` if the apply loop action is terminating the loop, `false` otherwise.
+    /// Returns `true` if the action terminates the current apply loop invocation.
     pub fn is_terminating(&self) -> bool {
         match self {
             Self::Continue => false,
@@ -350,15 +350,19 @@ struct ApplyLoopState {
     max_batch_fill_duration: Duration,
     /// Destination write result waiting to be applied to replication progress.
     pending_flush_result: Option<PendingBatchFlushResult<()>>,
-    /// The action that is being accumulated from multiple code paths until we are ready to act on
-    /// it.
+    /// The action being accumulated while the loop waits for a pending flush or shutdown
+    /// acknowledgement before it can return.
     pending_action: Option<ApplyLoopAction>,
     /// Set to `true` after a terminating action so the loop never accepts new messages again.
     ///
     /// This tracks both [`ApplyLoopAction::Pause`] and [`ApplyLoopAction::Complete`], since both
-    /// require stopping message intake forever.
+    /// terminate the current apply loop invocation even if additional cleanup flushes still need to
+    /// run.
     processing_stopped: bool,
     /// Set to `true` when a flush was deferred because another flush result was still in flight.
+    ///
+    /// While this is set, the loop stops both deadline-driven flush attempts and new message intake
+    /// until the in-flight flush resolves and the queued batch can be retried.
     processing_paused: bool,
 }
 
@@ -403,6 +407,9 @@ impl ApplyLoopState {
     }
 
     /// Sets the batch flush deadline, if not already set.
+    ///
+    /// The deadline stays armed until a flush is actually dispatched. If a flush attempt is deferred
+    /// because another flush is still in flight, the deadline is intentionally preserved.
     fn set_flush_deadline_if_needed(&mut self) {
         if self.flush_deadline.is_some() {
             return;
@@ -413,7 +420,7 @@ impl ApplyLoopState {
         debug!("started batch flush timer");
     }
 
-    /// Resets the batch flush deadline.
+    /// Resets the batch flush deadline after a batch has been dispatched.
     fn reset_flush_deadline(&mut self) {
         self.flush_deadline = None;
 
@@ -699,26 +706,22 @@ where
                 // PRIORITY 3: Handle the pending destination write result.
                 // This branch polls the stored future by mutable reference, so if another branch wins
                 // the select first we keep the pending result in place for the next iteration.
-                // After resolving, any paused flush is retried and message processing only resumes
-                // if no terminating action has already stopped the loop permanently.
+                // After resolving, any queued flush that had paused the loop is retried before we
+                // consider returning from the loop.
                 apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
                     let action = self
                         .handle_flush_result(apply_result)
                         .await?;
-                    self.state.note_action(action);
-
-                    // If there is a pending flush, we need that to be done before deciding what
-                    // to do with the action. Otherwise, we just return the value.
-                    if self.state.has_pending_flush_result() {
-                        self.state.merge_into_pending_action(action);
-                    } else if let Some(result) = action.to_result() {
+                    if let Some(result) = self.resolve_action(action) {
                         return Ok(result);
                     }
                 }
 
                 // PRIORITY 4: Handle batch flush timer expiry.
                 // Ensures batches don't wait indefinitely when message rate is low. The timer
-                // is started when the first event enters the batch and reset after each flush.
+                // is started when the first event enters the batch and reset only once a flush is
+                // actually dispatched. Disabled while a queued batch is paused behind an in-flight
+                // flush because that retry is driven by the flush-result branch above.
                 _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if !self.state.processing_paused => {
                     self.flush_batch("flush deadline reached").await?;
                 }
@@ -736,17 +739,24 @@ where
                             &replication_client,
                         )
                         .await?;
-                    self.state.note_action(action);
-
-                    // If there is a pending flush, we need that to be done before deciding what
-                    // to do with the action. Otherwise, we just return the value.
-                    if self.state.has_pending_flush_result() {
-                        self.state.merge_into_pending_action(action);
-                    } else if let Some(result) = action.to_result() {
+                    if let Some(result) = self.resolve_action(action) {
                         return Ok(result);
                     }
                 }
             }
+        }
+    }
+
+    /// Records an action and either returns the final loop result or defers it until the
+    /// outstanding flush completes.
+    fn resolve_action(&mut self, action: ApplyLoopAction) -> Option<ApplyLoopResult> {
+        self.state.note_action(action);
+
+        if self.state.has_pending_flush_result() {
+            self.state.merge_into_pending_action(action);
+            None
+        } else {
+            action.to_result()
         }
     }
 
@@ -855,6 +865,7 @@ where
             // We handle the result and merge it into the pending action, so that it can be properly
             // returned once the shutdown is completed.
             let action = self.handle_flush_result(flush_result).await?;
+            self.state.note_action(action);
             self.state.merge_into_pending_action(action);
         }
 
@@ -967,8 +978,8 @@ where
         let synchronize_action = self.process_syncing_tables_when_idle().await?;
         action = action.merge(synchronize_action);
 
-        // If processing was paused, there must be a batch that still needs to be flushed now that
-        // the previous in-flight result has resolved.
+        // If processing was paused, there must be a queued batch that still needs to be flushed now
+        // that the previous in-flight result has resolved.
         if processing_paused {
             self.flush_batch("pending flush result received").await?;
         }
@@ -1084,7 +1095,8 @@ where
     /// Flushes the current batch of events to the destination.
     ///
     /// If a flush is already in flight, this pauses the loop and leaves the current batch queued
-    /// until the pending flush result has been processed.
+    /// until the pending flush result has been processed. The queued batch is then retried from
+    /// [`Self::handle_flush_result`] when that in-flight flush resolves.
     async fn flush_batch(&mut self, reason: &str) -> EtlResult<()> {
         // If the batch is empty, we don't need to do anything.
         if !self.state.has_pending_batch() {
@@ -1825,6 +1837,7 @@ mod apply_worker {
                                     ?final_phase,
                                     "apply worker unblocked: table sync worker errored, skipping table",
                                 );
+
                                 return Ok(ApplyLoopAction::Continue);
                             }
 
@@ -1841,6 +1854,7 @@ mod apply_worker {
                                 table_id = table_id.0,
                                 "apply worker unblocked: shutdown signal received while waiting for table sync worker",
                             );
+
                             return Ok(ApplyLoopAction::Pause);
                         }
                     }
