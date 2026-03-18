@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use metrics::{Unit, describe_gauge, gauge};
 use tikv_jemalloc_ctl::{epoch, opt, raw, stats};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE, PIPELINE_ID_LABEL};
 
@@ -132,7 +132,7 @@ fn log_jemalloc_config() {
     // Get actual runtime narenas (not the configured value).
     let actual_narenas = tikv_jemalloc_ctl::arenas::narenas::read().ok();
 
-    info!(
+    debug!(
         background_thread = ?background_thread,
         narenas_configured = ?opt_narenas,
         narenas_actual = ?actual_narenas,

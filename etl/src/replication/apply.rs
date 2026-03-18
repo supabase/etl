@@ -456,9 +456,9 @@ impl ApplyLoopState {
     /// When idle, returns the last received LSN since no actual flushes occur. Otherwise,
     /// returns the last flush LSN from completed transactions.
     ///
-    /// Note that when a transaction is now started, the last flush lsn will be used, and it might
-    /// jump back compared to the last received lsn that we sent before, however this is fine since the
-    /// status update logic guarantees monotonically increasing LSNs.
+    /// Note that when a new transaction starts, the last flush LSN will be used and it may appear
+    /// to move backward relative to the last received LSN reported earlier. This is fine because
+    /// the status update logic guarantees monotonically increasing LSNs.
     fn effective_flush_lsn(&self) -> PgLsn {
         if self.is_idle() {
             self.replication_progress.last_received_lsn
@@ -867,7 +867,7 @@ where
 
         info!(
             %worker_type,
-            "shutdown signal received outside transaction, sending status update and waiting for acknowledgement",
+            "shutdown signal received while idle, sending status update and waiting for acknowledgement",
         );
 
         // In all other cases we just initiate the graceful shutdown.
@@ -998,8 +998,7 @@ where
 
     /// Handles a message from the replication stream.
     ///
-    /// Processes the message, manages batch timing, and handles deferred shutdown
-    /// at transaction boundaries.
+    /// Processes the message, manages batch timing, and cooperates with deferred shutdown.
     async fn handle_stream_message(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -1105,6 +1104,7 @@ where
     /// Flushes the current batch of events to the destination.
     ///
     /// If we are in deferred shutdown and the batch ended with a commit (i.e., we're no longer
+    /// mid-transaction), this will either wait for in-flight destination acknowledgements or
     /// mid-transaction), this will either wait for in-flight destination acknowledgements or
     /// initiate graceful shutdown immediately if none are pending.
     async fn flush_batch(&mut self, reason: &str) -> EtlResult<()> {
@@ -1635,7 +1635,7 @@ where
         }
     }
 
-    /// Processes syncing tables outside a transaction.
+    /// Processes syncing tables when the apply loop is idle.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
     async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<ApplyLoopAction> {
@@ -1651,7 +1651,7 @@ where
         debug!(
             worker_type = %self.worker_context.worker_type(),
             %current_lsn,
-            "processing syncing tables outside transaction"
+            "processing syncing tables while idle"
         );
 
         match &mut self.worker_context {

@@ -9,6 +9,7 @@ use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_p
 use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
 use etl::destination::{BatchFlushResult, Destination};
+use crate::table_name::try_stringify_table_name;
 use etl::error::{ErrorKind, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
@@ -19,6 +20,34 @@ use etl::{bail, etl_error};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{debug, info};
+
+/// Suffix for changelog tables
+const ICEBERG_CHANGELOG_TABLE_SUFFIX: &str = "changelog";
+/// CDC operation column name
+const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
+/// CDC operation column name
+const SEQUENCE_NUMBER_COLUMN_NAME: &str = "sequence_number";
+
+/// Type alias for Iceberg table names.
+type IcebergTableName = String;
+
+/// Converts a source [`TableName`] into an Iceberg changelog table name.
+pub fn table_name_to_iceberg_table_name(
+    table_name: &TableName,
+    single_destination_namespace: bool,
+) -> EtlResult<IcebergTableName> {
+    if single_destination_namespace {
+        return Ok(format!(
+            "{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}",
+            try_stringify_table_name(table_name)?
+        ));
+    }
+
+    Ok(format!(
+        "{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}",
+        table_name.name
+    ))
+}
 
 /// CDC operation types for Iceberg changelog tables.
 ///
@@ -48,46 +77,6 @@ impl fmt::Display for IcebergOperationType {
             IcebergOperationType::Update => write!(f, "UPDATE"),
             IcebergOperationType::Delete => write!(f, "DELETE"),
         }
-    }
-}
-
-/// Type alias for Iceberg table names.
-type IcebergTableName = String;
-
-/// Delimiter separating schema from table name in iceberg table identifiers.
-const ICEBERG_TABLE_ID_DELIMITER: &str = "_";
-/// Replacement string for escaping underscores in Postgres names.
-const ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT: &str = "__";
-/// Suffix for changelog tables
-const ICEBERG_CHANGELOG_TABLE_SUFFIX: &str = "changelog";
-
-/// CDC operation column name
-const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
-/// CDC operation column name
-const SEQUENCE_NUMBER_COLUMN_NAME: &str = "sequence_number";
-
-/// Converts a source table name to an Iceberg changelog table name.
-///
-/// Creates a standardized naming convention for Iceberg tables by combining
-/// the schema and table name with a `_changelog` suffix to distinguish
-/// CDC tables from regular data tables.
-pub fn table_name_to_iceberg_table_name(
-    table_name: &TableName,
-    single_destination_namespace: bool,
-) -> IcebergTableName {
-    if single_destination_namespace {
-        let escaped_schema = table_name.schema.replace(
-            ICEBERG_TABLE_ID_DELIMITER,
-            ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
-        );
-        let escaped_table = table_name.name.replace(
-            ICEBERG_TABLE_ID_DELIMITER,
-            ICEBERG_TABLE_ID_DELIMITER_ESCAPE_REPLACEMENT,
-        );
-
-        format!("{escaped_schema}_{escaped_table}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}")
-    } else {
-        format!("{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}", table_name.name)
     }
 }
 
@@ -139,18 +128,21 @@ impl DestinationNamespace {
 /// destination struct cloneable.
 #[derive(Debug)]
 struct Inner {
-    /// Cache of table names we already created/verified in the namespace.
+    /// Cache of source tables we already created/verified in the destination.
     ///
     /// Prevents redundant table existence checks and creation attempts.
     /// Tables are added to this cache after successful creation or verification.
-    created_tables: HashSet<IcebergTableName>,
-
+    ///
+    /// This cache is intentionally keyed by source [`TableId`] instead of the rendered Iceberg
+    /// table name. In a single destination namespace, distinct source tables from different
+    /// schemas can still render to the same destination table name. That collision should surface
+    /// as a destination error from Iceberg.
+    created_tables: HashSet<TableId>,
     /// Cache of namespaces we already created/verified in the destination
     ///
     /// Prevents redundant namespace existence checks and creation attempts.
     /// Namespaces are added to this cache after successful creation or verification.
     created_namespaces: HashSet<String>,
-
     /// Namespace where the tables will be replicated. Depending on the variant either
     /// all tables will go in one namespace or there will be one namespace per
     /// source schema.
@@ -210,14 +202,15 @@ where
             );
         };
 
-        let namespace = schema_to_namespace(&table_schema.name.schema);
-        let namespace = inner.namespace.get_or(&namespace);
+        let source_table_name = table_schema.name.clone();
+        let namespace = schema_to_namespace(&source_table_name.schema);
+        let namespace = inner.namespace.get_or(&namespace).to_string();
 
         self.client
-            .drop_table_if_exists(namespace, iceberg_table_name.clone())
+            .drop_table_if_exists(&namespace, iceberg_table_name.clone())
             .await
             .map_err(iceberg_error_to_etl_error)?;
-        inner.created_tables.remove(&iceberg_table_name);
+        inner.created_tables.remove(&table_id);
 
         // We recreate the table with the same schema.
         self.prepare_table_for_streaming(&mut inner, table_id)
@@ -409,7 +402,7 @@ where
         let table_schema = Self::modify_schema_with_cdc_columns(&table_schema);
 
         let iceberg_table_name =
-            table_name_to_iceberg_table_name(&table_schema.name, inner.namespace.is_single());
+            table_name_to_iceberg_table_name(&table_schema.name, inner.namespace.is_single())?;
         let iceberg_table_name = self
             .get_or_create_iceberg_table_name(&table_id, iceberg_table_name)
             .await?;
@@ -419,7 +412,13 @@ where
         let namespace = self.create_namespace_if_missing(inner, namespace).await?;
 
         let iceberg_table_name = self
-            .create_table_if_missing(inner, iceberg_table_name, &namespace, &table_schema)
+            .create_table_if_missing(
+                inner,
+                table_id,
+                iceberg_table_name,
+                &namespace,
+                &table_schema,
+            )
             .await?;
 
         Ok((namespace, iceberg_table_name))
@@ -466,11 +465,12 @@ where
     async fn create_table_if_missing(
         &self,
         inner: &mut Inner,
+        table_id: TableId,
         iceberg_table_name: String,
         namespace: &str,
         table_schema: &TableSchema,
     ) -> EtlResult<String> {
-        if inner.created_tables.contains(&iceberg_table_name) {
+        if inner.created_tables.contains(&table_id) {
             return Ok(iceberg_table_name);
         }
 
@@ -483,7 +483,7 @@ where
             .await
             .map_err(iceberg_error_to_etl_error)?;
 
-        inner.created_tables.insert(iceberg_table_name.clone());
+        inner.created_tables.insert(table_id);
 
         Ok(iceberg_table_name)
     }

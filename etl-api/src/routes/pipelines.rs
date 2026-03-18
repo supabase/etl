@@ -4,7 +4,6 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
-use etl_config::Environment;
 use etl_postgres::replication::{
     TableLookupError, get_table_names_from_table_ids, health, lag, state,
 };
@@ -27,15 +26,13 @@ use crate::db::sources::SourcesDbError;
 use crate::feature_flags::get_max_pipelines_per_tenant;
 use crate::k8s::core::{
     create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
-    delete_pipeline_resources_in_k8s,
+    delete_pipeline_resources_in_k8s, is_replicator_pod_stopped,
 };
 use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache, TrustedRootCertsError};
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use crate::utils::parse_docker_image_tag;
-use crate::validation::{
-    FailureType, ValidationContext, ValidationError, ValidationFailure,
-    validate_pipeline as run_pipeline_validation,
-};
+use crate::validation;
+use crate::validation::{FailureType, ValidationContext, ValidationError, ValidationFailure};
 use crate::{config::ApiConfig, k8s::PodStatus};
 
 #[derive(Debug, Error)]
@@ -154,6 +151,10 @@ impl PipelineError {
             }
             PipelineError::Validation(ValidationError::Database(_)) => {
                 "database validation failed".to_string()
+            }
+            PipelineError::Validation(ValidationError::TrustedRootCerts(_))
+            | PipelineError::Validation(ValidationError::Environment(_)) => {
+                "internal server error".to_string()
             }
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
@@ -982,7 +983,6 @@ pub async fn get_pipeline_status(
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
-
     let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
     let status = pod_status.into();
 
@@ -1331,11 +1331,18 @@ pub async fn update_pipeline_version(
         return Ok(HttpResponse::Ok().finish());
     }
 
+    // If a replicator is not running, we don't want to create/update k8s resources. It's fine to just
+    // update the image version in the db.
+    if is_replicator_pod_stopped(k8s_client.as_ref(), tenant_id, replicator.id).await? {
+        txn.commit().await?;
+
+        return Ok(HttpResponse::Ok().finish());
+    }
+
     let tls_config = trusted_root_certs_cache
         .get_tls_config(api_config.source.tls_enabled)
         .await?;
 
-    // We update the pipeline in K8s if client is available.
     create_or_update_pipeline_resources_in_k8s(
         k8s_client.as_ref(),
         tenant_id,
@@ -1348,6 +1355,7 @@ pub async fn update_pipeline_version(
         tls_config,
     )
     .await?;
+
     txn.commit().await?;
 
     Ok(HttpResponse::Ok().finish())
@@ -1384,18 +1392,14 @@ pub async fn validate_pipeline(
             .await?
             .ok_or(PipelineError::SourceNotFound(request.source_id))?;
 
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source.tls_enabled)
-        .await?;
-    let source_config = source.config.into_connection_config(tls_config);
+    let ctx = ValidationContext::build_from_source(
+        source.config,
+        api_config.as_ref(),
+        trusted_root_certs_cache.as_ref(),
+    )
+    .await?;
 
-    let environment = Environment::load().map_err(|_| PipelineError::MissingEnvironment)?;
-    let source_pool = connect_to_source_database_from_api(&source_config).await?;
-    let ctx = ValidationContext::builder(environment)
-        .source_pool(source_pool)
-        .build();
-
-    let failures = run_pipeline_validation(&ctx, &request.config).await?;
+    let failures = validation::validate_pipeline(&ctx, &request.config).await?;
     let response = ValidatePipelineResponse {
         validation_failures: failures.into_iter().map(Into::into).collect(),
     };

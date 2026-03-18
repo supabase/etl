@@ -34,7 +34,7 @@ use tokio::runtime::Handle;
 use tokio::time::sleep;
 
 use crate::support::database::{create_etl_api_database, get_test_db_config};
-use crate::support::k8s_client::MockK8sClient;
+use crate::support::k8s_client::{MockK8sClient, MockK8sState};
 
 pub struct TestApp {
     pub address: String,
@@ -42,6 +42,7 @@ pub struct TestApp {
     pub api_key: String,
     config: ApiConfig,
     server_handle: tokio::task::JoinHandle<io::Result<()>>,
+    pub k8s_state: MockK8sState,
 }
 
 impl TestApp {
@@ -514,6 +515,32 @@ pub async fn spawn_test_app() -> TestApp {
 pub async fn spawn_test_app_with_trusted_username(
     trusted_source_username: Option<String>,
 ) -> TestApp {
+    let k8s_state = MockK8sState::default();
+    spawn_test_app_with_k8s_state(trusted_source_username, k8s_state).await
+}
+
+pub async fn spawn_test_app_with_k8s_state(
+    trusted_source_username: Option<String>,
+    k8s_state: MockK8sState,
+) -> TestApp {
+    let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient::new(k8s_state.clone()));
+    let trusted_root_certs_cache = TrustedRootCertsCache::new(k8s_client.clone());
+
+    spawn_test_app_with_services(
+        trusted_source_username,
+        Some(k8s_client),
+        Some(trusted_root_certs_cache),
+        k8s_state,
+    )
+    .await
+}
+
+async fn spawn_test_app_with_services(
+    trusted_source_username: Option<String>,
+    k8s_client: Option<Arc<dyn K8sClient>>,
+    trusted_root_certs_cache: Option<TrustedRootCertsCache>,
+    k8s_state: MockK8sState,
+) -> TestApp {
     Environment::Dev.set();
 
     let base_address = "127.0.0.1";
@@ -554,16 +581,13 @@ pub async fn spawn_test_app_with_trusted_username(
         },
     };
 
-    let k8s_client: Arc<dyn K8sClient> = Arc::new(MockK8sClient);
-    let trusted_root_certs_cache = TrustedRootCertsCache::new(k8s_client.clone());
-
     let server = run(
         config.clone(),
         listener,
         api_db_pool,
         encryption_key,
-        Some(k8s_client),
-        Some(trusted_root_certs_cache),
+        k8s_client,
+        trusted_root_certs_cache,
         None,
     )
     .await
@@ -577,5 +601,6 @@ pub async fn spawn_test_app_with_trusted_username(
         api_key,
         config,
         server_handle,
+        k8s_state,
     }
 }

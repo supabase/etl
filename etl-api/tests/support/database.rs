@@ -3,11 +3,12 @@
 use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
 use etl_config::SerializableSecretString;
-use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
+use etl_config::shared::{IntoConnectOptions, PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
 use etl_postgres::replication::connect_to_source_database;
 use etl_postgres::sqlx::test_utils::create_pg_database;
+use pg_escape::{quote_identifier, quote_literal};
 use secrecy::ExposeSecret;
-use sqlx::PgPool;
+use sqlx::{Connection, Executor, PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::support::test_app::TestApp;
@@ -85,10 +86,89 @@ pub async fn create_test_source_database(
     (source_pool, response.id, source_db_config)
 }
 
+pub struct TrustedSourceDatabase {
+    pub admin_pool: PgPool,
+    pub admin_config: PgConnectionConfig,
+    pub trusted_config: PgConnectionConfig,
+    pub trusted_username: String,
+}
+
+pub async fn create_trusted_source_database() -> TrustedSourceDatabase {
+    let mut admin_config = get_test_db_config();
+    admin_config.name = format!("test_trusted_source_db_{}", Uuid::new_v4());
+
+    let admin_pool = create_pg_database(&admin_config).await;
+    let trusted_username = format!(
+        "supabase_etl_admin_{}",
+        &Uuid::new_v4().simple().to_string()[..12]
+    );
+    let trusted_password = format!("trusted-{}", Uuid::new_v4().simple());
+
+    let mut connection = PgConnection::connect_with(&admin_config.without_db(None))
+        .await
+        .expect("Failed to connect to Postgres");
+
+    connection
+        .execute(&*format!(
+            "create role {} with login password {} nosuperuser inherit nocreaterole nocreatedb replication bypassrls connection limit -1",
+            quote_identifier(&trusted_username),
+            quote_literal(&trusted_password),
+        ))
+        .await
+        .expect("Failed to create trusted ETL role");
+
+    connection
+        .execute(&*format!(
+            "grant create on database {} to {}",
+            quote_identifier(&admin_config.name),
+            quote_identifier(&trusted_username),
+        ))
+        .await
+        .expect("Failed to grant CREATE on database to trusted ETL role");
+
+    let mut trusted_config = admin_config.clone();
+    trusted_config.username = trusted_username.clone();
+    trusted_config.password = Some(trusted_password.into());
+
+    TrustedSourceDatabase {
+        admin_pool,
+        admin_config,
+        trusted_config,
+        trusted_username,
+    }
+}
+
+pub async fn drop_trusted_source_database(database: TrustedSourceDatabase) {
+    let TrustedSourceDatabase {
+        admin_pool,
+        admin_config,
+        trusted_config,
+        trusted_username,
+    } = database;
+
+    drop(admin_pool);
+
+    etl_postgres::sqlx::test_utils::drop_pg_database(&admin_config).await;
+
+    let mut connection = PgConnection::connect_with(&admin_config.without_db(None))
+        .await
+        .expect("Failed to connect to Postgres");
+
+    connection
+        .execute(&*format!(
+            "drop role if exists {}",
+            quote_identifier(&trusted_username),
+        ))
+        .await
+        .expect("Failed to drop trusted ETL role");
+
+    drop(trusted_config);
+}
+
 /// Runs ETL migrations on the source database.
 ///
-/// Sets up the `etl` schema and runs replicator migrations to create the state
-/// store tables needed for ETL operations.
+/// Sets up the `etl` schema and runs Postgres state store migrations to create the
+/// tables ETL uses to persist the replication state needed for ETL operations.
 ///
 /// # Panics
 /// Panics if database connection fails, schema creation fails, or migrations fail.
@@ -111,8 +191,8 @@ pub async fn run_etl_migrations_on_source_database(source_db_config: &PgConnecti
         .await
         .expect("failed to set search path");
 
-    // Run replicator migrations to create the state store tables.
-    sqlx::migrate!("../etl-replicator/migrations")
+    // Run etl migrations to create the state store tables.
+    sqlx::migrate!("../etl/migrations")
         .run(&source_pool)
         .await
         .expect("failed to run etl migrations");
