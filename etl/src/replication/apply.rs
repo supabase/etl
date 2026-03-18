@@ -165,8 +165,6 @@ impl ApplyLoopAction {
 pub enum ShutdownState {
     /// No shutdown requested, normal operation.
     NoShutdown,
-    /// Shutdown requested but deferred until a blocking condition clears.
-    Deferred,
     /// Shutdown in progress, waiting for PostgreSQL to acknowledge our flush position.
     /// The loop will only process keepalive messages until one arrives with `wal_end >= acked_flush_lsn`.
     WaitingForPrimaryKeepAlive {
@@ -176,14 +174,9 @@ pub enum ShutdownState {
 }
 
 impl ShutdownState {
-    /// Returns `true` if a shutdown has been requested (either deferred or waiting).
+    /// Returns `true` if a shutdown has been requested.
     pub fn is_requested(&self) -> bool {
         !matches!(self, Self::NoShutdown)
-    }
-
-    /// Returns `true` if a shutdown was deferred for any reason.
-    pub fn is_deferred(&self) -> bool {
-        matches!(self, Self::Deferred)
     }
 }
 
@@ -441,10 +434,7 @@ impl ApplyLoopState {
         self.replication_progress.last_received_lsn
     }
 
-    /// Returns `true` if the apply loop is totally idle, meaning that:
-    /// - It's not in the middle of a transaction.
-    /// - It doesn't have any events in the batch.
-    /// - It is not waiting for a batch to be flushed.
+    /// Returns `true` if the apply loop is totally idle.
     fn is_idle(&self) -> bool {
         !self.handling_transaction()
             && !self.has_pending_batch()
@@ -511,23 +501,6 @@ impl ApplyLoopState {
             Some(pending_action) => Some(pending_action.merge(new_pending_action)),
             None => Some(new_pending_action),
         }
-    }
-
-    /// Returns `true` whether a branch in the apply loop should defer the result and rather put it
-    /// into `pending_result` for it to be used once the loop cleanly completes.
-    ///
-    /// The rationale for the two conditions is:
-    /// - `has_pending_flush_result` -> when we have a terminating result, we can't return it until
-    ///   there is a pending flush in progress, otherwise the system will prematurely end before
-    ///   state transitions can occur.
-    /// - `WaitingForPrimaryKeepAlive` -> when we have a terminating result, we can't return it since
-    ///   we are waiting for a keep alive, and then we will return it.
-    fn should_defer_action(&self) -> bool {
-        self.has_pending_flush_result()
-            || matches!(
-                self.shutdown_state,
-                ShutdownState::WaitingForPrimaryKeepAlive { .. }
-            )
     }
 }
 
@@ -659,8 +632,8 @@ where
 
                 // PRIORITY 1: Handle shutdown signals.
                 // Shutdown takes highest priority to ensure graceful termination. When received,
-                // we either defer (if mid-transaction) or initiate graceful shutdown by sending
-                // a status update and waiting for PostgreSQL acknowledgement.
+                // we immediately send the final status update and wait for PostgreSQL
+                // acknowledgement, regardless of the current transaction state.
                 _ = self.shutdown_rx.changed() => {
                     self.handle_shutdown_signal(events_stream.as_mut()).await?;
                 }
@@ -703,16 +676,13 @@ where
                 // After resolving, processing_paused is cleared so the deadline and message branches
                 // resume, allowing the accumulated batch to be flushed on the next iteration.
                 apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
-                    // We are taking the pending action (if any), since we will merge it with the one
-                    // that is going to result from the `handle_flush_result`.
-                    let pending_apply = self.state.pending_action.take();
                     let action = self
-                        .handle_flush_result(events_stream.as_mut(), apply_result, pending_apply)
+                        .handle_flush_result(apply_result)
                         .await?;
 
-                    // If we should defer the action, we store it and continue the loop.
-                    // If the action is not deferrable, we just check if it's terminal and return.
-                    if self.state.should_defer_action() {
+                    // If there is a pending flush, we need that to be done before deciding what
+                    // to do with the action. Otherwise, we just return the value.
+                    if self.state.has_pending_flush_result() {
                         self.state.merge_into_pending_action(action);
                     } else if let Some(result) = action.to_result() {
                         return Ok(result);
@@ -722,7 +692,7 @@ where
                 // PRIORITY 4: Handle batch flush timer expiry.
                 // Ensures batches don't wait indefinitely when message rate is low. The timer
                 // is started when the first event enters the batch and reset after each flush.
-                _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if !self.state.processing_paused => {
+                _ = Self::wait_for_batch_deadline(self.state.flush_deadline) => {
                     self.flush_batch("flush deadline reached").await?;
                 }
 
@@ -741,9 +711,9 @@ where
                         )
                         .await?;
 
-                    // If we should defer the action, we store it and continue the loop.
-                    // If the action is not deferrable, we just check if it's terminal and return.
-                    if self.state.should_defer_action() {
+                    // If there is a pending flush, we need that to be done before deciding what
+                    // to do with the action. Otherwise, we just return the value.
+                    if self.state.has_pending_flush_result() {
                         self.state.merge_into_pending_action(action);
                     } else if let Some(result) = action.to_result() {
                         return Ok(result);
@@ -820,12 +790,9 @@ where
         Ok(false)
     }
 
-    /// Handles a shutdown signal by transitioning to the appropriate shutdown state.
+    /// Handles a shutdown signal by transitioning to [`ShutdownState::WaitingForPrimaryKeepAlive`].
     ///
-    /// If inside a transaction, defers shutdown until the transaction boundary.
-    /// If outside a transaction but destination writes are still in flight, waits for them
-    /// to resolve in order before sending the final PostgreSQL status update.
-    /// Otherwise, sends a status update and transitions to [`ShutdownState::WaitingForPrimaryKeepAlive`].
+    /// If an in-flight flush result is already ready, it is processed first without waiting.
     ///
     /// The goal of the shutdown procedure is to reduce duplicates on restart as much as possible
     /// by ensuring the replication slot's confirmed LSN reflects the latest flushed data.
@@ -851,26 +818,24 @@ where
             return Ok(());
         }
 
-        // the batch will be force flushed and graceful shutdown will begin.
-        // If we are not in idle, we defer the shutdown until the system is able to gracefully shutdown
-        // and complete outstanding work.
-        if !self.state.is_idle() {
+        // We try to take the pending flush result and handle it if it's immediately available.
+        if let Some(flush_result) = self.try_take_pending_flush_result() {
             info!(
                 %worker_type,
-                "shutdown signal received during non-idle time, deferring shutdown until idle",
+                "shutdown signal received with ready in-flight flush result, processing it before shutdown",
             );
 
-            self.state.shutdown_state = ShutdownState::Deferred;
-
-            return Ok(());
+            // We handle the result and merge it into the pending action, so that it can be properly
+            // returned once the shutdown is completed.
+            let action = self.handle_flush_result(flush_result).await?;
+            self.state.merge_into_pending_action(action);
         }
 
         info!(
             %worker_type,
-            "shutdown signal received while idle, sending status update and waiting for acknowledgement",
+            "shutdown signal received, sending status update and waiting for acknowledgement",
         );
 
-        // In all other cases we just initiate the graceful shutdown.
         self.initiate_graceful_shutdown(events_stream.as_mut())
             .await
     }
@@ -912,15 +877,19 @@ where
         }
     }
 
+    /// Tries to take a ready pending flush result without waiting.
+    fn try_take_pending_flush_result(&mut self) -> Option<CompletedBatchFlushResult<()>> {
+        self.state
+            .pending_flush_result
+            .as_mut()
+            .and_then(PendingBatchFlushResult::try_recv)
+    }
+
     /// Handles a completed batch flush result.
     async fn handle_flush_result(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         flush_result: CompletedBatchFlushResult<()>,
-        pending_action: Option<ApplyLoopAction>,
     ) -> EtlResult<ApplyLoopAction> {
-        // We store the existing processing state, that we can use to determine whether we want to
-        // flush or not.
         let processing_paused = self.state.processing_paused;
 
         // We clear the state, since now we have processed the pending batch.
@@ -951,7 +920,10 @@ where
         .record(metrics.dispatched_at.elapsed().as_secs_f64());
 
         // We take the current pending action, or we default to continue.
-        let mut action = pending_action.unwrap_or(ApplyLoopAction::Continue);
+        let mut action = self
+            .state
+            .pending_action
+            .unwrap_or(ApplyLoopAction::Continue);
 
         // We process the syncing tables with the last end lsn that the batch contains.
         //
@@ -969,28 +941,9 @@ where
         let synchronize_action = self.process_syncing_tables_when_idle().await?;
         action = action.merge(synchronize_action);
 
-        // If processing was paused, this is likely because a new batch is ready to be flushed but could
-        // not be flushed because of a pending flush result. If that's the case, we now want to flush
-        // that batch. Also, very important, we check if the action is terminating, because if we are
-        // told to terminate, we don't want to enqueue the existing batch.
-        if !action.is_terminating() && processing_paused {
+        // If processing was paused, it means that there must be a batch which still has to be flushed.
+        if processing_paused {
             self.flush_batch("pending flush result received").await?;
-        }
-
-        // If, after handling a flush result, we are told to shut down, and we are idle, we can immediately
-        // initiate the graceful shutdown. The reason why we check for idle is so that we do not shut down
-        // if there are outstanding batches to flush, since those will be terminated cleanly at commit
-        // boundaries when processed.
-        if self.state.shutdown_state.is_deferred() && self.state.is_idle() {
-            info!(
-                worker_type = %self.worker_context.worker_type(),
-                "batch flush result resolved, initiating graceful shutdown",
-            );
-
-            self.initiate_graceful_shutdown(events_stream.as_mut())
-                .await?;
-
-            return Ok(action);
         }
 
         Ok(action)
@@ -998,7 +951,7 @@ where
 
     /// Handles a message from the replication stream.
     ///
-    /// Processes the message, manages batch timing, and cooperates with deferred shutdown.
+    /// Processes the message and manages batch timing.
     async fn handle_stream_message(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -1103,10 +1056,8 @@ where
 
     /// Flushes the current batch of events to the destination.
     ///
-    /// If we are in deferred shutdown and the batch ended with a commit (i.e., we're no longer
-    /// mid-transaction), this will either wait for in-flight destination acknowledgements or
-    /// mid-transaction), this will either wait for in-flight destination acknowledgements or
-    /// initiate graceful shutdown immediately if none are pending.
+    /// If a flush is already in flight, this pauses the loop and leaves the current batch queued
+    /// until the pending flush result has been processed.
     async fn flush_batch(&mut self, reason: &str) -> EtlResult<()> {
         // If the batch is empty, we don't need to do anything.
         if !self.state.has_pending_batch() {
@@ -1151,6 +1102,10 @@ where
 
         // We reset the deadline for the batch, since we are now flushing a new batch. The new deadline
         // will start as soon as we process a new element.
+        //
+        // It's important to note that the deadline is removed only when the batch is flushed and not before
+        // this way, if a batch fails to flush due to inflight, it will be re-tried indefinitely until
+        // that finishes.
         self.state.reset_flush_deadline();
 
         Ok(())
@@ -1328,19 +1283,9 @@ where
         let end_lsn = PgLsn::from(message.end_lsn());
 
         // Process syncing tables after commit (worker-specific behavior).
-        let mut action = self
+        let action = self
             .process_syncing_tables_after_commit_event(end_lsn)
             .await?;
-
-        // If shutdown was deferred, we merge [`ApplyLoopAction::Pause`] so the apply loop pauses
-        // after this commit and a flush is forced (if no pending flush is in flight).
-        //
-        // We also stop processing, so that the system will from now on just wait for new flush results,
-        // but it will stop consuming new messages.
-        if self.state.shutdown_state.is_deferred() {
-            action = action.merge(ApplyLoopAction::Pause);
-            self.state.processing_paused = true;
-        }
 
         let tx_ordinal = self.state.next_tx_ordinal();
         let event = parse_event_from_commit_message(start_lsn, commit_lsn, tx_ordinal, message);
@@ -1627,7 +1572,8 @@ where
 
         match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
-                apply_worker::process_syncing_tables_after_flush(ctx, current_lsn).await
+                apply_worker::process_syncing_tables_after_flush(ctx, current_lsn).await?;
+                Ok(ApplyLoopAction::Continue)
             }
             WorkerContext::TableSync(ctx) => {
                 table_sync_worker::process_syncing_tables_after_flush(ctx, current_lsn).await
@@ -1934,26 +1880,22 @@ mod apply_worker {
     pub(super) async fn process_syncing_tables_after_flush<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         current_lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopAction>
+    ) -> EtlResult<()>
     where
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
     {
         for (table_id, table_replication_phase) in get_syncing_tables(&ctx.store).await? {
-            let action = process_single_syncing_table_after_flush(
+            process_single_syncing_table_after_flush(
                 ctx,
                 table_id,
                 table_replication_phase,
                 current_lsn,
             )
             .await?;
-
-            if action.is_terminating() {
-                return Ok(action);
-            }
         }
 
-        Ok(ApplyLoopAction::Continue)
+        Ok(())
     }
 
     /// Processes a single syncing table after batch flush.
@@ -1964,7 +1906,7 @@ mod apply_worker {
         table_id: TableId,
         table_replication_phase: TableReplicationPhase,
         current_lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopAction>
+    ) -> EtlResult<()>
     where
         S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
         D: Destination + Clone + Send + Sync + 'static,
@@ -2060,7 +2002,7 @@ mod apply_worker {
             }
         }
 
-        Ok(ApplyLoopAction::Continue)
+        Ok(())
     }
 
     /// Processes syncing tables outside transaction.

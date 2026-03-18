@@ -8,8 +8,8 @@ use std::{
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
-use etl::destination::{BatchFlushResult, Destination};
 use crate::table_name::try_stringify_table_name;
+use etl::destination::{BatchFlushResult, Destination};
 use etl::error::{ErrorKind, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;

@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
+use tokio::sync::oneshot::error::TryRecvError;
 use tokio_postgres::types::PgLsn;
 
 use crate::error::{ErrorKind, EtlError, EtlResult};
@@ -105,6 +106,14 @@ pin_project! {
 }
 
 impl<T> PendingBatchFlushResult<T> {
+    fn into_completed_result(&self, result: EtlResult<T>) -> CompletedBatchFlushResult<T> {
+        CompletedBatchFlushResult {
+            commit_end_lsn: self.commit_end_lsn,
+            metrics: self.metrics,
+            result,
+        }
+    }
+
     /// Returns the commit end LSN associated with this result, if any.
     pub fn commit_end_lsn(&self) -> Option<PgLsn> {
         self.commit_end_lsn
@@ -113,6 +122,18 @@ impl<T> PendingBatchFlushResult<T> {
     /// Returns the metrics captured when the batch was dispatched.
     pub fn metrics(&self) -> BatchFlushMetrics {
         self.metrics
+    }
+
+    /// Tries to receive the result without waiting.
+    pub fn try_recv(&mut self) -> Option<CompletedBatchFlushResult<T>> {
+        match self.rx.try_recv() {
+            Ok(result) => Some(self.into_completed_result(result)),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Closed) => Some(self.into_completed_result(Err(etl_error!(
+                ErrorKind::DestinationError,
+                "batch flush result channel closed before sending"
+            )))),
+        }
     }
 }
 
@@ -207,5 +228,33 @@ mod tests {
             err.description(),
             Some("batch flush result dropped without sending")
         );
+    }
+
+    #[tokio::test]
+    async fn try_recv_returns_none_while_result_is_pending() {
+        let metrics = BatchFlushMetrics {
+            events_count: 0,
+            dispatched_at: Instant::now(),
+        };
+        let (_flush_result, mut pending_result) = BatchFlushResult::<()>::new(None, metrics);
+
+        assert!(pending_result.try_recv().is_none());
+    }
+
+    #[tokio::test]
+    async fn try_recv_returns_completed_result_when_ready() {
+        let metrics = BatchFlushMetrics {
+            events_count: 1,
+            dispatched_at: Instant::now(),
+        };
+        let (flush_result, mut pending_result) =
+            BatchFlushResult::new(Some(PgLsn::from(42)), metrics);
+        flush_result.send_ok(()).unwrap();
+
+        let completed = pending_result.try_recv().expect("expected ready result");
+        let (commit_end_lsn, _metrics, result) = completed.into_parts();
+
+        assert_eq!(commit_end_lsn, Some(PgLsn::from(42)));
+        result.unwrap();
     }
 }
