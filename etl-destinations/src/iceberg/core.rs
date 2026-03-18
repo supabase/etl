@@ -151,7 +151,7 @@ struct Inner {
 
 impl<S> IcebergDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
     /// Creates a new Iceberg destination instance.
     ///
@@ -548,7 +548,7 @@ where
 
 impl<S> Destination for IcebergDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
     /// Returns the identifier name for this destination type.
     fn name() -> &'static str {
@@ -586,8 +586,12 @@ where
     /// them to appropriate Iceberg operations. Events are batched by table
     /// and processed concurrently for optimal performance.
     async fn write_events(&self, events: Vec<Event>, flush_result: BatchFlushResult<()>) {
-        let result = self.write_events(events).await;
-        let _ = flush_result.send_result(result);
+        let destination = self.clone();
+
+        tokio::spawn(async move {
+            let result = destination.write_events(events).await;
+            let _ = flush_result.send_result(result);
+        });
     }
 }
 

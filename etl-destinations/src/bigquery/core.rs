@@ -160,7 +160,7 @@ pub struct BigQueryDestination<S> {
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
     /// Creates a new [`BigQueryDestination`] with a pre-configured client.
     ///
@@ -830,7 +830,7 @@ where
 
 impl<S> Destination for BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
     fn name() -> &'static str {
         "bigquery"
@@ -852,8 +852,12 @@ where
     }
 
     async fn write_events(&self, events: Vec<Event>, flush_result: BatchFlushResult<()>) {
-        let result = self.write_events(events).await;
-        let _ = flush_result.send_result(result);
+        let destination = self.clone();
+
+        tokio::spawn(async move {
+            let result = destination.write_events(events).await;
+            let _ = flush_result.send_result(result);
+        });
     }
 }
 
