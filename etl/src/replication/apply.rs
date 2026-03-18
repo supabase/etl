@@ -1657,6 +1657,7 @@ where
         match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
                 apply_worker::process_syncing_tables_after_flush(ctx, current_lsn).await?;
+
                 Ok(None)
             }
             WorkerContext::TableSync(ctx) => {
