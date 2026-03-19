@@ -25,7 +25,8 @@ pub trait Destination {
     ///
     /// Override this method if the destination needs cleanup or bookkeeping during shutdown.
     /// Background streaming destinations should use it to stop writer loops and drain or drop
-    /// outstanding work. The default implementation is a no-op.
+    /// outstanding work. ETL calls this method at most once for a destination instance, after it
+    /// has stopped submitting new work. The default implementation is a no-op.
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
     }
@@ -78,8 +79,9 @@ pub trait Destination {
     /// streaming batch until the previous `flush_result` has been completed.
     ///
     /// Async implementations that offload work should coordinate `flush_result` with
-    /// [`Destination::shutdown`]. If the apply loop has already gone away, sending the result will
-    /// fail and may be treated as an implicit cancellation.
+    /// [`Destination::shutdown`]. ETL calls [`Destination::shutdown`] at most once and only after
+    /// it has stopped submitting new work. If the apply loop has already gone away, sending the
+    /// result will fail and may be treated as an implicit cancellation.
     ///
     /// During the initial copy phase, transaction boundaries are not a stable global invariant
     /// across all tables. A source transaction may be split across multiple streaming deliveries as

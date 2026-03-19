@@ -9,7 +9,7 @@ use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_p
 use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
 use crate::table_name::try_stringify_table_name;
-use etl::destination::{BatchFlushResult, Destination, DestinationActor, DestinationActorOutcome};
+use etl::destination::{BatchFlushResult, Destination, DestinationTaskSet};
 use etl::error::{ErrorKind, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
@@ -94,7 +94,7 @@ pub struct IcebergDestination<S> {
     client: IcebergClient,
     store: S,
     inner: Arc<Mutex<Inner>>,
-    streaming_actor: Arc<Mutex<Option<DestinationActor<Vec<Event>>>>>,
+    streaming_tasks: DestinationTaskSet,
 }
 
 /// Namespace in the destination where the tables will be copied
@@ -172,39 +172,8 @@ where
                 created_namespaces: HashSet::new(),
                 namespace,
             })),
-            streaming_actor: Arc::new(Mutex::new(None)),
+            streaming_tasks: DestinationTaskSet::new("iceberg"),
         }
-    }
-
-    /// Returns the lazily started streaming actor.
-    ///
-    /// Each queued flush batch contains both the event batch and the flush-result sender that
-    /// should be completed once the Iceberg write finishes. If the send back into the apply loop
-    /// fails, we treat that as the receiver having gone away and just log it.
-    async fn get_or_start_streaming_actor(&self) -> DestinationActor<Vec<Event>> {
-        let mut actor = self.streaming_actor.lock().await;
-        if let Some(actor) = actor.as_ref() {
-            return actor.clone();
-        }
-
-        let destination = self.clone();
-        let started_actor = DestinationActor::start(move |events, flush_result| {
-            let destination = destination.clone();
-
-            async move {
-                let result = destination.write_events(events).await;
-                if flush_result.send(result).is_err() {
-                    warn!(
-                        "failed to send iceberg flush result because apply loop was likely closed"
-                    );
-                }
-
-                Ok(DestinationActorOutcome::Continue)
-            }
-        });
-
-        *actor = Some(started_actor.clone());
-        started_actor
     }
 
     /// Truncates an Iceberg table by dropping and recreating it.
@@ -589,15 +558,7 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
-        let actor = {
-            let mut actor = self.streaming_actor.lock().await;
-            actor.take()
-        };
-
-        match actor {
-            Some(actor) => actor.shutdown().await,
-            None => Ok(()),
-        }
+        self.streaming_tasks.shutdown().await
     }
 
     /// Truncates the specified table by dropping and recreating it.
@@ -635,8 +596,21 @@ where
         events: Vec<Event>,
         flush_result: BatchFlushResult<()>,
     ) -> EtlResult<()> {
-        let actor = self.get_or_start_streaming_actor().await;
-        actor.send(events, flush_result)
+        self.streaming_tasks.try_reap().await?;
+
+        let destination = self.clone();
+        self.streaming_tasks
+            .spawn(async move {
+                let result = destination.write_events(events).await;
+                if flush_result.send(result).is_err() {
+                    warn!(
+                        "failed to send iceberg flush result because apply loop was likely closed"
+                    );
+                }
+            })
+            .await;
+
+        Ok(())
     }
 }
 
