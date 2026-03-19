@@ -310,6 +310,9 @@ where
             .write_events(events.clone(), wrapped_flush_result)
             .await?;
 
+        // We spawn a task to handle the result, this way the wrapper behaves like a transparent
+        // layer that doesn't block on the result of the inner destination, effectively exhibiting
+        // the fully asynchronous behavior that a destination could have.
         let inner = self.inner.clone();
         tokio::spawn(async move {
             let result = pending_result.await.into_result();
