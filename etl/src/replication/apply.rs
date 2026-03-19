@@ -706,68 +706,6 @@ where
         }
     }
 
-    /// Runs one loop iteration while shutdown is waiting for PostgreSQL to acknowledge the
-    /// requested flush LSN.
-    ///
-    /// In this phase the loop no longer accepts new replication messages and it no longer waits
-    /// for pending destination flushes. Instead it only waits for:
-    /// 1. PostgreSQL connection lifecycle updates.
-    /// 2. PostgreSQL keepalives that may acknowledge the shutdown status update with
-    ///    `wal_end >= acked_flush_lsn`.
-    /// 3. Periodic heartbeats once the computed keep alive deadline expires.
-    ///
-    /// Once the keepalive acknowledgement arrives, unresolved batch or flush work causes the loop
-    /// to conservatively return [`ApplyLoopResult::Paused`]. Only quiescent state may reuse the
-    /// stored exit intent.
-    async fn run_shutdown_wait_iteration(
-        &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
-        connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
-        acked_flush_lsn: PgLsn,
-    ) -> EtlResult<Option<ApplyLoopResult>> {
-        tokio::select! {
-            biased;
-
-            // PRIORITY 1: Handle PostgreSQL connection lifecycle updates.
-            // A closed or errored source connection always stops the loop immediately.
-            changed = connection_updates_rx.changed() => {
-                Self::handle_connection_update(changed, connection_updates_rx)?;
-            }
-
-            // PRIORITY 2: Wait for the keepalive that acknowledges the shutdown flush LSN.
-            // Once this barrier is reached, shutdown may finish.
-            message = events_stream.next() => {
-                if self
-                    .handle_shutdown_keepalive_wait_message(events_stream.as_mut(), message, acked_flush_lsn)
-                    .await?
-                {
-                    return Ok(Some(self.finish_shutdown()));
-                }
-            }
-
-            // PRIORITY 3: Resend a heartbeat once the computed keep alive deadline expires while
-            // shutdown is waiting for the primary keep alive acknowledgement barrier. This is a
-            // last-resort safeguard for cases where PostgreSQL keep alives stop reaching the loop,
-            // for example because the source has gone quiet, the stream is backpressured, or the
-            // network is delayed. In normal operation, PostgreSQL's own keep alives should drive
-            // this wait.
-            _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
-                self.send_status_update(
-                    events_stream.as_mut(),
-                    self.state.effective_flush_lsn(),
-                    true,
-                    StatusUpdateType::PeriodicKeepAlive,
-                )
-                .await?;
-
-                self.state
-                    .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Runs one normal apply-loop iteration while the worker is still actively processing.
     ///
     /// This keeps the priority order explicit:
@@ -861,6 +799,68 @@ where
         self.maybe_process_syncing_tables_when_idle().await?;
 
         Ok(self.try_finish_active_iteration())
+    }
+
+    /// Runs one loop iteration while shutdown is waiting for PostgreSQL to acknowledge the
+    /// requested flush LSN.
+    ///
+    /// In this phase the loop no longer accepts new replication messages and it no longer waits
+    /// for pending destination flushes. Instead it only waits for:
+    /// 1. PostgreSQL connection lifecycle updates.
+    /// 2. PostgreSQL keepalives that may acknowledge the shutdown status update with
+    ///    `wal_end >= acked_flush_lsn`.
+    /// 3. Periodic heartbeats once the computed keep alive deadline expires.
+    ///
+    /// Once the keepalive acknowledgement arrives, unresolved batch or flush work causes the loop
+    /// to conservatively return [`ApplyLoopResult::Paused`]. Only quiescent state may reuse the
+    /// stored exit intent.
+    async fn run_shutdown_wait_iteration(
+        &mut self,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
+        acked_flush_lsn: PgLsn,
+    ) -> EtlResult<Option<ApplyLoopResult>> {
+        tokio::select! {
+            biased;
+
+            // PRIORITY 1: Handle PostgreSQL connection lifecycle updates.
+            // A closed or errored source connection always stops the loop immediately.
+            changed = connection_updates_rx.changed() => {
+                Self::handle_connection_update(changed, connection_updates_rx)?;
+            }
+
+            // PRIORITY 2: Wait for the keepalive that acknowledges the shutdown flush LSN.
+            // Once this barrier is reached, shutdown may finish.
+            message = events_stream.next() => {
+                if self
+                    .handle_shutdown_keepalive_wait_message(events_stream.as_mut(), message, acked_flush_lsn)
+                    .await?
+                {
+                    return Ok(Some(self.finish_shutdown()));
+                }
+            }
+
+            // PRIORITY 3: Resend a heartbeat once the computed keep alive deadline expires while
+            // shutdown is waiting for the primary keep alive acknowledgement barrier. This is a
+            // last-resort safeguard for cases where PostgreSQL keep alives stop reaching the loop,
+            // for example because the source has gone quiet, the stream is backpressured, or the
+            // network is delayed. In normal operation, PostgreSQL's own keep alives should drive
+            // this wait.
+            _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
+                self.send_status_update(
+                    events_stream.as_mut(),
+                    self.state.effective_flush_lsn(),
+                    true,
+                    StatusUpdateType::PeriodicKeepAlive,
+                )
+                .await?;
+
+                self.state
+                    .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
+            }
+        }
+
+        Ok(None)
     }
 
     /// Returns the final loop result after PostgreSQL has acknowledged the shutdown status
