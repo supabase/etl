@@ -681,7 +681,7 @@ where
         let mut connection_updates_rx = replication_client.connection_updates_rx();
 
         loop {
-            let iteration_result = match &self.state.shutdown_state {
+            let result = match &self.state.shutdown_state {
                 ShutdownState::NoShutdown => {
                     self.run_active_iteration(
                         events_stream.as_mut(),
@@ -700,7 +700,7 @@ where
                 }
             };
 
-            if let Some(result) = iteration_result {
+            if let Some(result) = result {
                 return Ok(result);
             }
         }
@@ -869,9 +869,8 @@ where
     /// If batch construction or destination flush work is still unresolved, shutdown conservatively
     /// pauses the loop so the next start can replay from the last confirmed durable position.
     ///
-    /// This preserves the core replication invariant: phase transitions such as
-    /// `catchup -> sync_done` and `sync_done -> ready` must never be inferred from work that has
-    /// not yet been durably acknowledged through the normal flush-result path.
+    /// If there is no exit result, which should not happen in case of shutdown, but it's not enforced
+    /// statically, we also default to pausing.
     fn finish_shutdown(&self) -> ApplyLoopResult {
         if self.state.has_unresolved_batch_work() {
             return ApplyLoopResult::Paused;

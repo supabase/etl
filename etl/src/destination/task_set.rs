@@ -110,3 +110,9 @@ impl DestinationTaskSet {
         }
     }
 }
+
+impl Default for DestinationTaskSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
