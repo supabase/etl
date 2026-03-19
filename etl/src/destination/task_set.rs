@@ -15,14 +15,21 @@ const DESTINATION_TASK_REAP_THRESHOLD: usize = 32;
 
 /// Tracks destination-owned background tasks and reaps them safely.
 ///
-/// Destinations should call [`DestinationTaskSet::try_reap`] during normal operation to remove any
-/// completed tasks without blocking. During shutdown, [`DestinationTaskSet::shutdown`] drains the
-/// remaining tasks to completion.
+/// This helper is for destinations that want to offload accepted work to background tasks. The
+/// main use case today is the [`write_events`] method.
+///
+/// It intentionally does not add its own concurrency control. ETL already limits concurrent
+/// destination work through the apply worker and table sync workers, so this type only manages the
+/// lifecycle of spawned destination tasks: reap completed work during normal operation and shut
+/// down outstanding tasks safely.
 #[derive(Debug)]
 struct DestinationTaskSetInner {
     join_set: JoinSet<()>,
 }
 
+/// Shared handle used by destinations to manage spawned background tasks.
+///
+/// [`DestinationTaskSet`] is a small lifecycle primitive, not a scheduler.
 #[derive(Debug, Clone)]
 pub struct DestinationTaskSet {
     inner: Arc<Mutex<DestinationTaskSetInner>>,
