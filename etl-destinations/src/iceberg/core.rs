@@ -197,8 +197,6 @@ where
                     warn!(
                         "failed to send iceberg flush result because apply loop was likely closed"
                     );
-
-                    return Ok(DestinationActorOutcome::Stop);
                 }
 
                 Ok(DestinationActorOutcome::Continue)

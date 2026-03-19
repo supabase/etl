@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::DestinationError);
         assert_eq!(
             err.description(),
-            Some("batch flush result dropped without sending")
+            Some("Batch flush result dropped without sending")
         );
     }
 }

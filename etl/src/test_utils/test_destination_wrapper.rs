@@ -220,7 +220,7 @@ impl<D> TestDestinationWrapper<D> {
 
 impl<D> Destination for TestDestinationWrapper<D>
 where
-    D: Destination + Send + Sync + Clone,
+    D: Destination + Send + Sync + Clone + 'static,
 {
     fn name() -> &'static str {
         "wrapper"
@@ -309,18 +309,22 @@ where
         destination
             .write_events(events.clone(), wrapped_flush_result)
             .await?;
-        let result = pending_result.await.into_result();
 
-        {
-            let mut inner = self.inner.write().await;
-            if result.is_ok() {
-                inner.events.extend(events);
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let result = pending_result.await.into_result();
+
+            {
+                let mut inner = inner.write().await;
+                if result.is_ok() {
+                    inner.events.extend(events);
+                }
+
+                inner.check_conditions().await;
             }
 
-            inner.check_conditions().await;
-        }
-
-        let _ = flush_result.send(result);
+            let _ = flush_result.send(result);
+        });
 
         Ok(())
     }

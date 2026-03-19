@@ -854,8 +854,6 @@ where
                     warn!(
                         "failed to send bigquery flush result because apply loop was likely closed"
                     );
-
-                    return Ok(DestinationActorOutcome::Stop);
                 }
 
                 Ok(DestinationActorOutcome::Continue)

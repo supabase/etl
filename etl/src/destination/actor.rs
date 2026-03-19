@@ -155,13 +155,12 @@ mod tests {
         let processed = Arc::new(Mutex::new(Vec::new()));
         let processed_for_task = processed.clone();
 
-        let actor = DestinationActor::start(move |value, _flush_result: BatchFlushResult<()>| {
+        let actor = DestinationActor::start(move |value, flush_result: BatchFlushResult<()>| {
             let processed = processed_for_task.clone();
             async move {
-                processed
-                    .lock()
-                    .expect("processed mutex poisoned")
-                    .push(value);
+                processed.lock().unwrap().push(value);
+                let _ = flush_result.send(Ok(()));
+
                 Ok(DestinationActorOutcome::Continue)
             }
         });
@@ -174,7 +173,7 @@ mod tests {
             },
         );
         actor.send(1, flush_result).unwrap();
-        pending_result.await.into_result().unwrap_err();
+        pending_result.await.into_result().unwrap();
 
         let (flush_result, pending_result) = BatchFlushResult::new(
             None,
@@ -184,13 +183,10 @@ mod tests {
             },
         );
         actor.send(2, flush_result).unwrap();
-        pending_result.await.into_result().unwrap_err();
+        pending_result.await.into_result().unwrap();
         actor.shutdown().await.unwrap();
 
-        assert_eq!(
-            *processed.lock().expect("processed mutex poisoned"),
-            vec![1, 2]
-        );
+        assert_eq!(*processed.lock().unwrap(), vec![1, 2]);
     }
 
     #[tokio::test]
@@ -212,26 +208,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn destination_actor_passes_flush_batch_to_handler() {
-        let actor = DestinationActor::start(|value: u64, flush_result| async move {
-            assert_eq!(value, 7);
-            let _ = flush_result.send(Ok(()));
-            Ok(DestinationActorOutcome::Continue)
-        });
-
-        let (flush_result, pending_result) = BatchFlushResult::new(
-            None,
-            BatchFlushMetrics {
-                events_count: 1,
-                dispatched_at: std::time::Instant::now(),
-            },
-        );
-
-        actor.send(7, flush_result).unwrap();
-        pending_result.await.into_result().unwrap();
-    }
-
-    #[tokio::test]
     async fn destination_actor_can_stop_gracefully_from_handler() {
         let actor = DestinationActor::start(|(), _flush_result: BatchFlushResult<()>| async move {
             Ok(DestinationActorOutcome::Stop)
@@ -247,6 +223,46 @@ mod tests {
         actor.send((), flush_result).unwrap();
 
         actor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn destination_actor_continues_after_dropped_flush_receiver() {
+        let processed = Arc::new(Mutex::new(Vec::new()));
+        let processed_for_task = processed.clone();
+
+        let actor = DestinationActor::start(move |value, flush_result: BatchFlushResult<()>| {
+            let processed = processed_for_task.clone();
+            async move {
+                processed.lock().unwrap().push(value);
+                let _ = flush_result.send(Ok(()));
+
+                Ok(DestinationActorOutcome::Continue)
+            }
+        });
+
+        let (flush_result, pending_result) = BatchFlushResult::new(
+            None,
+            BatchFlushMetrics {
+                events_count: 1,
+                dispatched_at: std::time::Instant::now(),
+            },
+        );
+        actor.send(1, flush_result).unwrap();
+        drop(pending_result);
+
+        let (flush_result, pending_result) = BatchFlushResult::new(
+            None,
+            BatchFlushMetrics {
+                events_count: 1,
+                dispatched_at: std::time::Instant::now(),
+            },
+        );
+        actor.send(2, flush_result).unwrap();
+        pending_result.await.into_result().unwrap();
+
+        actor.shutdown().await.unwrap();
+
+        assert_eq!(*processed.lock().unwrap(), vec![1, 2]);
     }
 
     #[tokio::test]
