@@ -11,23 +11,21 @@ use crate::types::{Event, TableRow};
 /// The trait supports both bulk operations for initial table synchronization and streaming
 /// operations for real-time replication events.
 ///
-/// # Idempotency
-///
-/// Implementations should ensure idempotent operations where possible, as the ETL system
-/// may retry failed operations. The destination should handle concurrent writes safely
-/// when multiple table sync workers are active.
-///
-/// The trait also provides an optional [`Destination::shutdown`] method with a default no-op
-/// implementation. Override this method if your destination requires cleanup or bookkeeping
-/// when the pipeline shuts down.
+/// The interface is intentionally small and generic. ETL provides ordered data plus minimal
+/// coordination hooks, and each destination is free to choose its own execution model, such as
+/// inline writes, actors, queues, or spawned tasks.
+/// ETL is at-least-once, so destinations must tolerate duplicate writes. ETL may also call
+/// destination methods in parallel under some circumstances, so implementations must be safe for
+/// concurrent use.
 pub trait Destination {
     /// Returns the name of the destination.
     fn name() -> &'static str;
 
     /// Propagates the shutdown signal to the destination.
     ///
-    /// Override this method if the destination needs to perform cleanup or bookkeeping
-    /// when the pipeline shuts down. The default implementation is a no-op.
+    /// Override this method if the destination needs cleanup or bookkeeping during shutdown.
+    /// Background streaming destinations should use it to stop writer loops and drain or drop
+    /// outstanding work. The default implementation is a no-op.
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
     }
@@ -42,14 +40,21 @@ pub trait Destination {
 
     /// Writes a batch of table rows to the destination.
     ///
-    /// This method is used during initial table synchronization to bulk load existing
-    /// data. Rows are provided as [`TableRow`] instances with typed cell values.
-    /// Implementations should optimize batch insertion performance while maintaining
-    /// data consistency.
+    /// This method is used during initial table synchronization to bulk load existing data.
+    /// Rows are provided as [`TableRow`] instances with typed cell values. ETL may call this
+    /// method multiple times with different batches, including in parallel with other destination
+    /// work.
     ///
-    /// Note that this method will be called even if the source table has no data. In that case it
-    /// will supply an empty list of rows. This is done by design so that the destination can already
-    /// prepare the initial tables before starting streaming.
+    /// This path is currently synchronous from ETL's perspective: once the future resolves, ETL
+    /// assumes the destination is done with that batch.
+    ///
+    /// This method is called even if the source table has no data, so the destination can prepare
+    /// its initial state before streaming begins. ETL does not impose a meaningful ordering
+    /// requirement on these row batches; it just provides the data that should be written for the
+    /// initial snapshot.
+    ///
+    /// TODO: evaluate whether table-copy writes should eventually use an asynchronous completion
+    ///  result similar to [`Destination::write_events`].
     fn write_table_rows(
         &self,
         table_id: TableId,
@@ -58,19 +63,33 @@ pub trait Destination {
 
     /// Writes streaming replication events to the destination.
     ///
-    /// This method handles real-time changes from the Postgres replication stream.
-    /// Events include inserts, updates, deletes, and transaction boundaries. The
-    /// destination should process events in order, this is required to maintain data consistency.
+    /// This method handles real-time changes from the Postgres replication stream. Events include
+    /// inserts, updates, deletes, and transaction boundaries. ETL may call this method multiple
+    /// times with different streaming batches.
     ///
-    /// Implementations must report the final outcome by sending it through `flush_result`.
-    /// This decouples durable progress tracking from the method return path so callers can
-    /// wait on ordered completion separately from write dispatch.
+    /// The main ordering guarantee is per table: ETL preserves the required order for streaming
+    /// operations on the same table.
     ///
-    /// Event ordering within a transaction is guaranteed, and transactions are ordered according to
-    /// their commit time.
+    /// Implementations report asynchronous completion through `flush_result`. The method return
+    /// value is reserved for immediate dispatch/setup failures before the work has been accepted.
+    ///
+    /// This lets ETL distinguish synchronous dispatch errors from asynchronous flush completion.
+    /// ETL may continue accumulating the next batch, but it will not hand the destination the next
+    /// streaming batch until the previous `flush_result` has been completed.
+    ///
+    /// Async implementations that offload work should coordinate `flush_result` with
+    /// [`Destination::shutdown`]. If the apply loop has already gone away, sending the result will
+    /// fail and may be treated as an implicit cancellation.
+    ///
+    /// During the initial copy phase, transaction boundaries are not a stable global invariant
+    /// across all tables. A source transaction may be split across multiple streaming deliveries as
+    /// some tables are already ready for streaming and others are still being copied. In practice,
+    /// destinations should rely on per-table event ordering and not assume that `begin`/`commit`
+    /// boundaries always describe a complete all-tables transaction until initial copy has fully
+    /// finished.
     fn write_events(
         &self,
         events: Vec<Event>,
         flush_result: BatchFlushResult<()>,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = EtlResult<()>> + Send;
 }

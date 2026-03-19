@@ -487,7 +487,11 @@ impl Destination for BenchDestination {
         }
     }
 
-    async fn write_events(&self, events: Vec<Event>, flush_result: BatchFlushResult<()>) {
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        flush_result: BatchFlushResult<()>,
+    ) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => dest.write_events(events, flush_result).await,
             BenchDestination::BigQuery(dest) => dest.write_events(events, flush_result).await,
@@ -515,7 +519,13 @@ impl Destination for NullDestination {
         Ok(())
     }
 
-    async fn write_events(&self, _events: Vec<Event>, flush_result: BatchFlushResult<()>) {
-        let _ = flush_result.send_ok(());
+    async fn write_events(
+        &self,
+        _events: Vec<Event>,
+        flush_result: BatchFlushResult<()>,
+    ) -> EtlResult<()> {
+        let _ = flush_result.send(Ok(()));
+
+        Ok(())
     }
 }

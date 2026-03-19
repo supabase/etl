@@ -55,7 +55,11 @@ where
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>, flush_result: BatchFlushResult<()>) {
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        flush_result: BatchFlushResult<()>,
+    ) -> EtlResult<()> {
         let result = async {
             let mut table_ids = HashSet::new();
             for event in &events {
@@ -96,6 +100,8 @@ where
         }
         .await;
 
-        let _ = flush_result.send_result(result);
+        let _ = flush_result.send(result);
+
+        Ok(())
     }
 }

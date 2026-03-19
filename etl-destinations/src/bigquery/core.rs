@@ -1,4 +1,4 @@
-use etl::destination::{BatchFlushResult, Destination};
+use etl::destination::{BatchFlushResult, Destination, DestinationActor, DestinationActorOutcome};
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
@@ -156,6 +156,7 @@ pub struct BigQueryDestination<S> {
     pipeline_id: PipelineId,
     store: S,
     inner: Arc<Mutex<Inner>>,
+    streaming_actor: Arc<Mutex<Option<DestinationActor<Vec<Event>>>>>,
 }
 
 impl<S> BigQueryDestination<S>
@@ -188,6 +189,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_actor: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -221,6 +223,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_actor: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -253,6 +256,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_actor: Arc::new(Mutex::new(None)),
         })
     }
     /// Creates a new [`BigQueryDestination`] using Application Default Credentials (ADC).
@@ -283,6 +287,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_actor: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -327,6 +332,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_actor: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -826,6 +832,39 @@ where
 
         Ok(())
     }
+
+    /// Returns the lazily started streaming actor.
+    ///
+    /// Each queued flush batch contains both the event batch and the flush-result sender that
+    /// should be completed once the BigQuery write finishes. If the send back into the apply loop
+    /// fails, we treat that as the receiver having gone away and just log it.
+    async fn get_or_start_streaming_actor(&self) -> DestinationActor<Vec<Event>> {
+        let mut actor = self.streaming_actor.lock().await;
+        if let Some(actor) = actor.as_ref() {
+            return actor.clone();
+        }
+
+        let destination = self.clone();
+        let started_actor = DestinationActor::start(move |events, flush_result| {
+            let destination = destination.clone();
+
+            async move {
+                let result = destination.write_events(events).await;
+                if flush_result.send(result).is_err() {
+                    warn!(
+                        "failed to send bigquery flush result because apply loop was likely closed"
+                    );
+
+                    return Ok(DestinationActorOutcome::Stop);
+                }
+
+                Ok(DestinationActorOutcome::Continue)
+            }
+        });
+
+        *actor = Some(started_actor.clone());
+        started_actor
+    }
 }
 
 impl<S> Destination for BigQueryDestination<S>
@@ -834,6 +873,18 @@ where
 {
     fn name() -> &'static str {
         "bigquery"
+    }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        let actor = {
+            let mut actor = self.streaming_actor.lock().await;
+            actor.take()
+        };
+
+        match actor {
+            Some(actor) => actor.shutdown().await,
+            None => Ok(()),
+        }
     }
 
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
@@ -851,13 +902,13 @@ where
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>, flush_result: BatchFlushResult<()>) {
-        let destination = self.clone();
-
-        tokio::spawn(async move {
-            let result = destination.write_events(events).await;
-            let _ = flush_result.send_result(result);
-        });
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        flush_result: BatchFlushResult<()>,
+    ) -> EtlResult<()> {
+        let actor = self.get_or_start_streaming_actor().await;
+        actor.send(events, flush_result)
     }
 }
 

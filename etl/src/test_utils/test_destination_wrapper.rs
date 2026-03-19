@@ -291,7 +291,11 @@ where
         result
     }
 
-    async fn write_events(&self, events: Vec<Event>, flush_result: BatchFlushResult<()>) {
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        flush_result: BatchFlushResult<()>,
+    ) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
@@ -304,7 +308,7 @@ where
         let (wrapped_flush_result, pending_result) = BatchFlushResult::new(None, metrics);
         destination
             .write_events(events.clone(), wrapped_flush_result)
-            .await;
+            .await?;
         let result = pending_result.await.into_result();
 
         {
@@ -316,7 +320,9 @@ where
             inner.check_conditions().await;
         }
 
-        let _ = flush_result.send_result(result);
+        let _ = flush_result.send(result);
+
+        Ok(())
     }
 
     async fn shutdown(&self) -> EtlResult<()> {

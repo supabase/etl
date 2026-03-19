@@ -5,10 +5,9 @@ use std::time::Instant;
 
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
-use tokio::sync::oneshot::error::TryRecvError;
 use tokio_postgres::types::PgLsn;
 
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 
 /// Metrics captured at batch dispatch time and carried through to result processing.
@@ -25,6 +24,9 @@ pub struct BatchFlushMetrics {
 /// This handle is passed to [`crate::destination::Destination::write_events`] so
 /// destinations can report the final outcome of a flushed event batch without
 /// coupling apply-loop progress to the method's return value.
+///
+/// If the apply loop has already dropped the receiver, sending the result fails and the caller
+/// gets the original payload back. Destinations may treat that as an implicit cancellation signal.
 #[derive(Debug)]
 pub struct BatchFlushResult<T> {
     tx: Option<oneshot::Sender<EtlResult<T>>>,
@@ -49,30 +51,14 @@ impl<T> BatchFlushResult<T> {
     }
 
     /// Sends a completed result to the apply loop.
-    pub fn send_result(mut self, result: EtlResult<T>) -> Result<(), EtlResult<T>> {
+    ///
+    /// If the receiver has already been dropped, returns the original result to the caller.
+    pub fn send(mut self, result: EtlResult<T>) -> Result<(), EtlResult<T>> {
         let Some(tx) = self.tx.take() else {
             return Ok(());
         };
 
         tx.send(result)
-    }
-
-    /// Sends a successful result to the apply loop.
-    pub fn send_ok(self, value: T) -> Result<(), T> {
-        match self.send_result(Ok(value)) {
-            Ok(()) => Ok(()),
-            Err(Ok(value)) => Err(value),
-            Err(Err(_)) => unreachable!("successful batch flush results cannot return errors"),
-        }
-    }
-
-    /// Sends a failed result to the apply loop.
-    pub fn send_err(self, error: EtlError) -> Result<(), EtlError> {
-        match self.send_result(Err(error)) {
-            Ok(()) => Ok(()),
-            Err(Err(error)) => Err(error),
-            Err(Ok(_)) => unreachable!("failed batch flush results cannot return success values"),
-        }
     }
 }
 
@@ -84,7 +70,7 @@ impl<T> Drop for BatchFlushResult<T> {
 
         let _ = tx.send(Err(etl_error!(
             ErrorKind::DestinationError,
-            "batch flush result dropped without sending"
+            "Batch flush result dropped without sending"
         )));
     }
 }
@@ -93,8 +79,7 @@ pin_project! {
     /// Receiver half of an asynchronous batch flush result.
     ///
     /// Stored by the apply loop while the destination processes the batch. Resolves
-    /// once the destination calls [`BatchFlushResult::send_result`], [`BatchFlushResult::send_ok`],
-    /// or [`BatchFlushResult::send_err`], or drops the sender.
+    /// once the destination calls [`BatchFlushResult::send`].
     #[must_use = "pending batch flush results do nothing unless polled"]
     #[derive(Debug)]
     pub struct PendingBatchFlushResult<T> {
@@ -106,14 +91,6 @@ pin_project! {
 }
 
 impl<T> PendingBatchFlushResult<T> {
-    fn to_completed_result(&self, result: EtlResult<T>) -> CompletedBatchFlushResult<T> {
-        CompletedBatchFlushResult {
-            commit_end_lsn: self.commit_end_lsn,
-            metrics: self.metrics,
-            result,
-        }
-    }
-
     /// Returns the commit end LSN associated with this result, if any.
     pub fn commit_end_lsn(&self) -> Option<PgLsn> {
         self.commit_end_lsn
@@ -123,16 +100,29 @@ impl<T> PendingBatchFlushResult<T> {
     pub fn metrics(&self) -> BatchFlushMetrics {
         self.metrics
     }
+}
 
-    /// Tries to receive the result without waiting.
-    pub fn try_recv(&mut self) -> Option<CompletedBatchFlushResult<T>> {
-        match self.rx.try_recv() {
-            Ok(result) => Some(self.to_completed_result(result)),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Closed) => Some(self.to_completed_result(Err(etl_error!(
-                ErrorKind::DestinationError,
-                "Batch flush result channel closed before sending"
-            )))),
+impl<T> Future for PendingBatchFlushResult<T> {
+    type Output = CompletedBatchFlushResult<T>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+
+        match this.rx.poll(cx) {
+            Poll::Ready(Ok(result)) => Poll::Ready(CompletedBatchFlushResult {
+                commit_end_lsn: *this.commit_end_lsn,
+                metrics: *this.metrics,
+                result,
+            }),
+            Poll::Ready(Err(_)) => Poll::Ready(CompletedBatchFlushResult {
+                commit_end_lsn: *this.commit_end_lsn,
+                metrics: *this.metrics,
+                result: Err(etl_error!(
+                    ErrorKind::DestinationError,
+                    "Batch flush result channel closed before sending"
+                )),
+            }),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -167,31 +157,6 @@ impl<T> CompletedBatchFlushResult<T> {
     }
 }
 
-impl<T> Future for PendingBatchFlushResult<T> {
-    type Output = CompletedBatchFlushResult<T>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-
-        match this.rx.poll(cx) {
-            Poll::Ready(Ok(result)) => Poll::Ready(CompletedBatchFlushResult {
-                commit_end_lsn: *this.commit_end_lsn,
-                metrics: *this.metrics,
-                result,
-            }),
-            Poll::Ready(Err(_)) => Poll::Ready(CompletedBatchFlushResult {
-                commit_end_lsn: *this.commit_end_lsn,
-                metrics: *this.metrics,
-                result: Err(etl_error!(
-                    ErrorKind::DestinationError,
-                    "batch flush result channel closed before sending"
-                )),
-            }),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,7 +169,7 @@ mod tests {
         };
         let (flush_result, pending_result) = BatchFlushResult::new(Some(PgLsn::from(42)), metrics);
 
-        flush_result.send_ok(7_u64).unwrap();
+        flush_result.send(Ok(7_u64)).unwrap();
 
         let completed = pending_result.await;
         let (commit_end_lsn, _metrics, result) = completed.into_parts();
@@ -228,33 +193,5 @@ mod tests {
             err.description(),
             Some("batch flush result dropped without sending")
         );
-    }
-
-    #[tokio::test]
-    async fn try_recv_returns_none_while_result_is_pending() {
-        let metrics = BatchFlushMetrics {
-            events_count: 0,
-            dispatched_at: Instant::now(),
-        };
-        let (_flush_result, mut pending_result) = BatchFlushResult::<()>::new(None, metrics);
-
-        assert!(pending_result.try_recv().is_none());
-    }
-
-    #[tokio::test]
-    async fn try_recv_returns_completed_result_when_ready() {
-        let metrics = BatchFlushMetrics {
-            events_count: 1,
-            dispatched_at: Instant::now(),
-        };
-        let (flush_result, mut pending_result) =
-            BatchFlushResult::new(Some(PgLsn::from(42)), metrics);
-        flush_result.send_ok(()).unwrap();
-
-        let completed = pending_result.try_recv().expect("expected ready result");
-        let (commit_end_lsn, _metrics, result) = completed.into_parts();
-
-        assert_eq!(commit_end_lsn, Some(PgLsn::from(42)));
-        result.unwrap();
     }
 }

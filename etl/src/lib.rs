@@ -65,8 +65,9 @@
 //!     fn name() -> &'static str { "noop" }
 //!     async fn truncate_table(&self, _table_id: TableId) -> EtlResult<()> { Ok(()) }
 //!     async fn write_table_rows(&self, _table_id: TableId, _table_rows: Vec<TableRow>) -> EtlResult<()> { Ok(()) }
-//!     async fn write_events(&self, _events: Vec<Event>, flush_result: BatchFlushResult<()>) {
-//!         let _ = flush_result.send_ok(());
+//!     async fn write_events(&self, _events: Vec<Event>, flush_result: BatchFlushResult<()>) -> EtlResult<()> {
+//!         let _ = flush_result.send(Ok(()));
+//!         Ok(())
 //!     }
 //! }
 //!
