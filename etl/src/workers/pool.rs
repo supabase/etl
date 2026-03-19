@@ -194,14 +194,14 @@ impl TableSyncWorkerPool {
                         }
                     }
                 }
-                Err(join_err) => {
-                    if join_err.is_cancelled() {
+                Err(err) => {
+                    if err.is_cancelled() {
                         debug!("table sync worker task was cancelled");
                     } else {
                         errors.push(etl_error!(
                             ErrorKind::TableSyncWorkerPanic,
                             "Table sync worker panicked",
-                            join_err
+                            err
                         ));
                     }
                 }

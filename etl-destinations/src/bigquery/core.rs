@@ -189,7 +189,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
-            streaming_tasks: DestinationTaskSet::new("bigquery"),
+            streaming_tasks: DestinationTaskSet::new(),
         }
     }
 
@@ -223,7 +223,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
-            streaming_tasks: DestinationTaskSet::new("bigquery"),
+            streaming_tasks: DestinationTaskSet::new(),
         })
     }
 
@@ -256,7 +256,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
-            streaming_tasks: DestinationTaskSet::new("bigquery"),
+            streaming_tasks: DestinationTaskSet::new(),
         })
     }
     /// Creates a new [`BigQueryDestination`] using Application Default Credentials (ADC).
@@ -287,7 +287,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
-            streaming_tasks: DestinationTaskSet::new("bigquery"),
+            streaming_tasks: DestinationTaskSet::new(),
         })
     }
 
@@ -332,7 +332,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
-            streaming_tasks: DestinationTaskSet::new("bigquery"),
+            streaming_tasks: DestinationTaskSet::new(),
         })
     }
 

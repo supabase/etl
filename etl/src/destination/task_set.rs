@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
@@ -25,15 +25,13 @@ struct DestinationTaskSetInner {
 
 #[derive(Debug, Clone)]
 pub struct DestinationTaskSet {
-    name: &'static str,
     inner: Arc<Mutex<DestinationTaskSetInner>>,
 }
 
 impl DestinationTaskSet {
     /// Creates a new task set for a destination.
-    pub fn new(name: &'static str) -> Self {
+    pub fn new() -> Self {
         Self {
-            name,
             inner: Arc::new(Mutex::new(DestinationTaskSetInner {
                 join_set: JoinSet::new(),
             })),
@@ -67,9 +65,11 @@ impl DestinationTaskSet {
     ///
     /// Destination shutdown is a one-shot lifecycle operation. We therefore intentionally keep the
     /// mutex locked while draining the remaining tasks so no new work can be submitted
-    /// concurrently once shutdown has begun.
+    /// concurrently once shutdown has begun. We abort all remaining tasks first so shutdown does
+    /// not wait for background writes that are no longer needed.
     pub async fn shutdown(&self) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
+        inner.join_set.abort_all();
 
         while let Some(result) = inner.join_set.join_next().await {
             self.handle_task_result(result)?;
@@ -83,8 +83,16 @@ impl DestinationTaskSet {
         match result {
             Ok(()) => Ok(()),
             Err(err) => {
+                if err.is_cancelled() {
+                    warn!(
+                        error = %err,
+                        "destination background task was cancelled"
+                    );
+
+                    return Ok(());
+                }
+
                 error!(
-                    destination = self.name,
                     error = %err,
                     "destination background task panicked"
                 );

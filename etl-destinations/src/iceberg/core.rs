@@ -172,7 +172,7 @@ where
                 created_namespaces: HashSet::new(),
                 namespace,
             })),
-            streaming_tasks: DestinationTaskSet::new("iceberg"),
+            streaming_tasks: DestinationTaskSet::new(),
         }
     }
 
