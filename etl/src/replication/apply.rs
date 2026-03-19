@@ -781,6 +781,13 @@ where
             }
         }
 
+        // We try to process syncing tables when the system is idle to make sure the system advances
+        // synchronization state even when no data is being actively transferred. This is especially
+        // important to have the tables converge to `Ready` or `SyncDone` even if there is no traffic
+        // on that specific slot. In that case, the process is driven by keep alive messages which will
+        // advance the `last_received_lsn` and properly use that for the syncing LSN to establish progress.
+        self.maybe_process_syncing_tables_when_idle().await?;
+
         Ok(self.try_finish_active_iteration())
     }
 
@@ -1076,8 +1083,6 @@ where
                 .await?;
         }
 
-        self.maybe_process_syncing_tables_when_idle().await?;
-
         // If processing was paused, there must be a queued batch that still needs to be flushed now
         // that the previous in-flight result has resolved.
         if processing_paused {
@@ -1180,8 +1185,6 @@ where
         if let Some(error) = result.table_replication_error {
             self.mark_table_errored(error).await?;
         }
-
-        self.maybe_process_syncing_tables_when_idle().await?;
 
         Ok(())
     }
