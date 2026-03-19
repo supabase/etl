@@ -117,7 +117,7 @@ impl StatusUpdateType {
     fn request_reply(&self) -> bool {
         match self {
             Self::KeepAlive => false,
-            Self::PeriodicKeepAlive => false,
+            Self::PeriodicKeepAlive => true,
             Self::ShutdownFlush => true,
         }
     }

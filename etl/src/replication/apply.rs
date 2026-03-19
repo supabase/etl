@@ -55,8 +55,14 @@ use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 use crate::{bail, etl_error};
 
-/// Interval used for periodic standby status updates while the apply loop is otherwise idle.
-const PERIODIC_STATUS_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
+/// Grace period added on top of half the server `wal_sender_timeout`.
+const KEEP_ALIVE_DEADLINE_GRACE_PERIOD: Duration = Duration::from_secs(2);
+/// Heuristic keep alive deadline used when the server timeout cannot be read.
+///
+/// PostgreSQL defaults `wal_sender_timeout` to 60 seconds, so a 30 second client deadline is
+/// typically aligned with the default server keep alive cadence without claiming certainty about
+/// the actual source configuration.
+const DEFAULT_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_secs(30);
 
 /// Type of worker driving the apply loop.
 #[derive(Debug, Copy, Clone)]
@@ -321,6 +327,8 @@ struct ApplyLoopState {
     shutdown_state: ShutdownState,
     /// The deadline by which the current batch must be flushed.
     flush_deadline: Option<Instant>,
+    /// The deadline for the next proactive keep alive status update.
+    keep_alive_deadline: Instant,
     /// The maximum duration to wait before forcibly flushing a batch.
     max_batch_fill_duration: Duration,
     /// Destination write result waiting to be applied to replication progress.
@@ -339,7 +347,11 @@ struct ApplyLoopState {
 
 impl ApplyLoopState {
     /// Creates a new [`ApplyLoopState`] with initial replication progress and event batch.
-    fn new(replication_progress: ReplicationProgress, max_batch_fill_duration: Duration) -> Self {
+    fn new(
+        replication_progress: ReplicationProgress,
+        max_batch_fill_duration: Duration,
+        keep_alive_deadline_duration: Duration,
+    ) -> Self {
         Self {
             last_commit_end_lsn: None,
             remote_final_lsn: None,
@@ -351,6 +363,7 @@ impl ApplyLoopState {
             next_tx_ordinal: 0,
             shutdown_state: ShutdownState::NoShutdown,
             flush_deadline: None,
+            keep_alive_deadline: Instant::now() + keep_alive_deadline_duration,
             max_batch_fill_duration,
             pending_flush_result: None,
             exit_intent: None,
@@ -395,6 +408,11 @@ impl ApplyLoopState {
         self.flush_deadline = None;
 
         debug!("reset batch flush timer");
+    }
+
+    /// Resets the keep alive deadline using the configured duration.
+    fn reset_keep_alive_deadline(&mut self, keep_alive_deadline_duration: Duration) {
+        self.keep_alive_deadline = Instant::now() + keep_alive_deadline_duration;
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -543,6 +561,8 @@ pub struct ApplyLoop<S, D> {
     memory_monitor: MemoryMonitor,
     /// Cached dynamic batch budget used to decide flushes by bytes.
     cached_batch_budget: CachedBatchBudget,
+    /// Deadline duration used before proactively sending a periodic status update.
+    keep_alive_deadline_duration: Duration,
     /// Internal loop state.
     state: ApplyLoopState,
 }
@@ -579,9 +599,35 @@ where
             last_flush_lsn: start_lsn,
         };
 
+        let worker_type = worker_context.worker_type();
+        let keep_alive_deadline_duration = match replication_client.get_wal_sender_timeout().await {
+            Ok(Some(wal_sender_timeout)) => {
+                Self::compute_keep_alive_deadline_duration(wal_sender_timeout)
+            }
+            Ok(None) => {
+                warn!(
+                    %worker_type,
+                    fallback_keep_alive_deadline_secs = DEFAULT_KEEP_ALIVE_DEADLINE_DURATION.as_secs(),
+                    "wal sender timeout is disabled; using heuristic keep alive deadline",
+                );
+
+                DEFAULT_KEEP_ALIVE_DEADLINE_DURATION
+            }
+            Err(error) => {
+                warn!(
+                    %worker_type,
+                    error = %error,
+                    fallback_keep_alive_deadline_secs = DEFAULT_KEEP_ALIVE_DEADLINE_DURATION.as_secs(),
+                    "failed to read wal sender timeout; using heuristic keep alive deadline",
+                );
+
+                DEFAULT_KEEP_ALIVE_DEADLINE_DURATION
+            }
+        };
         let state = ApplyLoopState::new(
             initial_progress,
             Duration::from_millis(config.batch.max_fill_ms),
+            keep_alive_deadline_duration,
         );
 
         let cached_batch_budget = batch_budget.cached();
@@ -595,6 +641,7 @@ where
             worker_context,
             memory_monitor,
             cached_batch_budget,
+            keep_alive_deadline_duration,
             state,
         };
 
@@ -658,7 +705,7 @@ where
     /// 1. PostgreSQL connection lifecycle updates.
     /// 2. PostgreSQL keepalives that may acknowledge the shutdown status update with
     ///    `wal_end >= acked_flush_lsn`.
-    /// 3. Periodic heartbeats so PostgreSQL does not stall the shutdown wait.
+    /// 3. Periodic heartbeats once the computed keep alive deadline expires.
     ///
     /// Once the keepalive acknowledgement arrives, unresolved batch or flush work causes the loop
     /// to conservatively return [`ApplyLoopResult::Paused`]. Only quiescent state may reuse the
@@ -689,11 +736,9 @@ where
                 }
             }
 
-            // PRIORITY 3: Periodically resend a heartbeat while shutdown is waiting for the
-            // primary keepalive acknowledgement. This keeps PostgreSQL from deciding the
-            // replication connection is stalled if the source has gone quiet and no new messages
-            // are arriving while we wait for the acknowledgement barrier.
-            _ = tokio::time::sleep(PERIODIC_STATUS_UPDATE_INTERVAL) => {
+            // PRIORITY 3: Resend a heartbeat once the computed keep alive deadline expires while
+            // shutdown is waiting for the primary keep alive acknowledgement barrier.
+            _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     events_stream.as_mut(),
                     self.state.effective_flush_lsn(),
@@ -701,6 +746,9 @@ where
                     StatusUpdateType::PeriodicKeepAlive,
                 )
                 .await?;
+
+                self.state
+                    .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
             }
         }
 
@@ -715,11 +763,11 @@ where
     /// 3. Pending destination flush results.
     /// 4. Batch flush deadline expiry.
     /// 5. Incoming replication messages.
-    /// 6. Periodic heartbeats when the loop is otherwise idle.
+    /// 6. Periodic heartbeats once the computed keep alive deadline expires.
     ///
-    /// This covers quiet periods where no new WAL arrives and PostgreSQL therefore has no reason
-    /// to send us a keepalive first. We still emit standby status updates with the same effective
-    /// flush LSN so the connection stays alive even though replication progress has not changed.
+    /// This covers quiet periods where PostgreSQL does not send a keep alive before the expected
+    /// timeout-derived deadline. We still emit standby status updates with the same effective flush
+    /// LSN so the connection stays alive even though replication progress has not changed.
     ///
     /// Each branch performs its work and then relies on
     /// [`Self::try_finish_active_iteration`] to decide whether the loop may return yet.
@@ -767,10 +815,10 @@ where
                 .await?;
             }
 
-            // PRIORITY 6: Periodically emit a status update if the loop is otherwise idle. This
-            // intentionally resends the same effective flush LSN so PostgreSQL keeps the standby
-            // connection open during long idle stretches with no source activity.
-            _ = tokio::time::sleep(PERIODIC_STATUS_UPDATE_INTERVAL) => {
+            // PRIORITY 6: Emit a periodic status update once the computed keep alive deadline
+            // expires. This intentionally resends the same effective flush LSN so PostgreSQL keeps
+            // the standby connection open during long idle stretches with no source activity.
+            _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     events_stream.as_mut(),
                     self.state.effective_flush_lsn(),
@@ -778,6 +826,9 @@ where
                     StatusUpdateType::PeriodicKeepAlive,
                 )
                 .await?;
+
+                self.state
+                    .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
             }
         }
 
@@ -856,6 +907,26 @@ where
         }
     }
 
+    /// Waits for the keep alive deadline if one is set.
+    async fn wait_for_keep_alive_deadline(deadline: Instant) {
+        tokio::time::sleep_until(deadline.into()).await
+    }
+
+    /// Computes the keep alive deadline from PostgreSQL's `wal_sender_timeout`.
+    fn compute_keep_alive_deadline_duration(wal_sender_timeout: Duration) -> Duration {
+        let half_timeout = wal_sender_timeout
+            .checked_div(2)
+            .unwrap_or(wal_sender_timeout);
+        let deadline_with_grace = half_timeout.saturating_add(KEEP_ALIVE_DEADLINE_GRACE_PERIOD);
+        let latest_safe_deadline = wal_sender_timeout.saturating_sub(Duration::from_millis(500));
+
+        if latest_safe_deadline.is_zero() {
+            half_timeout
+        } else {
+            deadline_with_grace.min(latest_safe_deadline)
+        }
+    }
+
     /// Processes a replication message while shutdown is waiting for PostgreSQL to acknowledge the
     /// requested flush LSN.
     ///
@@ -872,12 +943,12 @@ where
         let Some(message) = message else {
             warn!(
                 %worker_type,
-                "replication stream ended while waiting for keepalive acknowledgement",
+                "replication stream ended while waiting for keep alive acknowledgement",
             );
 
             bail!(
                 ErrorKind::SourceConnectionFailed,
-                "Replication stream ended while waiting for keepalive acknowledgement"
+                "Replication stream ended while waiting for keep alive acknowledgement"
             )
         };
 
@@ -894,8 +965,11 @@ where
                         %worker_type,
                         %wal_end,
                         %acked_flush_lsn,
-                        "received keepalive acknowledgement, safe to shutdown",
+                        "received keep alive acknowledgement, safe to shutdown",
                     );
+
+                    self.state
+                        .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
 
                     return Ok(true);
                 }
@@ -906,7 +980,7 @@ where
                     %worker_type,
                     %wal_end,
                     %acked_flush_lsn,
-                    "received keepalive but wal_end < acked_flush_lsn, continuing to wait",
+                    "received keep alive but wal_end < acked_flush_lsn, continuing to wait",
                 );
 
                 self.send_status_update(
@@ -916,6 +990,9 @@ where
                     StatusUpdateType::KeepAlive,
                 )
                 .await?;
+
+                self.state
+                    .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
             }
             _ => {
                 // Ignore non-keepalive messages while waiting for shutdown acknowledgement.
@@ -1295,6 +1372,9 @@ where
                     StatusUpdateType::KeepAlive,
                 )
                 .await?;
+
+                self.state
+                    .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
 
                 Ok(HandleMessageResult::no_event())
             }
