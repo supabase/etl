@@ -38,6 +38,15 @@ impl DestinationTaskSet {
         }
     }
 
+    /// Spawns a new tracked background task.
+    pub async fn spawn<Fut>(&self, task: Fut)
+    where
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let mut inner = self.inner.lock().await;
+        inner.join_set.spawn(task);
+    }
+
     /// Reaps completed tasks once enough of them may have accumulated to justify the lock.
     pub async fn try_reap(&self) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
@@ -52,15 +61,6 @@ impl DestinationTaskSet {
         Ok(())
     }
 
-    /// Spawns a new tracked background task.
-    pub async fn spawn<Fut>(&self, task: Fut)
-    where
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        let mut inner = self.inner.lock().await;
-        inner.join_set.spawn(task);
-    }
-
     /// Reaps all remaining tasks during shutdown.
     ///
     /// Destination shutdown is a one-shot lifecycle operation. We therefore intentionally keep the
@@ -69,6 +69,7 @@ impl DestinationTaskSet {
     /// not wait for background writes that are no longer needed.
     pub async fn shutdown(&self) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
+
         inner.join_set.abort_all();
 
         while let Some(result) = inner.join_set.join_next().await {
@@ -79,6 +80,9 @@ impl DestinationTaskSet {
     }
 
     /// Handles the outcome of a completed task.
+    ///
+    /// If a task has panicked, we want to return the error immediately to avoid having invariants
+    /// being violated by the fact that a panic occurred but was swallowed.
     fn handle_task_result(&self, result: Result<(), tokio::task::JoinError>) -> EtlResult<()> {
         match result {
             Ok(()) => Ok(()),
