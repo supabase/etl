@@ -55,14 +55,21 @@ use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 use crate::{bail, etl_error};
 
-/// Grace period added on top of half the server `wal_sender_timeout`.
-const KEEP_ALIVE_DEADLINE_GRACE_PERIOD: Duration = Duration::from_secs(2);
 /// Heuristic keep alive deadline used when the server timeout cannot be read.
 ///
 /// PostgreSQL defaults `wal_sender_timeout` to 60 seconds, so a 30 second client deadline is
 /// typically aligned with the default server keep alive cadence without claiming certainty about
 /// the actual source configuration.
 const DEFAULT_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_secs(30);
+/// Fraction of `wal_sender_timeout` used for the proactive keep alive deadline.
+///
+/// PostgreSQL normally emits an idle keep alive around `wal_sender_timeout / 2`. We wait a bit
+/// longer than that, using `60%` of the full timeout, so normal server keep alives still win most
+/// of the time while the client still has room to send its own status update if that keep alive is
+/// delayed by network, scheduling, or local processing latency. This is intentionally a
+/// last-resort fallback: in normal operation, progress should still be driven by PostgreSQL's
+/// primary keep alive messages rather than by the client timeout path.
+const KEEP_ALIVE_DEADLINE_FRACTION: f64 = 0.6;
 
 /// Type of worker driving the apply loop.
 #[derive(Debug, Copy, Clone)]
@@ -600,6 +607,7 @@ where
         };
 
         let worker_type = worker_context.worker_type();
+
         let keep_alive_deadline_duration = match replication_client.get_wal_sender_timeout().await {
             Ok(Some(wal_sender_timeout)) => {
                 Self::compute_keep_alive_deadline_duration(wal_sender_timeout)
@@ -624,6 +632,7 @@ where
                 DEFAULT_KEEP_ALIVE_DEADLINE_DURATION
             }
         };
+
         let state = ApplyLoopState::new(
             initial_progress,
             Duration::from_millis(config.batch.max_fill_ms),
@@ -737,7 +746,11 @@ where
             }
 
             // PRIORITY 3: Resend a heartbeat once the computed keep alive deadline expires while
-            // shutdown is waiting for the primary keep alive acknowledgement barrier.
+            // shutdown is waiting for the primary keep alive acknowledgement barrier. This is a
+            // last-resort safeguard for cases where PostgreSQL keep alives stop reaching the loop,
+            // for example because the source has gone quiet, the stream is backpressured, or the
+            // network is delayed. In normal operation, PostgreSQL's own keep alives should drive
+            // this wait.
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     events_stream.as_mut(),
@@ -765,9 +778,14 @@ where
     /// 5. Incoming replication messages.
     /// 6. Periodic heartbeats once the computed keep alive deadline expires.
     ///
-    /// This covers quiet periods where PostgreSQL does not send a keep alive before the expected
-    /// timeout-derived deadline. We still emit standby status updates with the same effective flush
-    /// LSN so the connection stays alive even though replication progress has not changed.
+    /// PostgreSQL normally sends keep alives at roughly half of `wal_sender_timeout`. We wait a
+    /// little longer than that before proactively emitting our own status update so that normal
+    /// PostgreSQL keep alives still drive the loop, but long stalls can still be recovered without
+    /// waiting for the full server timeout. This timeout branch is therefore a last-resort
+    /// mechanism, not the primary source of progress. It matters when the loop is healthy but
+    /// effectively stuck on in-flight work, such as waiting for an older batch to flush before a
+    /// queued batch can be dispatched, or when keep alives are temporarily not reaching the loop
+    /// because the stream is backpressured or the source is not sending them promptly.
     ///
     /// Each branch performs its work and then relies on
     /// [`Self::try_finish_active_iteration`] to decide whether the loop may return yet.
@@ -817,7 +835,10 @@ where
 
             // PRIORITY 6: Emit a periodic status update once the computed keep alive deadline
             // expires. This intentionally resends the same effective flush LSN so PostgreSQL keeps
-            // the standby connection open during long idle stretches with no source activity.
+            // the standby connection open during long stalls, including cases where the loop is
+            // paused behind an in-flight flush and therefore not making visible progress yet. This
+            // is only a fallback path: most status updates should still be triggered by incoming
+            // PostgreSQL primary keep alive messages during normal operation.
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     events_stream.as_mut(),
@@ -913,18 +934,12 @@ where
     }
 
     /// Computes the keep alive deadline from PostgreSQL's `wal_sender_timeout`.
+    ///
+    /// PostgreSQL normally sends a keep alive after roughly half of this timeout. We therefore use
+    /// `60%` of the configured timeout to allow normal server keep alives to arrive first while
+    /// still leaving comfortable room for network and processing latency before the full timeout.
     fn compute_keep_alive_deadline_duration(wal_sender_timeout: Duration) -> Duration {
-        let half_timeout = wal_sender_timeout
-            .checked_div(2)
-            .unwrap_or(wal_sender_timeout);
-        let deadline_with_grace = half_timeout.saturating_add(KEEP_ALIVE_DEADLINE_GRACE_PERIOD);
-        let latest_safe_deadline = wal_sender_timeout.saturating_sub(Duration::from_millis(500));
-
-        if latest_safe_deadline.is_zero() {
-            half_timeout
-        } else {
-            deadline_with_grace.min(latest_safe_deadline)
-        }
+        wal_sender_timeout.mul_f64(KEEP_ALIVE_DEADLINE_FRACTION)
     }
 
     /// Processes a replication message while shutdown is waiting for PostgreSQL to acknowledge the
