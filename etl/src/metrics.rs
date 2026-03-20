@@ -47,8 +47,6 @@ pub const FORCED_LABEL: &str = "forced";
 pub const STATUS_UPDATE_TYPE_LABEL: &str = "status_update_type";
 /// Label key for worker error classification ("timed", "manual", "no_retry").
 pub const ERROR_TYPE_LABEL: &str = "error_type";
-/// Label key for worker error outcome ("retrying" or "terminal").
-pub const ERROR_OUTCOME_LABEL: &str = "error_outcome";
 /// Label key for transition direction ("activate" or "resume").
 pub const DIRECTION_LABEL: &str = "direction";
 
@@ -148,7 +146,7 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             ETL_WORKER_ERRORS_TOTAL,
             Unit::Count,
-            "Total number of worker errors, labeled by pipeline_id, worker_type, error_type, and error_outcome"
+            "Total number of worker errors, labeled by pipeline_id, worker_type, and error_type"
         );
 
         describe_gauge!(

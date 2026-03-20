@@ -16,8 +16,7 @@ use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
-    ERROR_OUTCOME_LABEL, ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL,
-    WORKER_TYPE_LABEL,
+    ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::apply::{
     ApplyLoop, ApplyLoopResult, TableSyncWorkerContext, WorkerContext,
@@ -452,16 +451,11 @@ where
             retry_policy = table_error.retry_policy().clone();
         }
 
-        let error_outcome = match retry_policy {
-            RetryPolicy::TimedRetry { .. } => "retrying",
-            RetryPolicy::ManualRetry | RetryPolicy::NoRetry => "terminal",
-        };
         counter!(
             ETL_WORKER_ERRORS_TOTAL,
             PIPELINE_ID_LABEL => pipeline_id.to_string(),
             WORKER_TYPE_LABEL => "table_sync",
             ERROR_TYPE_LABEL => policy.retry_directive().to_string(),
-            ERROR_OUTCOME_LABEL => error_outcome,
         )
         .increment(1);
 
