@@ -1,5 +1,3 @@
-use crate::error_notification::ErrorNotificationClient;
-use crate::sentry;
 use etl::error::EtlResult;
 use etl::state::table::TableReplicationPhase;
 use etl::store::cleanup::CleanupStore;
@@ -9,6 +7,9 @@ use etl::types::{TableId, TableSchema};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tracing::info;
+
+use crate::error_notification::ErrorNotificationClient;
+use crate::sentry;
 
 /// State store decorator that reports persisted table replication errors.
 ///
