@@ -1,4 +1,6 @@
-use etl::destination::{BatchFlushResult, Destination, DestinationTaskSet};
+use etl::destination::Destination;
+use etl::destination::flush_result::BatchFlushResult;
+use etl::destination::task_set::DestinationTaskSet;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;

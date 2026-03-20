@@ -2,7 +2,8 @@ use etl_postgres::types::TableId;
 use std::collections::HashSet;
 use tracing::info;
 
-use crate::destination::{BatchFlushResult, Destination};
+use crate::destination::Destination;
+use crate::destination::flush_result::BatchFlushResult;
 use crate::error::EtlResult;
 use crate::store::state::StateStore;
 use crate::types::{Event, TableRow};

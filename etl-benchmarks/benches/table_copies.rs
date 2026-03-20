@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use etl::destination::{BatchFlushResult, Destination};
+use etl::destination::Destination;
+use etl::destination::flush_result::BatchFlushResult;
 use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
 use etl::state::table::TableReplicationPhaseType;

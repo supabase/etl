@@ -7,7 +7,8 @@ use tokio::sync::{Notify, RwLock};
 
 use std::time::Instant;
 
-use crate::destination::{BatchFlushMetrics, BatchFlushResult, Destination};
+use crate::destination::Destination;
+use crate::destination::flush_result::{BatchFlushMetrics, BatchFlushResult};
 use crate::error::EtlResult;
 use crate::test_utils::event::{check_all_events_count, check_events_count, deduplicate_events};
 use crate::test_utils::notify::TimedNotify;

@@ -4,11 +4,7 @@
 //! Destinations handle both initial table synchronization data and streaming replication events.
 
 mod base;
-mod flush_result;
-mod task_set;
+pub mod flush_result;
+pub mod task_set;
 
 pub use base::Destination;
-pub use flush_result::{
-    BatchFlushMetrics, BatchFlushResult, CompletedBatchFlushResult, PendingBatchFlushResult,
-};
-pub use task_set::DestinationTaskSet;

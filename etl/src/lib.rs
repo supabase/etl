@@ -50,7 +50,7 @@
 //! ```rust,no_run
 //! use etl::{
 //!     config::{BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TcpKeepaliveConfig, TlsConfig, TableSyncCopyConfig},
-//!     destination::{BatchFlushResult, Destination},
+//!     destination::{Destination, flush_result::BatchFlushResult},
 //!     error::EtlResult,
 //!     pipeline::Pipeline,
 //!     store::both::memory::MemoryStore,

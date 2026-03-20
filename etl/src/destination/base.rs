@@ -1,7 +1,7 @@
 use etl_postgres::types::TableId;
 use std::future::Future;
 
-use crate::destination::BatchFlushResult;
+use crate::destination::flush_result::BatchFlushResult;
 use crate::error::EtlResult;
 use crate::types::{Event, TableRow};
 

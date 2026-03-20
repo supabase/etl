@@ -33,9 +33,9 @@ use crate::conversions::event::{
     parse_event_from_relation_message, parse_event_from_truncate_message,
     parse_event_from_update_message,
 };
-use crate::destination::{
-    BatchFlushMetrics, BatchFlushResult, CompletedBatchFlushResult, Destination,
-    PendingBatchFlushResult,
+use crate::destination::Destination;
+use crate::destination::flush_result::{
+    BatchFlushMetrics, BatchFlushResult, CompletedBatchFlushResult, PendingBatchFlushResult,
 };
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
@@ -55,12 +55,10 @@ use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 use crate::{bail, etl_error};
 
-/// Heuristic keep alive deadline used when the server timeout cannot be read.
+/// Default keep alive value if it can't be fetched from Postgres.
 ///
-/// PostgreSQL defaults `wal_sender_timeout` to 60 seconds, so a 30 second client deadline is
-/// typically aligned with the default server keep alive cadence without claiming certainty about
-/// the actual source configuration.
-const DEFAULT_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_secs(30);
+/// PostgreSQL defaults `wal_sender_timeout` to 60 seconds, so we will use the same.
+const DEFAULT_KEEP_ALIVE_DURATION: Duration = Duration::from_secs(60);
 /// Fraction of `wal_sender_timeout` used for the proactive keep alive deadline.
 ///
 /// PostgreSQL normally emits an idle keep alive around `wal_sender_timeout / 2`. We wait a bit
@@ -311,7 +309,7 @@ impl HandleMessageResult {
     }
 }
 
-/// A shared state that is used throughout the apply loop to track progress.
+/// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
     /// The highest LSN received from the [`end_lsn`] field of a [`Commit`] message.
@@ -336,8 +334,6 @@ struct ApplyLoopState {
     flush_deadline: Option<Instant>,
     /// The deadline for the next proactive keep alive status update.
     keep_alive_deadline: Instant,
-    /// The maximum duration to wait before forcibly flushing a batch.
-    max_batch_fill_duration: Duration,
     /// Destination write result waiting to be applied to replication progress.
     pending_flush_result: Option<PendingBatchFlushResult<()>>,
     /// The strongest exit that this apply loop invocation should eventually return.
@@ -353,10 +349,9 @@ struct ApplyLoopState {
 }
 
 impl ApplyLoopState {
-    /// Creates a new [`ApplyLoopState`] with initial replication progress and event batch.
+    /// Creates a new [`ApplyLoopState`] with initial replication progress.
     fn new(
         replication_progress: ReplicationProgress,
-        max_batch_fill_duration: Duration,
         keep_alive_deadline_duration: Duration,
     ) -> Self {
         Self {
@@ -371,7 +366,6 @@ impl ApplyLoopState {
             shutdown_state: ShutdownState::NoShutdown,
             flush_deadline: None,
             keep_alive_deadline: Instant::now() + keep_alive_deadline_duration,
-            max_batch_fill_duration,
             pending_flush_result: None,
             exit_intent: None,
             processing_paused: false,
@@ -400,12 +394,12 @@ impl ApplyLoopState {
     ///
     /// The deadline stays armed until a flush is actually dispatched. If a flush attempt is deferred
     /// because another flush is still in flight, the deadline is intentionally preserved.
-    fn set_flush_deadline_if_needed(&mut self) {
+    fn set_flush_deadline_if_needed(&mut self, max_batch_fill_duration: Duration) {
         if self.flush_deadline.is_some() {
             return;
         }
 
-        self.flush_deadline = Some(Instant::now() + self.max_batch_fill_duration);
+        self.flush_deadline = Some(Instant::now() + max_batch_fill_duration);
 
         debug!("started batch flush timer");
     }
@@ -549,12 +543,12 @@ impl ApplyLoopState {
 
 /// Main apply loop implementation that processes replication events.
 ///
-/// [`ApplyLoop`] encapsulates all state and logic for the apply loop, providing
-/// a struct-based approach instead of the previous function-based approach.
+/// [`ApplyLoop`] encapsulates the apply loop's immutable dependencies plus its mutable runtime
+/// state.
 pub struct ApplyLoop<S, D> {
     /// Unique identifier for the pipeline.
     pipeline_id: PipelineId,
-    /// Shared configuration.
+    /// Shared immutable configuration.
     config: Arc<PipelineConfig>,
     /// Schema store for table schemas.
     schema_store: S,
@@ -562,15 +556,17 @@ pub struct ApplyLoop<S, D> {
     destination: D,
     /// Shutdown signal receiver.
     shutdown_rx: ShutdownRx,
-    /// Worker context for worker-specific behavior.
+    /// Worker-specific dependencies and coordination hooks.
     worker_context: WorkerContext<S, D>,
     /// Shared memory backpressure controller.
     memory_monitor: MemoryMonitor,
     /// Cached dynamic batch budget used to decide flushes by bytes.
     cached_batch_budget: CachedBatchBudget,
+    /// Maximum duration to wait before forcibly flushing a batch.
+    max_batch_fill_duration: Duration,
     /// Deadline duration used before proactively sending a periodic status update.
     keep_alive_deadline_duration: Duration,
-    /// Internal loop state.
+    /// Mutable loop state.
     state: ApplyLoopState,
 }
 
@@ -601,13 +597,7 @@ where
             "starting apply loop",
         );
 
-        let initial_progress = ReplicationProgress {
-            last_received_lsn: start_lsn,
-            last_flush_lsn: start_lsn,
-        };
-
         let worker_type = worker_context.worker_type();
-
         let keep_alive_deadline_duration = match replication_client.get_wal_sender_timeout().await {
             Ok(Some(wal_sender_timeout)) => {
                 Self::compute_keep_alive_deadline_duration(wal_sender_timeout)
@@ -615,31 +605,28 @@ where
             Ok(None) => {
                 warn!(
                     %worker_type,
-                    fallback_keep_alive_deadline_secs = DEFAULT_KEEP_ALIVE_DEADLINE_DURATION.as_secs(),
                     "wal sender timeout is disabled; using heuristic keep alive deadline",
                 );
 
-                DEFAULT_KEEP_ALIVE_DEADLINE_DURATION
+                Self::compute_keep_alive_deadline_duration(DEFAULT_KEEP_ALIVE_DURATION)
             }
             Err(error) => {
                 warn!(
                     %worker_type,
                     error = %error,
-                    fallback_keep_alive_deadline_secs = DEFAULT_KEEP_ALIVE_DEADLINE_DURATION.as_secs(),
                     "failed to read wal sender timeout; using heuristic keep alive deadline",
                 );
 
-                DEFAULT_KEEP_ALIVE_DEADLINE_DURATION
+                Self::compute_keep_alive_deadline_duration(DEFAULT_KEEP_ALIVE_DURATION)
             }
         };
 
-        let state = ApplyLoopState::new(
-            initial_progress,
-            Duration::from_millis(config.batch.max_fill_ms),
-            keep_alive_deadline_duration,
-        );
+        let initial_progress = ReplicationProgress {
+            last_received_lsn: start_lsn,
+            last_flush_lsn: start_lsn,
+        };
 
-        let cached_batch_budget = batch_budget.cached();
+        let state = ApplyLoopState::new(initial_progress, keep_alive_deadline_duration);
 
         let mut apply_loop = Self {
             pipeline_id,
@@ -649,7 +636,8 @@ where
             shutdown_rx,
             worker_context,
             memory_monitor,
-            cached_batch_budget,
+            cached_batch_budget: batch_budget.cached(),
+            max_batch_fill_duration: Duration::from_millis(config.batch.max_fill_ms),
             keep_alive_deadline_duration,
             state,
         };
@@ -927,7 +915,7 @@ where
         }
     }
 
-    /// Waits for the keep alive deadline if one is set.
+    /// Waits until the keep alive deadline expires.
     async fn wait_for_keep_alive_deadline(deadline: Instant) {
         tokio::time::sleep_until(deadline.into()).await
     }
@@ -1254,7 +1242,8 @@ where
 
             // We start the batch timer for the flushing. This timer is needed to control force
             // flushing of a batch if its size is not reached in time.
-            self.state.set_flush_deadline_if_needed();
+            self.state
+                .set_flush_deadline_if_needed(self.max_batch_fill_duration);
         }
 
         // We check for the batch flushing conditions before deciding whether to flush or not.
