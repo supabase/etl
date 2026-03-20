@@ -16,8 +16,8 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::metrics::{
-    ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL,
-    WORKER_TYPE_LABEL,
+    ERROR_OUTCOME_LABEL, ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL,
+    PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::apply::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState};
@@ -144,11 +144,18 @@ where
         error!(error = %err, "apply worker failed");
 
         let policy = build_error_handling_policy(&err);
+        let error_outcome =
+            if policy.should_retry() && *retry_attempts < config.table_error_retry_max_attempts {
+                "retrying"
+            } else {
+                "terminal"
+            };
         counter!(
             ETL_WORKER_ERRORS_TOTAL,
             PIPELINE_ID_LABEL => pipeline_id.to_string(),
             WORKER_TYPE_LABEL => "apply",
             ERROR_TYPE_LABEL => policy.retry_directive().to_string(),
+            ERROR_OUTCOME_LABEL => error_outcome,
         )
         .increment(1);
 

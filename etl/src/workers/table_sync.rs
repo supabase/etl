@@ -16,7 +16,8 @@ use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
-    ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+    ERROR_OUTCOME_LABEL, ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL,
+    WORKER_TYPE_LABEL,
 };
 use crate::replication::apply::{
     ApplyLoop, ApplyLoopResult, TableSyncWorkerContext, WorkerContext,
@@ -424,14 +425,6 @@ where
         // computed in the worker from config so both table sync and apply worker use the
         // same retry timing settings.
         let policy = build_error_handling_policy(&err);
-        counter!(
-            ETL_WORKER_ERRORS_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-            WORKER_TYPE_LABEL => "table_sync",
-            ERROR_TYPE_LABEL => policy.retry_directive().to_string(),
-        )
-        .increment(1);
-
         let mut retry_policy = match policy.retry_directive() {
             RetryDirective::Timed => RetryPolicy::retry_in(ChronoDuration::milliseconds(
                 config.table_error_retry_delay_ms as i64,
@@ -458,6 +451,19 @@ where
             table_error = table_error.with_retry_policy(RetryPolicy::ManualRetry);
             retry_policy = table_error.retry_policy().clone();
         }
+
+        let error_outcome = match retry_policy {
+            RetryPolicy::TimedRetry { .. } => "retrying",
+            RetryPolicy::ManualRetry | RetryPolicy::NoRetry => "terminal",
+        };
+        counter!(
+            ETL_WORKER_ERRORS_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+            WORKER_TYPE_LABEL => "table_sync",
+            ERROR_TYPE_LABEL => policy.retry_directive().to_string(),
+            ERROR_OUTCOME_LABEL => error_outcome,
+        )
+        .increment(1);
 
         // Update the state and store with the error. This way the user is notified about
         // the current error state.
