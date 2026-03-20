@@ -68,6 +68,13 @@ const DEFAULT_KEEP_ALIVE_DURATION: Duration = Duration::from_secs(60);
 /// last-resort fallback: in normal operation, progress should still be driven by PostgreSQL's
 /// primary keep alive messages rather than by the client timeout path.
 const KEEP_ALIVE_DEADLINE_FRACTION: f64 = 0.6;
+/// Minimum client-side deadline for proactive keep alive retries.
+///
+/// PostgreSQL exposes `wal_sender_timeout` in millisecond units and `0` disables it, so the
+/// smallest enabled value is effectively `1ms`. A raw `60%` deadline at that scale would make the
+/// apply loop spin sending forced keep alives, which is not operationally useful. We clamp to
+/// `100ms`.
+const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 
 /// Type of worker driving the apply loop.
 #[derive(Debug, Copy, Clone)]
@@ -926,7 +933,9 @@ where
     /// `60%` of the configured timeout to allow normal server keep alives to arrive first while
     /// still leaving comfortable room for network and processing latency before the full timeout.
     fn compute_keep_alive_deadline_duration(wal_sender_timeout: Duration) -> Duration {
-        wal_sender_timeout.mul_f64(KEEP_ALIVE_DEADLINE_FRACTION)
+        wal_sender_timeout
+            .mul_f64(KEEP_ALIVE_DEADLINE_FRACTION)
+            .max(MIN_KEEP_ALIVE_DEADLINE_DURATION)
     }
 
     /// Processes a replication message while shutdown is waiting for PostgreSQL to acknowledge the
