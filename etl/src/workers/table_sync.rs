@@ -451,11 +451,16 @@ where
             retry_policy = table_error.retry_policy().clone();
         }
 
+        let error_type = match retry_policy {
+            RetryPolicy::TimedRetry { .. } => "timed",
+            RetryPolicy::ManualRetry => "manual",
+            RetryPolicy::NoRetry => "no_retry",
+        };
         counter!(
             ETL_WORKER_ERRORS_TOTAL,
             PIPELINE_ID_LABEL => pipeline_id.to_string(),
             WORKER_TYPE_LABEL => "table_sync",
-            ERROR_TYPE_LABEL => policy.retry_directive().to_string(),
+            ERROR_TYPE_LABEL => error_type,
         )
         .increment(1);
 
