@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::error::{ReplicatorError, ReplicatorResult};
-use crate::error_notification::{ErrorNotificationClient, ErrorNotifyingStateStore};
+use crate::error_notification::ErrorNotificationClient;
+use crate::error_reporting::ErrorReportingStateStore;
 use crate::metrics;
 use crate::sentry::set_destination_tag;
 use etl::pipeline::Pipeline;
@@ -52,7 +53,7 @@ pub async fn start_replicator_with_config(
             max_staleness_mins,
             connection_pool_size,
         } => {
-            set_destination_scope::<BigQueryDestination<ErrorNotifyingStateStore<PostgresStore>>>();
+            set_destination_scope::<BigQueryDestination<ErrorReportingStateStore<PostgresStore>>>();
 
             let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
@@ -80,7 +81,7 @@ pub async fn start_replicator_with_config(
                     s3_region,
                 },
         } => {
-            set_destination_scope::<IcebergDestination<ErrorNotifyingStateStore<PostgresStore>>>();
+            set_destination_scope::<IcebergDestination<ErrorReportingStateStore<PostgresStore>>>();
 
             let env = Environment::load().map_err(ReplicatorError::config)?;
             let client = IcebergClient::new_with_supabase_catalog(
@@ -114,7 +115,7 @@ pub async fn start_replicator_with_config(
                     s3_endpoint,
                 },
         } => {
-            set_destination_scope::<IcebergDestination<ErrorNotifyingStateStore<PostgresStore>>>();
+            set_destination_scope::<IcebergDestination<ErrorReportingStateStore<PostgresStore>>>();
 
             let client = IcebergClient::new_with_rest_catalog(
                 catalog_uri.clone(),
@@ -171,7 +172,7 @@ async fn init_store(
 ) -> ReplicatorResult<impl StateStore + SchemaStore + CleanupStore + Clone> {
     info!("initializing postgres state store");
 
-    Ok(ErrorNotifyingStateStore::new(
+    Ok(ErrorReportingStateStore::new(
         PostgresStore::new(pipeline_id, pg_connection_config).await?,
         notification_client,
     ))
