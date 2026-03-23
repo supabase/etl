@@ -610,7 +610,7 @@ fn build_setup_sql_with_strategy(
             .join(", ");
 
         sql.push_str(&format!(
-            " CREATE OR REPLACE SECRET {secret_name} (TYPE S3, {secret_body}, USE_SSL {});",
+            " SET enable_http_metadata_cache = true; SET parquet_metadata_cache = true; CREATE OR REPLACE SECRET {secret_name} (TYPE S3, {secret_body}, USE_SSL {});",
             if s3.use_ssl { "true" } else { "false" }
         ));
     }
@@ -619,6 +619,7 @@ fn build_setup_sql_with_strategy(
         .unwrap_or_default();
 
     sql.push_str(&format!(
+        // " ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}{metadata_schema_clause}); SET http_proxy='http://localhost:8080';",
         " ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}{metadata_schema_clause});",
         quote_literal(&format!("ducklake:{catalog_target}")),
         quote_literal(data_path),
