@@ -424,14 +424,6 @@ where
         // computed in the worker from config so both table sync and apply worker use the
         // same retry timing settings.
         let policy = build_error_handling_policy(&err);
-        counter!(
-            ETL_WORKER_ERRORS_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-            WORKER_TYPE_LABEL => "table_sync",
-            ERROR_TYPE_LABEL => policy.retry_directive().to_string(),
-        )
-        .increment(1);
-
         let mut retry_policy = match policy.retry_directive() {
             RetryDirective::Timed => RetryPolicy::retry_in(ChronoDuration::milliseconds(
                 config.table_error_retry_delay_ms as i64,
@@ -458,6 +450,19 @@ where
             table_error = table_error.with_retry_policy(RetryPolicy::ManualRetry);
             retry_policy = table_error.retry_policy().clone();
         }
+
+        let error_type = match retry_policy {
+            RetryPolicy::TimedRetry { .. } => "timed",
+            RetryPolicy::ManualRetry => "manual",
+            RetryPolicy::NoRetry => "no_retry",
+        };
+        counter!(
+            ETL_WORKER_ERRORS_TOTAL,
+            PIPELINE_ID_LABEL => pipeline_id.to_string(),
+            WORKER_TYPE_LABEL => "table_sync",
+            ERROR_TYPE_LABEL => error_type,
+        )
+        .increment(1);
 
         // Update the state and store with the error. This way the user is notified about
         // the current error state.

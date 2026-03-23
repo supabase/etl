@@ -15,6 +15,7 @@ pub const ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE: &str = "etl_parallel_table_cop
 pub const ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE: &str = "etl_parallel_table_copy_rows_imbalance";
 pub const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
 pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
+pub const ETL_REPLICATION_MESSAGES_TOTAL: &str = "etl_replication_messages_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
 pub const ETL_ROW_SIZE_BYTES: &str = "etl_row_size_bytes";
@@ -111,6 +112,12 @@ pub(crate) fn register_metrics() {
             ETL_EVENTS_PROCESSED_TOTAL,
             Unit::Count,
             "Total number of events successfully processed (stored), labeled by worker_type, action, pipeline_id, and destination"
+        );
+
+        describe_counter!(
+            ETL_REPLICATION_MESSAGES_TOTAL,
+            Unit::Count,
+            "Total number of logical replication messages received by the apply loop, labeled by pipeline_id and worker_type"
         );
 
         describe_counter!(
