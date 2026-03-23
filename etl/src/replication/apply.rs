@@ -75,6 +75,14 @@ impl WorkerType {
             },
         }
     }
+
+    /// Returns a low-cardinality worker type label for metrics and tags.
+    pub fn to_simple_string(&self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+            Self::TableSync { .. } => "table_sync",
+        }
+    }
 }
 
 impl Display for WorkerType {
@@ -966,7 +974,7 @@ where
 
         counter!(
             ETL_EVENTS_PROCESSED_TOTAL,
-            WORKER_TYPE_LABEL => "apply",
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
             ACTION_LABEL => "table_streaming",
             PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             DESTINATION_LABEL => D::name(),
@@ -977,7 +985,7 @@ where
 
         histogram!(
             ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-            WORKER_TYPE_LABEL => "apply",
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
             ACTION_LABEL => "table_streaming",
             PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             DESTINATION_LABEL => D::name(),
@@ -1011,7 +1019,7 @@ where
         counter!(
             ETL_REPLICATION_MESSAGES_TOTAL,
             PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_string(),
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
         )
         .increment(1);
 
