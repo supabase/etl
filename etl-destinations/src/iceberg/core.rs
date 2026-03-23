@@ -21,7 +21,7 @@ use etl::types::{
 use etl::{bail, etl_error};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Suffix for changelog tables
 const ICEBERG_CHANGELOG_TABLE_SUFFIX: &str = "changelog";
@@ -604,11 +604,7 @@ where
         self.streaming_tasks
             .spawn(async move {
                 let result = destination.write_events(events).await;
-                if flush_result.send(result).is_err() {
-                    warn!(
-                        "failed to send iceberg flush result because apply loop was likely closed"
-                    );
-                }
+                flush_result.send(result);
             })
             .await;
 

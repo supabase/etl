@@ -874,11 +874,7 @@ where
         self.streaming_tasks
             .spawn(async move {
                 let result = destination.write_events(events).await;
-                if flush_result.send(result).is_err() {
-                    warn!(
-                        "failed to send bigquery flush result because apply loop was likely closed"
-                    );
-                }
+                flush_result.send(result);
             })
             .await;
 

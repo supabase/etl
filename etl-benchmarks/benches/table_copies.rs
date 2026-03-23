@@ -525,7 +525,7 @@ impl Destination for NullDestination {
         _events: Vec<Event>,
         flush_result: BatchFlushResult<()>,
     ) -> EtlResult<()> {
-        let _ = flush_result.send(Ok(()));
+        flush_result.send(Ok(()));
 
         Ok(())
     }

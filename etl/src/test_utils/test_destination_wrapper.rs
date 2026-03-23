@@ -327,7 +327,7 @@ where
                 inner.check_conditions().await;
             }
 
-            let _ = flush_result.send(result);
+            flush_result.send(result);
         });
 
         Ok(())

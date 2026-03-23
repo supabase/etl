@@ -101,7 +101,7 @@ where
         }
         .await;
 
-        let _ = flush_result.send(result);
+        flush_result.send(result);
 
         Ok(())
     }

@@ -6,6 +6,7 @@ use std::time::Instant;
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
 use tokio_postgres::types::PgLsn;
+use tracing::warn;
 
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
@@ -52,13 +53,15 @@ impl<T> BatchFlushResult<T> {
 
     /// Sends a completed result to the apply loop.
     ///
-    /// If the receiver has already been dropped, returns the original result to the caller.
-    pub fn send(mut self, result: EtlResult<T>) -> Result<(), EtlResult<T>> {
+    /// If the receiver has already been dropped, logs a warning and discards the result.
+    pub fn send(mut self, result: EtlResult<T>) {
         let Some(tx) = self.tx.take() else {
-            return Ok(());
+            return;
         };
 
-        tx.send(result)
+        if tx.send(result).is_err() {
+            warn!("could not send batch flush result because apply loop was already closed");
+        }
     }
 }
 
@@ -169,7 +172,7 @@ mod tests {
         };
         let (flush_result, pending_result) = BatchFlushResult::new(Some(PgLsn::from(42)), metrics);
 
-        flush_result.send(Ok(7_u64)).unwrap();
+        flush_result.send(Ok(7_u64));
 
         let completed = pending_result.await;
         let (commit_end_lsn, _metrics, result) = completed.into_parts();
