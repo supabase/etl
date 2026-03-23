@@ -1,4 +1,4 @@
-use etl::error::EtlResult;
+use etl::error::{EtlError, EtlResult};
 use etl::state::table::TableReplicationPhase;
 use etl::store::cleanup::CleanupStore;
 use etl::store::schema::SchemaStore;
@@ -22,6 +22,15 @@ pub struct ErrorReportingStateStore<S> {
     notification_client: Option<Arc<ErrorNotificationClient>>,
 }
 
+/// Persisted table error waiting to be reported.
+#[derive(Debug)]
+struct ReportableTableError {
+    /// Table whose replication state was persisted as errored.
+    table_id: TableId,
+    /// Source ETL error captured in the persisted table phase.
+    source_err: EtlError,
+}
+
 impl<S> ErrorReportingStateStore<S> {
     /// Creates a reporting wrapper around `inner`.
     pub fn new(inner: S, notification_client: Option<ErrorNotificationClient>) -> Self {
@@ -32,23 +41,38 @@ impl<S> ErrorReportingStateStore<S> {
     }
 
     /// Reports persisted errored table state updates.
-    async fn report_errored_updates(&self, updates: &[(TableId, TableReplicationPhase)]) {
+    async fn report_errored_updates(&self, updates: Vec<ReportableTableError>) {
         let notification_client = self.notification_client.as_ref();
 
-        for (table_id, phase) in updates {
-            let TableReplicationPhase::Errored { source_err, .. } = phase else {
-                continue;
-            };
+        for update in updates {
+            info!(
+                table_id = update.table_id.0,
+                "reporting table replication error"
+            );
 
-            info!(table_id = table_id.0, "reporting table replication error");
-
-            sentry::capture_table_error(*table_id, source_err);
+            sentry::capture_table_error(update.table_id, &update.source_err);
             if let Some(notification_client) = notification_client {
                 notification_client
-                    .notify_error(source_err.to_string(), source_err)
+                    .notify_error(update.source_err.to_string(), &update.source_err)
                     .await;
             }
         }
+    }
+
+    /// Extracts only the errored state updates that need post-persistence reporting.
+    fn collect_reportable_errors(
+        updates: &[(TableId, TableReplicationPhase)],
+    ) -> Vec<ReportableTableError> {
+        updates
+            .iter()
+            .filter_map(|(table_id, phase)| match phase {
+                TableReplicationPhase::Errored { source_err, .. } => Some(ReportableTableError {
+                    table_id: *table_id,
+                    source_err: source_err.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -77,14 +101,15 @@ where
         &self,
         updates: Vec<(TableId, TableReplicationPhase)>,
     ) -> EtlResult<()> {
-        self.inner
-            .update_table_replication_states(updates.clone())
-            .await?;
+        // We collect all errors in advance, to avoid cloning the whole set of updates.
+        let reportable_errors = Self::collect_reportable_errors(&updates);
+
+        self.inner.update_table_replication_states(updates).await?;
 
         // This operation must be infallible or at least not propagate failures, otherwise the
         // error thrown here, will be caught and handled by the core of etl itself. There is no
         // infinite recursion problem, but it might make the system harder to understand.
-        self.report_errored_updates(&updates).await;
+        self.report_errored_updates(reportable_errors).await;
 
         Ok(())
     }
