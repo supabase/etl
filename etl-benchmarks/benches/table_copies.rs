@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use etl::destination::Destination;
+use etl::destination::async_result::{
+    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
 use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
 use etl::state::table::TableReplicationPhaseType;
@@ -469,10 +472,14 @@ impl Destination for BenchDestination {
         "bench_destination"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
         match self {
-            BenchDestination::Null(dest) => dest.truncate_table(table_id).await,
-            BenchDestination::BigQuery(dest) => dest.truncate_table(table_id).await,
+            BenchDestination::Null(dest) => dest.truncate_table(table_id, async_result).await,
+            BenchDestination::BigQuery(dest) => dest.truncate_table(table_id, async_result).await,
         }
     }
 
@@ -480,17 +487,28 @@ impl Destination for BenchDestination {
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
         match self {
-            BenchDestination::Null(dest) => dest.write_table_rows(table_id, table_rows).await,
-            BenchDestination::BigQuery(dest) => dest.write_table_rows(table_id, table_rows).await,
+            BenchDestination::Null(dest) => {
+                dest.write_table_rows(table_id, table_rows, async_result)
+                    .await
+            }
+            BenchDestination::BigQuery(dest) => {
+                dest.write_table_rows(table_id, table_rows, async_result)
+                    .await
+            }
         }
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
         match self {
-            BenchDestination::Null(dest) => dest.write_events(events).await,
-            BenchDestination::BigQuery(dest) => dest.write_events(events).await,
+            BenchDestination::Null(dest) => dest.write_events(events, async_result).await,
+            BenchDestination::BigQuery(dest) => dest.write_events(events, async_result).await,
         }
     }
 }
@@ -500,7 +518,13 @@ impl Destination for NullDestination {
         "null"
     }
 
-    async fn truncate_table(&self, _table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        _table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(()));
+
         Ok(())
     }
 
@@ -508,14 +532,22 @@ impl Destination for NullDestination {
         &self,
         _table_id: TableId,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
         self.row_count
             .fetch_add(table_rows.len() as u64, Ordering::Relaxed);
+        async_result.send(Ok(()));
 
         Ok(())
     }
 
-    async fn write_events(&self, _events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events(
+        &self,
+        _events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(()));
+
         Ok(())
     }
 }

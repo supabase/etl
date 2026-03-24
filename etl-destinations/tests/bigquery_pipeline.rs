@@ -1622,7 +1622,7 @@ async fn table_array_with_null_values() {
     // We sleep to wait for the event to be processed. This is not ideal, but if we wanted to do
     // this better, we would have to also implement error handling within the apply worker to write
     // in the state store.
-    sleep(Duration::from_secs(1)).await;
+    sleep(Duration::from_secs(5)).await;
 
     // Wait for the pipeline expecting an error to be returned.
     let err = pipeline.shutdown_and_wait().await.err().unwrap();

@@ -10,6 +10,10 @@ use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
 use crate::table_name::try_stringify_table_name;
 use etl::destination::Destination;
+use etl::destination::async_result::{
+    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
+use etl::destination::task_set::DestinationTaskSet;
 use etl::error::{ErrorKind, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
@@ -94,6 +98,7 @@ pub struct IcebergDestination<S> {
     client: IcebergClient,
     store: S,
     inner: Arc<Mutex<Inner>>,
+    streaming_tasks: DestinationTaskSet,
 }
 
 /// Namespace in the destination where the tables will be copied
@@ -151,7 +156,7 @@ struct Inner {
 
 impl<S> IcebergDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
     /// Creates a new Iceberg destination instance.
     ///
@@ -171,6 +176,7 @@ where
                 created_namespaces: HashSet::new(),
                 namespace,
             })),
+            streaming_tasks: DestinationTaskSet::new(),
         }
     }
 
@@ -548,19 +554,28 @@ where
 
 impl<S> Destination for IcebergDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
     /// Returns the identifier name for this destination type.
     fn name() -> &'static str {
         "iceberg"
     }
 
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.streaming_tasks.shutdown().await
+    }
+
     /// Truncates the specified table by dropping and recreating it.
     ///
     /// Removes all data from the target Iceberg table while preserving
     /// the table schema structure for continued CDC operations.
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table(table_id).await?;
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
+        let result = self.truncate_table(table_id).await;
+        async_result.send(result);
 
         Ok(())
     }
@@ -574,8 +589,10 @@ where
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        self.write_table_rows(table_id, table_rows).await?;
+        let result = self.write_table_rows(table_id, table_rows).await;
+        async_result.send(result);
 
         Ok(())
     }
@@ -585,8 +602,20 @@ where
     /// Handles insert, update, delete, and truncate events by converting
     /// them to appropriate Iceberg operations. Events are batched by table
     /// and processed concurrently for optimal performance.
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.write_events(events).await?;
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
+        self.streaming_tasks.try_reap().await?;
+
+        let destination = self.clone();
+        self.streaming_tasks
+            .spawn(async move {
+                let result = destination.write_events(events).await;
+                async_result.send(result);
+            })
+            .await;
 
         Ok(())
     }

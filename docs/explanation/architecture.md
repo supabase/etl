@@ -68,9 +68,9 @@ Where replicated data goes. Implement the `Destination` trait to send data anywh
 ```rust
 pub trait Destination {
     fn name() -> &'static str;
-    fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
-    fn write_table_rows(&self, table_id: TableId, rows: Vec<TableRow>) -> impl Future<Output = EtlResult<()>> + Send;
-    fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn truncate_table(&self, table_id: TableId, async_result: TruncateTableResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_table_rows(&self, table_id: TableId, rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
@@ -80,6 +80,11 @@ pub trait Destination {
 | `truncate_table()` | Before initial copy | Clear destination table |
 | `write_table_rows()` | During initial copy | Receive bulk rows |
 | `write_events()` | After initial copy | Receive streaming changes |
+
+Each write-like method receives an async result handle. The intent is different per method:
+
+- `write_events()`: after dispatch succeeds, ETL may keep processing while the destination finishes the batch.
+- `truncate_table()` and `write_table_rows()`: ETL waits for the result immediately. The handle is still useful because it keeps the destination API uniform and lets implementations reuse similar internal patterns.
 
 ### Store
 

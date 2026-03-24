@@ -1,4 +1,8 @@
 use etl::destination::Destination;
+use etl::destination::async_result::{
+    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
+use etl::destination::task_set::DestinationTaskSet;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
@@ -156,11 +160,12 @@ pub struct BigQueryDestination<S> {
     pipeline_id: PipelineId,
     store: S,
     inner: Arc<Mutex<Inner>>,
+    streaming_tasks: DestinationTaskSet,
 }
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
     /// Creates a new [`BigQueryDestination`] with a pre-configured client.
     ///
@@ -188,6 +193,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_tasks: DestinationTaskSet::new(),
         }
     }
 
@@ -221,6 +227,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_tasks: DestinationTaskSet::new(),
         })
     }
 
@@ -253,6 +260,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_tasks: DestinationTaskSet::new(),
         })
     }
     /// Creates a new [`BigQueryDestination`] using Application Default Credentials (ADC).
@@ -283,6 +291,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_tasks: DestinationTaskSet::new(),
         })
     }
 
@@ -327,6 +336,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_tasks: DestinationTaskSet::new(),
         })
     }
 
@@ -830,29 +840,55 @@ where
 
 impl<S> Destination for BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
     fn name() -> &'static str {
         "bigquery"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.process_truncate_for_table_ids(iter::once(table_id))
-            .await
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.streaming_tasks.shutdown().await
+    }
+
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
+        let result = self
+            .process_truncate_for_table_ids(iter::once(table_id))
+            .await;
+        async_result.send(result);
+
+        Ok(())
     }
 
     async fn write_table_rows(
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        self.write_table_rows(table_id, table_rows).await?;
+        let result = self.write_table_rows(table_id, table_rows).await;
+        async_result.send(result);
 
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.write_events(events).await?;
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
+        self.streaming_tasks.try_reap().await?;
+
+        let destination = self.clone();
+        self.streaming_tasks
+            .spawn(async move {
+                let result = destination.write_events(events).await;
+                async_result.send(result);
+            })
+            .await;
 
         Ok(())
     }

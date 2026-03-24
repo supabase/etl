@@ -3,6 +3,9 @@ use std::collections::HashSet;
 use tracing::info;
 
 use crate::destination::Destination;
+use crate::destination::async_result::{
+    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
 use crate::error::EtlResult;
 use crate::store::state::StateStore;
 use crate::types::{Event, TableRow};
@@ -31,8 +34,13 @@ where
         "memory"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
         info!(table_id = table_id.0, "truncating table");
+        async_result.send(Ok(()));
 
         Ok(())
     }
@@ -41,52 +49,72 @@ where
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        self.state_store
+        let result = self
+            .state_store
             .store_table_mapping(table_id, format!("memory_destination_table_{}", table_id.0))
-            .await?;
+            .await;
 
-        info!(
-            table_id = table_id.0,
-            row_count = table_rows.len(),
-            "writing table rows"
-        );
+        if result.is_ok() {
+            info!(
+                table_id = table_id.0,
+                row_count = table_rows.len(),
+                "writing table rows"
+            );
+        }
+
+        async_result.send(result);
 
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        let mut table_ids = HashSet::new();
-        for event in &events {
-            match event {
-                Event::Insert(event) => {
-                    table_ids.insert(event.table_id);
-                }
-                Event::Update(event) => {
-                    table_ids.insert(event.table_id);
-                }
-                Event::Delete(event) => {
-                    table_ids.insert(event.table_id);
-                }
-                Event::Relation(event) => {
-                    table_ids.insert(event.table_schema.id);
-                }
-                Event::Truncate(event) => {
-                    for table_id in &event.rel_ids {
-                        table_ids.insert(TableId::new(*table_id));
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
+        let result = async {
+            let mut table_ids = HashSet::new();
+            for event in &events {
+                match event {
+                    Event::Insert(event) => {
+                        table_ids.insert(event.table_id);
                     }
+                    Event::Update(event) => {
+                        table_ids.insert(event.table_id);
+                    }
+                    Event::Delete(event) => {
+                        table_ids.insert(event.table_id);
+                    }
+                    Event::Relation(event) => {
+                        table_ids.insert(event.table_schema.id);
+                    }
+                    Event::Truncate(event) => {
+                        for table_id in &event.rel_ids {
+                            table_ids.insert(TableId::new(*table_id));
+                        }
+                    }
+                    Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
                 }
-                Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
             }
-        }
 
-        for table_id in table_ids {
-            self.state_store
-                .store_table_mapping(table_id, format!("memory_destination_table_{}", table_id.0))
-                .await?;
-        }
+            for table_id in table_ids {
+                self.state_store
+                    .store_table_mapping(
+                        table_id,
+                        format!("memory_destination_table_{}", table_id.0),
+                    )
+                    .await?;
+            }
 
-        info!(event_count = events.len(), "writing events");
+            info!(event_count = events.len(), "writing events");
+
+            Ok(())
+        }
+        .await;
+
+        async_result.send(result);
 
         Ok(())
     }
