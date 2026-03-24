@@ -50,7 +50,7 @@
 //! ```rust,no_run
 //! use etl::{
 //!     config::{BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TcpKeepaliveConfig, TlsConfig, TableSyncCopyConfig},
-//!     destination::{Destination, flush_result::{WriteEventsResult, WriteTableRowsResult}},
+//!     destination::{Destination, async_result::{WriteEventsResult, WriteTableRowsResult}},
 //!     error::EtlResult,
 //!     pipeline::Pipeline,
 //!     store::both::memory::MemoryStore,
@@ -63,7 +63,7 @@
 //!
 //! impl Destination for NoopDestination {
 //!     fn name() -> &'static str { "noop" }
-//!     async fn truncate_table(&self, _table_id: TableId, async_result: etl::destination::flush_result::TruncateTableResult<()>) -> EtlResult<()> {
+//!     async fn truncate_table(&self, _table_id: TableId, async_result: etl::destination::async_result::TruncateTableResult<()>) -> EtlResult<()> {
 //!         async_result.send(Ok(()));
 //!         Ok(())
 //!     }

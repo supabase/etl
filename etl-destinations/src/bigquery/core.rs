@@ -1,5 +1,5 @@
 use etl::destination::Destination;
-use etl::destination::flush_result::{
+use etl::destination::async_result::{
     TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
 };
 use etl::destination::task_set::DestinationTaskSet;
@@ -855,17 +855,10 @@ where
         table_id: TableId,
         async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
-        self.streaming_tasks.try_reap().await?;
-
-        let destination = self.clone();
-        self.streaming_tasks
-            .spawn(async move {
-                let result = destination
-                    .process_truncate_for_table_ids(iter::once(table_id))
-                    .await;
-                async_result.send(result);
-            })
+        let result = self
+            .process_truncate_for_table_ids(iter::once(table_id))
             .await;
+        async_result.send(result);
 
         Ok(())
     }
@@ -876,15 +869,8 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        self.streaming_tasks.try_reap().await?;
-
-        let destination = self.clone();
-        self.streaming_tasks
-            .spawn(async move {
-                let result = destination.write_table_rows(table_id, table_rows).await;
-                async_result.send(result);
-            })
-            .await;
+        let result = self.write_table_rows(table_id, table_rows).await;
+        async_result.send(result);
 
         Ok(())
     }

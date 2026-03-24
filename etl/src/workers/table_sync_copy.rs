@@ -17,7 +17,7 @@ use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::stream::TryBatchBackpressureStream;
 use crate::destination::Destination;
-use crate::destination::flush_result::WriteTableRowsResult;
+use crate::destination::async_result::WriteTableRowsResult;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 #[cfg(feature = "failpoints")]

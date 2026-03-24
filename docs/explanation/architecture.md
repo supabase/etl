@@ -81,6 +81,11 @@ pub trait Destination {
 | `write_table_rows()` | During initial copy | Receive bulk rows |
 | `write_events()` | After initial copy | Receive streaming changes |
 
+Each write-like method receives an async result handle. The intent is different per method:
+
+- `write_events()`: after dispatch succeeds, ETL may keep processing while the destination finishes the batch.
+- `truncate_table()` and `write_table_rows()`: ETL waits for the result immediately. The handle is still useful because it keeps the destination API uniform and lets implementations reuse similar internal patterns.
+
 ### Store
 
 Persists pipeline state so replication can resume after restarts. Three traits work together:

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use tracing::info;
 
 use crate::destination::Destination;
-use crate::destination::flush_result::{
+use crate::destination::async_result::{
     TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
 };
 use crate::error::EtlResult;

@@ -1,7 +1,7 @@
 use etl_postgres::types::TableId;
 use std::future::Future;
 
-use crate::destination::flush_result::{
+use crate::destination::async_result::{
     TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
 };
 use crate::error::EtlResult;
@@ -16,6 +16,7 @@ use crate::types::{Event, TableRow};
 /// The interface is intentionally small and generic. ETL provides ordered data plus minimal
 /// coordination hooks, and each destination is free to choose its own execution model, such as
 /// inline writes, actors, queues, or spawned tasks.
+///
 /// ETL is at-least-once, so destinations must tolerate duplicate writes. ETL may also call
 /// destination methods in parallel under some circumstances, so implementations must be safe for
 /// concurrent use.
@@ -39,6 +40,11 @@ pub trait Destination {
     /// destination table starts from a clean state before bulk loading. Truncation is
     /// best-effort and may be skipped if table metadata is missing, and callers may continue
     /// after a truncation error.
+    ///
+    /// Implementations complete `async_result` when truncation is actually done. ETL still waits
+    /// for that result immediately before continuing. The asynchronous result exists mainly to
+    /// keep the destination interface uniform across methods, not to let ETL overlap more work
+    /// with truncation.
     fn truncate_table(
         &self,
         table_id: TableId,
@@ -57,13 +63,17 @@ pub trait Destination {
     /// requirement on these row batches; it just provides the data that should be written for the
     /// initial snapshot.
     ///
-    ///
-    /// Implementations report asynchronous completion through `flush_result`. The method return
+    /// Implementations report asynchronous completion through `async_result`. The method return
     /// value is reserved for immediate dispatch/setup failures before the work has been accepted.
     ///
     /// ETL still waits for each table-copy batch to finish before reading the next batch for the
-    /// same copy partition, so this hook preserves backpressure while allowing destinations to
-    /// unify their internal execution model across table copy and streaming writes.
+    /// same copy partition. For non-parallel table copy, that means a new batch is requested only
+    /// after the previous result completes. For parallel table copy, ETL already invokes this
+    /// method concurrently across partitions, so the asynchronous result is mostly an API
+    /// consistency tool rather than a way to queue all copy batches and wait at the end.
+    ///
+    /// This immediate waiting is intentional: it preserves backpressure and avoids accumulating too
+    /// many in-flight row batches in memory.
     fn write_table_rows(
         &self,
         table_id: TableId,
@@ -80,14 +90,16 @@ pub trait Destination {
     /// The main ordering guarantee is per table: ETL preserves the required order for streaming
     /// operations on the same table.
     ///
-    /// Implementations report asynchronous completion through `flush_result`. The method return
+    /// Implementations report asynchronous completion through `async_result`. The method return
     /// value is reserved for immediate dispatch/setup failures before the work has been accepted.
     ///
     /// This lets ETL distinguish synchronous dispatch errors from asynchronous flush completion.
-    /// ETL may continue accumulating the next batch, but it will not hand the destination the next
-    /// streaming batch until the previous `flush_result` has been completed.
+    /// This is also the path where ETL gains real overlap: once dispatch succeeds, the apply loop
+    /// may continue processing while the destination finishes the current batch. ETL still will not
+    /// hand the destination the next streaming batch until the previous `async_result` has been
+    /// completed.
     ///
-    /// Async implementations that offload work should coordinate `flush_result` with
+    /// Async implementations that offload work should coordinate `async_result` with
     /// [`Destination::shutdown`]. ETL calls [`Destination::shutdown`] at most once and only after
     /// it has stopped submitting new work. If the apply loop has already gone away, sending the
     /// result will fail and may be treated as an implicit cancellation.

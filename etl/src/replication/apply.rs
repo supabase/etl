@@ -34,7 +34,7 @@ use crate::conversions::event::{
     parse_event_from_update_message,
 };
 use crate::destination::Destination;
-use crate::destination::flush_result::{
+use crate::destination::async_result::{
     ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
     PendingWriteEventsResult, WriteEventsResult,
 };

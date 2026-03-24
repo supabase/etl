@@ -11,7 +11,7 @@ use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
-use crate::destination::flush_result::{TruncateTableResult, WriteTableRowsResult};
+use crate::destination::async_result::{TruncateTableResult, WriteTableRowsResult};
 use crate::error::{ErrorKind, EtlResult};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, etl_fail_point};

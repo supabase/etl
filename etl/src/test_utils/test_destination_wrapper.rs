@@ -8,7 +8,7 @@ use tokio::sync::{Notify, RwLock};
 use std::time::Instant;
 
 use crate::destination::Destination;
-use crate::destination::flush_result::{
+use crate::destination::async_result::{
     ApplyLoopAsyncResultMetadata, DispatchMetrics, TruncateTableResult, WriteEventsResult,
     WriteTableRowsResult,
 };

@@ -33,6 +33,10 @@ pub trait Destination {
 - Operations should be idempotent when possible (ETL may retry on failure)
 - Handle concurrent calls safely (parallel table sync workers)
 - Process events in order to maintain data consistency
+- All three write-like methods use async results, but ETL waits differently:
+- `truncate_table()` waits immediately.
+- `write_table_rows()` also waits immediately, requesting the next batch only after the current one finishes for that copy partition.
+- `write_events()` is the method where ETL can keep processing while the destination finishes the current batch.
 
 See [Event Types](events.md) for details on the events received by `write_events()`.
 

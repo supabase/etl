@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use etl::destination::Destination;
-use etl::destination::flush_result::{
+use etl::destination::async_result::{
     TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
 };
 use etl::error::EtlResult;
