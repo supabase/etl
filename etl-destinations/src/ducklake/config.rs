@@ -15,7 +15,7 @@ use crate::ducklake::core::LAKE_CATALOG;
 
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";
-const DUCKDB_EXTENSION_VERSION: &str = "1.4.4";
+const DUCKDB_EXTENSION_VERSION: &str = "1.5.1";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const JSON_EXTENSION_FILE: &str = "json.duckdb_extension";
@@ -620,10 +620,10 @@ fn build_setup_sql_with_strategy(
 
     sql.push_str(&format!(
         // " ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}{metadata_schema_clause}); SET http_proxy='http://localhost:8080';",
-        " ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}{metadata_schema_clause});",
+        " ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}, AUTOMATIC_MIGRATION true{metadata_schema_clause});",
         quote_literal(&format!("ducklake:{catalog_target}")),
         quote_literal(data_path),
-        super::DATA_INLINING_ROW_LIMIT
+        super::ATTACH_DATA_INLINING_ROW_LIMIT
     ));
 
     if let Some(duckdb_log) = duckdb_log {
@@ -934,8 +934,9 @@ mod tests {
         assert!(sql.contains(&format!("DATA_PATH {}", quote_literal(data_url.as_str()))));
         assert!(sql.contains(&format!(
             "DATA_INLINING_ROW_LIMIT {}",
-            crate::ducklake::DATA_INLINING_ROW_LIMIT
+            crate::ducklake::ATTACH_DATA_INLINING_ROW_LIMIT
         )));
+        assert!(sql.contains("AUTOMATIC_MIGRATION true"));
     }
 
     #[test]
@@ -965,8 +966,9 @@ mod tests {
         assert!(sql.contains(&format!("DATA_PATH {}", quote_literal(data_url.as_str()))));
         assert!(sql.contains(&format!(
             "DATA_INLINING_ROW_LIMIT {}",
-            crate::ducklake::DATA_INLINING_ROW_LIMIT
+            crate::ducklake::ATTACH_DATA_INLINING_ROW_LIMIT
         )));
+        assert!(sql.contains("AUTOMATIC_MIGRATION true"));
     }
 
     #[test]
@@ -1001,8 +1003,9 @@ mod tests {
         assert!(sql.contains(&format!("DATA_PATH {}", quote_literal(data_url.as_str()))));
         assert!(sql.contains(&format!(
             "DATA_INLINING_ROW_LIMIT {}",
-            crate::ducklake::DATA_INLINING_ROW_LIMIT
+            crate::ducklake::ATTACH_DATA_INLINING_ROW_LIMIT
         )));
+        assert!(sql.contains("AUTOMATIC_MIGRATION true"));
     }
 
     #[test]

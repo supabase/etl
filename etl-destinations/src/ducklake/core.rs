@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::error::Error as StdError;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -23,7 +22,7 @@ use etl::types::{ArrayCell, Cell, Event, TableId, TableName, TableRow, TableSche
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
 use rand::Rng;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_postgres::types::PgLsn;
@@ -57,7 +56,7 @@ const SQL_DELETE_BATCH_SIZE: usize = 8;
 /// Keeping mixed insert/delete/update streams in the same batch improves
 /// insert throughput on interleaved workloads while still capping transaction
 /// lifetime for DuckLake conflict handling.
-const CDC_MUTATION_BATCH_SIZE: usize = 32;
+const CDC_MUTATION_BATCH_SIZE: usize = 128;
 /// ETL-managed marker table storing per-table applied CDC batches.
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
 /// Inline small marker-table writes in the DuckLake metadata catalog instead of
@@ -285,6 +284,7 @@ pub struct DuckLakeDestination<S> {
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
     table_creation_slots: Arc<Semaphore>,
+    table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     store: S,
     duckdb_log: Option<Arc<DuckDbLogConfig>>,
     /// Cache of table names whose DDL has already been executed.
@@ -410,6 +410,7 @@ impl<S> DuckLakeDestination<S> {
             pool: Arc::new(pool),
             blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
             table_creation_slots: Arc::new(Semaphore::new(1)),
+            table_write_slots: Arc::new(Mutex::new(HashMap::new())),
             store,
             duckdb_log: duckdb_log.map(Arc::new),
             created_tables: Arc::new(Mutex::new(HashSet::new())),
@@ -454,6 +455,7 @@ where
     /// Deletes all rows from the destination table without dropping it.
     async fn truncate_table_inner(&self, table_id: TableId) -> EtlResult<()> {
         let table_name = self.ensure_table_exists(table_id).await?;
+        let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.ensure_applied_batches_table_exists().await?;
         self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
             conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
@@ -512,6 +514,7 @@ where
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let table_name = self.ensure_table_exists(table_id).await?;
+        let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
 
         if table_rows.is_empty() {
             return Ok(());
@@ -615,6 +618,7 @@ where
                 for (table_id, mutations) in table_id_to_mutations {
                     let table_name = self.ensure_table_exists(table_id).await?;
                     let table_schema = self.get_table_schema(table_id).await?;
+                    let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
                     let manager = Arc::clone(&self.manager);
                     let pool = Arc::clone(&self.pool);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
@@ -622,6 +626,7 @@ where
                         prepare_mutation_table_batches(&table_schema, table_name, mutations)?;
 
                     join_set.spawn(async move {
+                        let _table_write_permit = table_write_permit;
                         apply_table_batches_with_retry(
                             manager,
                             pool,
@@ -663,11 +668,13 @@ where
 
                 for (table_id, truncates) in truncate_table_ids {
                     let table_name = self.ensure_table_exists(table_id).await?;
+                    let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
                     let manager = Arc::clone(&self.manager);
                     let pool = Arc::clone(&self.pool);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     let prepared_batch = prepare_truncate_table_batch(table_name, truncates);
                     join_set.spawn(async move {
+                        let _table_write_permit = table_write_permit;
                         apply_table_batch_with_retry(manager, pool, blocking_slots, prepared_batch)
                             .await
                     });
@@ -886,6 +893,25 @@ where
         Ok(ducklake_table_name)
     }
 
+    /// Serializes writes that target the same DuckLake table.
+    async fn acquire_table_write_slot(&self, table_name: &str) -> EtlResult<OwnedSemaphorePermit> {
+        let table_slot = {
+            let mut table_write_slots = self.table_write_slots.lock();
+            Arc::clone(
+                table_write_slots
+                    .entry(table_name.to_string())
+                    .or_insert_with(|| Arc::new(Semaphore::new(1))),
+            )
+        };
+
+        table_slot.acquire_owned().await.map_err(|_| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake table write semaphore closed"
+            )
+        })
+    }
+
     /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a
     /// permit that matches the configured DuckDB concurrency limit.
     async fn run_duckdb_blocking<R, F>(&self, operation: F) -> EtlResult<R>
@@ -928,6 +954,7 @@ where
 /// - `public.my_table` → `public_my__table`
 /// - `my_schema.orders` → `my__schema_orders`
 pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> DuckLakeTableName {
+    // try_stringify_table_name(table_name)
     let escaped_schema = table_name
         .schema
         .replace(TABLE_NAME_DELIMITER, TABLE_NAME_ESCAPE);
@@ -1152,50 +1179,42 @@ async fn apply_table_batches_with_retry(
         );
         match run_duckdb_blocking(Arc::clone(&pool), Arc::clone(&blocking_slots), {
             let manager = Arc::clone(&manager);
-            move |conn| apply_table_batches(manager.as_ref(), conn, attempt_batches.as_ref())
+            move |conn| {
+                let operation_started = std::time::Instant::now();
+                apply_table_batches(manager.as_ref(), conn, attempt_batches.as_ref())?;
+                info!(
+                    duration_ms = operation_started.elapsed().as_millis() as u64,
+                    "ducklake batch ---- "
+                );
+                let operation_started = std::time::Instant::now();
+                let res = flush_table_inlined_data(
+                    conn,
+                    &attempt_batches[0].table_name,
+                    DuckLakeTableBatchKind::Mutation,
+                );
+                info!(
+                    duration_ms = operation_started.elapsed().as_millis() as u64,
+                    "ducklake inlining flush >>>>>"
+                );
+                res
+            }
         })
         .await
         {
             Ok(()) => return Ok(()),
             Err(e) if attempt < MAX_COMMIT_RETRIES => {
-                let is_transient_delete_file_404 = is_transient_ducklake_delete_file_not_found(&e);
-                let base_delay = if is_transient_delete_file_404 {
-                    std::cmp::max(
-                        delay,
-                        Duration::from_millis(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
-                    )
-                } else {
-                    delay
-                };
                 let jitter_ratio = rand::rng().random_range(0.5..=1.5_f64);
-                let jittered = base_delay.mul_f64(jitter_ratio);
-                if is_transient_delete_file_404 {
-                    warn!(
-                        attempt = attempt + 1,
-                        max = MAX_COMMIT_RETRIES,
-                        table = %table_name,
-                        batch_count,
-                        delay_ms = jittered.as_millis() as u64,
-                        error = ?e,
-                        "ducklake table batch sequence hit delete-file visibility lag, retrying"
-                    );
-                } else {
-                    warn!(
-                        attempt = attempt + 1,
-                        max = MAX_COMMIT_RETRIES,
-                        table = %table_name,
-                        batch_count,
-                        error = ?e,
-                        "ducklake table batch sequence failed, retrying"
-                    );
-                }
-                tokio::time::sleep(jittered).await;
-                delay = std::cmp::min(
-                    base_delay * 2,
-                    Duration::from_millis(
-                        MAX_RETRY_DELAY_MS.max(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
-                    ),
+                let jittered = delay.mul_f64(jitter_ratio);
+                warn!(
+                    attempt = attempt + 1,
+                    max = MAX_COMMIT_RETRIES,
+                    table = %table_name,
+                    batch_count,
+                    error = ?e,
+                    "ducklake table batch sequence failed, retrying"
                 );
+                tokio::time::sleep(jittered).await;
+                delay = std::cmp::min(delay * 2, Duration::from_millis(MAX_RETRY_DELAY_MS));
             }
             Err(e) => {
                 return Err(etl_error!(
@@ -1271,50 +1290,40 @@ async fn apply_table_batch_with_retry(
                         batch_kind = batch_kind.as_str(),
                         "ducklake table batch already committed, skipping replay"
                     );
+
+                    if batch_kind == DuckLakeTableBatchKind::Copy {
+                        flush_table_inlined_data(conn, &attempt_batch.table_name, batch_kind)?;
+                    }
+
                     return Ok(());
                 }
 
-                apply_table_batch(manager.as_ref(), conn, attempt_batch.as_ref())
+                apply_table_batch(manager.as_ref(), conn, attempt_batch.as_ref())?;
+
+                if batch_kind == DuckLakeTableBatchKind::Copy {
+                    flush_table_inlined_data(conn, &attempt_batch.table_name, batch_kind)?;
+                }
+
+                Ok(())
             }
         })
         .await
         {
             Ok(()) => return Ok(()),
             Err(e) if attempt < MAX_COMMIT_RETRIES => {
-                let is_transient_delete_file_404 = is_transient_ducklake_delete_file_not_found(&e);
-                let base_delay = if is_transient_delete_file_404 {
-                    std::cmp::max(
-                        delay,
-                        Duration::from_millis(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
-                    )
-                } else {
-                    delay
-                };
                 let jitter_ratio = rand::rng().random_range(0.5..=1.5_f64);
-                let jittered = base_delay.mul_f64(jitter_ratio);
-                if is_transient_delete_file_404 {
-                    warn!(
-                        attempt = attempt + 1,
-                        max = MAX_COMMIT_RETRIES,
-                        table = %table_name,
-                        batch_id = %batch_id,
-                        delay_ms = jittered.as_millis() as u64,
-                        error = ?e,
-                        "ducklake delete file not visible yet, retrying"
-                    );
-                } else {
-                    warn!(
-                        attempt = attempt + 1,
-                        max = MAX_COMMIT_RETRIES,
-                        table = %table_name,
-                        batch_id = %batch_id,
-                        error = ?e,
-                        "ducklake table mutation attempt failed, retrying"
-                    );
-                }
+                let jittered = delay.mul_f64(jitter_ratio);
+                warn!(
+                    attempt = attempt + 1,
+                    max = MAX_COMMIT_RETRIES,
+                    table = %table_name,
+                    batch_id = %batch_id,
+                    error = ?e,
+                    "ducklake table mutation attempt failed, retrying"
+                );
                 tokio::time::sleep(jittered).await;
                 delay = std::cmp::min(
-                    base_delay * 2,
+                    delay * 2,
                     Duration::from_millis(
                         MAX_RETRY_DELAY_MS.max(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
                     ),
@@ -1335,24 +1344,6 @@ async fn apply_table_batch_with_retry(
     }
 
     Ok(())
-}
-
-/// Returns whether the error chain matches DuckLake's transient object-store
-/// visibility failure for delete parquet files.
-fn is_transient_ducklake_delete_file_not_found(error: &etl::error::EtlError) -> bool {
-    let mut current: Option<&(dyn StdError + 'static)> = Some(error);
-    while let Some(source) = current {
-        let message = source.to_string();
-        if message.contains("delete.parquet")
-            && message.contains("404 (Not Found)")
-            && message.contains("HTTP Error")
-        {
-            return true;
-        }
-        current = source.source();
-    }
-
-    false
 }
 
 /// Prepares ordered atomic batches for one table's CDC mutations.
@@ -1896,6 +1887,48 @@ fn apply_table_batch(
             Err(error)
         }
     }
+}
+
+/// Flushes inlined user data for one table after the write transaction commits.
+fn flush_table_inlined_data(
+    conn: &duckdb::Connection,
+    table_name: &str,
+    batch_kind: DuckLakeTableBatchKind,
+) -> EtlResult<()> {
+    let sql = format!(
+        "SELECT COALESCE(SUM(rows_flushed), 0) \
+         FROM ducklake_flush_inlined_data({}, table_name => {});",
+        quote_literal(LAKE_CATALOG),
+        quote_literal(table_name),
+    );
+    let rows_flushed: i64 = conn.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake inlined data flush failed",
+            format_query_error_detail(&sql, &e),
+            source: e
+        )
+    })?;
+
+    if rows_flushed > 0 {
+        info!(
+            table = %table_name,
+            batch_kind = batch_kind.as_str(),
+            rows_flushed,
+            "ducklake inlined data flushed"
+        );
+    } else {
+        debug!(
+            table = %table_name,
+            batch_kind = batch_kind.as_str(),
+            "ducklake inlined data already flushed"
+        );
+    }
+
+    #[cfg(feature = "test-utils")]
+    maybe_fail_after_flushed_batch_for_tests(batch_kind, table_name)?;
+
+    Ok(())
 }
 
 /// Applies the truncate action inside an open transaction.
@@ -2578,6 +2611,12 @@ static FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE: LazyLock<Mutex<Option<String>>> =
 #[cfg(feature = "test-utils")]
 static FAIL_AFTER_COPY_BATCH_COMMIT_TABLE: LazyLock<Mutex<Option<String>>> =
     LazyLock::new(|| Mutex::new(None));
+#[cfg(feature = "test-utils")]
+static FAIL_AFTER_ATOMIC_BATCH_FLUSH_TABLE: LazyLock<Mutex<Option<String>>> =
+    LazyLock::new(|| Mutex::new(None));
+#[cfg(feature = "test-utils")]
+static FAIL_AFTER_COPY_BATCH_FLUSH_TABLE: LazyLock<Mutex<Option<String>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 /// Arms a test hook that injects one post-commit failure for the next atomic batch.
 #[cfg(feature = "test-utils")]
@@ -2591,11 +2630,25 @@ pub fn arm_fail_after_copy_batch_commit_once_for_tests(table_name: &str) {
     *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_string());
 }
 
+/// Arms a test hook that injects one failure after flushing a mutation batch.
+#[cfg(feature = "test-utils")]
+pub fn arm_fail_after_atomic_batch_flush_once_for_tests(table_name: &str) {
+    *FAIL_AFTER_ATOMIC_BATCH_FLUSH_TABLE.lock() = Some(table_name.to_string());
+}
+
+/// Arms a test hook that injects one failure after flushing a copy batch.
+#[cfg(feature = "test-utils")]
+pub fn arm_fail_after_copy_batch_flush_once_for_tests(table_name: &str) {
+    *FAIL_AFTER_COPY_BATCH_FLUSH_TABLE.lock() = Some(table_name.to_string());
+}
+
 /// Clears DuckLake destination test hooks.
 #[cfg(feature = "test-utils")]
 pub fn reset_ducklake_test_hooks() {
     *FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock() = None;
     *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = None;
+    *FAIL_AFTER_ATOMIC_BATCH_FLUSH_TABLE.lock() = None;
+    *FAIL_AFTER_COPY_BATCH_FLUSH_TABLE.lock() = None;
 }
 
 /// Injects a synthetic failure after commit so retries must rely on the correct marker path.
@@ -2609,6 +2662,21 @@ fn maybe_fail_after_committed_batch_for_tests(
         DuckLakeTableBatchKind::Mutation | DuckLakeTableBatchKind::Truncate => {
             maybe_fail_after_atomic_batch_commit_for_tests(table_name)
         }
+    }
+}
+
+/// Injects a synthetic failure after flush so retries must avoid reapplying rows.
+#[cfg(feature = "test-utils")]
+fn maybe_fail_after_flushed_batch_for_tests(
+    batch_kind: DuckLakeTableBatchKind,
+    table_name: &str,
+) -> EtlResult<()> {
+    match batch_kind {
+        DuckLakeTableBatchKind::Copy => maybe_fail_after_copy_batch_flush_for_tests(table_name),
+        DuckLakeTableBatchKind::Mutation => {
+            maybe_fail_after_atomic_batch_flush_for_tests(table_name)
+        }
+        DuckLakeTableBatchKind::Truncate => Ok(()),
     }
 }
 
@@ -2627,6 +2695,21 @@ fn maybe_fail_after_atomic_batch_commit_for_tests(table_name: &str) -> EtlResult
     Ok(())
 }
 
+/// Injects a synthetic failure after flush so mutation retries re-enter at flush only.
+#[cfg(feature = "test-utils")]
+fn maybe_fail_after_atomic_batch_flush_for_tests(table_name: &str) -> EtlResult<()> {
+    let mut fail_table = FAIL_AFTER_ATOMIC_BATCH_FLUSH_TABLE.lock();
+    if fail_table.as_deref() == Some(table_name) {
+        *fail_table = None;
+        return Err(etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "ducklake test hook injected post-flush failure"
+        ));
+    }
+
+    Ok(())
+}
+
 /// Injects a synthetic failure after commit so copy retries must rely on the marker table.
 #[cfg(feature = "test-utils")]
 fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<()> {
@@ -2636,6 +2719,21 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<(
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
             "ducklake test hook injected copy post-commit failure"
+        ));
+    }
+
+    Ok(())
+}
+
+/// Injects a synthetic failure after flush so copy retries re-enter at flush only.
+#[cfg(feature = "test-utils")]
+fn maybe_fail_after_copy_batch_flush_for_tests(table_name: &str) -> EtlResult<()> {
+    let mut fail_table = FAIL_AFTER_COPY_BATCH_FLUSH_TABLE.lock();
+    if fail_table.as_deref() == Some(table_name) {
+        *fail_table = None;
+        return Err(etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "ducklake test hook injected copy post-flush failure"
         ));
     }
 
@@ -3178,36 +3276,6 @@ mod tests {
             }
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
         }
-    }
-
-    #[test]
-    fn test_is_transient_ducklake_delete_file_not_found_ignores_other_errors() {
-        let error = etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake DELETE failed",
-            source: duckdb::Error::DuckDBFailure(
-                duckdb::ffi::Error::new(1),
-                Some("Transaction conflict".to_string()),
-            )
-        );
-
-        assert!(!is_transient_ducklake_delete_file_not_found(&error));
-    }
-
-    #[test]
-    fn test_is_transient_ducklake_delete_file_not_found_matches_delete_parquet_404() {
-        let error = etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake DELETE failed",
-            source: duckdb::Error::DuckDBFailure(
-                duckdb::ffi::Error::new(1),
-                Some(
-                    "HTTP Error: Unable to connect to URL \"https://example.com/path/ducklake-123-delete.parquet\": 404 (Not Found).".to_string(),
-                ),
-            )
-        );
-
-        assert!(is_transient_ducklake_delete_file_not_found(&error));
     }
 
     #[test]

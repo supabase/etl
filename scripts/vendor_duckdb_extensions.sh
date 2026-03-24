@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DUCKDB_VERSION="1.4.4"
+DUCKDB_VERSION="1.5.1"
 DUCKDB_EXTENSION_REPOSITORY_VERSION="v${DUCKDB_VERSION}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_ROOT="${REPO_ROOT}/vendor/duckdb/extensions"
