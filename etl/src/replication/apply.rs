@@ -35,7 +35,8 @@ use crate::conversions::event::{
 };
 use crate::destination::Destination;
 use crate::destination::flush_result::{
-    BatchFlushMetrics, BatchFlushResult, CompletedBatchFlushResult, PendingBatchFlushResult,
+    ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
+    PendingWriteEventsResult, WriteEventsResult,
 };
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
@@ -350,7 +351,7 @@ struct ApplyLoopState {
     /// The deadline for the next proactive keep alive status update.
     keep_alive_deadline: Instant,
     /// Destination write result waiting to be applied to replication progress.
-    pending_flush_result: Option<PendingBatchFlushResult<()>>,
+    pending_flush_result: Option<PendingWriteEventsResult<()>>,
     /// The strongest exit that this apply loop invocation should eventually return.
     ///
     /// Once set, the loop stops ingesting new replication messages and instead drains any
@@ -1128,8 +1129,8 @@ where
 
     /// Waits for the pending flush result, if any.
     async fn wait_for_flush_result(
-        pending_flush_result: Option<&mut PendingBatchFlushResult<()>>,
-    ) -> CompletedBatchFlushResult<()> {
+        pending_flush_result: Option<&mut PendingWriteEventsResult<()>>,
+    ) -> CompletedWriteEventsResult<()> {
         match pending_flush_result {
             Some(flush_result) => flush_result.await,
             None => std::future::pending().await,
@@ -1139,13 +1140,13 @@ where
     /// Handles a completed batch flush result.
     async fn handle_flush_result(
         &mut self,
-        flush_result: CompletedBatchFlushResult<()>,
+        flush_result: CompletedWriteEventsResult<()>,
     ) -> EtlResult<()> {
         // We clear the state up front because this flush is no longer in flight.
         let processing_paused = self.state.resume_processing();
 
         // Explode the result into parts which are used for handling the flush result.
-        let (commit_end_lsn, metrics, result) = flush_result.into_parts();
+        let (metadata, result) = flush_result.into_parts();
 
         // If there was an error in the flushing, we return it immediately.
         result?;
@@ -1157,7 +1158,7 @@ where
             PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             DESTINATION_LABEL => D::name(),
         )
-        .increment(metrics.events_count as u64);
+        .increment(metadata.metrics.items_count as u64);
 
         histogram!(
             ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
@@ -1166,7 +1167,7 @@ where
             PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             DESTINATION_LABEL => D::name(),
         )
-        .record(metrics.dispatched_at.elapsed().as_secs_f64());
+        .record(metadata.metrics.dispatched_at.elapsed().as_secs_f64());
 
         // We process the syncing tables with the last end lsn that the batch contains.
         //
@@ -1174,7 +1175,7 @@ where
         // if we process a huge transaction, and we don't reach the commit before flushing. In that
         // case, we don't process syncing tables, meaning that progress it not tracked, since it's
         // not going to do anything because we can only track progress at commit boundaries.
-        if let Some(commit_end_lsn) = commit_end_lsn {
+        if let Some(commit_end_lsn) = metadata.commit_end_lsn {
             self.process_syncing_tables_after_flush(commit_end_lsn)
                 .await?;
         }
@@ -1319,15 +1320,17 @@ where
 
         // Capture dispatch-time metrics; they are carried through the result channel and
         // recorded once the destination acknowledges the batch.
-        let metrics = BatchFlushMetrics {
-            events_count: events_batch_size,
-            dispatched_at: Instant::now(),
+        let metadata = ApplyLoopAsyncResultMetadata {
+            commit_end_lsn: self.state.last_commit_end_lsn.take(),
+            metrics: DispatchMetrics {
+                items_count: events_batch_size,
+                dispatched_at: Instant::now(),
+            },
         };
 
         // Create the flush result channel: the sender is handed to the destination and the
         // pending receiver is stored on the loop state until the destination signals completion.
-        let (flush_result, pending_flush_result) =
-            BatchFlushResult::new(self.state.last_commit_end_lsn.take(), metrics);
+        let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
         self.destination
             .write_events(events_batch, flush_result)
             .await?;

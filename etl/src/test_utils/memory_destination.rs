@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use tracing::info;
 
 use crate::destination::Destination;
-use crate::destination::flush_result::BatchFlushResult;
+use crate::destination::flush_result::{
+    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
 use crate::error::EtlResult;
 use crate::store::state::StateStore;
 use crate::types::{Event, TableRow};
@@ -32,8 +34,13 @@ where
         "memory"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
         info!(table_id = table_id.0, "truncating table");
+        async_result.send(Ok(()));
 
         Ok(())
     }
@@ -42,16 +49,22 @@ where
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        self.state_store
+        let result = self
+            .state_store
             .store_table_mapping(table_id, format!("memory_destination_table_{}", table_id.0))
-            .await?;
+            .await;
 
-        info!(
-            table_id = table_id.0,
-            row_count = table_rows.len(),
-            "writing table rows"
-        );
+        if result.is_ok() {
+            info!(
+                table_id = table_id.0,
+                row_count = table_rows.len(),
+                "writing table rows"
+            );
+        }
+
+        async_result.send(result);
 
         Ok(())
     }
@@ -59,7 +72,7 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
-        flush_result: BatchFlushResult<()>,
+        async_result: WriteEventsResult<()>,
     ) -> EtlResult<()> {
         let result = async {
             let mut table_ids = HashSet::new();
@@ -101,7 +114,7 @@ where
         }
         .await;
 
-        flush_result.send(result);
+        async_result.send(result);
 
         Ok(())
     }

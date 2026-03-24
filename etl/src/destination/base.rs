@@ -1,7 +1,9 @@
 use etl_postgres::types::TableId;
 use std::future::Future;
 
-use crate::destination::flush_result::BatchFlushResult;
+use crate::destination::flush_result::{
+    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
 use crate::error::EtlResult;
 use crate::types::{Event, TableRow};
 
@@ -37,7 +39,11 @@ pub trait Destination {
     /// destination table starts from a clean state before bulk loading. Truncation is
     /// best-effort and may be skipped if table metadata is missing, and callers may continue
     /// after a truncation error.
-    fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
+    fn truncate_table(
+        &self,
+        table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> impl Future<Output = EtlResult<()>> + Send;
 
     /// Writes a batch of table rows to the destination.
     ///
@@ -46,20 +52,23 @@ pub trait Destination {
     /// method multiple times with different batches, including in parallel with other destination
     /// work.
     ///
-    /// This path is currently synchronous from ETL's perspective: once the future resolves, ETL
-    /// assumes the destination is done with that batch.
-    ///
     /// This method is called even if the source table has no data, so the destination can prepare
     /// its initial state before streaming begins. ETL does not impose a meaningful ordering
     /// requirement on these row batches; it just provides the data that should be written for the
     /// initial snapshot.
     ///
-    /// TODO: evaluate whether table-copy writes should eventually use an asynchronous completion
-    ///  result similar to [`Destination::write_events`].
+    ///
+    /// Implementations report asynchronous completion through `flush_result`. The method return
+    /// value is reserved for immediate dispatch/setup failures before the work has been accepted.
+    ///
+    /// ETL still waits for each table-copy batch to finish before reading the next batch for the
+    /// same copy partition, so this hook preserves backpressure while allowing destinations to
+    /// unify their internal execution model across table copy and streaming writes.
     fn write_table_rows(
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
     /// Writes streaming replication events to the destination.
@@ -92,6 +101,6 @@ pub trait Destination {
     fn write_events(
         &self,
         events: Vec<Event>,
-        flush_result: BatchFlushResult<()>,
+        async_result: WriteEventsResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 }

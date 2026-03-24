@@ -140,19 +140,25 @@ Handle this by either:
 - Ignoring Begin/Commit if your destination does not require transactions
 
 ```rust
-async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-    for event in events {
-        match event {
-            Event::Insert(e) => self.handle_insert(e).await?,
-            Event::Update(e) => self.handle_update(e).await?,
-            Event::Delete(e) => self.handle_delete(e).await?,
-            Event::Truncate(e) => self.handle_truncate(e).await?,
-            Event::Relation(e) => self.handle_schema(e).await?,
-            // Transaction markers - safe to ignore for most destinations
-            Event::Begin(_) | Event::Commit(_) => {}
-            Event::Unsupported => {}
+async fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult<()>) -> EtlResult<()> {
+    let result = async {
+        for event in events {
+            match event {
+                Event::Insert(e) => self.handle_insert(e).await?,
+                Event::Update(e) => self.handle_update(e).await?,
+                Event::Delete(e) => self.handle_delete(e).await?,
+                Event::Truncate(e) => self.handle_truncate(e).await?,
+                Event::Relation(e) => self.handle_schema(e).await?,
+                // Transaction markers - safe to ignore for most destinations
+                Event::Begin(_) | Event::Commit(_) => {}
+                Event::Unsupported => {}
+            }
         }
+        Ok(())
     }
+    .await;
+
+    async_result.send(result);
     Ok(())
 }
 ```

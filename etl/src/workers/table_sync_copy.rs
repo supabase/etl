@@ -17,6 +17,7 @@ use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::stream::TryBatchBackpressureStream;
 use crate::destination::Destination;
+use crate::destination::flush_result::WriteTableRowsResult;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 #[cfg(feature = "failpoints")]
@@ -143,8 +144,12 @@ where
                 total_rows += batch_size;
 
                 let before_sending = Instant::now();
+                let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
 
-                destination.write_table_rows(table_id, table_rows).await?;
+                destination
+                    .write_table_rows(table_id, table_rows, flush_result)
+                    .await?;
+                pending_flush_result.await.into_result()?;
 
                 counter!(
                     ETL_EVENTS_PROCESSED_TOTAL,

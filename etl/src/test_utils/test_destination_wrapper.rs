@@ -8,7 +8,10 @@ use tokio::sync::{Notify, RwLock};
 use std::time::Instant;
 
 use crate::destination::Destination;
-use crate::destination::flush_result::{BatchFlushMetrics, BatchFlushResult};
+use crate::destination::flush_result::{
+    ApplyLoopAsyncResultMetadata, DispatchMetrics, TruncateTableResult, WriteEventsResult,
+    WriteTableRowsResult,
+};
 use crate::error::EtlResult;
 use crate::test_utils::event::{check_all_events_count, check_events_count, deduplicate_events};
 use crate::test_utils::notify::TimedNotify;
@@ -227,13 +230,22 @@ where
         "wrapper"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
         };
 
-        let result = destination.truncate_table(table_id).await;
+        let (wrapped_truncate_result, pending_result) = TruncateTableResult::new(());
+        destination
+            .truncate_table(table_id, wrapped_truncate_result)
+            .await?;
+
+        let result = pending_result.await.into_result();
 
         let mut inner = self.inner.write().await;
 
@@ -258,13 +270,16 @@ where
             !has_table_id
         });
 
-        result
+        async_result.send(result);
+
+        Ok(())
     }
 
     async fn write_table_rows(
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
         let destination = {
             let mut inner = self.inner.write().await;
@@ -272,9 +287,12 @@ where
             inner.wrapped_destination.clone()
         };
 
-        let result = destination
-            .write_table_rows(table_id, table_rows.clone())
-            .await;
+        let (wrapped_flush_result, pending_result) = WriteTableRowsResult::new(());
+        destination
+            .write_table_rows(table_id, table_rows.clone(), wrapped_flush_result)
+            .await?;
+
+        let result = pending_result.await.into_result();
 
         {
             let mut inner = self.inner.write().await;
@@ -289,24 +307,29 @@ where
             inner.check_conditions().await;
         }
 
-        result
+        async_result.send(result);
+
+        Ok(())
     }
 
     async fn write_events(
         &self,
         events: Vec<Event>,
-        flush_result: BatchFlushResult<()>,
+        async_result: WriteEventsResult<()>,
     ) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
         };
 
-        let metrics = BatchFlushMetrics {
-            events_count: events.len(),
-            dispatched_at: Instant::now(),
-        };
-        let (wrapped_flush_result, pending_result) = BatchFlushResult::new(None, metrics);
+        let (wrapped_flush_result, pending_result) =
+            WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
+                commit_end_lsn: None,
+                metrics: DispatchMetrics {
+                    items_count: events.len(),
+                    dispatched_at: Instant::now(),
+                },
+            });
         destination
             .write_events(events.clone(), wrapped_flush_result)
             .await?;
@@ -314,6 +337,11 @@ where
         // We spawn a task to handle the result, this way the wrapper behaves like a transparent
         // layer that doesn't block on the result of the inner destination, effectively exhibiting
         // the fully asynchronous behavior that a destination could have.
+        //
+        // For the other destination methods with async result this is not needed since the methods
+        // on the outside block on the result right after calling the method, so it's not needed to
+        // simulate asynchronous work to make the code continue and do something else in the
+        // meanwhile.
         let inner = self.inner.clone();
         tokio::spawn(async move {
             let result = pending_result.await.into_result();
@@ -327,7 +355,7 @@ where
                 inner.check_conditions().await;
             }
 
-            flush_result.send(result);
+            async_result.send(result);
         });
 
         Ok(())

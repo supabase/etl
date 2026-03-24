@@ -10,7 +10,9 @@ use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
 use crate::table_name::try_stringify_table_name;
 use etl::destination::Destination;
-use etl::destination::flush_result::BatchFlushResult;
+use etl::destination::flush_result::{
+    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
 use etl::destination::task_set::DestinationTaskSet;
 use etl::error::{ErrorKind, EtlResult};
 use etl::store::schema::SchemaStore;
@@ -567,8 +569,20 @@ where
     ///
     /// Removes all data from the target Iceberg table while preserving
     /// the table schema structure for continued CDC operations.
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table(table_id).await?;
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
+        self.streaming_tasks.try_reap().await?;
+
+        let destination = self.clone();
+        self.streaming_tasks
+            .spawn(async move {
+                let result = destination.truncate_table(table_id).await;
+                async_result.send(result);
+            })
+            .await;
 
         Ok(())
     }
@@ -582,8 +596,17 @@ where
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        self.write_table_rows(table_id, table_rows).await?;
+        self.streaming_tasks.try_reap().await?;
+
+        let destination = self.clone();
+        self.streaming_tasks
+            .spawn(async move {
+                let result = destination.write_table_rows(table_id, table_rows).await;
+                async_result.send(result);
+            })
+            .await;
 
         Ok(())
     }
@@ -596,7 +619,7 @@ where
     async fn write_events(
         &self,
         events: Vec<Event>,
-        flush_result: BatchFlushResult<()>,
+        async_result: WriteEventsResult<()>,
     ) -> EtlResult<()> {
         self.streaming_tasks.try_reap().await?;
 
@@ -604,7 +627,7 @@ where
         self.streaming_tasks
             .spawn(async move {
                 let result = destination.write_events(events).await;
-                flush_result.send(result);
+                async_result.send(result);
             })
             .await;
 
