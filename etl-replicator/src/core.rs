@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::error::{ReplicatorError, ReplicatorResult};
-use crate::migrations::migrate_state_store;
+use crate::error_notification::ErrorNotificationClient;
+use crate::error_reporting::ErrorReportingStateStore;
+use crate::metrics;
 use crate::sentry::set_destination_tag;
 use etl::pipeline::Pipeline;
 use etl::store::both::postgres::PostgresStore;
@@ -12,9 +14,7 @@ use etl::store::state::StateStore;
 use etl::types::PipelineId;
 use etl::{config::IcebergConfig, destination::Destination};
 use etl_config::Environment;
-use etl_config::shared::{
-    BatchConfig, DestinationConfig, PgConnectionConfig, PipelineConfig, ReplicatorConfig,
-};
+use etl_config::shared::{DestinationConfig, PgConnectionConfig, ReplicatorConfig};
 use etl_destinations::iceberg::{
     DestinationNamespace, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
 };
@@ -28,7 +28,7 @@ use etl_destinations::{
 };
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{debug, info, warn};
+use tracing::{error, info, warn};
 use url::Url;
 
 /// Starts the replicator service with the provided configuration.
@@ -37,15 +37,15 @@ use url::Url;
 /// configuration, and starts the pipeline.
 pub async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
+    notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
-    info!("starting replicator service");
-
-    log_config(&replicator_config);
+    let pipeline_id = replicator_config.pipeline.id;
 
     // We initialize the state store, which for the replicator is not configurable.
     let state_store = init_store(
-        replicator_config.pipeline.id,
+        pipeline_id,
         replicator_config.pipeline.pg_connection.clone(),
+        notification_client,
     )
     .await?;
 
@@ -59,7 +59,7 @@ pub async fn start_replicator_with_config(
             max_staleness_mins,
             connection_pool_size,
         } => {
-            set_destination_scope::<BigQueryDestination<PostgresStore>>();
+            set_destination_scope::<BigQueryDestination<ErrorReportingStateStore<PostgresStore>>>();
 
             let destination = BigQueryDestination::new_with_key(
                 project_id.clone(),
@@ -67,7 +67,7 @@ pub async fn start_replicator_with_config(
                 service_account_key.expose_secret(),
                 *max_staleness_mins,
                 *connection_pool_size,
-                replicator_config.pipeline.id,
+                pipeline_id,
                 state_store.clone(),
             )
             .await?;
@@ -87,7 +87,7 @@ pub async fn start_replicator_with_config(
                     s3_region,
                 },
         } => {
-            set_destination_scope::<IcebergDestination<PostgresStore>>();
+            set_destination_scope::<IcebergDestination<ErrorReportingStateStore<PostgresStore>>>();
 
             let env = Environment::load().map_err(ReplicatorError::config)?;
             let client = IcebergClient::new_with_supabase_catalog(
@@ -121,7 +121,7 @@ pub async fn start_replicator_with_config(
                     s3_endpoint,
                 },
         } => {
-            set_destination_scope::<IcebergDestination<PostgresStore>>();
+            set_destination_scope::<IcebergDestination<ErrorReportingStateStore<PostgresStore>>>();
 
             let client = IcebergClient::new_with_rest_catalog(
                 catalog_uri.clone(),
@@ -196,8 +196,6 @@ pub async fn start_replicator_with_config(
         }
     }
 
-    info!("replicator service completed");
-
     Ok(())
 }
 
@@ -220,91 +218,86 @@ pub fn create_props(
     props
 }
 
-fn log_config(config: &ReplicatorConfig) {
-    log_destination_config(&config.destination);
-    log_pipeline_config(&config.pipeline);
+/// Initializes the state store.
+///
+/// Creates a [`PostgresStore`] instance for the given pipeline and connection
+/// configuration. The pipeline itself owns state-store migration startup.
+async fn init_store(
+    pipeline_id: PipelineId,
+    pg_connection_config: PgConnectionConfig,
+    notification_client: Option<ErrorNotificationClient>,
+) -> ReplicatorResult<impl StateStore + SchemaStore + CleanupStore + Clone> {
+    info!("initializing postgres state store");
+
+    Ok(ErrorReportingStateStore::new(
+        PostgresStore::new(pipeline_id, pg_connection_config).await?,
+        notification_client,
+    ))
 }
 
-fn log_destination_config(config: &DestinationConfig) {
-    match config {
-        DestinationConfig::BigQuery {
-            project_id,
-            dataset_id,
-            service_account_key: _,
-            max_staleness_mins,
-            connection_pool_size,
-        } => {
-            debug!(
-                project_id,
-                dataset_id,
-                max_staleness_mins,
-                connection_pool_size,
-                "using bigquery destination config"
-            )
+/// Starts a pipeline and handles graceful shutdown signals.
+///
+/// Launches the pipeline, sets up signal handlers for SIGTERM and SIGINT,
+/// and ensures proper cleanup on shutdown. The pipeline will attempt to
+/// finish processing current batches before terminating.
+#[tracing::instrument(skip(pipeline))]
+async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> ReplicatorResult<()>
+where
+    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
+    D: Destination + Clone + Send + Sync + 'static,
+{
+    // Start the pipeline.
+    pipeline.start().await?;
+
+    // We spawn metrics collection after the pipeline was started, so that if we crash before starting
+    // we don't keep emitting metrics that make it look as if the system is running.
+    metrics::spawn_metrics_tasks(pipeline.id());
+
+    // Spawn a task to listen for shutdown signals and trigger shutdown.
+    let shutdown_tx = pipeline.shutdown_tx();
+    let shutdown_handle = tokio::spawn(async move {
+        // Listen for SIGTERM, sent by Kubernetes before SIGKILL during pod termination.
+        //
+        // If the process is killed before shutdown completes, the pipeline may become corrupted,
+        // depending on the state store and destination implementations.
+        let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
+            error!("failed to register sigterm handler, shutting down pipeline");
+
+            if let Err(err) = shutdown_tx.shutdown() {
+                warn!(error = %err, "failed to send shutdown signal");
+            }
+
+            return;
+        };
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("sigint (ctrl+c) received, shutting down pipeline");
+            }
+            _ = sigterm.recv() => {
+                info!("sigterm received, shutting down pipeline");
+            }
         }
-        DestinationConfig::Iceberg {
-            config:
-                IcebergConfig::Supabase {
-                    namespace,
-                    project_ref,
-                    catalog_token: _,
-                    warehouse_name,
-                    s3_access_key_id: _,
-                    s3_secret_access_key: _,
-                    s3_region,
-                },
-        } => {
-            debug!(
-                namespace,
-                project_ref, warehouse_name, s3_region, "using supabase iceberg destination config"
-            )
+
+        if let Err(err) = shutdown_tx.shutdown() {
+            warn!(error = %err, "failed to send shutdown signal");
         }
-        DestinationConfig::Iceberg {
-            config:
-                IcebergConfig::Rest {
-                    catalog_uri,
-                    warehouse_name,
-                    namespace,
-                    s3_access_key_id: _,
-                    s3_secret_access_key: _,
-                    s3_endpoint,
-                },
-        } => {
-            debug!(
-                catalog_uri,
-                warehouse_name,
-                namespace,
-                s3_endpoint,
-                "using generic rest iceberg destination config"
-            )
-        }
-        DestinationConfig::Ducklake {
-            catalog_url,
-            data_path,
-            pool_size,
-            s3_access_key_id: _,
-            s3_secret_access_key: _,
-            s3_region,
-            s3_endpoint,
-            s3_url_style,
-            s3_use_ssl,
-            metadata_schema,
-            duckdb_log,
-        } => {
-            debug!(
-                catalog_url,
-                data_path,
-                pool_size,
-                s3_region,
-                s3_endpoint,
-                s3_url_style,
-                s3_use_ssl,
-                metadata_schema,
-                duckdb_log = ?duckdb_log,
-                "using ducklake destination config"
-            )
-        }
-    }
+    });
+
+    // Wait for the pipeline to finish (either normally or via shutdown).
+    let result = pipeline.wait().await;
+
+    // Ensure the shutdown task is finished before returning.
+    // If the pipeline finished before Ctrl+C, we want to abort the shutdown task.
+    // If Ctrl+C was pressed, the shutdown task will have already triggered shutdown.
+    // We don't care about the result of the shutdown_handle, but we should abort it if it's still running.
+    shutdown_handle.abort();
+    let _ = shutdown_handle.await;
+
+    // Propagate any pipeline error.
+    result?;
+
+    Ok(())
 }
 
 fn parse_ducklake_url(value: &str) -> Result<Url, std::io::Error> {
@@ -329,105 +322,4 @@ fn parse_ducklake_url(value: &str) -> Result<Url, std::io::Error> {
             path.display()
         ))
     })
-}
-
-fn log_pipeline_config(config: &PipelineConfig) {
-    debug!(
-        pipeline_id = config.id,
-        publication_name = config.publication_name,
-        table_error_retry_delay_ms = config.table_error_retry_delay_ms,
-        max_table_sync_workers = config.max_table_sync_workers,
-        "pipeline config"
-    );
-    log_pg_connection_config(&config.pg_connection);
-    log_batch_config(&config.batch);
-}
-
-fn log_pg_connection_config(config: &PgConnectionConfig) {
-    debug!(
-        host = config.host,
-        port = config.port,
-        dbname = config.name,
-        username = config.username,
-        tls_enabled = config.tls.enabled,
-        "source postgres connection config",
-    );
-}
-
-fn log_batch_config(config: &BatchConfig) {
-    debug!(
-        max_fill_ms = config.max_fill_ms,
-        memory_budget_ratio = config.memory_budget_ratio,
-        "batch config"
-    );
-}
-
-/// Initializes the state store with migrations.
-///
-/// Runs necessary database migrations on the state store and creates a
-/// [`PostgresStore`] instance for the given pipeline and connection configuration.
-async fn init_store(
-    pipeline_id: PipelineId,
-    pg_connection_config: PgConnectionConfig,
-) -> ReplicatorResult<impl StateStore + SchemaStore + CleanupStore + Clone> {
-    migrate_state_store(&pg_connection_config).await?;
-
-    Ok(PostgresStore::new(pipeline_id, pg_connection_config))
-}
-
-/// Starts a pipeline and handles graceful shutdown signals.
-///
-/// Launches the pipeline, sets up signal handlers for SIGTERM and SIGINT,
-/// and ensures proper cleanup on shutdown. The pipeline will attempt to
-/// finish processing current batches before terminating.
-#[tracing::instrument(skip(pipeline))]
-async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> ReplicatorResult<()>
-where
-    S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
-    D: Destination + Clone + Send + Sync + 'static,
-{
-    // Start the pipeline.
-    pipeline.start().await?;
-
-    // Spawn a task to listen for shutdown signals and trigger shutdown.
-    let shutdown_tx = pipeline.shutdown_tx();
-    let shutdown_handle = tokio::spawn(async move {
-        // Listen for SIGTERM, sent by Kubernetes before SIGKILL during pod termination.
-        //
-        // If the process is killed before shutdown completes, the pipeline may become corrupted,
-        // depending on the state store and destination implementations.
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
-
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("sigint (ctrl+c) received, shutting down pipeline");
-            }
-            _ = sigterm.recv() => {
-                info!("sigterm received, shutting down pipeline");
-            }
-        }
-
-        if let Err(e) = shutdown_tx.shutdown() {
-            warn!(error = ?e, "failed to send shutdown signal");
-            return;
-        }
-
-        info!("pipeline shutdown successfully")
-    });
-
-    // Wait for the pipeline to finish (either normally or via shutdown).
-    let result = pipeline.wait().await;
-
-    // Ensure the shutdown task is finished before returning.
-    // If the pipeline finished before Ctrl+C, we want to abort the shutdown task.
-    // If Ctrl+C was pressed, the shutdown task will have already triggered shutdown.
-    // We don't care about the result of the shutdown_handle, but we should abort it if it's still running.
-    shutdown_handle.abort();
-    let _ = shutdown_handle.await;
-
-    // Propagate any pipeline error.
-    result?;
-
-    Ok(())
 }

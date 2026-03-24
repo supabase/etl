@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use utoipa::ToSchema;
 
+pub mod common;
 pub mod destinations;
 pub mod destinations_pipelines;
 pub mod health_check;
@@ -12,6 +13,7 @@ pub mod pipelines;
 pub mod sources;
 pub mod tenants;
 pub mod tenants_sources;
+pub mod utils;
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ErrorMessage {

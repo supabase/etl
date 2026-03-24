@@ -37,8 +37,8 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-    ETL_EVENTS_PROCESSED_TOTAL, ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE,
-    ETL_TRANSACTIONS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+    ETL_EVENTS_PROCESSED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_TRANSACTION_DURATION_SECONDS,
+    ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::{PgReplicationClient, PostgresConnectionUpdate};
 use crate::replication::stream::{EventsStream, StatusUpdateType};
@@ -73,6 +73,14 @@ impl WorkerType {
                 pipeline_id,
                 table_id: *table_id,
             },
+        }
+    }
+
+    /// Returns a low-cardinality worker type label for metrics and tags.
+    pub fn to_simple_string(&self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+            Self::TableSync { .. } => "table_sync",
         }
     }
 }
@@ -177,6 +185,11 @@ impl ShutdownState {
     /// Returns `true` if a shutdown has been requested (either deferred or waiting).
     pub fn is_shutdown_requested(&self) -> bool {
         !matches!(self, Self::NoShutdown)
+    }
+
+    /// Returns `true` if a shutdown was deferred.
+    pub fn is_deferred(&self) -> bool {
+        matches!(self, Self::Deferred)
     }
 }
 
@@ -340,6 +353,8 @@ struct ApplyLoopState {
     current_tx_begin_ts: Option<Instant>,
     /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
     current_tx_events: u64,
+    /// Next zero-based ordinal to assign to transaction-scoped events.
+    next_tx_ordinal: u64,
     /// The current shutdown state tracking graceful shutdown progress.
     shutdown_state: ShutdownState,
     /// The deadline by which the current batch must be flushed.
@@ -359,10 +374,26 @@ impl ApplyLoopState {
             events_batch_bytes: 0,
             current_tx_begin_ts: None,
             current_tx_events: 0,
+            next_tx_ordinal: 0,
             shutdown_state: ShutdownState::NoShutdown,
             batch_flush_deadline: None,
             max_batch_fill_duration,
         }
+    }
+
+    /// Adds an event to the pending batch.
+    fn add_event_to_batch(&mut self, event: Event) {
+        self.events_batch_bytes = self.events_batch_bytes.saturating_add(event.size_hint());
+        self.events_batch.push(event);
+    }
+
+    /// Takes the pending events batch and resets the tracked batch size.
+    fn take_events_batch(&mut self) -> (Vec<Event>, usize) {
+        let events_batch = std::mem::take(&mut self.events_batch);
+        let events_batch_bytes = self.events_batch_bytes;
+        self.events_batch_bytes = 0;
+
+        (events_batch, events_batch_bytes)
     }
 
     /// Starts the batch flush timer if not already running.
@@ -403,16 +434,21 @@ impl ApplyLoopState {
         self.replication_progress.last_received_lsn
     }
 
+    /// Returns `true` if the apply loop is idle.
+    fn is_idle(&self) -> bool {
+        !self.handling_transaction() && self.events_batch.is_empty()
+    }
+
     /// Returns the effective flush LSN to report to PostgreSQL.
     ///
-    /// When idle (no active transaction and empty batch), returns the last received LSN since no
-    /// actual flushes occur. Otherwise, returns the last flush LSN from completed transactions.
+    /// When idle, returns the last received LSN since no actual flushes occur. Otherwise, returns
+    /// the last flush LSN from completed transactions.
     ///
-    /// Note that when a transaction is now started, the last flush lsn will be used, and it might
-    /// jump back compared to the last received lsn that we sent before, however this is fine since the
-    /// status update logic guarantees monotonically increasing LSNs.
+    /// Note that when a new transaction starts, the last flush LSN will be used and it may appear
+    /// to move backward relative to the last received LSN reported earlier. This is fine because
+    /// the status update logic guarantees monotonically increasing LSNs.
     fn effective_flush_lsn(&self) -> PgLsn {
-        if !self.handling_transaction() && self.events_batch.is_empty() {
+        if self.is_idle() {
             self.replication_progress.last_received_lsn
         } else {
             self.replication_progress.last_flush_lsn
@@ -422,6 +458,29 @@ impl ApplyLoopState {
     /// Returns true if the apply loop is in the middle of processing a transaction.
     fn handling_transaction(&self) -> bool {
         self.remote_final_lsn.is_some()
+    }
+
+    /// Resets transaction-local ordinal assignment.
+    fn reset_tx_ordinal(&mut self) {
+        self.next_tx_ordinal = 0;
+    }
+
+    /// Returns and advances the next transaction-local ordinal.
+    fn next_tx_ordinal(&mut self) -> u64 {
+        let tx_ordinal = self.next_tx_ordinal;
+        self.next_tx_ordinal = match self.next_tx_ordinal.checked_add(1) {
+            Some(next_tx_ordinal) => next_tx_ordinal,
+            None => {
+                warn!(
+                    current_tx_ordinal = self.next_tx_ordinal,
+                    "transaction-local ordinal overflow detected; subsequent events may reuse the same ordinal"
+                );
+
+                self.next_tx_ordinal
+            }
+        };
+
+        tx_ordinal
     }
 }
 
@@ -592,13 +651,10 @@ where
                 // Ensures batches don't wait indefinitely when message rate is low. The timer
                 // is started when the first event enters the batch and reset after each flush.
                 _ = Self::wait_for_batch_deadline(&self.state) => {
-                    info!(
-                        worker_type = %self.worker_context.worker_type(),
-                        batch_size = self.state.events_batch.len(),
-                        "batch flush deadline reached, flushing batch",
-                    );
+                    let action = self
+                        .flush_batch(events_stream.as_mut(), "flush deadline reached")
+                        .await?;
 
-                    let action = self.flush_batch(events_stream.as_mut()).await?;
                     if let Some(result) = action.to_result() {
                         // If we're waiting for shutdown acknowledgement, store the result and continue.
                         if matches!(self.state.shutdown_state, ShutdownState::WaitingForPrimaryKeepAlive { .. }) {
@@ -704,8 +760,8 @@ where
 
     /// Handles a shutdown signal by transitioning to the appropriate shutdown state.
     ///
-    /// If outside a transaction, sends a status update and transitions to [`ShutdownState::WaitingForPrimaryKeepAlive`].
-    /// If inside a transaction, defers shutdown until the transaction boundary.
+    /// If idle, sends a status update and transitions to [`ShutdownState::WaitingForPrimaryKeepAlive`].
+    /// Otherwise, defers shutdown until the current work has been flushed.
     ///
     /// The goal of the shutdown procedure is to reduce duplicates on restart as much as possible
     /// by ensuring the replication slot's confirmed LSN reflects the latest flushed data.
@@ -731,13 +787,11 @@ where
             return Ok(());
         }
 
-        // If we are processing a transaction, or if the batch has pending data, we defer shutdown
-        // until we hit a transaction boundary (e.g. a commit message). When that is encountered,
-        // the batch will be force flushed and graceful shutdown will begin.
-        if self.state.handling_transaction() || !self.state.events_batch.is_empty() {
+        // If the apply loop is not idle, defer shutdown until the current work has been flushed.
+        if !self.state.is_idle() {
             info!(
                 %worker_type,
-                "shutdown signal received during transaction/non-empty batch, deferring until transaction boundary",
+                "shutdown signal received while not idle, deferring until current work is flushed",
             );
             self.state.shutdown_state = ShutdownState::Deferred;
 
@@ -746,7 +800,7 @@ where
 
         info!(
             %worker_type,
-            "shutdown signal received outside transaction, sending status update and waiting for acknowledgement",
+            "shutdown signal received while idle, sending status update and waiting for acknowledgement",
         );
 
         // In all other cases we just initiate the graceful shutdown.
@@ -783,8 +837,7 @@ where
 
     /// Handles a message from the replication stream.
     ///
-    /// Processes the message, manages batch timing, and handles deferred shutdown
-    /// at transaction boundaries.
+    /// Processes the message, manages batch timing, and cooperates with deferred shutdown.
     async fn handle_stream_message(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -852,11 +905,7 @@ where
         if let Some(event) = result.event
             && should_include_event
         {
-            self.state.events_batch_bytes = self
-                .state
-                .events_batch_bytes
-                .saturating_add(event.size_hint());
-            self.state.events_batch.push(event);
+            self.state.add_event_to_batch(event);
             self.state.update_last_commit_end_lsn(result.end_lsn);
         }
 
@@ -872,15 +921,8 @@ where
             } else {
                 "early flush requested"
             };
-            info!(
-                worker_type = %self.worker_context.worker_type(),
-                batch_size = self.state.events_batch.len(),
-                batch_size_bytes = self.state.events_batch_bytes,
-                %reason,
-                "flushing batch",
-            );
 
-            let flush_batch_action = self.flush_batch(events_stream.as_mut()).await?;
+            let flush_batch_action = self.flush_batch(events_stream.as_mut(), reason).await?;
             action = action.merge(flush_batch_action);
         }
 
@@ -902,19 +944,63 @@ where
     async fn flush_batch(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
+        reason: &str,
     ) -> EtlResult<ApplyLoopAction> {
+        // If there is no batch to flush, we just continue processing.
+        if self.state.events_batch.is_empty() {
+            return Ok(ApplyLoopAction::Continue);
+        }
+
+        // We replace the existing vector with a new one and reset the accumulated batch bytes size.
+        let (events_batch, events_batch_bytes) = self.state.take_events_batch();
+
+        let events_batch_size = events_batch.len();
+        info!(
+            worker_type = %self.worker_context.worker_type(),
+            batch_size = events_batch_size,
+            batch_size_bytes = events_batch_bytes,
+            %reason,
+            "flushing batch to destination"
+        );
+
+        let before_sending = Instant::now();
+
+        // Destination writes are synchronous here so apply-loop progress stays coupled to durable
+        // destination writes.
+        self.destination.write_events(events_batch).await?;
+
+        // Reset the batch deadline. It will be restarted when a new event enters the batch.
         self.state.reset_batch_deadline();
 
-        self.send_batch_to_destination().await?;
+        counter!(
+            ETL_EVENTS_PROCESSED_TOTAL,
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
+            ACTION_LABEL => "table_streaming",
+            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
+            DESTINATION_LABEL => D::name(),
+        )
+        .increment(events_batch_size as u64);
+
+        let send_duration_seconds = before_sending.elapsed().as_secs_f64();
+
+        histogram!(
+            ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
+            ACTION_LABEL => "table_streaming",
+            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
+            DESTINATION_LABEL => D::name(),
+        )
+        .record(send_duration_seconds);
+
+        // We process the syncing tables after the batch flush, to determine what to do with the loop
+        // and properly report progress.
         let action = self
             .process_syncing_tables_after_batch_flush(events_stream.as_mut())
             .await?;
 
         // If we're in deferred shutdown and the batch ended with a commit (i.e., we're no longer
         // mid-transaction), initiate graceful shutdown now.
-        if matches!(self.state.shutdown_state, ShutdownState::Deferred)
-            && !self.state.handling_transaction()
-        {
+        if self.state.shutdown_state.is_deferred() && !self.state.handling_transaction() {
             info!(
                 worker_type = %self.worker_context.worker_type(),
                 "deferred shutdown: batch flush completed transaction, initiating graceful shutdown",
@@ -926,57 +1012,19 @@ where
         Ok(action)
     }
 
-    /// Sends the current batch of events to the destination and updates metrics.
-    async fn send_batch_to_destination(&mut self) -> EtlResult<()> {
-        if self.state.events_batch.is_empty() {
-            return Ok(());
-        }
-
-        // We replace the existing vector with a new one and reset the accumulated batch bytes size.
-        let events_batch = std::mem::take(&mut self.state.events_batch);
-        let events_batch_bytes = self.state.events_batch_bytes;
-        self.state.events_batch_bytes = 0;
-
-        let events_batch_size = events_batch.len();
-        info!(
-            events_batch_size,
-            events_batch_bytes, "sending batch to destination"
-        );
-
-        let before_sending = Instant::now();
-
-        // TODO: in the future we want to investigate how to perform the writing asynchronously
-        //  to avoid stalling the apply loop.
-        self.destination.write_events(events_batch).await?;
-
-        counter!(
-            ETL_EVENTS_PROCESSED_TOTAL,
-            WORKER_TYPE_LABEL => "apply",
-            ACTION_LABEL => "table_streaming",
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
-            DESTINATION_LABEL => D::name(),
-        )
-        .increment(events_batch_size as u64);
-
-        let send_duration_seconds = before_sending.elapsed().as_secs_f64();
-        histogram!(
-            ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-            WORKER_TYPE_LABEL => "apply",
-            ACTION_LABEL => "table_streaming",
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
-            DESTINATION_LABEL => D::name(),
-        )
-        .record(send_duration_seconds);
-
-        Ok(())
-    }
-
     /// Dispatches replication protocol messages to appropriate handlers.
     async fn handle_replication_message(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<HandleMessageResult> {
+        counter!(
+            ETL_REPLICATION_MESSAGES_TOTAL,
+            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
+        )
+        .increment(1);
+
         match message {
             ReplicationMessage::XLogData(message) => {
                 let start_lsn = PgLsn::from(message.wal_start());
@@ -1082,8 +1130,10 @@ where
 
         self.state.current_tx_begin_ts = Some(Instant::now());
         self.state.current_tx_events = 0;
+        self.state.reset_tx_ordinal();
 
-        let event = parse_event_from_begin_message(start_lsn, final_lsn, message);
+        let tx_ordinal = self.state.next_tx_ordinal();
+        let event = parse_event_from_begin_message(start_lsn, final_lsn, tx_ordinal, message);
 
         Ok(HandleMessageResult::return_event(Event::Begin(event)))
     }
@@ -1149,11 +1199,12 @@ where
         // [`ApplyLoopAction::Pause`] so the apply loop pauses after this commit. This allows
         // [`Self::flush_batch`] to perform the status update and wait for PostgreSQL
         // acknowledgement before shutting down.
-        if matches!(self.state.shutdown_state, ShutdownState::Deferred) {
+        if self.state.shutdown_state.is_deferred() {
             action = action.merge(ApplyLoopAction::Pause);
         }
 
-        let event = parse_event_from_commit_message(start_lsn, commit_lsn, message);
+        let tx_ordinal = self.state.next_tx_ordinal();
+        let event = parse_event_from_commit_message(start_lsn, commit_lsn, tx_ordinal, message);
 
         let mut result = HandleMessageResult {
             event: Some(Event::Commit(event)),
@@ -1186,6 +1237,7 @@ where
         };
 
         let table_id = TableId::new(message.rel_id());
+        let tx_ordinal = self.state.next_tx_ordinal();
 
         if !self
             .should_apply_changes(table_id, remote_final_lsn)
@@ -1206,14 +1258,21 @@ where
                 )
             })?;
 
-        let event = parse_event_from_relation_message(start_lsn, remote_final_lsn, message)?;
+        let event =
+            parse_event_from_relation_message(start_lsn, remote_final_lsn, tx_ordinal, message)?;
 
         if !existing_table_schema.partial_eq(&event.table_schema) {
             let error = TableReplicationError::with_solution(
                 table_id,
                 format!("The schema for table {table_id} has changed during streaming"),
-                "ETL doesn't support schema changes at this point in time, rollback the schema",
+                "ETL doesn't support schema changes at this point in time, rollback the schema"
+                    .into(),
                 RetryPolicy::ManualRetry,
+                etl_error!(
+                    ErrorKind::SourceSchemaError,
+                    "table schema changed during streaming",
+                    format!("table schema for table {table_id} changed during streaming")
+                ),
             );
 
             return Ok(HandleMessageResult::finish_batch_and_exclude_event(error));
@@ -1236,6 +1295,8 @@ where
             );
         };
 
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         if !self
             .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
             .await?
@@ -1247,6 +1308,7 @@ where
             &self.schema_store,
             start_lsn,
             remote_final_lsn,
+            tx_ordinal,
             message,
             self.pipeline_id,
         )
@@ -1269,6 +1331,8 @@ where
             );
         };
 
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         if !self
             .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
             .await?
@@ -1280,6 +1344,7 @@ where
             &self.schema_store,
             start_lsn,
             remote_final_lsn,
+            tx_ordinal,
             message,
             self.pipeline_id,
         )
@@ -1302,6 +1367,8 @@ where
             );
         };
 
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         if !self
             .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
             .await?
@@ -1313,6 +1380,7 @@ where
             &self.schema_store,
             start_lsn,
             remote_final_lsn,
+            tx_ordinal,
             message,
             self.pipeline_id,
         )
@@ -1335,6 +1403,8 @@ where
             );
         };
 
+        let tx_ordinal = self.state.next_tx_ordinal();
+
         let mut rel_ids = Vec::with_capacity(message.rel_ids().len());
         for &table_id in message.rel_ids().iter() {
             let should_apply_truncate = self
@@ -1349,8 +1419,13 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        let event =
-            parse_event_from_truncate_message(start_lsn, remote_final_lsn, message, rel_ids);
+        let event = parse_event_from_truncate_message(
+            start_lsn,
+            remote_final_lsn,
+            tx_ordinal,
+            message,
+            rel_ids,
+        );
 
         Ok(HandleMessageResult::return_event(Event::Truncate(event)))
     }
@@ -1446,19 +1521,13 @@ where
         }
     }
 
-    /// Processes syncing tables outside a transaction.
+    /// Processes syncing tables when the apply loop is idle.
     ///
     /// Dispatches to worker-specific implementation based on the worker context.
-    /// Only processes when outside a transaction and the batch is empty.
+    /// Only processes when no transaction is active and the batch is empty.
     async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<ApplyLoopAction> {
-        if self.state.handling_transaction() {
-            debug!("skipping table sync processing because of in progress transaction");
-
-            return Ok(ApplyLoopAction::Continue);
-        }
-
-        if !self.state.events_batch.is_empty() {
-            debug!("skipping table sync processing because batch is not empty");
+        if !self.state.is_idle() {
+            debug!("skipping table sync processing because apply loop is not idle");
 
             return Ok(ApplyLoopAction::Continue);
         }
@@ -1469,7 +1538,7 @@ where
         debug!(
             worker_type = %self.worker_context.worker_type(),
             %current_lsn,
-            "processing syncing tables outside transaction"
+            "processing syncing tables while idle"
         );
 
         match &mut self.worker_context {

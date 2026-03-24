@@ -231,11 +231,11 @@ impl EventsStream {
         // on 2000-01-01.
         let ts = POSTGRES_EPOCH
             .elapsed()
-            .map_err(|e| {
+            .map_err(|err| {
                 etl_error!(
                     ErrorKind::InvalidState,
                     "Invalid PostgreSQL epoch",
-                    e.to_string()
+                    err.to_string()
                 )
             })?
             .as_micros() as i64;

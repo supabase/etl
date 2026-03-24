@@ -1,56 +1,11 @@
 use etl::error::EtlError;
-use etl_config::Environment;
-use secrecy::ExposeSecret;
+use etl::types::TableId;
 use sentry::protocol::{Event, Exception, Stacktrace, Value};
 use sentry::types::Uuid;
 use serde_json::json;
 use std::backtrace::BacktraceStatus;
-use std::sync::Arc;
-use tracing::info;
 
-use crate::APP_VERSION_ENV_NAME;
-use crate::config::load_replicator_config;
-use crate::error::{ReplicatorError, ReplicatorResult};
-
-/// Initializes Sentry error tracking for the replicator service.
-pub fn init() -> ReplicatorResult<Option<sentry::ClientInitGuard>> {
-    if let Ok(config) = load_replicator_config()
-        && let Some(sentry_config) = &config.sentry
-    {
-        info!("initializing sentry with supplied dsn");
-
-        let environment = Environment::load().map_err(ReplicatorError::config)?;
-        let dsn = sentry_config
-            .dsn
-            .expose_secret()
-            .parse()
-            .map_err(ReplicatorError::config)?;
-
-        let guard = sentry::init(sentry::ClientOptions {
-            dsn: Some(dsn),
-            environment: Some(environment.to_string().into()),
-            integrations: vec![Arc::new(
-                sentry::integrations::panic::PanicIntegration::new(),
-            )],
-            attach_stacktrace: true,
-            ..Default::default()
-        });
-
-        let version = std::env::var(APP_VERSION_ENV_NAME);
-
-        sentry::configure_scope(|scope| {
-            scope.set_tag("service", "replicator");
-            if let Ok(version) = version {
-                scope.set_tag("version", version);
-            }
-        });
-
-        return Ok(Some(guard));
-    }
-
-    info!("sentry not configured for replicator, skipping initialization");
-    Ok(None)
-}
+use crate::error::ReplicatorError;
 
 /// Sets the destination tag on the current Sentry scope.
 ///
@@ -68,35 +23,64 @@ pub fn capture_error(err: &ReplicatorError) -> Uuid {
     sentry::capture_event(event)
 }
 
+/// Captures a stored table replication [`EtlError`] to Sentry.
+pub fn capture_table_error(table_id: TableId, err: &EtlError) {
+    sentry::with_scope(
+        |scope| {
+            scope.set_tag("table_id", table_id.0.to_string());
+        },
+        || sentry::capture_event(event_from_etl_error(err)),
+    );
+}
+
 /// Converts a [`ReplicatorError`] into a Sentry [`Event`].
 fn event_from_replicator_error(err: &ReplicatorError) -> Event<'static> {
+    if let ReplicatorError::Etl(etl_err) = err {
+        return event_from_etl_error(etl_err);
+    }
+
     let mut event = Event {
         level: sentry::Level::Error,
         ..Default::default()
     };
     let mut exceptions = Vec::new();
 
-    match err {
-        ReplicatorError::Etl(etl_err) => {
-            if etl_err.errors().is_some() {
-                let leaf_count = count_leaf_errors(etl_err);
-                exceptions.push(Exception {
-                    ty: "Many".to_string(),
-                    value: Some(format!("{leaf_count} errors occurred")),
-                    ..Default::default()
-                });
-                event.extra.insert(
-                    "etl_error_tree".to_string(),
-                    etl_error_tree_to_serde_value(etl_err),
-                );
-            } else {
-                collect_single_etl_exception_chain(etl_err, &mut exceptions);
-            }
-        }
-        _ => collect_standard_exception_chain(err, &mut exceptions),
+    collect_standard_exception_chain(err, &mut exceptions);
+
+    if let Some(stacktrace) = find_and_parse_backtrace(err.backtrace())
+        && let Some(exception) = exceptions.first_mut()
+    {
+        exception.stacktrace = Some(stacktrace);
     }
 
-    if let Some(stacktrace) = find_and_parse_stacktrace(err)
+    event.exception = exceptions.into();
+    event
+}
+
+/// Converts an [`EtlError`] into a Sentry [`Event`].
+fn event_from_etl_error(err: &EtlError) -> Event<'static> {
+    let mut event = Event {
+        level: sentry::Level::Error,
+        ..Default::default()
+    };
+    let mut exceptions = Vec::new();
+
+    if err.errors().is_some() {
+        let leaf_count = count_leaf_errors(err);
+        exceptions.push(Exception {
+            ty: "Many".to_string(),
+            value: Some(format!("{leaf_count} errors occurred")),
+            ..Default::default()
+        });
+        event.extra.insert(
+            "etl_error_tree".to_string(),
+            etl_error_tree_to_serde_value(err),
+        );
+    } else {
+        collect_single_etl_exception_chain(err, &mut exceptions);
+    }
+
+    if let Some(stacktrace) = find_and_parse_backtrace(err.backtrace())
         && let Some(exception) = exceptions.first_mut()
     {
         exception.stacktrace = Some(stacktrace);
@@ -187,9 +171,9 @@ fn etl_error_tree_to_serde_value(error: &EtlError) -> Value {
     }
 }
 
-/// Finds the first captured backtrace in a [`ReplicatorError`] and parses it.
-fn find_and_parse_stacktrace(error: &ReplicatorError) -> Option<Stacktrace> {
-    let backtrace = error.backtrace()?;
+/// Parses a captured backtrace into a Sentry [`Stacktrace`].
+fn find_and_parse_backtrace(backtrace: Option<&std::backtrace::Backtrace>) -> Option<Stacktrace> {
+    let backtrace = backtrace?;
     if backtrace.status() != BacktraceStatus::Captured {
         return None;
     }

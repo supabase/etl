@@ -56,13 +56,12 @@ pub struct SourceConfig {
     /// Defaults to `true`.
     #[serde(default = "default_source_tls_enabled")]
     pub tls_enabled: bool,
-    /// Optional trusted username for validation.
+    /// Optional trusted username for source profile validation.
     ///
-    /// When provided, source validation will check that the connected database
-    /// username matches this value. This is useful in production environments
-    /// where a standard username is used with pre-configured permissions.
+    /// When provided, ETL validates that source connections use this role and
+    /// that the role matches the expected ETL profile and memberships.
     ///
-    /// If `None`, username validation is skipped.
+    /// If `None`, trusted source profile validation is skipped.
     pub trusted_username: Option<String>,
 }
 

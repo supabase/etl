@@ -30,15 +30,10 @@ pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde_json = { workspace = true, features = ["std"] }
-sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
 sysinfo = { workspace = true, features = ["system"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
-tokio-postgres = { workspace = true, features = [
-    "runtime",
-    "with-chrono-0_4",
-    "with-uuid-1",
-    "with-serde_json-1",
-] }
+tokio-postgres = { workspace = true, features = ["runtime", "with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 tokio-rustls = { workspace = true, default-features = false }
 tokio-stream = { workspace = true }
 tracing = { workspace = true, default-features = true }
@@ -46,11 +41,7 @@ uuid = { workspace = true, features = ["v4"] }
 x509-cert = { workspace = true, default-features = false }
 
 [dev-dependencies]
-etl-postgres = { workspace = true, features = [
-    "tokio",
-    "replication",
-    "test-utils",
-] }
+etl-postgres = { workspace = true, features = ["tokio", "replication", "test-utils"] }
 etl-telemetry = { workspace = true }
 
 rand = { workspace = true, features = ["thread_rng"] }

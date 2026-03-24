@@ -11,7 +11,7 @@ use crate::db::images::Image;
 use crate::db::pipelines::Pipeline;
 use crate::db::replicators::Replicator;
 use crate::db::sources::Source;
-use crate::k8s::{DestinationType, K8sClient, ReplicatorConfigMapFile};
+use crate::k8s::{DestinationType, K8sClient, PodStatus, ReplicatorConfigMapFile};
 use crate::routes::pipelines::PipelineError;
 
 /// Secret types required by different destination configurations.
@@ -127,6 +127,18 @@ pub async fn delete_pipeline_resources_in_k8s(
     delete_replicator_stateful_set(k8s_client, &prefix).await?;
 
     Ok(())
+}
+
+/// Returns `true` if the replicator pod is stopped, `false` otherwise.
+pub async fn is_replicator_pod_stopped(
+    k8s_client: &dyn K8sClient,
+    tenant_id: &str,
+    replicator_id: i64,
+) -> Result<bool, PipelineError> {
+    let prefix = create_k8s_object_prefix(tenant_id, replicator_id);
+    let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
+
+    Ok(matches!(pod_status, PodStatus::Stopped))
 }
 
 /// Extracts and combines credentials from source and destination configurations.

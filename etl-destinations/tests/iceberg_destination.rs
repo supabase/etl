@@ -105,11 +105,13 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let users_table = table_name_to_iceberg_table_name(
         &database_schema.users_schema().name,
         single_destination_namespace,
-    );
+    )
+    .unwrap();
     let orders_table = table_name_to_iceberg_table_name(
         &database_schema.orders_schema().name,
         single_destination_namespace,
-    );
+    )
+    .unwrap();
 
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
 
@@ -329,22 +331,24 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     let users_table = table_name_to_iceberg_table_name(
         &database_schema.users_schema().name,
         single_destination_namespace,
-    );
+    )
+    .unwrap();
     let orders_table = table_name_to_iceberg_table_name(
         &database_schema.orders_schema().name,
         single_destination_namespace,
-    );
+    )
+    .unwrap();
 
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
 
-    // Sort deterministically by the sequence number for stable assertions
+    // Sort deterministically by the sequence key for stable assertions
     actual_users.sort_by(|a, b| {
         let a_key = format!("{:?}", a.values()[4]);
         let b_key = format!("{:?}", b.values()[4]);
         a_key.cmp(&b_key)
     });
 
-    // Drop the last column (non-deterministic sequence number) before comparison.
+    // Drop the last column (non-deterministic sequence key) before comparison.
     for row in &mut actual_users {
         let _ = row.values_mut().pop();
     }
@@ -395,14 +399,14 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     let mut actual_orders =
         read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
 
-    // Sort deterministically by the primary key (id) and sequence number for stable assertions
+    // Sort deterministically by the primary key (id) and sequence key for stable assertions
     actual_orders.sort_by(|a, b| {
         let a_key = format!("{:?}", a.values()[3]);
         let b_key = format!("{:?}", b.values()[3]);
         a_key.cmp(&b_key)
     });
 
-    // Drop the last column (non-deterministic sequence number) before comparison.
+    // Drop the last column (non-deterministic sequence key) before comparison.
     for row in &mut actual_orders {
         let _ = row.values_mut().pop();
     }
@@ -572,11 +576,13 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     let users_table = table_name_to_iceberg_table_name(
         &database_schema.users_schema().name,
         single_destination_namespace,
-    );
+    )
+    .unwrap();
     let orders_table = table_name_to_iceberg_table_name(
         &database_schema.orders_schema().name,
         single_destination_namespace,
-    );
+    )
+    .unwrap();
 
     let actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
     let actual_orders = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
@@ -606,7 +612,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     // After truncate, pre-truncate CDC rows should be gone (tables were dropped). Only post-truncate rows remain.
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
     for row in &mut actual_users {
-        let _ = row.values_mut().pop(); // drop sequence_number
+        let _ = row.values_mut().pop(); // drop sequence_key
     }
     actual_users
         .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
@@ -630,7 +636,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     let mut actual_orders =
         read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
     for row in &mut actual_orders {
-        let _ = row.values_mut().pop(); // drop sequence_number
+        let _ = row.values_mut().pop(); // drop sequence_key
     }
     actual_orders
         .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));

@@ -111,9 +111,9 @@ where
 
     /// Starts the pipeline and begins replication processing.
     ///
-    /// This method initializes the connection to Postgres, sets up table mappings and schemas,
-    /// creates the worker pool for table synchronization, and starts the apply worker for
-    /// processing replication stream events.
+    /// This method initializes the connection to Postgres, sets up table mappings
+    /// and schemas, creates the worker pool for table synchronization, and starts
+    /// the apply worker for processing replication stream events.
     pub async fn start(&mut self) -> EtlResult<()> {
         info!(
             publication_name = %self.config.publication_name,

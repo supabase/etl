@@ -11,14 +11,11 @@ homepage.workspace = true
 etl-config = { workspace = true }
 
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true, default-features = true }
 tracing-appender = { workspace = true }
 tracing-log = { workspace = true, features = ["std", "log-tracer"] }
-tracing-subscriber = { workspace = true, default-features = true, features = [
-    "json",
-    "env-filter",
-    "ansi",
-] }
+tracing-subscriber = { workspace = true, default-features = true, features = ["json", "env-filter", "ansi"] }

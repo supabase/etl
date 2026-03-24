@@ -32,12 +32,7 @@ chrono = { workspace = true }
 configcat = { workspace = true }
 constant_time_eq = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
-kube = { workspace = true, features = [
-    "runtime",
-    "derive",
-    "client",
-    "rustls-tls",
-] }
+kube = { workspace = true, features = ["runtime", "derive", "client", "rustls-tls"] }
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 pg_escape = { workspace = true }
 rand = { workspace = true, features = ["std"] }
@@ -47,13 +42,7 @@ secrecy = { workspace = true }
 sentry = { workspace = true, features = ["actix"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
-sqlx = { workspace = true, features = [
-    "runtime-tokio-rustls",
-    "macros",
-    "postgres",
-    "json",
-    "migrate",
-] }
+sqlx = { workspace = true, features = ["runtime-tokio-rustls", "macros", "postgres", "json", "migrate"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true, default-features = false }

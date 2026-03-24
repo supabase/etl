@@ -95,7 +95,6 @@ impl ErrorNotificationClient {
         };
 
         info!(
-            pipeline_id = %self.pipeline_id,
             error_hash = %notification.error_hash,
             "sending error notification to supabase api"
         );
@@ -103,7 +102,6 @@ impl ErrorNotificationClient {
         match self.send_notification(notification).await {
             Ok(response) => {
                 info!(
-                    pipeline_id = %self.pipeline_id,
                     message = %response.message,
                     deduplicated = %response.deduplicated,
                     "error notification sent successfully"
@@ -111,7 +109,6 @@ impl ErrorNotificationClient {
             }
             Err(err) => {
                 warn!(
-                    pipeline_id = %self.pipeline_id,
                     error = %err,
                     "failed to send error notification, continuing without notification"
                 );

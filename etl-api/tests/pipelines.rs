@@ -1,3 +1,4 @@
+use etl_api::k8s::PodStatus;
 use etl_api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
     GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse, RollbackTablesRequest,
@@ -14,6 +15,7 @@ use sqlx::postgres::types::Oid;
 use crate::support::database::{
     create_test_source_database, run_etl_migrations_on_source_database,
 };
+use crate::support::k8s_client::MockK8sState;
 use crate::support::mocks::create_image_with_name;
 use crate::support::mocks::pipelines::{
     create_pipeline_with_config, new_pipeline_config, updated_pipeline_config,
@@ -23,7 +25,7 @@ use crate::{
     support::mocks::destinations::create_destination,
     support::mocks::sources::create_source,
     support::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
-    support::test_app::{TestApp, spawn_test_app},
+    support::test_app::{TestApp, spawn_test_app, spawn_test_app_with_k8s_state},
 };
 
 mod support;
@@ -716,6 +718,58 @@ async fn pipeline_version_can_be_updated() {
 
     // Assert
     assert!(response.status().is_success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_version_update_skips_k8s_reconcile_when_pipeline_is_stopped() {
+    init_test_tracing();
+    // Arrange
+    let k8s_state = MockK8sState::default();
+    k8s_state.set_pod_status(PodStatus::Stopped).await;
+    let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
+    let tenant_id = create_tenant(&app).await;
+    let source_id = create_source(&app, &tenant_id).await;
+    let destination_id = create_destination(&app, &tenant_id).await;
+    let old_image_id =
+        create_image_with_name(&app, "supabase/replicator:1.2.3".to_string(), true).await;
+
+    let pipeline_id = {
+        let req = CreatePipelineRequest {
+            source_id,
+            destination_id,
+            config: new_pipeline_config(),
+        };
+        let resp = app.create_pipeline(&tenant_id, &req).await;
+        let resp: CreatePipelineResponse =
+            resp.json().await.expect("failed to deserialize response");
+        resp.id
+    };
+
+    let default_image_id =
+        create_image_with_name(&app, "supabase/replicator:1.3.0".to_string(), true).await;
+
+    // Act
+    let update_request = UpdatePipelineVersionRequest {
+        version_id: default_image_id,
+    };
+    let response = app
+        .update_pipeline_version(&tenant_id, pipeline_id, &update_request)
+        .await;
+
+    // Assert
+    assert!(response.status().is_success());
+    assert_eq!(app.k8s_state.create_calls(), 0);
+
+    let version_response = app.get_pipeline_version(&tenant_id, pipeline_id).await;
+    assert!(version_response.status().is_success());
+    let version: GetPipelineVersionResponse = version_response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    assert_eq!(version.version.id, default_image_id);
+    assert_eq!(version.version.name, "1.3.0");
+    assert_ne!(version.version.id, old_image_id);
+    assert!(version.new_version.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
