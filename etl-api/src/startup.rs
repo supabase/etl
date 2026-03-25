@@ -372,11 +372,11 @@ pub async fn run(
                     .service(read_all_tenants)
                     // sources
                     .service(create_source)
+                    .service(validate_source)
                     .service(read_source)
                     .service(update_source)
                     .service(delete_source)
                     .service(read_all_sources)
-                    .service(validate_source)
                     //destinations
                     .service(validate_destination)
                     .service(create_destination)
