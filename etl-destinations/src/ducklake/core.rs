@@ -3,11 +3,12 @@ use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::sync::Arc;
 #[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
+use std::sync::atomic::AtomicBool;
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use chrono::{NaiveDate, NaiveTime};
@@ -35,13 +36,10 @@ use crate::ducklake::config::{
     DuckDbLogConfig, build_setup_sql, current_duckdb_extension_strategy,
 };
 use crate::ducklake::schema::build_create_table_sql_ducklake;
+use crate::table_name::try_stringify_table_name;
 
 /// The DuckDB catalog alias used in every `lake.<table>` qualified name.
 pub(super) const LAKE_CATALOG: &str = "lake";
-/// Delimiter used to join schema and table name in the DuckLake table name.
-const TABLE_NAME_DELIMITER: &str = "_";
-/// Escape string for underscores within schema/table names to prevent collisions.
-const TABLE_NAME_ESCAPE: &str = "__";
 /// Maximum number of rows per SQL `INSERT ... VALUES` batch when nested values
 /// force the staging path to bypass DuckDB's appender API.
 const SQL_INSERT_BATCH_SIZE: usize = 256;
@@ -49,7 +47,7 @@ const SQL_INSERT_BATCH_SIZE: usize = 256;
 ///
 /// Keep this small so each delete statement remains cheap while still avoiding
 /// one round-trip per deleted row.
-const SQL_DELETE_BATCH_SIZE: usize = 8;
+const SQL_DELETE_BATCH_SIZE: usize = 16;
 /// Maximum number of ordered CDC mutations grouped into one atomic DuckLake
 /// transaction.
 ///
@@ -61,7 +59,7 @@ const CDC_MUTATION_BATCH_SIZE: usize = 128;
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
 /// Inline small marker-table writes in the DuckLake metadata catalog instead of
 /// creating Parquet files for this metadata-like table.
-const APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT: usize = 100;
+const APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT: usize = 256;
 /// Enables the expensive post-commit row-count diagnostics when set.
 const BATCH_DIAGNOSTICS_ENV_VAR: &str = "ETL_DUCKLAKE_BATCH_DIAGNOSTICS";
 
@@ -89,7 +87,9 @@ enum TableMutation {
 enum PreparedTableMutation {
     Upsert(PreparedRows),
     Delete {
+        // For WHERE clause predicates used in DELETE statements.
         predicates: Vec<String>,
+        // To know if it's coming from an update or delete operation.
         origin: &'static str,
     },
 }
@@ -289,11 +289,43 @@ pub struct DuckLakeDestination<S> {
     duckdb_log: Option<Arc<DuckDbLogConfig>>,
     /// Cache of table names whose DDL has already been executed.
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
-    /// Cache tracking whether the ETL batch marker table already exists.
-    applied_batches_table_created: Arc<Mutex<bool>>,
+    /// Cache tracking whether the ETL batch marker table already exists. If it's set then the table has already been created
+    applied_batches_table_created: Arc<AtomicBool>,
 }
 
-impl<S> DuckLakeDestination<S> {
+impl<S> Destination for DuckLakeDestination<S>
+where
+    S: StateStore + SchemaStore + Send + Sync,
+{
+    fn name() -> &'static str {
+        "ducklake"
+    }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.dump_duckdb_logs_inner().await
+    }
+
+    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+        self.truncate_table_inner(table_id).await
+    }
+
+    async fn write_table_rows(
+        &self,
+        table_id: TableId,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        self.write_table_rows_inner(table_id, table_rows).await
+    }
+
+    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+        self.write_events_inner(events).await
+    }
+}
+
+impl<S> DuckLakeDestination<S>
+where
+    S: StateStore + SchemaStore + Send + Sync,
+{
     /// Creates a new DuckLake destination.
     ///
     /// - `catalog_url`: DuckLake catalog location. Use a PostgreSQL URL
@@ -405,53 +437,22 @@ impl<S> DuckLakeDestination<S> {
             )
         })??;
 
-        Ok(Self {
+        let destination = Self {
             manager,
             pool: Arc::new(pool),
             blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
             table_creation_slots: Arc::new(Semaphore::new(1)),
-            table_write_slots: Arc::new(Mutex::new(HashMap::new())),
+            table_write_slots: Arc::default(),
             store,
             duckdb_log: duckdb_log.map(Arc::new),
-            created_tables: Arc::new(Mutex::new(HashSet::new())),
-            applied_batches_table_created: Arc::new(Mutex::new(false)),
-        })
-    }
-}
+            created_tables: Arc::default(),
+            applied_batches_table_created: Arc::default(),
+        };
+        destination.ensure_applied_batches_table_exists().await?;
 
-impl<S> Destination for DuckLakeDestination<S>
-where
-    S: StateStore + SchemaStore + Send + Sync,
-{
-    fn name() -> &'static str {
-        "ducklake"
+        Ok(destination)
     }
 
-    async fn shutdown(&self) -> EtlResult<()> {
-        self.dump_duckdb_logs_inner().await
-    }
-
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table_inner(table_id).await
-    }
-
-    async fn write_table_rows(
-        &self,
-        table_id: TableId,
-        table_rows: Vec<TableRow>,
-    ) -> EtlResult<()> {
-        self.write_table_rows_inner(table_id, table_rows).await
-    }
-
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.write_events_inner(events).await
-    }
-}
-
-impl<S> DuckLakeDestination<S>
-where
-    S: StateStore + SchemaStore + Send + Sync,
-{
     /// Deletes all rows from the destination table without dropping it.
     async fn truncate_table_inner(&self, table_id: TableId) -> EtlResult<()> {
         let table_name = self.ensure_table_exists(table_id).await?;
@@ -782,11 +783,8 @@ where
 
     /// Ensures the ETL-managed replay marker table exists.
     async fn ensure_applied_batches_table_exists(&self) -> EtlResult<()> {
-        {
-            let created = self.applied_batches_table_created.lock();
-            if *created {
-                return Ok(());
-            }
+        if self.applied_batches_table_created.load(Ordering::Relaxed) {
+            return Ok(());
         }
 
         let _table_creation_permit = self
@@ -801,11 +799,8 @@ where
                 )
             })?;
 
-        {
-            let created = self.applied_batches_table_created.lock();
-            if *created {
-                return Ok(());
-            }
+        if self.applied_batches_table_created.load(Ordering::Relaxed) {
+            return Ok(());
         }
 
         let ddl = format!(
@@ -852,7 +847,7 @@ where
                     )
                 })?;
 
-                *created.lock() = true;
+                created.store(true, Ordering::Relaxed);
                 Ok(())
             },
         )
@@ -886,7 +881,7 @@ where
             return Ok(existing);
         }
 
-        let ducklake_table_name = table_name_to_ducklake_table_name(table_name);
+        let ducklake_table_name = table_name_to_ducklake_table_name(table_name)?;
         self.store
             .store_table_mapping(table_id, ducklake_table_name.clone())
             .await?;
@@ -953,15 +948,9 @@ where
 /// # Example
 /// - `public.my_table` → `public_my__table`
 /// - `my_schema.orders` → `my__schema_orders`
-pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> DuckLakeTableName {
-    // try_stringify_table_name(table_name)
-    let escaped_schema = table_name
-        .schema
-        .replace(TABLE_NAME_DELIMITER, TABLE_NAME_ESCAPE);
-    let escaped_table = table_name
-        .name
-        .replace(TABLE_NAME_DELIMITER, TABLE_NAME_ESCAPE);
-    format!("{escaped_schema}{TABLE_NAME_DELIMITER}{escaped_table}")
+/// Returns an error if the table name cannot be converted.
+pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> EtlResult<DuckLakeTableName> {
+    try_stringify_table_name(table_name)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -1171,6 +1160,7 @@ async fn apply_table_batches_with_retry(
     let batches = Arc::new(batches);
     let mut delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS);
 
+    // This retry mechanism is safe because
     for attempt in 0..=MAX_COMMIT_RETRIES {
         let attempt_batches = Arc::clone(&batches);
         tracing::info!(
@@ -1237,6 +1227,8 @@ fn apply_table_batches(
     batches: &[PreparedDuckLakeTableBatch],
 ) -> EtlResult<()> {
     for batch in batches {
+        // This is useful in case it fails in the middle of the process.
+        // As we have a batch id we can check if it was already committed or not and only replay if not.
         if applied_batch_marker_exists(conn, batch)? {
             debug!(
                 table = %batch.table_name,
@@ -2751,14 +2743,16 @@ mod tests {
             table_name_to_ducklake_table_name(&TableName {
                 schema: "public".to_string(),
                 name: "orders".to_string(),
-            }),
+            })
+            .unwrap(),
             "public_orders"
         );
         assert_eq!(
             table_name_to_ducklake_table_name(&TableName {
                 schema: "my_schema".to_string(),
                 name: "my_table".to_string(),
-            }),
+            })
+            .unwrap(),
             "my__schema_my__table"
         );
     }
