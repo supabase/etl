@@ -6,7 +6,7 @@ use etl_api::routes::sources::{
 };
 use etl_config::SerializableSecretString;
 use etl_config::shared::PgConnectionConfig;
-use etl_postgres::sqlx::test_utils::create_pg_database;
+use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 use secrecy::ExposeSecret;
@@ -365,6 +365,8 @@ async fn source_creation_with_non_matching_trusted_username_fails() {
         StatusCode::FORBIDDEN,
         "Expected FORBIDDEN status for non-matching trusted username"
     );
+
+    drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -395,6 +397,8 @@ async fn source_validation_with_non_matching_trusted_username_returns_failure() 
         !response.validation_failures.is_empty(),
         "Expected validation failures for non-matching trusted username"
     );
+
+    drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -464,4 +468,6 @@ async fn source_creation_with_matching_trusted_username_but_invalid_role_profile
 
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(body.contains("ETL needs to work properly"));
+
+    drop_pg_database(&source_db_config).await;
 }
