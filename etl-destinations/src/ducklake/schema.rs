@@ -83,7 +83,7 @@ pub fn build_create_table_sql_ducklake(
         .collect();
 
     format!(
-        "CREATE TABLE IF NOT EXISTS {table_name} (\n{}\n)",
+        "CREATE TABLE IF NOT EXISTS {table_name} ({})",
         col_defs.join(",\n")
     )
 }

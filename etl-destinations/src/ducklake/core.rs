@@ -3,12 +3,13 @@ use std::env;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::sync::Arc;
 #[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
-use std::sync::atomic::AtomicBool;
+use std::sync::OnceLock;
 #[cfg(feature = "test-utils")]
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::{NaiveDate, NaiveTime};
@@ -20,12 +21,13 @@ use etl::etl_error;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{ArrayCell, Cell, Event, TableId, TableName, TableRow, TableSchema};
+use metrics::{counter, gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
 use rand::Rng;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::task::JoinSet;
-use tokio::time::Instant;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{Instant, MissedTickBehavior};
 use tokio_postgres::types::PgLsn;
 
 use tracing::{Level, debug, info, warn};
@@ -34,6 +36,22 @@ use url::Url;
 use crate::ducklake::S3Config;
 use crate::ducklake::config::{
     DuckDbLogConfig, build_setup_sql, current_duckdb_extension_strategy,
+};
+use crate::ducklake::metrics::{
+    BATCH_KIND_LABEL, DELETE_ORIGIN_LABEL, ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS,
+    ETL_DUCKLAKE_BATCH_PREPARED_MUTATIONS, ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS,
+    ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS, ETL_DUCKLAKE_DELETE_PREDICATES,
+    ETL_DUCKLAKE_FAILED_BATCHES_TOTAL, ETL_DUCKLAKE_FILES_SCHEDULED_FOR_DELETION_BYTES,
+    ETL_DUCKLAKE_FILES_SCHEDULED_FOR_DELETION_TOTAL, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
+    ETL_DUCKLAKE_INLINE_FLUSH_ROWS, ETL_DUCKLAKE_OLDEST_SCHEDULED_DELETION_AGE_SECONDS,
+    ETL_DUCKLAKE_OLDEST_SNAPSHOT_AGE_SECONDS, ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
+    ETL_DUCKLAKE_POOL_SIZE, ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL, ETL_DUCKLAKE_RETRIES_TOTAL,
+    ETL_DUCKLAKE_SNAPSHOTS_TOTAL, ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES,
+    ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILE_AVG_SIZE_BYTES, ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES,
+    ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_BYTES, ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_FILES,
+    ETL_DUCKLAKE_TABLE_DELETED_ROW_RATIO, ETL_DUCKLAKE_TABLE_SMALL_FILE_RATIO,
+    ETL_DUCKLAKE_UPSERT_ROWS, PREPARED_ROWS_KIND_LABEL, RESULT_LABEL, RETRY_SCOPE_LABEL,
+    SUB_BATCH_KIND_LABEL, register_metrics,
 };
 use crate::ducklake::schema::build_create_table_sql_ducklake;
 use crate::table_name::try_stringify_table_name;
@@ -62,6 +80,14 @@ const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
 const APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT: usize = 256;
 /// Enables the expensive post-commit row-count diagnostics when set.
 const BATCH_DIAGNOSTICS_ENV_VAR: &str = "ETL_DUCKLAKE_BATCH_DIAGNOSTICS";
+/// Files smaller than this are usually too small to be efficient in object storage.
+const SMALL_FILE_SIZE_BYTES: i64 = 5 * 1024 * 1024; // 5MB
+/// Dedicated pool size for background DuckLake metrics sampling.
+const METRICS_POOL_SIZE: u32 = 1;
+/// Frequency of background DuckLake metrics sampling.
+const METRICS_POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// Timeout applied to each background DuckLake metrics query.
+const METRICS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Alias for DuckLake table names.
 type DuckLakeTableName = String;
@@ -181,6 +207,32 @@ struct PreparedDuckLakeTableBatch {
     action: PreparedDuckLakeTableBatchAction,
 }
 
+/// Aggregated storage health sampled for one DuckLake table.
+struct DuckLakeTableStorageMetrics {
+    active_data_files: i64,
+    active_data_bytes: i64,
+    small_data_files: i64,
+    active_data_rows: i64,
+    active_delete_files: i64,
+    active_delete_bytes: i64,
+    deleted_rows: i64,
+}
+
+/// Global maintenance backlog sampled from the DuckLake catalog.
+struct DuckLakeCatalogMaintenanceMetrics {
+    snapshots_total: i64,
+    oldest_snapshot_age_seconds: i64,
+    files_scheduled_for_deletion_total: i64,
+    files_scheduled_for_deletion_bytes: i64,
+    oldest_scheduled_deletion_age_seconds: i64,
+}
+
+/// Shared state for the background DuckLake metrics sampler.
+struct DuckLakeMetricsSampler {
+    shutdown_tx: watch::Sender<()>,
+    handle: Mutex<Option<JoinHandle<()>>>,
+}
+
 // ── connection manager ────────────────────────────────────────────────────────
 
 /// Custom r2d2 connection manager that opens an in-memory DuckDB connection and
@@ -258,12 +310,139 @@ fn format_query_error_detail(sql: &str, error: &duckdb::Error) -> String {
     format!("sql: {compact_sql}; source: {error}")
 }
 
+/// Builds and warms an r2d2 pool of initialized DuckDB connections.
+async fn build_warm_ducklake_pool(
+    manager: DuckLakeConnectionManager,
+    pool_size: u32,
+    purpose: &'static str,
+) -> EtlResult<r2d2::Pool<DuckLakeConnectionManager>> {
+    tokio::task::spawn_blocking(move || -> EtlResult<_> {
+        let started = Instant::now();
+        let pool = r2d2::Pool::builder()
+            .max_size(pool_size)
+            .min_idle(Some(pool_size))
+            .test_on_check_out(true)
+            .build(manager)
+            .map_err(|e| {
+                etl_error!(
+                    ErrorKind::DestinationConnectionFailed,
+                    "Failed to build DuckLake connection pool",
+                    source: e
+                )
+            })?;
+
+        let mut warmed_connections = Vec::with_capacity(pool_size as usize);
+        for _ in 0..pool_size {
+            let conn = pool.get().map_err(|e| {
+                etl_error!(
+                    ErrorKind::DestinationConnectionFailed,
+                    "Failed to warm DuckLake connection pool",
+                    source: e
+                )
+            })?;
+            warmed_connections.push(conn);
+        }
+        drop(warmed_connections);
+
+        info!(
+            purpose,
+            pool_size,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "ducklake connection pool warmed"
+        );
+
+        Ok(pool)
+    })
+    .await
+    .map_err(|_| {
+        etl_error!(
+            ErrorKind::ApplyWorkerPanic,
+            "DuckLake connection pool initialization task panicked"
+        )
+    })?
+}
+
+/// Builds the dedicated metrics pool and spawns the periodic DuckLake sampler task.
+async fn spawn_ducklake_metrics_sampler(
+    manager: DuckLakeConnectionManager,
+    created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+) -> EtlResult<DuckLakeMetricsSampler> {
+    let pool = Arc::new(build_warm_ducklake_pool(manager, METRICS_POOL_SIZE, "metrics").await?);
+    let blocking_slots = Arc::new(Semaphore::new(METRICS_POOL_SIZE as usize));
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let handle = tokio::spawn(run_ducklake_metrics_sampler(
+        pool,
+        blocking_slots,
+        created_tables,
+        shutdown_rx,
+    ));
+
+    Ok(DuckLakeMetricsSampler {
+        shutdown_tx,
+        handle: Mutex::new(handle.into()),
+    })
+}
+
+/// Periodically samples DuckLake metadata on a dedicated connection pool.
+async fn run_ducklake_metrics_sampler(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+    mut shutdown_rx: watch::Receiver<()>,
+) {
+    let mut interval = tokio::time::interval(METRICS_POLL_INTERVAL);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                info!("ducklake metrics sampler shutting down");
+                break;
+            }
+            _ = interval.tick() => {
+                if let Err(error) =
+                    record_catalog_maintenance_metrics(Arc::clone(&pool), Arc::clone(&blocking_slots)).await
+                {
+                    warn!(error = ?error, "ducklake catalog maintenance metrics collection failed");
+                }
+
+                let table_names = {
+                    let cache = created_tables.lock();
+                    cache.iter().cloned().collect::<Vec<_>>()
+                };
+
+                for table_name in table_names {
+                    if shutdown_rx.has_changed().unwrap_or(false) {
+                        info!("ducklake metrics sampler stopping after shutdown signal");
+                        return;
+                    }
+
+                    if let Err(error) = record_table_storage_metrics(
+                        Arc::clone(&pool),
+                        Arc::clone(&blocking_slots),
+                        table_name.clone(),
+                    )
+                    .await
+                    {
+                        warn!(
+                            table = %table_name,
+                            error = ?error,
+                            "ducklake table storage metrics collection failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Returns whether a DuckLake DDL error indicates another transaction already
 /// created the requested table.
 fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) -> bool {
     let message = error.to_string();
     message.contains("has been created by another transaction already")
-        && message.contains(&format!("attempting to create table \"{table_name}\""))
+        && message.contains(&format!(r#"attempting to create table "{table_name}""#))
 }
 
 // ── destination ───────────────────────────────────────────────────────────────
@@ -283,6 +462,7 @@ pub struct DuckLakeDestination<S> {
     manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
+    metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
     table_creation_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     store: S,
@@ -302,6 +482,7 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
+        self.shutdown_metrics_sampler().await?;
         self.dump_duckdb_logs_inner().await
     }
 
@@ -360,6 +541,8 @@ where
         duckdb_log: Option<DuckDbLogConfig>,
         store: S,
     ) -> EtlResult<Self> {
+        register_metrics();
+
         if pool_size == 0 {
             return Err(etl_error!(
                 ErrorKind::ConfigError,
@@ -369,6 +552,7 @@ where
         }
 
         let extension_strategy = current_duckdb_extension_strategy()?;
+        let disable_extension_autoload = extension_strategy.disables_autoload();
         if let crate::ducklake::config::DuckDbExtensionStrategy::VendoredLinux { platform_dir } =
             extension_strategy
         {
@@ -385,70 +569,40 @@ where
 
         let manager = Arc::new(DuckLakeConnectionManager {
             setup_sql: Arc::clone(&setup_sql),
-            disable_extension_autoload: extension_strategy.disables_autoload(),
+            disable_extension_autoload,
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         });
 
-        let manager_for_pool = Arc::clone(&manager);
-        let pool = tokio::task::spawn_blocking(move || -> EtlResult<_> {
-            let started = Instant::now();
-            let pool = r2d2::Pool::builder()
-                .max_size(pool_size)
-                .min_idle(Some(pool_size))
-                .test_on_check_out(true)
-                .build(manager_for_pool.as_ref().clone())
-                .map_err(|e| {
-                    etl_error!(
-                        ErrorKind::DestinationConnectionFailed,
-                        "Failed to build DuckLake connection pool",
-                        source: e
-                    )
-                })?;
-
-            // Check out each warm connection once so pool startup pays the
-            // attach/bootstrap cost before the destination begins serving work.
-            let mut warmed_connections = Vec::with_capacity(pool_size as usize);
-            for _ in 0..pool_size {
-                let conn = pool.get().map_err(|e| {
-                    etl_error!(
-                        ErrorKind::DestinationConnectionFailed,
-                        "Failed to warm DuckLake connection pool",
-                        source: e
-                    )
-                })?;
-                warmed_connections.push(conn);
-            }
-            drop(warmed_connections);
-
-            info!(
-                pool_size,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "ducklake connection pool warmed"
-            );
-
-            Ok(pool)
-        })
-        .await
-        .map_err(|_| {
-            etl_error!(
-                ErrorKind::ApplyWorkerPanic,
-                "DuckLake connection pool initialization task panicked"
-            )
-        })??;
-
-        let destination = Self {
+        let pool = build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?;
+        let created_tables = Arc::default();
+        let mut destination = Self {
             manager,
             pool: Arc::new(pool),
             blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
+            metrics_sampler: Arc::new(None),
             table_creation_slots: Arc::new(Semaphore::new(1)),
             table_write_slots: Arc::default(),
             store,
             duckdb_log: duckdb_log.map(Arc::new),
-            created_tables: Arc::default(),
+            created_tables: Arc::clone(&created_tables),
             applied_batches_table_created: Arc::default(),
         };
+        gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
         destination.ensure_applied_batches_table_exists().await?;
+        destination.metrics_sampler = Arc::new(
+            spawn_ducklake_metrics_sampler(
+                DuckLakeConnectionManager {
+                    setup_sql: Arc::clone(&setup_sql),
+                    disable_extension_autoload,
+                    #[cfg(feature = "test-utils")]
+                    open_count: Arc::new(AtomicUsize::new(0)),
+                },
+                Arc::clone(&created_tables),
+            )
+            .await?
+            .into(),
+        );
 
         Ok(destination)
     }
@@ -468,7 +622,7 @@ where
             })?;
 
             let result = (|| -> EtlResult<()> {
-                let delete_table_sql = format!("DELETE FROM {LAKE_CATALOG}.\"{table_name}\";");
+                let delete_table_sql = format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}";"#);
                 conn.execute_batch(&delete_table_sql).map_err(|e| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
@@ -515,12 +669,12 @@ where
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let table_name = self.ensure_table_exists(table_id).await?;
-        let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
 
         if table_rows.is_empty() {
             return Ok(());
         }
 
+        // Here we can have concurrent table writers because it's INSERTs only and CDC (write_events) won't start before the copy phase is complete
         self.ensure_applied_batches_table_exists().await?;
         let table_schema = self.get_table_schema(table_id).await?;
         let prepared_batch = prepare_copy_table_batch(&table_schema, table_name, table_rows)?;
@@ -804,14 +958,14 @@ where
         }
 
         let ddl = format!(
-            "CREATE TABLE IF NOT EXISTS {LAKE_CATALOG}.\"{APPLIED_BATCHES_TABLE}\" (\
-             table_name VARCHAR NOT NULL, \
-             batch_id VARCHAR NOT NULL, \
-             batch_kind VARCHAR NOT NULL, \
-             first_start_lsn UBIGINT, \
-             last_commit_lsn UBIGINT, \
-             applied_at TIMESTAMPTZ NOT NULL\
-             );"
+            r#"CREATE TABLE IF NOT EXISTS {LAKE_CATALOG}."{APPLIED_BATCHES_TABLE}" (
+             table_name VARCHAR NOT NULL,
+             batch_id VARCHAR NOT NULL,
+             batch_kind VARCHAR NOT NULL,
+             first_start_lsn UBIGINT,
+             last_commit_lsn UBIGINT,
+             applied_at TIMESTAMPTZ NOT NULL
+             );"#
         );
         let created = Arc::clone(&self.applied_batches_table_created);
         let table_name = APPLIED_BATCHES_TABLE.to_string();
@@ -888,7 +1042,7 @@ where
         Ok(ducklake_table_name)
     }
 
-    /// Serializes writes that target the same DuckLake table.
+    /// Serializes table-local truncate and CDC mutation writes.
     async fn acquire_table_write_slot(&self, table_name: &str) -> EtlResult<OwnedSemaphorePermit> {
         let table_slot = {
             let mut table_write_slots = self.table_write_slots.lock();
@@ -932,6 +1086,24 @@ where
             .await
     }
 
+    /// Stops the background DuckLake metrics sampler.
+    async fn shutdown_metrics_sampler(&self) -> EtlResult<()> {
+        if let Some(metrics_sampler) = &*self.metrics_sampler {
+            let _ = metrics_sampler.shutdown_tx.send(());
+            let handle = metrics_sampler.handle.lock().take();
+            if let Some(handle) = handle {
+                handle.await.map_err(|_| {
+                    etl_error!(
+                        ErrorKind::ApplyWorkerPanic,
+                        "DuckLake metrics sampler task panicked"
+                    )
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Returns how many DuckDB connections have been initialized for tests.
     #[cfg(feature = "test-utils")]
     pub fn connection_open_count_for_tests(&self) -> usize {
@@ -948,6 +1120,7 @@ where
 /// # Example
 /// - `public.my_table` → `public_my__table`
 /// - `my_schema.orders` → `my__schema_orders`
+///
 /// Returns an error if the table name cannot be converted.
 pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> EtlResult<DuckLakeTableName> {
     try_stringify_table_name(table_name)
@@ -1101,6 +1274,8 @@ where
             "DuckLake blocking slot acquisition failed"
         )
     })?;
+    histogram!(ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS)
+        .record(slot_wait_started.elapsed().as_secs_f64());
     info!(
         wait_ms = slot_wait_started.elapsed().as_millis() as u64,
         "wait for ducklake blocking slot"
@@ -1118,12 +1293,16 @@ where
                 source: e
             )
         })?;
+        histogram!(ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS)
+            .record(checkout_started.elapsed().as_secs_f64());
         info!(
             wait_ms = checkout_started.elapsed().as_millis() as u64,
             "wait for ducklake pool checkout"
         );
         let operation_started = Instant::now();
         let res = operation(&pooled_conn.conn);
+        histogram!(ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS)
+            .record(operation_started.elapsed().as_secs_f64());
         info!(
             duration_ms = operation_started.elapsed().as_millis() as u64,
             "ducklake blocking operation finished"
@@ -1155,9 +1334,9 @@ async fn apply_table_batches_with_retry(
         return Ok(());
     }
 
-    let table_name = batches[0].table_name.clone();
     let batch_count = batches.len();
     let batches = Arc::new(batches);
+    let table_name = &batches[0].table_name;
     let mut delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS);
 
     // This retry mechanism is safe because
@@ -1193,6 +1372,12 @@ async fn apply_table_batches_with_retry(
         {
             Ok(()) => return Ok(()),
             Err(e) if attempt < MAX_COMMIT_RETRIES => {
+                counter!(
+                    ETL_DUCKLAKE_RETRIES_TOTAL,
+                    BATCH_KIND_LABEL => DuckLakeTableBatchKind::Mutation.as_str(),
+                    RETRY_SCOPE_LABEL => "table_sequence",
+                )
+                .increment(1);
                 let jitter_ratio = rand::rng().random_range(0.5..=1.5_f64);
                 let jittered = delay.mul_f64(jitter_ratio);
                 warn!(
@@ -1207,6 +1392,12 @@ async fn apply_table_batches_with_retry(
                 delay = std::cmp::min(delay * 2, Duration::from_millis(MAX_RETRY_DELAY_MS));
             }
             Err(e) => {
+                counter!(
+                    ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
+                    BATCH_KIND_LABEL => DuckLakeTableBatchKind::Mutation.as_str(),
+                    RETRY_SCOPE_LABEL => "table_sequence",
+                )
+                .increment(1);
                 return Err(etl_error!(
                     ErrorKind::DuckLakeAtomicBatchRetryable,
                     "DuckLake atomic table batch sequence failed after retries",
@@ -1230,6 +1421,11 @@ fn apply_table_batches(
         // This is useful in case it fails in the middle of the process.
         // As we have a batch id we can check if it was already committed or not and only replay if not.
         if applied_batch_marker_exists(conn, batch)? {
+            counter!(
+                ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL,
+                BATCH_KIND_LABEL => batch.batch_kind.as_str(),
+            )
+            .increment(1);
             debug!(
                 table = %batch.table_name,
                 batch_id = %batch.batch_id,
@@ -1276,6 +1472,11 @@ async fn apply_table_batch_with_retry(
             let manager = Arc::clone(&manager);
             move |conn| {
                 if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
+                    counter!(
+                        ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL,
+                        BATCH_KIND_LABEL => batch_kind.as_str(),
+                    )
+                    .increment(1);
                     debug!(
                         table = %attempt_batch.table_name,
                         batch_id = %attempt_batch.batch_id,
@@ -1303,6 +1504,12 @@ async fn apply_table_batch_with_retry(
         {
             Ok(()) => return Ok(()),
             Err(e) if attempt < MAX_COMMIT_RETRIES => {
+                counter!(
+                    ETL_DUCKLAKE_RETRIES_TOTAL,
+                    BATCH_KIND_LABEL => batch_kind.as_str(),
+                    RETRY_SCOPE_LABEL => "single_batch",
+                )
+                .increment(1);
                 let jitter_ratio = rand::rng().random_range(0.5..=1.5_f64);
                 let jittered = delay.mul_f64(jitter_ratio);
                 warn!(
@@ -1322,6 +1529,12 @@ async fn apply_table_batch_with_retry(
                 );
             }
             Err(e) => {
+                counter!(
+                    ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
+                    BATCH_KIND_LABEL => batch_kind.as_str(),
+                    RETRY_SCOPE_LABEL => "single_batch",
+                )
+                .increment(1);
                 return Err(etl_error!(
                     ErrorKind::DuckLakeAtomicBatchRetryable,
                     "DuckLake atomic table batch failed after retries",
@@ -1704,8 +1917,8 @@ fn applied_batch_marker_exists(
     batch: &PreparedDuckLakeTableBatch,
 ) -> EtlResult<bool> {
     let sql = format!(
-        "SELECT 1 FROM {LAKE_CATALOG}.\"{APPLIED_BATCHES_TABLE}\" \
-         WHERE table_name = {} AND batch_id = {} LIMIT 1;",
+        r#"SELECT 1 FROM {LAKE_CATALOG}."{APPLIED_BATCHES_TABLE}"
+         WHERE table_name = {} AND batch_id = {} LIMIT 1;"#,
         quote_literal(&batch.table_name),
         quote_literal(&batch.batch_id)
     );
@@ -1742,9 +1955,8 @@ fn insert_applied_batch_marker(
     batch: &PreparedDuckLakeTableBatch,
 ) -> EtlResult<()> {
     let sql = format!(
-        "INSERT INTO {LAKE_CATALOG}.\"{APPLIED_BATCHES_TABLE}\" \
-         (table_name, batch_id, batch_kind, first_start_lsn, last_commit_lsn, applied_at) VALUES \
-         ({}, {}, {}, {}, {}, current_timestamp);",
+        r#"INSERT INTO {LAKE_CATALOG}."{APPLIED_BATCHES_TABLE}"
+         (table_name, batch_id, batch_kind, first_start_lsn, last_commit_lsn, applied_at) VALUES ({}, {}, {}, {}, {}, current_timestamp);"#,
         quote_literal(&batch.table_name),
         quote_literal(&batch.batch_id),
         quote_literal(batch.batch_kind.as_str()),
@@ -1769,8 +1981,8 @@ fn clear_applied_batch_markers_for_kind(
     batch_kind: DuckLakeTableBatchKind,
 ) -> EtlResult<()> {
     let sql = format!(
-        "DELETE FROM {LAKE_CATALOG}.\"{APPLIED_BATCHES_TABLE}\" \
-         WHERE table_name = {} AND batch_kind = {};",
+        r#"DELETE FROM {LAKE_CATALOG}."{APPLIED_BATCHES_TABLE}"
+         WHERE table_name = {} AND batch_kind = {};"#,
         quote_literal(table_name),
         quote_literal(batch_kind.as_str())
     );
@@ -1791,6 +2003,7 @@ fn apply_table_batch(
     conn: &duckdb::Connection,
     batch: &PreparedDuckLakeTableBatch,
 ) -> EtlResult<()> {
+    let batch_started = Instant::now();
     let diagnostics_conn = if batch_diagnostics_enabled() && tracing::enabled!(Level::INFO) {
         match manager.open_duckdb_connection() {
             Ok(conn) => Some(conn),
@@ -1826,7 +2039,12 @@ fn apply_table_batch(
                     prepared_mutations.len()
                 );
                 for prepared_mutation in prepared_mutations {
-                    apply_table_mutation(conn, &batch.table_name, prepared_mutation)?;
+                    apply_table_mutation(
+                        conn,
+                        &batch.table_name,
+                        batch.batch_kind,
+                        prepared_mutation,
+                    )?;
                 }
             }
             PreparedDuckLakeTableBatchAction::Truncate => {
@@ -1847,6 +2065,18 @@ fn apply_table_batch(
                 tracing::error!(?e, "error commit");
                 etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", source: e)
             })?;
+            histogram!(
+                ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS,
+                BATCH_KIND_LABEL => batch.batch_kind.as_str(),
+                SUB_BATCH_KIND_LABEL => batch_log_kind(batch),
+            )
+            .record(batch_started.elapsed().as_secs_f64());
+            histogram!(
+                ETL_DUCKLAKE_BATCH_PREPARED_MUTATIONS,
+                BATCH_KIND_LABEL => batch.batch_kind.as_str(),
+                SUB_BATCH_KIND_LABEL => batch_log_kind(batch),
+            )
+            .record(prepared_mutation_count(batch) as f64);
 
             if tracing::enabled!(Level::INFO)
                 && let Some(diagnostics_conn) = diagnostics_conn.as_ref()
@@ -1887,9 +2117,10 @@ fn flush_table_inlined_data(
     table_name: &str,
     batch_kind: DuckLakeTableBatchKind,
 ) -> EtlResult<()> {
+    let flush_started = Instant::now();
     let sql = format!(
-        "SELECT COALESCE(SUM(rows_flushed), 0) \
-         FROM ducklake_flush_inlined_data({}, table_name => {});",
+        r#"SELECT COALESCE(SUM(rows_flushed), 0)
+         FROM ducklake_flush_inlined_data({}, table_name => {});"#,
         quote_literal(LAKE_CATALOG),
         quote_literal(table_name),
     );
@@ -1901,6 +2132,19 @@ fn flush_table_inlined_data(
             source: e
         )
     })?;
+    let flush_result = if rows_flushed > 0 { "flushed" } else { "noop" };
+    histogram!(
+        ETL_DUCKLAKE_INLINE_FLUSH_ROWS,
+        BATCH_KIND_LABEL => batch_kind.as_str(),
+        RESULT_LABEL => flush_result,
+    )
+    .record(rows_flushed as f64);
+    histogram!(
+        ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
+        BATCH_KIND_LABEL => batch_kind.as_str(),
+        RESULT_LABEL => flush_result,
+    )
+    .record(flush_started.elapsed().as_secs_f64());
 
     if rows_flushed > 0 {
         info!(
@@ -1925,7 +2169,7 @@ fn flush_table_inlined_data(
 
 /// Applies the truncate action inside an open transaction.
 fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> EtlResult<()> {
-    let sql = format!("DELETE FROM {LAKE_CATALOG}.\"{table_name}\";");
+    let sql = format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}";"#);
     conn.execute_batch(&sql).map_err(|e| {
         tracing::error!(?e, "error DELETE");
         etl_error!(
@@ -1948,13 +2192,26 @@ fn optional_lsn_to_sql_literal(lsn: Option<PgLsn>) -> String {
 fn apply_table_mutation(
     conn: &duckdb::Connection,
     table_name: &str,
+    batch_kind: DuckLakeTableBatchKind,
     prepared_mutation: &PreparedTableMutation,
 ) -> EtlResult<()> {
     match prepared_mutation {
         PreparedTableMutation::Upsert(prepared_rows) => {
+            histogram!(
+                ETL_DUCKLAKE_UPSERT_ROWS,
+                BATCH_KIND_LABEL => batch_kind.as_str(),
+                PREPARED_ROWS_KIND_LABEL => prepared_rows_kind(prepared_rows),
+            )
+            .record(prepared_rows_count(prepared_rows) as f64);
             apply_upsert_mutation(conn, table_name, prepared_rows)
         }
-        PreparedTableMutation::Delete { predicates, .. } => {
+        PreparedTableMutation::Delete { predicates, origin } => {
+            histogram!(
+                ETL_DUCKLAKE_DELETE_PREDICATES,
+                BATCH_KIND_LABEL => batch_kind.as_str(),
+                DELETE_ORIGIN_LABEL => *origin,
+            )
+            .record(predicates.len() as f64);
             apply_delete_mutation(conn, table_name, predicates.as_slice())
         }
     }
@@ -1982,8 +2239,8 @@ fn apply_upsert_mutation(
 
     // Mirror the DuckLake target schema without copying any data.
     conn.execute_batch(&format!(
-        "CREATE OR REPLACE TEMP TABLE {staging:?} AS \
-         SELECT * FROM {LAKE_CATALOG}.\"{table_name}\" LIMIT 0;"
+        r#"CREATE OR REPLACE TEMP TABLE {staging:?} AS
+         SELECT * FROM {LAKE_CATALOG}."{table_name}" LIMIT 0;"#
     ))
     .map_err(|e| {
         tracing::error!(?e, "error CREATE TEMP TABLE");
@@ -2044,7 +2301,7 @@ fn apply_upsert_mutation(
 
     let result = conn
         .execute_batch(&format!(
-            "INSERT INTO {LAKE_CATALOG}.\"{table_name}\" SELECT * FROM {staging:?};"
+            r#"INSERT INTO {LAKE_CATALOG}."{table_name}" SELECT * FROM {staging:?};"#
         ))
         .map_err(|e| {
             tracing::error!(?e, "error INSERT INTO");
@@ -2084,7 +2341,7 @@ fn apply_delete_mutation(
             .join(" OR ");
 
         let sql_query =
-            format!("DELETE FROM {LAKE_CATALOG}.\"{table_name}\" WHERE {where_clause};",);
+            format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}" WHERE {where_clause};"#);
         conn.execute_batch(&sql_query).map_err(|e| {
             tracing::error!(?e, "error DELETE FROM");
             etl_error!(
@@ -2116,10 +2373,34 @@ fn query_table_row_count(
     table_name: &str,
 ) -> Result<i64, duckdb::Error> {
     conn.query_row(
-        &format!("SELECT COUNT(*) FROM {LAKE_CATALOG}.\"{table_name}\";"),
+        &format!(r#"SELECT COUNT(*) FROM {LAKE_CATALOG}."{table_name}";"#),
         [],
         |row| row.get(0),
     )
+}
+
+/// Returns the number of values carried by a prepared row payload.
+fn prepared_rows_count(prepared_rows: &PreparedRows) -> usize {
+    match prepared_rows {
+        PreparedRows::Appender(values) => values.len(),
+        PreparedRows::SqlLiterals(values) => values.len(),
+    }
+}
+
+/// Returns the encoding strategy used by a prepared row payload.
+fn prepared_rows_kind(prepared_rows: &PreparedRows) -> &'static str {
+    match prepared_rows {
+        PreparedRows::Appender(_) => "appender",
+        PreparedRows::SqlLiterals(_) => "sql_literals",
+    }
+}
+
+/// Returns the number of prepared mutation statements in one atomic batch.
+fn prepared_mutation_count(batch: &PreparedDuckLakeTableBatch) -> usize {
+    match &batch.action {
+        PreparedDuckLakeTableBatchAction::Truncate => 1,
+        PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => prepared_mutations.len(),
+    }
 }
 
 /// Returns the insert row count when the batch is a pure insert sub-batch.
@@ -2157,6 +2438,271 @@ fn batch_log_kind(batch: &PreparedDuckLakeTableBatch) -> &'static str {
             }
         }
     }
+}
+
+/// Samples storage health for one table without affecting the write path.
+async fn record_table_storage_metrics(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    table_name: DuckLakeTableName,
+) -> EtlResult<()> {
+    let metrics = query_table_storage_metrics(pool, blocking_slots, table_name).await?;
+    let active_data_files = metrics.active_data_files.max(0) as f64;
+    let active_data_bytes = metrics.active_data_bytes.max(0) as f64;
+    let active_delete_files = metrics.active_delete_files.max(0) as f64;
+    let active_delete_bytes = metrics.active_delete_bytes.max(0) as f64;
+    let small_file_ratio = if metrics.active_data_files > 0 {
+        metrics.small_data_files.max(0) as f64 / metrics.active_data_files as f64
+    } else {
+        0.0
+    };
+    let average_data_file_size_bytes = if metrics.active_data_files > 0 {
+        metrics.active_data_bytes.max(0) as f64 / metrics.active_data_files as f64
+    } else {
+        0.0
+    };
+    let deleted_row_ratio = if metrics.active_data_rows > 0 {
+        metrics.deleted_rows.max(0) as f64 / metrics.active_data_rows as f64
+    } else {
+        0.0
+    };
+
+    histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES).record(active_data_files);
+    histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES).record(active_data_bytes);
+    histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILE_AVG_SIZE_BYTES)
+        .record(average_data_file_size_bytes);
+    histogram!(ETL_DUCKLAKE_TABLE_SMALL_FILE_RATIO).record(small_file_ratio);
+    histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_FILES).record(active_delete_files);
+    histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_BYTES).record(active_delete_bytes);
+    histogram!(ETL_DUCKLAKE_TABLE_DELETED_ROW_RATIO).record(deleted_row_ratio);
+
+    Ok(())
+}
+
+/// Samples global snapshot and deletion backlog gauges.
+async fn record_catalog_maintenance_metrics(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+) -> EtlResult<()> {
+    let metrics = query_catalog_maintenance_metrics(pool, blocking_slots).await?;
+    gauge!(ETL_DUCKLAKE_SNAPSHOTS_TOTAL).set(metrics.snapshots_total.max(0) as f64);
+    gauge!(ETL_DUCKLAKE_OLDEST_SNAPSHOT_AGE_SECONDS)
+        .set(metrics.oldest_snapshot_age_seconds.max(0) as f64);
+    gauge!(ETL_DUCKLAKE_FILES_SCHEDULED_FOR_DELETION_TOTAL)
+        .set(metrics.files_scheduled_for_deletion_total.max(0) as f64);
+    gauge!(ETL_DUCKLAKE_FILES_SCHEDULED_FOR_DELETION_BYTES)
+        .set(metrics.files_scheduled_for_deletion_bytes.max(0) as f64);
+    gauge!(ETL_DUCKLAKE_OLDEST_SCHEDULED_DELETION_AGE_SECONDS)
+        .set(metrics.oldest_scheduled_deletion_age_seconds.max(0) as f64);
+
+    Ok(())
+}
+
+/// Returns table-level storage health from the DuckLake metadata tables.
+async fn query_table_storage_metrics(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    table_name: DuckLakeTableName,
+) -> EtlResult<DuckLakeTableStorageMetrics> {
+    let table_name_for_query = table_name.clone();
+    tokio::time::timeout(
+        METRICS_QUERY_TIMEOUT,
+        run_duckdb_blocking(pool, blocking_slots, move |conn| {
+            query_table_storage_metrics_blocking(conn, &table_name_for_query)
+        }),
+    )
+    .await
+    .map_err(|_| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table storage metrics query timed out",
+            format!(
+                "table={table_name}, timeout_s={}",
+                METRICS_QUERY_TIMEOUT.as_secs()
+            )
+        )
+    })?
+}
+
+/// Returns table-level storage health from the DuckLake metadata tables.
+fn query_table_storage_metrics_blocking(
+    conn: &duckdb::Connection,
+    table_name: &str,
+) -> EtlResult<DuckLakeTableStorageMetrics> {
+    let metadata_namespace = ducklake_metadata_namespace(conn)?;
+    let sql = format!(
+        r#"WITH target_table AS (
+             SELECT table_id
+             FROM {metadata_namespace}.ducklake_table
+             WHERE end_snapshot IS NULL AND table_name = {}
+             LIMIT 1
+         ),
+         data_stats AS (
+             SELECT
+                 COUNT(*) AS active_data_files,
+                 COALESCE(SUM(file_size_bytes), 0) AS active_data_bytes,
+                 COALESCE(SUM(CASE WHEN file_size_bytes < {} THEN 1 ELSE 0 END), 0) AS small_data_files,
+                 COALESCE(SUM(record_count), 0) AS active_data_rows
+             FROM {metadata_namespace}.ducklake_data_file
+             WHERE end_snapshot IS NULL AND table_id = (SELECT table_id FROM target_table)
+         ),
+         delete_stats AS (
+             SELECT
+                 COUNT(*) AS active_delete_files,
+                 COALESCE(SUM(file_size_bytes), 0) AS active_delete_bytes,
+                 COALESCE(SUM(delete_count), 0) AS deleted_rows
+             FROM {metadata_namespace}.ducklake_delete_file
+             WHERE end_snapshot IS NULL AND table_id = (SELECT table_id FROM target_table)
+         )
+         SELECT
+             active_data_files,
+             active_data_bytes,
+             small_data_files,
+             active_data_rows,
+             active_delete_files,
+             active_delete_bytes,
+             deleted_rows
+         FROM data_stats CROSS JOIN delete_stats;"#,
+        quote_literal(table_name),
+        SMALL_FILE_SIZE_BYTES,
+    );
+
+    conn.query_row(&sql, [], |row| {
+        Ok(DuckLakeTableStorageMetrics {
+            active_data_files: row.get(0)?,
+            active_data_bytes: row.get(1)?,
+            small_data_files: row.get(2)?,
+            active_data_rows: row.get(3)?,
+            active_delete_files: row.get(4)?,
+            active_delete_bytes: row.get(5)?,
+            deleted_rows: row.get(6)?,
+        })
+    })
+    .map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table storage metrics query failed",
+            format_query_error_detail(&sql, &e),
+            source: e
+        )
+    })
+}
+
+/// Returns global maintenance backlog metrics from the DuckLake metadata tables.
+async fn query_catalog_maintenance_metrics(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+) -> EtlResult<DuckLakeCatalogMaintenanceMetrics> {
+    tokio::time::timeout(
+        METRICS_QUERY_TIMEOUT,
+        run_duckdb_blocking(pool, blocking_slots, move |conn| {
+            query_catalog_maintenance_metrics_blocking(conn)
+        }),
+    )
+    .await
+    .map_err(|_| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake catalog maintenance metrics query timed out",
+            format!("timeout_s={}", METRICS_QUERY_TIMEOUT.as_secs())
+        )
+    })?
+}
+
+/// Returns global maintenance backlog metrics from the DuckLake metadata tables.
+fn query_catalog_maintenance_metrics_blocking(
+    conn: &duckdb::Connection,
+) -> EtlResult<DuckLakeCatalogMaintenanceMetrics> {
+    let metadata_namespace = ducklake_metadata_namespace(conn)?;
+    let sql = format!(
+        r#"WITH snapshot_stats AS (
+             SELECT
+                 COUNT(*) AS snapshots_total,
+                 COALESCE(MAX(date_diff('second', snapshot_time, current_timestamp)), 0) AS oldest_snapshot_age_seconds
+             FROM {metadata_namespace}.ducklake_snapshot
+         ),
+         scheduled_deletion_stats AS (
+             SELECT
+                 COUNT(*) AS files_scheduled_for_deletion_total,
+                 COALESCE(SUM(data_files.file_size_bytes), 0) AS files_scheduled_for_deletion_bytes,
+                 COALESCE(MAX(date_diff('second', scheduled.schedule_start, current_timestamp)), 0) AS oldest_scheduled_deletion_age_seconds
+             FROM {metadata_namespace}.ducklake_files_scheduled_for_deletion AS scheduled
+             LEFT JOIN {metadata_namespace}.ducklake_data_file AS data_files USING (data_file_id)
+         )
+         SELECT
+             snapshots_total,
+             oldest_snapshot_age_seconds,
+             files_scheduled_for_deletion_total,
+             files_scheduled_for_deletion_bytes,
+             oldest_scheduled_deletion_age_seconds
+         FROM snapshot_stats CROSS JOIN scheduled_deletion_stats;"#
+    );
+
+    conn.query_row(&sql, [], |row| {
+        Ok(DuckLakeCatalogMaintenanceMetrics {
+            snapshots_total: row.get(0)?,
+            oldest_snapshot_age_seconds: row.get(1)?,
+            files_scheduled_for_deletion_total: row.get(2)?,
+            files_scheduled_for_deletion_bytes: row.get(3)?,
+            oldest_scheduled_deletion_age_seconds: row.get(4)?,
+        })
+    })
+    .map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake catalog maintenance metrics query failed",
+            format_query_error_detail(&sql, &e),
+            source: e
+        )
+    })
+}
+
+/// Returns the fully-qualified hidden DuckLake metadata namespace.
+fn ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<String> {
+    static METADATA_NAMESPACE: OnceLock<String> = OnceLock::new();
+
+    if let Some(namespace) = METADATA_NAMESPACE.get() {
+        return Ok(namespace.clone());
+    }
+
+    let namespace = resolve_ducklake_metadata_namespace(conn)?;
+    let _ = METADATA_NAMESPACE.set(namespace.clone());
+    Ok(namespace)
+}
+
+/// Resolves the schema that DuckLake uses inside its hidden metadata catalog.
+fn resolve_ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<String> {
+    let metadata_catalog = format!("__ducklake_metadata_{LAKE_CATALOG}");
+    let sql = format!(
+        r#"SELECT table_schema
+           FROM information_schema.tables
+           WHERE table_catalog = {}
+             AND table_name = 'ducklake_snapshot'
+           ORDER BY CASE
+               WHEN table_schema = 'main' THEN 0
+               WHEN table_schema = 'ducklake' THEN 1
+               ELSE 2
+           END,
+           table_schema
+           LIMIT 1;"#,
+        quote_literal(&metadata_catalog),
+    );
+    let table_schema = conn
+        .query_row(&sql, [], |row| row.get::<_, String>(0))
+        .map_err(|e| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake metadata namespace query failed",
+                format_query_error_detail(&sql, &e),
+                source: e
+            )
+        })?;
+
+    Ok(format!(
+        "{}.{}",
+        quote_identifier(&metadata_catalog),
+        quote_identifier(&table_schema),
+    ))
 }
 
 /// Inserts rows into the local staging table using SQL literals.
@@ -2735,7 +3281,96 @@ fn maybe_fail_after_copy_batch_flush_for_tests(table_name: &str) -> EtlResult<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use duckdb::{Config, Connection};
+    use etl::destination::Destination;
+    use etl::store::both::memory::MemoryStore;
+    use etl::store::schema::SchemaStore;
     use etl::types::{ColumnSchema, Type as PgType};
+    use pg_escape::{quote_identifier, quote_literal};
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+    use url::Url;
+
+    fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
+        TableSchema::new(
+            TableId::new(table_id),
+            TableName::new(schema.to_string(), table.to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ],
+        )
+    }
+
+    fn path_to_file_url(path: &Path) -> Url {
+        Url::from_file_path(path).expect("failed to convert path to file url")
+    }
+
+    fn open_verification_connection() -> Connection {
+        if cfg!(target_os = "linux") {
+            return Connection::open_in_memory_with_flags(
+                Config::default()
+                    .enable_autoload_extension(false)
+                    .expect("failed to disable DuckDB extension autoload"),
+            )
+            .expect("failed to open in-memory DuckDB");
+        }
+
+        Connection::open_in_memory().expect("failed to open in-memory DuckDB")
+    }
+
+    fn ducklake_load_sql() -> String {
+        if cfg!(target_os = "linux") {
+            let platform_dir = match std::env::consts::ARCH {
+                "x86_64" => "linux_amd64",
+                "aarch64" => "linux_arm64",
+                arch => panic!("unsupported linux architecture for DuckDB test extensions: {arch}"),
+            };
+            let env_override = std::env::var_os("ETL_DUCKDB_EXTENSION_ROOT").map(PathBuf::from);
+            let candidate_roots = env_override
+                .into_iter()
+                .chain([
+                    PathBuf::from("/app/duckdb_extensions"),
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/duckdb/extensions"),
+                ])
+                .collect::<Vec<_>>();
+
+            for root in candidate_roots {
+                let extension_dir = root.join("1.5.1").join(platform_dir);
+                let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
+                let json_extension = extension_dir.join("json.duckdb_extension");
+                let parquet_extension = extension_dir.join("parquet.duckdb_extension");
+
+                if ducklake_extension.is_file()
+                    && json_extension.is_file()
+                    && parquet_extension.is_file()
+                {
+                    return format!(
+                        "LOAD {}; LOAD {}; LOAD {};",
+                        quote_literal(&ducklake_extension.display().to_string()),
+                        quote_literal(&json_extension.display().to_string()),
+                        quote_literal(&parquet_extension.display().to_string()),
+                    );
+                }
+            }
+        }
+
+        "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet;"
+            .to_string()
+    }
+
+    fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
+        let conn = open_verification_connection();
+        conn.execute_batch(&format!(
+            "{} ATTACH {} AS {} (DATA_PATH {});",
+            ducklake_load_sql(),
+            quote_literal(&format!("ducklake:{}", catalog.as_str())),
+            quote_identifier(LAKE_CATALOG),
+            quote_literal(data.as_str()),
+        ))
+        .expect("failed to attach DuckLake catalog");
+        conn
+    }
 
     #[test]
     fn test_table_name_escaping() {
@@ -2772,7 +3407,7 @@ mod tests {
 
     #[test]
     fn test_format_query_error_detail_compacts_sql_and_includes_source() {
-        let sql = "CREATE TABLE lake.\"orders\" (\n  \"id\" INTEGER NOT NULL\n)";
+        let sql = r#"CREATE TABLE lake."orders" ("id" INTEGER NOT NULL)"#;
         let error = duckdb::Error::DuckDBFailure(
             duckdb::ffi::Error::new(1),
             Some("parser error".to_string()),
@@ -2780,7 +3415,7 @@ mod tests {
 
         assert_eq!(
             format_query_error_detail(sql, &error),
-            "sql: CREATE TABLE lake.\"orders\" ( \"id\" INTEGER NOT NULL ); source: parser error"
+            "sql: CREATE TABLE lake.\"orders\" (\"id\" INTEGER NOT NULL); source: parser error"
         );
     }
 
@@ -3404,5 +4039,89 @@ mod tests {
         );
 
         assert_ne!(first.batch_id, second.batch_id);
+    }
+
+    #[tokio::test]
+    async fn test_query_table_storage_metrics_reads_ducklake_metadata() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
+        let data = path_to_file_url(&dir.path().join("data"));
+        let store = MemoryStore::new();
+        let schema = make_schema(1, "public", "users");
+        let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+        store
+            .store_table_schema(schema.clone())
+            .await
+            .expect("failed to seed schema");
+
+        let destination =
+            DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, None, store)
+                .await
+                .expect("failed to create destination");
+
+        destination
+            .write_table_rows(
+                schema.id,
+                vec![
+                    TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
+                    TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
+                ],
+            )
+            .await
+            .expect("failed to write rows");
+
+        let conn = open_lake_conn(&catalog, &data);
+        let metrics = query_table_storage_metrics_blocking(&conn, &table_name)
+            .expect("failed to query storage metrics");
+
+        assert!(metrics.active_data_files >= 1);
+        assert!(metrics.active_data_bytes > 0);
+        assert_eq!(metrics.active_delete_files, 0);
+        assert_eq!(metrics.deleted_rows, 0);
+    }
+
+    #[tokio::test]
+    async fn test_query_catalog_maintenance_metrics_reads_ducklake_metadata() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
+        let data = path_to_file_url(&dir.path().join("data"));
+        let store = MemoryStore::new();
+        let schema = make_schema(1, "public", "users");
+
+        store
+            .store_table_schema(schema.clone())
+            .await
+            .expect("failed to seed schema");
+
+        let destination =
+            DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, None, store)
+                .await
+                .expect("failed to create destination");
+
+        destination
+            .write_table_rows(
+                schema.id,
+                vec![TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("alice".to_string()),
+                ])],
+            )
+            .await
+            .expect("failed to write rows");
+        destination
+            .truncate_table(schema.id)
+            .await
+            .expect("failed to truncate table");
+
+        let conn = open_lake_conn(&catalog, &data);
+        let metrics = query_catalog_maintenance_metrics_blocking(&conn)
+            .expect("failed to query catalog maintenance metrics");
+
+        assert!(metrics.snapshots_total >= 1);
+        assert!(metrics.oldest_snapshot_age_seconds >= 0);
+        assert!(metrics.files_scheduled_for_deletion_total >= 0);
+        assert!(metrics.files_scheduled_for_deletion_bytes >= 0);
+        assert!(metrics.oldest_scheduled_deletion_age_seconds >= 0);
     }
 }

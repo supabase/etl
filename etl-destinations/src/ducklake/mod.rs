@@ -1,5 +1,6 @@
 mod config;
 mod core;
+mod metrics;
 mod schema;
 
 /// Attach-level DuckLake data inlining limit for ETL-managed connections.

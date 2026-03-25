@@ -10,6 +10,7 @@ homepage.workspace = true
 [features]
 ducklake = [
     "dep:duckdb",
+    "dep:metrics",
     "dep:parking_lot",
     "dep:pg_escape",
     "dep:r2d2",
