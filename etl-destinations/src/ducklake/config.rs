@@ -11,7 +11,7 @@ use tokio_postgres::Config as PgConfig;
 use tokio_postgres::config::{Host, SslMode};
 use url::Url;
 
-use crate::ducklake::core::LAKE_CATALOG;
+use crate::ducklake::LAKE_CATALOG;
 
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";

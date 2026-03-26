@@ -1,8 +1,30 @@
-use std::sync::Once;
+use std::collections::HashSet;
+use std::sync::{Arc, Once, OnceLock};
 
-use metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
+use etl::error::{ErrorKind, EtlResult};
+use etl::etl_error;
+use metrics::{Unit, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
+use parking_lot::Mutex;
+use pg_escape::{quote_identifier, quote_literal};
+use tokio::sync::{Semaphore, watch};
+use tokio::task::JoinHandle;
+use tokio::time::{Duration, MissedTickBehavior};
+use tracing::{info, warn};
+
+use crate::ducklake::client::{
+    DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
+    format_query_error_detail, run_duckdb_blocking,
+};
+use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG};
 
 static REGISTER_METRICS: Once = Once::new();
+
+/// Files smaller than this are usually too small to be efficient in object storage.
+const SMALL_FILE_SIZE_BYTES: i64 = 5_000_000; // 5MB
+/// Dedicated pool size for background DuckLake metrics sampling.
+const METRICS_POOL_SIZE: u32 = 1;
+/// Frequency of background DuckLake metrics sampling.
+const METRICS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) const ETL_DUCKLAKE_POOL_SIZE: &str = "etl_ducklake_pool_size";
 pub(crate) const ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS: &str =
@@ -55,6 +77,32 @@ pub(crate) const DELETE_ORIGIN_LABEL: &str = "delete_origin";
 pub(crate) const RETRY_SCOPE_LABEL: &str = "retry_scope";
 pub(crate) const RESULT_LABEL: &str = "result";
 pub(crate) const MAINTENANCE_TASK_LABEL: &str = "task";
+
+/// Shared state for the background DuckLake metrics sampler.
+pub(super) struct DuckLakeMetricsSampler {
+    pub(super) shutdown_tx: watch::Sender<()>,
+    pub(super) handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Aggregated storage health sampled for one DuckLake table.
+pub(super) struct DuckLakeTableStorageMetrics {
+    pub(super) active_data_files: i64,
+    pub(super) active_data_bytes: i64,
+    pub(super) small_data_files: i64,
+    pub(super) active_data_rows: i64,
+    pub(super) active_delete_files: i64,
+    pub(super) active_delete_bytes: i64,
+    pub(super) deleted_rows: i64,
+}
+
+/// Global maintenance backlog sampled from the DuckLake catalog.
+pub(super) struct DuckLakeCatalogMaintenanceMetrics {
+    pub(super) snapshots_total: i64,
+    pub(super) oldest_snapshot_age_seconds: i64,
+    pub(super) files_scheduled_for_deletion_total: i64,
+    pub(super) files_scheduled_for_deletion_bytes: i64,
+    pub(super) oldest_scheduled_deletion_age_seconds: i64,
+}
 
 /// Registers DuckLake metrics once per process.
 pub(crate) fn register_metrics() {
@@ -191,4 +239,327 @@ pub(crate) fn register_metrics() {
             "Age in seconds of the oldest file waiting in files_scheduled_for_deletion."
         );
     });
+}
+
+/// Builds the dedicated metrics pool and spawns the periodic DuckLake sampler task.
+pub(super) async fn spawn_ducklake_metrics_sampler(
+    manager: DuckLakeConnectionManager,
+    created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+) -> EtlResult<DuckLakeMetricsSampler> {
+    let pool = Arc::new(build_warm_ducklake_pool(manager, METRICS_POOL_SIZE, "metrics").await?);
+    let blocking_slots = Arc::new(Semaphore::new(METRICS_POOL_SIZE as usize));
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let handle = tokio::spawn(run_ducklake_metrics_sampler(
+        pool,
+        blocking_slots,
+        created_tables,
+        shutdown_rx,
+    ));
+
+    Ok(DuckLakeMetricsSampler {
+        shutdown_tx,
+        handle: Mutex::new(handle.into()),
+    })
+}
+
+/// Periodically samples DuckLake metadata on a dedicated connection pool.
+async fn run_ducklake_metrics_sampler(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+    mut shutdown_rx: watch::Receiver<()>,
+) {
+    let mut interval = tokio::time::interval(METRICS_POLL_INTERVAL);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                info!("ducklake metrics sampler shutting down");
+                break;
+            }
+            _ = interval.tick() => {
+                if let Err(error) =
+                    record_catalog_maintenance_metrics(Arc::clone(&pool), Arc::clone(&blocking_slots)).await
+                {
+                    warn!(error = ?error, "ducklake catalog maintenance metrics collection failed");
+                }
+
+                let table_names = {
+                    let cache = created_tables.lock();
+                    cache.iter().cloned().collect::<Vec<_>>()
+                };
+
+                for table_name in table_names {
+                    if shutdown_rx.has_changed().unwrap_or(false) {
+                        info!("ducklake metrics sampler stopping after shutdown signal");
+                        return;
+                    }
+
+                    if let Err(error) = record_table_storage_metrics(
+                        Arc::clone(&pool),
+                        Arc::clone(&blocking_slots),
+                        table_name.clone(),
+                    )
+                    .await
+                    {
+                        warn!(
+                            table = %table_name,
+                            error = ?error,
+                            "ducklake table storage metrics collection failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Samples storage health for one table without affecting the write path.
+async fn record_table_storage_metrics(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    table_name: DuckLakeTableName,
+) -> EtlResult<()> {
+    let metrics = query_table_storage_metrics(pool, blocking_slots, table_name).await?;
+    let active_data_files = metrics.active_data_files.max(0) as f64;
+    let active_data_bytes = metrics.active_data_bytes.max(0) as f64;
+    let active_delete_files = metrics.active_delete_files.max(0) as f64;
+    let active_delete_bytes = metrics.active_delete_bytes.max(0) as f64;
+    let small_file_ratio = if metrics.active_data_files > 0 {
+        metrics.small_data_files.max(0) as f64 / metrics.active_data_files as f64
+    } else {
+        0.0
+    };
+    let average_data_file_size_bytes = if metrics.active_data_files > 0 {
+        metrics.active_data_bytes.max(0) as f64 / metrics.active_data_files as f64
+    } else {
+        0.0
+    };
+    let deleted_row_ratio = if metrics.active_data_rows > 0 {
+        metrics.deleted_rows.max(0) as f64 / metrics.active_data_rows as f64
+    } else {
+        0.0
+    };
+
+    histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES).record(active_data_files);
+    histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES).record(active_data_bytes);
+    histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILE_AVG_SIZE_BYTES)
+        .record(average_data_file_size_bytes);
+    histogram!(ETL_DUCKLAKE_TABLE_SMALL_FILE_RATIO).record(small_file_ratio);
+    histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_FILES).record(active_delete_files);
+    histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_BYTES).record(active_delete_bytes);
+    histogram!(ETL_DUCKLAKE_TABLE_DELETED_ROW_RATIO).record(deleted_row_ratio);
+
+    Ok(())
+}
+
+/// Samples global snapshot and deletion backlog gauges.
+async fn record_catalog_maintenance_metrics(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+) -> EtlResult<()> {
+    let metrics = query_catalog_maintenance_metrics(pool, blocking_slots).await?;
+    gauge!(ETL_DUCKLAKE_SNAPSHOTS_TOTAL).set(metrics.snapshots_total.max(0) as f64);
+    gauge!(ETL_DUCKLAKE_OLDEST_SNAPSHOT_AGE_SECONDS)
+        .set(metrics.oldest_snapshot_age_seconds.max(0) as f64);
+    gauge!(ETL_DUCKLAKE_FILES_SCHEDULED_FOR_DELETION_TOTAL)
+        .set(metrics.files_scheduled_for_deletion_total.max(0) as f64);
+    gauge!(ETL_DUCKLAKE_FILES_SCHEDULED_FOR_DELETION_BYTES)
+        .set(metrics.files_scheduled_for_deletion_bytes.max(0) as f64);
+    gauge!(ETL_DUCKLAKE_OLDEST_SCHEDULED_DELETION_AGE_SECONDS)
+        .set(metrics.oldest_scheduled_deletion_age_seconds.max(0) as f64);
+
+    Ok(())
+}
+
+/// Returns table-level storage health from the DuckLake metadata tables.
+async fn query_table_storage_metrics(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    table_name: DuckLakeTableName,
+) -> EtlResult<DuckLakeTableStorageMetrics> {
+    let table_name_for_query = table_name.clone();
+    run_duckdb_blocking(
+        pool,
+        blocking_slots,
+        DuckDbBlockingOperationKind::Metrics,
+        move |conn| query_table_storage_metrics_blocking(conn, &table_name_for_query),
+    )
+    .await
+}
+
+/// Returns table-level storage health from the DuckLake metadata tables.
+pub(super) fn query_table_storage_metrics_blocking(
+    conn: &duckdb::Connection,
+    table_name: &str,
+) -> EtlResult<DuckLakeTableStorageMetrics> {
+    let metadata_namespace = ducklake_metadata_namespace(conn)?;
+    let sql = format!(
+        r#"WITH target_table AS (
+             SELECT table_id
+             FROM {metadata_namespace}.ducklake_table
+             WHERE end_snapshot IS NULL AND table_name = {}
+             LIMIT 1
+         ),
+         data_stats AS (
+             SELECT
+                 COUNT(*) AS active_data_files,
+                 COALESCE(SUM(file_size_bytes), 0) AS active_data_bytes,
+                 COALESCE(SUM(CASE WHEN file_size_bytes < {} THEN 1 ELSE 0 END), 0) AS small_data_files,
+                 COALESCE(SUM(record_count), 0) AS active_data_rows
+             FROM {metadata_namespace}.ducklake_data_file
+             WHERE end_snapshot IS NULL AND table_id = (SELECT table_id FROM target_table)
+         ),
+         delete_stats AS (
+             SELECT
+                 COUNT(*) AS active_delete_files,
+                 COALESCE(SUM(file_size_bytes), 0) AS active_delete_bytes,
+                 COALESCE(SUM(delete_count), 0) AS deleted_rows
+             FROM {metadata_namespace}.ducklake_delete_file
+             WHERE end_snapshot IS NULL AND table_id = (SELECT table_id FROM target_table)
+         )
+         SELECT
+             active_data_files,
+             active_data_bytes,
+             small_data_files,
+             active_data_rows,
+             active_delete_files,
+             active_delete_bytes,
+             deleted_rows
+         FROM data_stats CROSS JOIN delete_stats;"#,
+        quote_literal(table_name),
+        SMALL_FILE_SIZE_BYTES,
+    );
+
+    conn.query_row(&sql, [], |row| {
+        Ok(DuckLakeTableStorageMetrics {
+            active_data_files: row.get(0)?,
+            active_data_bytes: row.get(1)?,
+            small_data_files: row.get(2)?,
+            active_data_rows: row.get(3)?,
+            active_delete_files: row.get(4)?,
+            active_delete_bytes: row.get(5)?,
+            deleted_rows: row.get(6)?,
+        })
+    })
+    .map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake table storage metrics query failed",
+            format_query_error_detail(&sql, &e),
+            source: e
+        )
+    })
+}
+
+/// Returns global maintenance backlog metrics from the DuckLake metadata tables.
+async fn query_catalog_maintenance_metrics(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+) -> EtlResult<DuckLakeCatalogMaintenanceMetrics> {
+    run_duckdb_blocking(
+        pool,
+        blocking_slots,
+        DuckDbBlockingOperationKind::Metrics,
+        query_catalog_maintenance_metrics_blocking,
+    )
+    .await
+}
+
+/// Returns global maintenance backlog metrics from the DuckLake metadata tables.
+pub(super) fn query_catalog_maintenance_metrics_blocking(
+    conn: &duckdb::Connection,
+) -> EtlResult<DuckLakeCatalogMaintenanceMetrics> {
+    let metadata_namespace = ducklake_metadata_namespace(conn)?;
+    let sql = format!(
+        r#"WITH snapshot_stats AS (
+             SELECT
+                 COUNT(*) AS snapshots_total,
+                 COALESCE(MAX(date_diff('second', snapshot_time, current_timestamp)), 0) AS oldest_snapshot_age_seconds
+             FROM {metadata_namespace}.ducklake_snapshot
+         ),
+         scheduled_deletion_stats AS (
+             SELECT
+                 COUNT(*) AS files_scheduled_for_deletion_total,
+                 COALESCE(SUM(data_files.file_size_bytes), 0) AS files_scheduled_for_deletion_bytes,
+                 COALESCE(MAX(date_diff('second', scheduled.schedule_start, current_timestamp)), 0) AS oldest_scheduled_deletion_age_seconds
+             FROM {metadata_namespace}.ducklake_files_scheduled_for_deletion AS scheduled
+             LEFT JOIN {metadata_namespace}.ducklake_data_file AS data_files USING (data_file_id)
+         )
+         SELECT
+             snapshots_total,
+             oldest_snapshot_age_seconds,
+             files_scheduled_for_deletion_total,
+             files_scheduled_for_deletion_bytes,
+             oldest_scheduled_deletion_age_seconds
+         FROM snapshot_stats CROSS JOIN scheduled_deletion_stats;"#
+    );
+
+    conn.query_row(&sql, [], |row| {
+        Ok(DuckLakeCatalogMaintenanceMetrics {
+            snapshots_total: row.get(0)?,
+            oldest_snapshot_age_seconds: row.get(1)?,
+            files_scheduled_for_deletion_total: row.get(2)?,
+            files_scheduled_for_deletion_bytes: row.get(3)?,
+            oldest_scheduled_deletion_age_seconds: row.get(4)?,
+        })
+    })
+    .map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake catalog maintenance metrics query failed",
+            format_query_error_detail(&sql, &e),
+            source: e
+        )
+    })
+}
+
+/// Returns the fully-qualified hidden DuckLake metadata namespace.
+fn ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<String> {
+    static METADATA_NAMESPACE: OnceLock<String> = OnceLock::new();
+
+    if let Some(namespace) = METADATA_NAMESPACE.get() {
+        return Ok(namespace.clone());
+    }
+
+    let namespace = resolve_ducklake_metadata_namespace(conn)?;
+    let _ = METADATA_NAMESPACE.set(namespace.clone());
+    Ok(namespace)
+}
+
+/// Resolves the schema that DuckLake uses inside its hidden metadata catalog.
+fn resolve_ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<String> {
+    let metadata_catalog = format!("__ducklake_metadata_{LAKE_CATALOG}");
+    let sql = format!(
+        r#"SELECT table_schema
+           FROM information_schema.tables
+           WHERE table_catalog = {}
+             AND table_name = 'ducklake_snapshot'
+           ORDER BY CASE
+               WHEN table_schema = 'main' THEN 0
+               WHEN table_schema = 'ducklake' THEN 1
+               ELSE 2
+           END,
+           table_schema
+           LIMIT 1;"#,
+        quote_literal(&metadata_catalog),
+    );
+    let table_schema = conn
+        .query_row(&sql, [], |row| row.get::<_, String>(0))
+        .map_err(|e| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake metadata namespace query failed",
+                format_query_error_detail(&sql, &e),
+                source: e
+            )
+        })?;
+
+    Ok(format!(
+        "{}.{}",
+        quote_identifier(&metadata_catalog),
+        quote_identifier(&table_schema),
+    ))
 }

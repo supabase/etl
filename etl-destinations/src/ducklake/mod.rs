@@ -1,14 +1,23 @@
+mod client;
 mod config;
 mod core;
+mod encoding;
+mod maintenance;
 mod metrics;
 mod schema;
+
+/// The DuckDB catalog alias used in every `lake.<table>` qualified name.
+pub(super) const LAKE_CATALOG: &str = "lake";
+
+/// Alias for DuckLake table names.
+pub(super) type DuckLakeTableName = String;
 
 /// Attach-level DuckLake data inlining limit for ETL-managed connections.
 ///
 /// This applies to every DuckDB connection in the destination pool so small
 /// writes inline into the DuckLake metadata first and can later be
 /// materialized to Parquet by the background maintenance worker.
-const ATTACH_DATA_INLINING_ROW_LIMIT: usize = 500; // This number has been computed from our metrics in prod
+const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 
 pub use config::{DuckDbLogConfig, S3Config};
 pub use core::{DuckLakeDestination, table_name_to_ducklake_table_name};
