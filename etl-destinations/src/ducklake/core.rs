@@ -430,6 +430,9 @@ where
     ///
     /// Copy batches are recorded in the replay marker table so a retry after an
     /// ambiguous post-commit failure can detect already applied rows.
+    ///
+    /// Small copy batches may stay inlined until the background maintenance
+    /// worker materializes them after we emit the maintenance notification.
     async fn write_table_rows_inner(
         &self,
         table_id: TableId,
@@ -464,7 +467,6 @@ where
             table_name,
             approx_bytes,
             inserted_rows,
-            deleted_rows: 0,
         })
         .await;
 
@@ -517,8 +519,7 @@ where
                         let old_table_row = update.old_table_row;
                         let upsert_bytes = table_row.size_hint() as u64;
                         let mutations = table_id_to_mutations.entry(table_id).or_default();
-                        let delete_bytes = if let Some((_, old_row)) = old_table_row {
-                            let delete_bytes = old_row.size_hint() as u64;
+                        if let Some((_, old_row)) = old_table_row {
                             mutations.push(TrackedTableMutation {
                                 start_lsn: update.start_lsn,
                                 commit_lsn: update.commit_lsn,
@@ -527,7 +528,6 @@ where
                                     upsert_row: table_row,
                                 },
                             });
-                            delete_bytes
                         } else {
                             debug!(
                                 "update event has no old row, deleting by primary key from new row"
@@ -537,21 +537,16 @@ where
                                 commit_lsn: update.commit_lsn,
                                 mutation: TableMutation::Replace(table_row),
                             });
-                            upsert_bytes
-                        };
+                        }
                         let stats = table_id_to_stats.entry(table_id).or_default();
-                        stats.approx_bytes = stats
-                            .approx_bytes
-                            .saturating_add(upsert_bytes.saturating_add(delete_bytes));
+                        stats.approx_bytes = stats.approx_bytes.saturating_add(upsert_bytes);
                         stats.inserted_rows = stats.inserted_rows.saturating_add(1);
-                        stats.deleted_rows = stats.deleted_rows.saturating_add(1);
                     }
                     Event::Delete(delete) => {
                         let Some((_, old_row)) = delete.old_table_row else {
                             info!("delete event has no old row, skipping");
                             continue;
                         };
-                        let approx_bytes = old_row.size_hint() as u64;
                         table_id_to_mutations
                             .entry(delete.table_id)
                             .or_default()
@@ -560,9 +555,6 @@ where
                                 commit_lsn: delete.commit_lsn,
                                 mutation: TableMutation::Delete(old_row),
                             });
-                        let stats = table_id_to_stats.entry(delete.table_id).or_default();
-                        stats.approx_bytes = stats.approx_bytes.saturating_add(approx_bytes);
-                        stats.deleted_rows = stats.deleted_rows.saturating_add(1);
                     }
                     event => {
                         debug!(event_type = %event.event_type(), "skipping unsupported event type");
@@ -1280,18 +1272,10 @@ async fn apply_table_batch_with_retry(
                             "ducklake table batch already committed, skipping replay"
                         );
 
-                        if batch_kind == DuckLakeTableBatchKind::Copy {
-                            flush_table_inlined_data(conn, &attempt_batch.table_name, batch_kind)?;
-                        }
-
                         return Ok(());
                     }
 
                     apply_table_batch(manager.as_ref(), conn, attempt_batch.as_ref())?;
-
-                    if batch_kind == DuckLakeTableBatchKind::Copy {
-                        flush_table_inlined_data(conn, &attempt_batch.table_name, batch_kind)?;
-                    }
 
                     Ok(())
                 }
@@ -1955,10 +1939,6 @@ pub(super) fn flush_table_inlined_data(
             "ducklake inlined data already flushed"
         );
     }
-
-    #[cfg(feature = "test-utils")]
-    maybe_fail_after_flushed_batch_for_tests(batch_kind, table_name)?;
-
     Ok(rows_flushed)
 }
 
@@ -2265,9 +2245,6 @@ static FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE: LazyLock<Mutex<Option<String>>> =
 #[cfg(feature = "test-utils")]
 static FAIL_AFTER_COPY_BATCH_COMMIT_TABLE: LazyLock<Mutex<Option<String>>> =
     LazyLock::new(|| Mutex::new(None));
-#[cfg(feature = "test-utils")]
-static FAIL_AFTER_COPY_BATCH_FLUSH_TABLE: LazyLock<Mutex<Option<String>>> =
-    LazyLock::new(|| Mutex::new(None));
 
 /// Arms a test hook that injects one post-commit failure for the next atomic batch.
 #[cfg(feature = "test-utils")]
@@ -2281,18 +2258,11 @@ pub fn arm_fail_after_copy_batch_commit_once_for_tests(table_name: &str) {
     *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_string());
 }
 
-/// Arms a test hook that injects one failure after flushing a copy batch.
-#[cfg(feature = "test-utils")]
-pub fn arm_fail_after_copy_batch_flush_once_for_tests(table_name: &str) {
-    *FAIL_AFTER_COPY_BATCH_FLUSH_TABLE.lock() = Some(table_name.to_string());
-}
-
 /// Clears DuckLake destination test hooks.
 #[cfg(feature = "test-utils")]
 pub fn reset_ducklake_test_hooks() {
     *FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock() = None;
     *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = None;
-    *FAIL_AFTER_COPY_BATCH_FLUSH_TABLE.lock() = None;
 }
 
 /// Injects a synthetic failure after commit so retries must rely on the correct marker path.
@@ -2306,18 +2276,6 @@ fn maybe_fail_after_committed_batch_for_tests(
         DuckLakeTableBatchKind::Mutation | DuckLakeTableBatchKind::Truncate => {
             maybe_fail_after_atomic_batch_commit_for_tests(table_name)
         }
-    }
-}
-
-/// Injects a synthetic failure after flush so copy retries must avoid reapplying rows.
-#[cfg(feature = "test-utils")]
-fn maybe_fail_after_flushed_batch_for_tests(
-    batch_kind: DuckLakeTableBatchKind,
-    table_name: &str,
-) -> EtlResult<()> {
-    match batch_kind {
-        DuckLakeTableBatchKind::Copy => maybe_fail_after_copy_batch_flush_for_tests(table_name),
-        DuckLakeTableBatchKind::Mutation | DuckLakeTableBatchKind::Truncate => Ok(()),
     }
 }
 
@@ -2345,21 +2303,6 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<(
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
             "ducklake test hook injected copy post-commit failure"
-        ));
-    }
-
-    Ok(())
-}
-
-/// Injects a synthetic failure after flush so copy retries re-enter at flush only.
-#[cfg(feature = "test-utils")]
-fn maybe_fail_after_copy_batch_flush_for_tests(table_name: &str) -> EtlResult<()> {
-    let mut fail_table = FAIL_AFTER_COPY_BATCH_FLUSH_TABLE.lock();
-    if fail_table.as_deref() == Some(table_name) {
-        *fail_table = None;
-        return Err(etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "ducklake test hook injected copy post-flush failure"
         ));
     }
 
@@ -3108,8 +3051,22 @@ mod tests {
             .expect("failed to write rows");
 
         let conn = open_lake_conn(&catalog, &data);
-        let metrics = query_table_storage_metrics_blocking(&conn, &table_name)
-            .expect("failed to query storage metrics");
+        let _rows_flushed =
+            flush_table_inlined_data(&conn, &table_name, DuckLakeTableBatchKind::Copy)
+                .expect("failed to materialize inlined rows for storage metrics test");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let metrics = loop {
+            let metrics = query_table_storage_metrics_blocking(&conn, &table_name)
+                .expect("failed to query storage metrics");
+            if metrics.active_data_files >= 1 {
+                break metrics;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for storage metrics after materialization"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
 
         assert!(metrics.active_data_files >= 1);
         assert!(metrics.active_data_bytes > 0);

@@ -31,13 +31,11 @@ const MAINTENANCE_POOL_SIZE: u32 = 1;
 /// Poll interval for checking per-table inline flush thresholds.
 const MAINTENANCE_FLUSH_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// How long a table can stay idle before pending inlined data is materialized.
-const MAINTENANCE_IDLE_FLUSH_THRESHOLD: Duration = Duration::from_secs(30);
+const MAINTENANCE_IDLE_FLUSH_THRESHOLD: Duration = Duration::from_secs(60 * 5);
 /// Pending bytes threshold that triggers a background inline flush.
 const MAINTENANCE_PENDING_BYTES_THRESHOLD: u64 = 5_000_000; // 5MB
 /// Pending inserted rows threshold that triggers a background inline flush.
 const MAINTENANCE_PENDING_ROWS_THRESHOLD: u64 = ATTACH_DATA_INLINING_ROW_LIMIT - 100;
-/// Pending deleted rows threshold that triggers a background inline flush.
-const MAINTENANCE_PENDING_DELETES_THRESHOLD: u64 = 500;
 /// Minimum idle window before targeted table maintenance runs, to not have maintenances ran too frequently.
 const MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD: Duration = Duration::from_secs(90);
 /// Minimum delay between targeted maintenance runs for the same table.
@@ -80,7 +78,6 @@ impl MaintenanceOperation {
 enum MaintenanceReason {
     PendingBytesThreshold,
     PendingInsertedRowsThreshold,
-    PendingDeletedRowsThreshold,
     IdleFlushThreshold,
     DirtyIdleWindow,
     CheckpointInterval,
@@ -92,7 +89,6 @@ impl MaintenanceReason {
         match self {
             Self::PendingBytesThreshold => "pending_bytes_threshold",
             Self::PendingInsertedRowsThreshold => "pending_inserted_rows_threshold",
-            Self::PendingDeletedRowsThreshold => "pending_deleted_rows_threshold",
             Self::IdleFlushThreshold => "idle_flush_threshold",
             Self::DirtyIdleWindow => "dirty_idle_window",
             Self::CheckpointInterval => "checkpoint_interval",
@@ -138,7 +134,6 @@ pub(super) struct TableMaintenanceNotification {
     pub(super) table_name: DuckLakeTableName,
     pub(super) approx_bytes: u64,
     pub(super) inserted_rows: u64,
-    pub(super) deleted_rows: u64,
 }
 
 /// Coalesced maintenance state for one DuckLake table.
@@ -146,7 +141,6 @@ pub(super) struct TableMaintenanceNotification {
 struct TableMaintenanceState {
     pending_bytes: u64,
     pending_inserted_rows: u64,
-    pending_deleted_rows: u64,
     dirty_since_compaction: bool,
     last_write_at: Instant,
     last_compaction_at: Option<Instant>,
@@ -159,16 +153,13 @@ impl TableMaintenanceState {
         self.pending_inserted_rows = self
             .pending_inserted_rows
             .saturating_add(notification.inserted_rows);
-        self.pending_deleted_rows = self
-            .pending_deleted_rows
-            .saturating_add(notification.deleted_rows);
         self.dirty_since_compaction = true;
         self.last_write_at = now;
     }
 
     /// Returns whether the table still has pending inline work.
     fn has_pending_flush_work(&self) -> bool {
-        self.pending_bytes > 0 || self.pending_inserted_rows > 0 || self.pending_deleted_rows > 0
+        self.pending_bytes > 0 || self.pending_inserted_rows > 0
     }
 
     /// Returns the primary reason that pending inlined work should be flushed.
@@ -179,10 +170,6 @@ impl TableMaintenanceState {
 
         if self.pending_inserted_rows >= MAINTENANCE_PENDING_ROWS_THRESHOLD {
             return Some(MaintenanceReason::PendingInsertedRowsThreshold);
-        }
-
-        if self.pending_deleted_rows >= MAINTENANCE_PENDING_DELETES_THRESHOLD {
-            return Some(MaintenanceReason::PendingDeletedRowsThreshold);
         }
 
         let idle = now.saturating_duration_since(self.last_write_at);
@@ -197,7 +184,6 @@ impl TableMaintenanceState {
     fn clear_pending_flush(&mut self) {
         self.pending_bytes = 0;
         self.pending_inserted_rows = 0;
-        self.pending_deleted_rows = 0;
     }
 
     /// Returns the reason targeted maintenance should run for this table.
@@ -359,7 +345,6 @@ async fn run_ducklake_maintenance_worker(
                         let mut state = TableMaintenanceState {
                             pending_bytes: 0,
                             pending_inserted_rows: 0,
-                            pending_deleted_rows: 0,
                             dirty_since_compaction: true,
                             last_write_at: now,
                             last_compaction_at: None,
@@ -1008,7 +993,6 @@ mod tests {
         let state = TableMaintenanceState {
             pending_bytes: MAINTENANCE_PENDING_BYTES_THRESHOLD,
             pending_inserted_rows: MAINTENANCE_PENDING_ROWS_THRESHOLD,
-            pending_deleted_rows: MAINTENANCE_PENDING_DELETES_THRESHOLD,
             dirty_since_compaction: true,
             last_write_at: now - MAINTENANCE_IDLE_FLUSH_THRESHOLD,
             last_compaction_at: None,
@@ -1026,7 +1010,6 @@ mod tests {
         let state = TableMaintenanceState {
             pending_bytes: MAINTENANCE_PENDING_BYTES_THRESHOLD - 1,
             pending_inserted_rows: MAINTENANCE_PENDING_ROWS_THRESHOLD,
-            pending_deleted_rows: 0,
             dirty_since_compaction: true,
             last_write_at: now,
             last_compaction_at: None,
@@ -1039,30 +1022,11 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_uses_pending_deleted_rows_flush_reason() {
-        let now = Instant::now();
-        let state = TableMaintenanceState {
-            pending_bytes: MAINTENANCE_PENDING_BYTES_THRESHOLD - 1,
-            pending_inserted_rows: MAINTENANCE_PENDING_ROWS_THRESHOLD - 1,
-            pending_deleted_rows: MAINTENANCE_PENDING_DELETES_THRESHOLD,
-            dirty_since_compaction: true,
-            last_write_at: now,
-            last_compaction_at: None,
-        };
-
-        assert_eq!(
-            state.flush_reason(now),
-            Some(MaintenanceReason::PendingDeletedRowsThreshold)
-        );
-    }
-
-    #[test]
     fn test_table_maintenance_state_uses_idle_flush_reason() {
         let now = Instant::now();
         let state = TableMaintenanceState {
             pending_bytes: 128,
             pending_inserted_rows: 1,
-            pending_deleted_rows: 0,
             dirty_since_compaction: true,
             last_write_at: now,
             last_compaction_at: None,
@@ -1081,7 +1045,6 @@ mod tests {
         let state = TableMaintenanceState {
             pending_bytes: 0,
             pending_inserted_rows: 0,
-            pending_deleted_rows: 0,
             dirty_since_compaction: true,
             last_write_at: now,
             last_compaction_at: Some(now),

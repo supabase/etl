@@ -38,8 +38,7 @@ use etl_destinations::ducklake::{
 #[cfg(feature = "test-utils")]
 use etl_destinations::ducklake::{
     arm_fail_after_atomic_batch_commit_once_for_tests,
-    arm_fail_after_copy_batch_commit_once_for_tests,
-    arm_fail_after_copy_batch_flush_once_for_tests, reset_ducklake_test_hooks,
+    arm_fail_after_copy_batch_commit_once_for_tests, reset_ducklake_test_hooks,
 };
 use pg_escape::{quote_identifier, quote_literal};
 use std::f64::consts::PI;
@@ -316,10 +315,10 @@ async fn test_write_table_rows_basic() {
     assert_eq!(name.as_deref(), Some("Alice"));
 }
 
-/// Small copy batches should be flushed to Parquet before the caller returns.
+/// Small copy batches should remain inlined after the caller returns.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_table_rows_auto_flushes_inlined_data() {
-    let dir = make_test_dir("write_table_rows_auto_flushes_inlined_data");
+async fn test_write_table_rows_small_batch_stays_inlined_after_return() {
+    let dir = make_test_dir("write_table_rows_small_batch_stays_inlined_after_return");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
@@ -329,7 +328,7 @@ async fn test_write_table_rows_auto_flushes_inlined_data() {
 
     let table_id = TableId::new(16);
     let schema = make_schema(16, "public", "copy_flush");
-    let table_name = table_name_to_ducklake_table_name(&schema.name);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
@@ -360,10 +359,57 @@ async fn test_write_table_rows_auto_flushes_inlined_data() {
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
-    assert!(
-        count_table_files(&conn, &table_name) >= 1,
-        "copy batch should already be flushed to parquet"
+    assert_eq!(
+        count_table_files(&conn, &table_name),
+        0,
+        "small copy batch should remain inlined until background maintenance"
     );
+}
+
+/// Large inlined copy backlogs should be materialized by the background worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_write_table_rows_background_flush_materializes_large_inline_backlog() {
+    let dir = make_test_dir("write_table_rows_background_flush_materializes_large_inline_backlog");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let table_id = TableId::new(22);
+    let schema = make_schema(22, "public", "copy_background_flush");
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    let rows = (0..600)
+        .map(|id| TableRow::new(vec![Cell::I32(id), Cell::String("x".repeat(10_000))]))
+        .collect::<Vec<_>>();
+
+    destination.write_table_rows(table_id, rows).await.unwrap();
+
+    wait_for_condition(Duration::from_secs(10), || {
+        let conn = open_lake_conn(&catalog_url, &data_url);
+        count_table_files(&conn, &table_name) >= 1
+    })
+    .await;
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(count_rows(&conn, &table_name), 600);
     assert_eq!(flush_inlined_rows(&conn, &table_name), 0);
 }
 
@@ -1486,64 +1532,6 @@ async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
         )
         .unwrap();
     assert_eq!(name, "posted");
-
-    reset_ducklake_test_hooks();
-}
-
-/// A post-flush retry should not duplicate table-copy rows.
-#[cfg(feature = "test-utils")]
-#[tokio::test(flavor = "multi_thread")]
-async fn test_write_table_rows_retry_after_post_flush_failure_is_idempotent() {
-    let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
-    reset_ducklake_test_hooks();
-
-    let dir = make_test_dir("write_table_rows_retry_after_post_flush_failure_is_idempotent");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
-
-    let table_id = TableId::new(18);
-    let schema = make_schema(18, "public", "copy_flush_retry");
-    let table_name = table_name_to_ducklake_table_name(&schema.name);
-
-    let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
-
-    let destination = DuckLakeDestination::new(
-        catalog_url.clone(),
-        data_url.clone(),
-        1,
-        None,
-        None,
-        None,
-        store,
-    )
-    .await
-    .unwrap();
-
-    arm_fail_after_copy_batch_flush_once_for_tests(&table_name);
-    destination
-        .write_table_rows(
-            table_id,
-            vec![
-                TableRow::new(vec![Cell::I32(1), Cell::String("alpha".to_string())]),
-                TableRow::new(vec![Cell::I32(2), Cell::String("beta".to_string())]),
-            ],
-        )
-        .await
-        .unwrap();
-
-    let conn = open_lake_conn(&catalog_url, &data_url);
-    assert_eq!(count_rows(&conn, &table_name), 2);
-    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
-    assert!(
-        count_table_files(&conn, &table_name) >= 1,
-        "copy batch should be materialized after retry"
-    );
-    assert_eq!(flush_inlined_rows(&conn, &table_name), 0);
 
     reset_ducklake_test_hooks();
 }

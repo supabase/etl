@@ -56,7 +56,7 @@ These explain the pressure your writer is putting on DuckLake:
 - `etl_ducklake_inline_flush_rows`
 - `etl_ducklake_inline_flush_duration_seconds`
 
-The destination attaches DuckLake with `DATA_INLINING_ROW_LIMIT = 500` and then
+The destination attaches DuckLake with `DATA_INLINING_ROW_LIMIT = 10000` and then
 lets a background maintenance worker flush and checkpoint inlined data after
 writes. These metrics tell you whether that strategy is helping.
 
