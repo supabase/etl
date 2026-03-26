@@ -7,9 +7,9 @@ The metrics fall into four groups:
 
 - write-path metrics: show how the ETL writer is batching, waiting, retrying,
   and flushing inline data.
-- maintenance counters: operation-level counters emitted by the background
-  maintenance worker with the primary reason and outcome for each maintenance
-  attempt.
+- maintenance execution metrics: operation-level duration and skip metrics
+  emitted by the background maintenance worker with the primary reason and
+  outcome for each maintenance attempt.
 - table-health samples: histograms recorded by a background sampler every
   30 seconds on a dedicated DuckDB pool of size 1. They describe the current
   shape of tables known to the current destination instance.
@@ -73,15 +73,24 @@ How to read them:
 
 ### Background maintenance metrics
 
-- `etl_ducklake_maintenance_total`
+- `etl_ducklake_maintenance_duration_seconds`
+- `etl_ducklake_maintenance_skipped_total`
 
-This counter is emitted once per background maintenance operation with labels:
+`etl_ducklake_maintenance_duration_seconds` is emitted once per background
+maintenance operation that actually runs. Use the histogram `_count` as the
+event count for non-skipped outcomes.
+
+It carries these labels:
 
 - `task`: `flush`, `targeted_maintenance`, or `checkpoint`
 - `operation`: `flush_inlined_data`, `rewrite_data_files`,
   `merge_adjacent_files`, or `checkpoint`
 - `reason`: the primary cause for the maintenance decision
-- `outcome`: `applied`, `noop`, `skipped_busy`, or `failed`
+- `outcome`: `applied`, `noop`, or `failed`
+
+`etl_ducklake_maintenance_skipped_total` counts maintenance operations that
+were skipped because the worker could not acquire the table-local write slot.
+It is labeled by `task`, `operation`, and `reason`.
 
 How to read it:
 
@@ -90,14 +99,14 @@ How to read it:
 - `task="flush"` with `reason="idle_flush_threshold"` means none of the size
   thresholds fired first, and the table was flushed because it stayed idle long
   enough with pending inline work.
-- `task="targeted_maintenance"` can emit up to two counter events for one
+- `task="targeted_maintenance"` can emit up to two duration series for one
   maintenance cycle: one for `rewrite_data_files` and one for
   `merge_adjacent_files`.
-- `outcome="skipped_busy"` means the worker wanted to run maintenance but the
-  table-local write slot was still busy.
-- rising `outcome="failed"` counts point to maintenance execution issues,
-  while many `outcome="noop"` counts usually mean maintenance is polling more
-  often than work is actually accumulating.
+- rising `etl_ducklake_maintenance_skipped_total` means the worker wants to run
+  maintenance but the table-local write slot is still busy.
+- rising histogram `_count` for `outcome="failed"` points to maintenance
+  execution issues, while many `outcome="noop"` samples usually mean
+  maintenance is polling more often than work is actually accumulating.
 
 ### Table-health sampling metrics
 

@@ -45,7 +45,10 @@ pub(crate) const ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS: &str =
 pub(crate) const ETL_DUCKLAKE_RETRIES_TOTAL: &str = "etl_ducklake_retries_total";
 pub(crate) const ETL_DUCKLAKE_FAILED_BATCHES_TOTAL: &str = "etl_ducklake_failed_batches_total";
 pub(crate) const ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL: &str = "etl_ducklake_replayed_batches_total";
-pub(crate) const ETL_DUCKLAKE_MAINTENANCE_TOTAL: &str = "etl_ducklake_maintenance_total";
+pub(crate) const ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS: &str =
+    "etl_ducklake_maintenance_duration_seconds";
+pub(crate) const ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL: &str =
+    "etl_ducklake_maintenance_skipped_total";
 pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES: &str =
     "etl_ducklake_table_active_data_files";
 pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES: &str =
@@ -175,10 +178,15 @@ pub(crate) fn register_metrics() {
             Unit::Count,
             "DuckLake batches skipped because an applied marker already existed, labeled by batch_kind."
         );
+        describe_histogram!(
+            ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
+            Unit::Seconds,
+            "Duration of DuckLake background maintenance operations, labeled by task, operation, reason, and outcome. Use the histogram count as the event count for non-skipped outcomes."
+        );
         describe_counter!(
-            ETL_DUCKLAKE_MAINTENANCE_TOTAL,
+            ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL,
             Unit::Count,
-            "DuckLake background maintenance operation attempts and outcomes, labeled by task, operation, reason, and outcome."
+            "DuckLake background maintenance operations skipped because execution was deferred, labeled by task, operation, and reason."
         );
 
         describe_histogram!(

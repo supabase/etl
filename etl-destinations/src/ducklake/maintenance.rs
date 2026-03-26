@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
-use metrics::counter;
+use metrics::{counter, histogram};
 use parking_lot::Mutex;
 use pg_escape::quote_literal;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
@@ -20,8 +20,9 @@ use crate::ducklake::client::{
 };
 use crate::ducklake::core::{DuckLakeTableBatchKind, flush_table_inlined_data};
 use crate::ducklake::metrics::{
-    ETL_DUCKLAKE_MAINTENANCE_TOTAL, MAINTENANCE_OPERATION_LABEL, MAINTENANCE_OUTCOME_LABEL,
-    MAINTENANCE_REASON_LABEL, MAINTENANCE_TASK_LABEL,
+    ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS, ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL,
+    MAINTENANCE_OPERATION_LABEL, MAINTENANCE_OUTCOME_LABEL, MAINTENANCE_REASON_LABEL,
+    MAINTENANCE_TASK_LABEL,
 };
 use crate::ducklake::{ATTACH_DATA_INLINING_ROW_LIMIT, DuckLakeTableName, LAKE_CATALOG};
 
@@ -229,19 +230,36 @@ pub(super) struct DuckLakeMaintenanceWorker {
     pub(super) handle: Mutex<Option<JoinHandle<()>>>,
 }
 
-/// Records one DuckLake background maintenance operation outcome.
-fn record_ducklake_maintenance(
+/// Records one DuckLake background maintenance operation duration sample.
+fn record_ducklake_maintenance_duration(
     task: &'static str,
     operation: MaintenanceOperation,
     reason: MaintenanceReason,
     outcome: MaintenanceOutcome,
+    duration_seconds: f64,
 ) {
-    counter!(
-        ETL_DUCKLAKE_MAINTENANCE_TOTAL,
+    debug_assert_ne!(outcome, MaintenanceOutcome::SkippedBusy);
+    histogram!(
+        ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
         MAINTENANCE_TASK_LABEL => task,
         MAINTENANCE_OPERATION_LABEL => operation.as_str(),
         MAINTENANCE_REASON_LABEL => reason.as_str(),
         MAINTENANCE_OUTCOME_LABEL => outcome.as_str(),
+    )
+    .record(duration_seconds);
+}
+
+/// Records one DuckLake background maintenance operation skip.
+fn record_ducklake_maintenance_skipped(
+    task: &'static str,
+    operation: MaintenanceOperation,
+    reason: MaintenanceReason,
+) {
+    counter!(
+        ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL,
+        MAINTENANCE_TASK_LABEL => task,
+        MAINTENANCE_OPERATION_LABEL => operation.as_str(),
+        MAINTENANCE_REASON_LABEL => reason.as_str(),
     )
     .increment(1);
 }
@@ -252,11 +270,10 @@ fn record_skipped_targeted_maintenance(reason: MaintenanceReason) {
         MaintenanceOperation::RewriteDataFiles,
         MaintenanceOperation::MergeAdjacentFiles,
     ] {
-        record_ducklake_maintenance(
+        record_ducklake_maintenance_skipped(
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             operation,
             reason,
-            MaintenanceOutcome::SkippedBusy,
         );
     }
 }
@@ -470,11 +487,10 @@ async fn flush_table_inlined_data_in_background(
 ) -> EtlResult<MaintenanceOutcome> {
     let Some(table_write_permit) = try_acquire_table_write_slot(&table_write_slots, &table_name)
     else {
-        record_ducklake_maintenance(
+        record_ducklake_maintenance_skipped(
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
             reason,
-            MaintenanceOutcome::SkippedBusy,
         );
         return Ok(MaintenanceOutcome::SkippedBusy);
     };
@@ -538,21 +554,24 @@ fn flush_table_inlined_data_in_background_blocking(
     table_name: &str,
     reason: MaintenanceReason,
 ) -> EtlResult<MaintenanceOutcome> {
+    let flush_started = Instant::now();
     let rows_flushed = flush_table_inlined_data(conn, table_name, DuckLakeTableBatchKind::Mutation)
         .inspect_err(|_error| {
-            record_ducklake_maintenance(
+            record_ducklake_maintenance_duration(
                 MAINTENANCE_TASK_FLUSH,
                 MaintenanceOperation::FlushInlinedData,
                 reason,
                 MaintenanceOutcome::Failed,
+                flush_started.elapsed().as_secs_f64(),
             );
         })?;
     let outcome = MaintenanceOutcome::from(rows_flushed);
-    record_ducklake_maintenance(
+    record_ducklake_maintenance_duration(
         MAINTENANCE_TASK_FLUSH,
         MaintenanceOperation::FlushInlinedData,
         reason,
         outcome,
+        flush_started.elapsed().as_secs_f64(),
     );
     Ok(outcome)
 }
@@ -563,36 +582,42 @@ fn run_targeted_table_maintenance_blocking(
     table_name: &str,
     reason: MaintenanceReason,
 ) -> EtlResult<MaintenanceOutcome> {
+    let rewrite_started = Instant::now();
     let rewritten_files = rewrite_table_data_files(conn, table_name).inspect_err(|_error| {
-        record_ducklake_maintenance(
+        record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
             reason,
             MaintenanceOutcome::Failed,
+            rewrite_started.elapsed().as_secs_f64(),
         );
     })?;
     let rewrite_outcome = MaintenanceOutcome::from(rewritten_files);
-    record_ducklake_maintenance(
+    record_ducklake_maintenance_duration(
         MAINTENANCE_TASK_TARGETED_MAINTENANCE,
         MaintenanceOperation::RewriteDataFiles,
         reason,
         rewrite_outcome,
+        rewrite_started.elapsed().as_secs_f64(),
     );
 
+    let merge_started = Instant::now();
     let merged_files = merge_adjacent_table_files(conn, table_name).inspect_err(|_error| {
-        record_ducklake_maintenance(
+        record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
             reason,
             MaintenanceOutcome::Failed,
+            merge_started.elapsed().as_secs_f64(),
         );
     })?;
     let merge_outcome = MaintenanceOutcome::from(merged_files);
-    record_ducklake_maintenance(
+    record_ducklake_maintenance_duration(
         MAINTENANCE_TASK_TARGETED_MAINTENANCE,
         MaintenanceOperation::MergeAdjacentFiles,
         reason,
         merge_outcome,
+        merge_started.elapsed().as_secs_f64(),
     );
 
     info!(
@@ -610,13 +635,15 @@ fn run_background_checkpoint_blocking(
     conn: &duckdb::Connection,
     reason: MaintenanceReason,
 ) -> EtlResult<()> {
+    let checkpoint_started = Instant::now();
     #[cfg(test)]
     if FAIL_CHECKPOINT_ONCE_FOR_TESTS.swap(false, AtomicOrdering::Relaxed) {
-        record_ducklake_maintenance(
+        record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_CHECKPOINT,
             MaintenanceOperation::Checkpoint,
             reason,
             MaintenanceOutcome::Failed,
+            checkpoint_started.elapsed().as_secs_f64(),
         );
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
@@ -625,11 +652,12 @@ fn run_background_checkpoint_blocking(
     }
 
     conn.execute_batch("CHECKPOINT").map_err(|error| {
-        record_ducklake_maintenance(
+        record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_CHECKPOINT,
             MaintenanceOperation::Checkpoint,
             reason,
             MaintenanceOutcome::Failed,
+            checkpoint_started.elapsed().as_secs_f64(),
         );
         etl_error!(
             ErrorKind::DestinationQueryFailed,
@@ -638,11 +666,12 @@ fn run_background_checkpoint_blocking(
         )
     })?;
     info!("ducklake background checkpoint completed");
-    record_ducklake_maintenance(
+    record_ducklake_maintenance_duration(
         MAINTENANCE_TASK_CHECKPOINT,
         MaintenanceOperation::Checkpoint,
         reason,
         MaintenanceOutcome::Applied,
+        checkpoint_started.elapsed().as_secs_f64(),
     );
     Ok(())
 }
@@ -699,7 +728,7 @@ mod tests {
 
     use crate::ducklake::metrics::register_metrics;
 
-    fn maintenance_counter_value(
+    fn maintenance_duration_count(
         rendered: &str,
         task: &str,
         operation: MaintenanceOperation,
@@ -714,8 +743,9 @@ mod tests {
         rendered
             .lines()
             .find_map(|line| {
-                if line.starts_with(ETL_DUCKLAKE_MAINTENANCE_TOTAL)
-                    && line.contains(&task_label)
+                if line.starts_with(&format!(
+                    "{ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS}_count"
+                )) && line.contains(&task_label)
                     && line.contains(&operation_label)
                     && line.contains(&reason_label)
                     && line.contains(&outcome_label)
@@ -728,20 +758,67 @@ mod tests {
             .unwrap_or(0.0)
     }
 
+    fn maintenance_skipped_counter_value(
+        rendered: &str,
+        task: &str,
+        operation: MaintenanceOperation,
+        reason: MaintenanceReason,
+    ) -> f64 {
+        let task_label = format!(r#"{MAINTENANCE_TASK_LABEL}="{task}""#);
+        let operation_label = format!(r#"{MAINTENANCE_OPERATION_LABEL}="{}""#, operation.as_str());
+        let reason_label = format!(r#"{MAINTENANCE_REASON_LABEL}="{}""#, reason.as_str());
+
+        rendered
+            .lines()
+            .find_map(|line| {
+                if line.starts_with(ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL)
+                    && line.contains(&task_label)
+                    && line.contains(&operation_label)
+                    && line.contains(&reason_label)
+                {
+                    line.split_whitespace().last()?.parse::<f64>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.0)
+    }
+
     #[tokio::test]
-    async fn test_maintenance_metrics_are_exported_with_reason_and_outcome_labels() {
+    async fn test_maintenance_duration_histogram_counts_are_exported_with_labels() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
 
         let rendered_before = handle.render();
-        let flush_before = maintenance_counter_value(
+        let flush_applied_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
             MaintenanceReason::PendingBytesThreshold,
             MaintenanceOutcome::Applied,
         );
-        let checkpoint_before = maintenance_counter_value(
+        let flush_noop_before = maintenance_duration_count(
+            &rendered_before,
+            MAINTENANCE_TASK_FLUSH,
+            MaintenanceOperation::FlushInlinedData,
+            MaintenanceReason::IdleFlushThreshold,
+            MaintenanceOutcome::Noop,
+        );
+        let rewrite_applied_before = maintenance_duration_count(
+            &rendered_before,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::RewriteDataFiles,
+            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceOutcome::Applied,
+        );
+        let merge_noop_before = maintenance_duration_count(
+            &rendered_before,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::MergeAdjacentFiles,
+            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceOutcome::Noop,
+        );
+        let checkpoint_failed_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_CHECKPOINT,
             MaintenanceOperation::Checkpoint,
@@ -749,28 +826,72 @@ mod tests {
             MaintenanceOutcome::Failed,
         );
 
-        record_ducklake_maintenance(
+        record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
             MaintenanceReason::PendingBytesThreshold,
             MaintenanceOutcome::Applied,
+            0.25,
         );
-        record_ducklake_maintenance(
+        record_ducklake_maintenance_duration(
+            MAINTENANCE_TASK_FLUSH,
+            MaintenanceOperation::FlushInlinedData,
+            MaintenanceReason::IdleFlushThreshold,
+            MaintenanceOutcome::Noop,
+            0.15,
+        );
+        record_ducklake_maintenance_duration(
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::RewriteDataFiles,
+            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceOutcome::Applied,
+            1.0,
+        );
+        record_ducklake_maintenance_duration(
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::MergeAdjacentFiles,
+            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceOutcome::Noop,
+            0.4,
+        );
+        record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_CHECKPOINT,
             MaintenanceOperation::Checkpoint,
             MaintenanceReason::CheckpointInterval,
             MaintenanceOutcome::Failed,
+            0.05,
         );
 
         let rendered_after = handle.render();
-        let flush_after = maintenance_counter_value(
+        let flush_applied_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
             MaintenanceReason::PendingBytesThreshold,
             MaintenanceOutcome::Applied,
         );
-        let checkpoint_after = maintenance_counter_value(
+        let flush_noop_after = maintenance_duration_count(
+            &rendered_after,
+            MAINTENANCE_TASK_FLUSH,
+            MaintenanceOperation::FlushInlinedData,
+            MaintenanceReason::IdleFlushThreshold,
+            MaintenanceOutcome::Noop,
+        );
+        let rewrite_applied_after = maintenance_duration_count(
+            &rendered_after,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::RewriteDataFiles,
+            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceOutcome::Applied,
+        );
+        let merge_noop_after = maintenance_duration_count(
+            &rendered_after,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::MergeAdjacentFiles,
+            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceOutcome::Noop,
+        );
+        let checkpoint_failed_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_CHECKPOINT,
             MaintenanceOperation::Checkpoint,
@@ -779,29 +900,53 @@ mod tests {
         );
 
         assert!(
-            flush_after > flush_before,
-            "flush maintenance counter did not increase"
+            flush_applied_after > flush_applied_before,
+            "flush applied duration count did not increase"
         );
         assert!(
-            checkpoint_after > checkpoint_before,
-            "checkpoint maintenance counter did not increase"
+            flush_noop_after > flush_noop_before,
+            "flush noop duration count did not increase"
+        );
+        assert!(
+            rewrite_applied_after > rewrite_applied_before,
+            "rewrite applied duration count did not increase"
+        );
+        assert!(
+            merge_noop_after > merge_noop_before,
+            "merge noop duration count did not increase"
+        );
+        assert!(
+            checkpoint_failed_after > checkpoint_failed_before,
+            "checkpoint failed duration count did not increase"
         );
     }
 
     #[tokio::test]
-    async fn test_targeted_maintenance_busy_emits_two_skipped_busy_events() {
+    async fn test_targeted_maintenance_busy_emits_two_skip_counter_events_and_no_durations() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
 
         let rendered_before = handle.render();
-        let rewrite_before = maintenance_counter_value(
+        let rewrite_before = maintenance_skipped_counter_value(
+            &rendered_before,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::RewriteDataFiles,
+            MaintenanceReason::DirtyIdleWindow,
+        );
+        let merge_before = maintenance_skipped_counter_value(
+            &rendered_before,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::MergeAdjacentFiles,
+            MaintenanceReason::DirtyIdleWindow,
+        );
+        let rewrite_duration_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
             MaintenanceReason::DirtyIdleWindow,
             MaintenanceOutcome::SkippedBusy,
         );
-        let merge_before = maintenance_counter_value(
+        let merge_duration_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
@@ -812,14 +957,26 @@ mod tests {
         record_skipped_targeted_maintenance(MaintenanceReason::DirtyIdleWindow);
 
         let rendered_after = handle.render();
-        let rewrite_after = maintenance_counter_value(
+        let rewrite_after = maintenance_skipped_counter_value(
+            &rendered_after,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::RewriteDataFiles,
+            MaintenanceReason::DirtyIdleWindow,
+        );
+        let merge_after = maintenance_skipped_counter_value(
+            &rendered_after,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::MergeAdjacentFiles,
+            MaintenanceReason::DirtyIdleWindow,
+        );
+        let rewrite_duration_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
             MaintenanceReason::DirtyIdleWindow,
             MaintenanceOutcome::SkippedBusy,
         );
-        let merge_after = maintenance_counter_value(
+        let merge_duration_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
@@ -829,11 +986,19 @@ mod tests {
 
         assert!(
             rewrite_after > rewrite_before,
-            "rewrite skipped_busy counter did not increase"
+            "rewrite skipped counter did not increase"
         );
         assert!(
             merge_after > merge_before,
-            "merge skipped_busy counter did not increase"
+            "merge skipped counter did not increase"
+        );
+        assert_eq!(
+            rewrite_duration_after, rewrite_duration_before,
+            "rewrite skip should not emit a duration sample"
+        );
+        assert_eq!(
+            merge_duration_after, merge_duration_before,
+            "merge skip should not emit a duration sample"
         );
     }
 
@@ -972,7 +1137,7 @@ mod tests {
         let conn = duckdb::Connection::open_in_memory().expect("failed to open in-memory duckdb");
 
         let rendered_before = handle.render();
-        let failed_before = maintenance_counter_value(
+        let failed_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
@@ -994,7 +1159,7 @@ mod tests {
         );
 
         let rendered_after = handle.render();
-        let failed_after = maintenance_counter_value(
+        let failed_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
@@ -1004,25 +1169,25 @@ mod tests {
 
         assert!(
             failed_after > failed_before,
-            "flush failed counter did not increase"
+            "flush failed duration count did not increase"
         );
     }
 
     #[tokio::test]
-    async fn test_rewrite_failure_prevents_merge_metric() {
+    async fn test_rewrite_failure_records_duration_and_prevents_merge_duration() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
         let conn = duckdb::Connection::open_in_memory().expect("failed to open in-memory duckdb");
 
         let rendered_before = handle.render();
-        let rewrite_failed_before = maintenance_counter_value(
+        let rewrite_failed_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
             MaintenanceReason::DirtyIdleWindow,
             MaintenanceOutcome::Failed,
         );
-        let merge_failed_before = maintenance_counter_value(
+        let merge_failed_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
@@ -1044,14 +1209,14 @@ mod tests {
         );
 
         let rendered_after = handle.render();
-        let rewrite_failed_after = maintenance_counter_value(
+        let rewrite_failed_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
             MaintenanceReason::DirtyIdleWindow,
             MaintenanceOutcome::Failed,
         );
-        let merge_failed_after = maintenance_counter_value(
+        let merge_failed_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
@@ -1061,22 +1226,22 @@ mod tests {
 
         assert!(
             rewrite_failed_after > rewrite_failed_before,
-            "rewrite failed counter did not increase"
+            "rewrite failed duration count did not increase"
         );
         assert_eq!(
             merge_failed_after, merge_failed_before,
-            "merge failed counter should not increase when rewrite fails first"
+            "merge failed duration should not increase when rewrite fails first"
         );
     }
 
     #[tokio::test]
-    async fn test_checkpoint_success_records_applied_metric() {
+    async fn test_checkpoint_success_records_applied_duration() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
         let conn = duckdb::Connection::open_in_memory().expect("failed to open in-memory duckdb");
 
         let rendered_before = handle.render();
-        let applied_before = maintenance_counter_value(
+        let applied_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_CHECKPOINT,
             MaintenanceOperation::Checkpoint,
@@ -1088,7 +1253,7 @@ mod tests {
             .expect("checkpoint should succeed");
 
         let rendered_after = handle.render();
-        let applied_after = maintenance_counter_value(
+        let applied_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_CHECKPOINT,
             MaintenanceOperation::Checkpoint,
@@ -1098,19 +1263,19 @@ mod tests {
 
         assert!(
             applied_after > applied_before,
-            "checkpoint applied counter did not increase"
+            "checkpoint applied duration count did not increase"
         );
     }
 
     #[tokio::test]
-    async fn test_checkpoint_failure_records_failed_metric() {
+    async fn test_checkpoint_failure_records_failed_duration() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
         let conn = duckdb::Connection::open_in_memory().expect("failed to open in-memory duckdb");
         FAIL_CHECKPOINT_ONCE_FOR_TESTS.store(true, AtomicOrdering::Relaxed);
 
         let rendered_before = handle.render();
-        let failed_before = maintenance_counter_value(
+        let failed_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_CHECKPOINT,
             MaintenanceOperation::Checkpoint,
@@ -1122,7 +1287,7 @@ mod tests {
             run_background_checkpoint_blocking(&conn, MaintenanceReason::CheckpointInterval);
 
         let rendered_after = handle.render();
-        let failed_after = maintenance_counter_value(
+        let failed_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_CHECKPOINT,
             MaintenanceOperation::Checkpoint,
@@ -1136,7 +1301,58 @@ mod tests {
         );
         assert!(
             failed_after > failed_before,
-            "checkpoint failed counter did not increase"
+            "checkpoint failed duration count did not increase"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flush_busy_emits_skip_counter_only() {
+        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
+        register_metrics();
+
+        let rendered_before = handle.render();
+        let skipped_before = maintenance_skipped_counter_value(
+            &rendered_before,
+            MAINTENANCE_TASK_FLUSH,
+            MaintenanceOperation::FlushInlinedData,
+            MaintenanceReason::PendingBytesThreshold,
+        );
+        let duration_before = maintenance_duration_count(
+            &rendered_before,
+            MAINTENANCE_TASK_FLUSH,
+            MaintenanceOperation::FlushInlinedData,
+            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceOutcome::SkippedBusy,
+        );
+
+        record_ducklake_maintenance_skipped(
+            MAINTENANCE_TASK_FLUSH,
+            MaintenanceOperation::FlushInlinedData,
+            MaintenanceReason::PendingBytesThreshold,
+        );
+
+        let rendered_after = handle.render();
+        let skipped_after = maintenance_skipped_counter_value(
+            &rendered_after,
+            MAINTENANCE_TASK_FLUSH,
+            MaintenanceOperation::FlushInlinedData,
+            MaintenanceReason::PendingBytesThreshold,
+        );
+        let duration_after = maintenance_duration_count(
+            &rendered_after,
+            MAINTENANCE_TASK_FLUSH,
+            MaintenanceOperation::FlushInlinedData,
+            MaintenanceReason::PendingBytesThreshold,
+            MaintenanceOutcome::SkippedBusy,
+        );
+
+        assert!(
+            skipped_after > skipped_before,
+            "flush skipped counter did not increase"
+        );
+        assert_eq!(
+            duration_after, duration_before,
+            "flush skip should not emit a duration sample"
         );
     }
 }
