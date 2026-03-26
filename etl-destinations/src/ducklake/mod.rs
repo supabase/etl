@@ -6,8 +6,8 @@ mod schema;
 /// Attach-level DuckLake data inlining limit for ETL-managed connections.
 ///
 /// This applies to every DuckDB connection in the destination pool so small
-/// writes inline into the DuckLake metadata first and are then explicitly
-/// flushed to Parquet after commit.
+/// writes inline into the DuckLake metadata first and can later be
+/// materialized to Parquet by the background maintenance worker.
 const ATTACH_DATA_INLINING_ROW_LIMIT: usize = 500; // This number has been computed from our metrics in prod
 
 pub use config::{DuckDbLogConfig, S3Config};

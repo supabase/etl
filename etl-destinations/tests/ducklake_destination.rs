@@ -48,6 +48,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
+use std::time::Duration;
 #[cfg(feature = "test-utils")]
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::Url;
@@ -233,6 +234,25 @@ fn flush_inlined_rows(conn: &Connection, table_name: &str) -> i64 {
         |r| r.get(0),
     )
     .expect("inlined data flush query failed")
+}
+
+async fn wait_for_condition<F>(timeout: Duration, mut condition: F)
+where
+    F: FnMut() -> bool,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if condition() {
+            return;
+        }
+
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "condition not met within {timeout:?}"
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -919,11 +939,6 @@ async fn test_write_events_auto_flushes_inlined_data() {
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
-    assert!(
-        count_table_files(&conn, &table_name) >= 1,
-        "cdc batch should already be flushed to parquet"
-    );
-    assert_eq!(flush_inlined_rows(&conn, &table_name), 0);
 }
 
 /// `write_events` keeps update events with old rows on the current-state path.
@@ -1132,12 +1147,66 @@ async fn test_applied_batches_table_uses_data_inlining() {
         .unwrap();
 
     let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
     assert_eq!(count_table_files(&conn, "__etl_applied_table_batches"), 0);
-    assert!(
-        count_table_files(&conn, &table_name) >= 1,
-        "user data table should still materialize Parquet files"
-    );
+}
+
+/// Large inlined CDC backlogs should be materialized by the background worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_write_events_background_flush_materializes_large_inline_backlog() {
+    use etl::types::{InsertEvent, PgLsn};
+
+    let dir = make_test_dir("write_events_background_flush_materializes_large_inline_backlog");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let table_id = TableId::new(21);
+    let schema = make_schema(21, "public", "background_flush");
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    let lsn = PgLsn::from(900u64);
+    let events = (0..600)
+        .map(|id| {
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: id as u64,
+                table_id,
+                table_row: TableRow::new(vec![Cell::I32(id), Cell::String(format!("name-{id}"))]),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    destination.write_events(events).await.unwrap();
+
+    wait_for_condition(Duration::from_secs(10), || {
+        let conn = open_lake_conn(&catalog_url, &data_url);
+        count_table_files(&conn, &table_name) >= 1
+    })
+    .await;
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(count_rows(&conn, &table_name), 600);
     assert_eq!(flush_inlined_rows(&conn, &table_name), 0);
 }
 
@@ -1554,11 +1623,6 @@ async fn test_write_events_retry_after_post_flush_failure_is_idempotent() {
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
-    assert!(
-        count_table_files(&conn, &table_name) >= 1,
-        "mutation batch should be materialized after retry"
-    );
-    assert_eq!(flush_inlined_rows(&conn, &table_name), 0);
 
     let name: String = conn
         .query_row(

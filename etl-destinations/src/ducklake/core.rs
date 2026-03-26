@@ -20,12 +20,12 @@ use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{ArrayCell, Cell, Event, TableId, TableName, TableRow, TableSchema};
+use etl::types::{ArrayCell, Cell, Event, SizeHint, TableId, TableName, TableRow, TableSchema};
 use metrics::{counter, gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
 use rand::Rng;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_postgres::types::PgLsn;
@@ -88,6 +88,28 @@ const METRICS_POOL_SIZE: u32 = 1;
 const METRICS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// Timeout applied to each background DuckLake metrics query.
 const METRICS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Dedicated pool size for background DuckLake maintenance work.
+const MAINTENANCE_POOL_SIZE: u32 = 1;
+/// Poll interval for checking per-table inline flush thresholds.
+const MAINTENANCE_FLUSH_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// How long a table can stay idle before pending inlined data is materialized.
+const MAINTENANCE_IDLE_FLUSH_THRESHOLD: Duration = Duration::from_secs(30);
+/// Pending bytes threshold that triggers a background inline flush.
+const MAINTENANCE_PENDING_BYTES_THRESHOLD: u64 = 5 * 1024 * 1024; // 5MB
+/// Pending inserted rows threshold that triggers a background inline flush.
+const MAINTENANCE_PENDING_ROWS_THRESHOLD: u64 = 10_000;
+/// Pending deleted rows threshold that triggers a background inline flush.
+const MAINTENANCE_PENDING_DELETES_THRESHOLD: u64 = 500;
+/// Pending commit count threshold that triggers a background inline flush.
+const MAINTENANCE_PENDING_COMMITS_THRESHOLD: u64 = 8;
+/// Minimum idle window before targeted table maintenance runs, to not have maintenances ran too frequently.
+const MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD: Duration = Duration::from_secs(90);
+/// Minimum delay between targeted maintenance runs for the same table.
+const MAINTENANCE_TABLE_COMPACTION_INTERVAL: Duration = Duration::from_mins(5);
+/// Global checkpoint interval used to keep catalog maintenance moving.
+const MAINTENANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_mins(15);
+/// Timeout for sending a notification to the maintenance worker.
+const NOTIFICATION_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Alias for DuckLake table names.
 type DuckLakeTableName = String;
@@ -229,6 +251,94 @@ struct DuckLakeCatalogMaintenanceMetrics {
 
 /// Shared state for the background DuckLake metrics sampler.
 struct DuckLakeMetricsSampler {
+    shutdown_tx: watch::Sender<()>,
+    handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Per-table write activity sent to the background maintenance worker.
+#[derive(Clone, Debug, Default)]
+struct TableMaintenanceNotification {
+    table_name: DuckLakeTableName,
+    approx_bytes: u64,
+    inserted_rows: u64,
+    deleted_rows: u64,
+    commit_count: u64,
+}
+
+/// Coalesced maintenance state for one DuckLake table.
+#[derive(Debug)]
+struct TableMaintenanceState {
+    pending_bytes: u64,
+    pending_inserted_rows: u64,
+    pending_deleted_rows: u64,
+    pending_commit_count: u64,
+    dirty_since_compaction: bool,
+    last_write_at: Instant,
+    last_compaction_at: Option<Instant>,
+}
+
+impl TableMaintenanceState {
+    /// Aggregates one write notification into the existing table state.
+    fn record(&mut self, notification: &TableMaintenanceNotification, now: Instant) {
+        self.pending_bytes = self.pending_bytes.saturating_add(notification.approx_bytes);
+        self.pending_inserted_rows = self
+            .pending_inserted_rows
+            .saturating_add(notification.inserted_rows);
+        self.pending_deleted_rows = self
+            .pending_deleted_rows
+            .saturating_add(notification.deleted_rows);
+        self.pending_commit_count = self
+            .pending_commit_count
+            .saturating_add(notification.commit_count);
+        self.dirty_since_compaction = true;
+        self.last_write_at = now;
+    }
+
+    /// Returns whether pending inlined work should be flushed now.
+    fn should_flush(&self, now: Instant) -> bool {
+        let idle = now.saturating_duration_since(self.last_write_at);
+        self.pending_bytes >= MAINTENANCE_PENDING_BYTES_THRESHOLD
+            || self.pending_inserted_rows >= MAINTENANCE_PENDING_ROWS_THRESHOLD
+            || self.pending_deleted_rows >= MAINTENANCE_PENDING_DELETES_THRESHOLD
+            || self.pending_commit_count >= MAINTENANCE_PENDING_COMMITS_THRESHOLD
+            // If the table is inactive for a while then flush now, it's a good strategy to not be in conflicts with current transactions
+            || ((self.pending_bytes > 0
+                || self.pending_inserted_rows > 0
+                || self.pending_deleted_rows > 0
+                || self.pending_commit_count > 0)
+                && idle >= MAINTENANCE_IDLE_FLUSH_THRESHOLD)
+    }
+
+    /// Clears pending flush counters after a successful flush/materialization.
+    fn clear_pending_flush(&mut self) {
+        self.pending_bytes = 0;
+        self.pending_inserted_rows = 0;
+        self.pending_deleted_rows = 0;
+        self.pending_commit_count = 0;
+    }
+
+    /// Returns whether targeted maintenance should run for this table.
+    fn should_compact(&self, now: Instant) -> bool {
+        if !self.dirty_since_compaction {
+            return false;
+        }
+
+        let idle = now.saturating_duration_since(self.last_write_at);
+        let enough_idle = idle >= MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD;
+        let enough_gap = match self.last_compaction_at {
+            Some(last) => {
+                now.saturating_duration_since(last) >= MAINTENANCE_TABLE_COMPACTION_INTERVAL
+            }
+            None => true,
+        };
+
+        enough_idle && enough_gap
+    }
+}
+
+/// Shared state for the background DuckLake maintenance worker.
+struct DuckLakeMaintenanceWorker {
+    notification_tx: mpsc::Sender<TableMaintenanceNotification>,
     shutdown_tx: watch::Sender<()>,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -437,6 +547,252 @@ async fn run_ducklake_metrics_sampler(
     }
 }
 
+/// Builds the dedicated maintenance pool and spawns the periodic DuckLake worker.
+async fn spawn_ducklake_maintenance_worker(
+    manager: DuckLakeConnectionManager,
+    table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+) -> EtlResult<DuckLakeMaintenanceWorker> {
+    let pool =
+        Arc::new(build_warm_ducklake_pool(manager, MAINTENANCE_POOL_SIZE, "maintenance").await?);
+    let blocking_slots = Arc::new(Semaphore::new(MAINTENANCE_POOL_SIZE as usize));
+    let (notification_tx, notification_rx) = mpsc::channel(1024);
+    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let handle = tokio::spawn(run_ducklake_maintenance_worker(
+        pool,
+        blocking_slots,
+        table_write_slots,
+        notification_rx,
+        shutdown_rx,
+    ));
+
+    Ok(DuckLakeMaintenanceWorker {
+        notification_tx,
+        shutdown_tx,
+        handle: Mutex::new(handle.into()),
+    })
+}
+
+/// Coalesces write notifications and runs background DuckLake maintenance.
+async fn run_ducklake_maintenance_worker(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    mut notification_rx: mpsc::Receiver<TableMaintenanceNotification>,
+    mut shutdown_rx: watch::Receiver<()>,
+) {
+    let mut flush_interval = tokio::time::interval(MAINTENANCE_FLUSH_POLL_INTERVAL);
+    flush_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut checkpoint_interval = tokio::time::interval_at(
+        Instant::now() + MAINTENANCE_CHECKPOINT_INTERVAL,
+        MAINTENANCE_CHECKPOINT_INTERVAL,
+    );
+    checkpoint_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    let mut table_states: HashMap<DuckLakeTableName, TableMaintenanceState> = HashMap::new();
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                info!("ducklake maintenance worker shutting down");
+                break;
+            }
+            maybe_notification = notification_rx.recv() => {
+                let Some(notification) = maybe_notification else {
+                    info!("ducklake maintenance worker channel closed");
+                    break;
+                };
+
+                let now = Instant::now();
+                table_states
+                    .entry(notification.table_name.clone())
+                    .and_modify(|state| state.record(&notification, now))
+                    .or_insert_with(|| {
+                        let mut state = TableMaintenanceState {
+                            pending_bytes: 0,
+                            pending_inserted_rows: 0,
+                            pending_deleted_rows: 0,
+                            pending_commit_count: 0,
+                            dirty_since_compaction: true,
+                            last_write_at: now,
+                            last_compaction_at: None,
+                        };
+                        state.record(&notification, now);
+                        state
+                    });
+            }
+            _ = flush_interval.tick() => {
+                let mut now = Instant::now();
+
+                for (table_name, table_state) in &mut table_states {
+                    if table_state.should_flush(now) {
+                        match flush_table_inlined_data_in_background(
+                            Arc::clone(&pool),
+                            Arc::clone(&blocking_slots),
+                            Arc::clone(&table_write_slots),
+                            table_name.clone(),
+                        )
+                        .await
+                        {
+                            Ok(flushed) => {
+                                if flushed {
+                                    table_state.clear_pending_flush();
+                                }
+                            }
+                            Err(error) => {
+                                warn!(
+                                    table = %table_name,
+                                    error = ?error,
+                                    "ducklake background flush failed"
+                                );
+                            }
+                        }
+                    }
+                    now = Instant::now();
+                    if table_state.should_compact(now) {
+                        match run_targeted_table_maintenance(
+                            Arc::clone(&pool),
+                            Arc::clone(&blocking_slots),
+                            Arc::clone(&table_write_slots),
+                            table_name.clone(),
+                        )
+                        .await
+                        {
+                            Ok(compacted) => {
+                                if compacted {
+                                    table_state.dirty_since_compaction = false;
+                                    table_state.last_compaction_at = Some(Instant::now());
+                                }
+                            }
+                            Err(error) => {
+                                warn!(
+                                    table = %table_name,
+                                    error = ?error,
+                                    "ducklake targeted maintenance failed"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                table_states.retain(|_, state| {
+                    state.pending_bytes > 0
+                        || state.pending_inserted_rows > 0
+                        || state.pending_deleted_rows > 0
+                        || state.pending_commit_count > 0
+                        || state.dirty_since_compaction
+                });
+            }
+            _ = checkpoint_interval.tick() => {
+                if table_states.is_empty() {
+                    continue;
+                }
+
+                if let Err(error) = run_background_checkpoint(
+                    Arc::clone(&pool),
+                    Arc::clone(&blocking_slots),
+                )
+                .await
+                {
+                    warn!(error = ?error, "ducklake background checkpoint failed");
+                }
+            }
+        }
+    }
+}
+
+/// Returns the table-local semaphore shared by writes and background maintenance.
+fn table_write_slot(
+    table_write_slots: &Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    table_name: &str,
+) -> Arc<Semaphore> {
+    let mut slots = table_write_slots.lock();
+    slots
+        .entry(table_name.to_string())
+        .or_insert_with(|| Arc::new(Semaphore::new(1)))
+        .clone()
+}
+
+/// Tries to acquire the table-local semaphore without blocking the maintenance worker.
+fn try_acquire_table_write_slot(
+    table_write_slots: &Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    table_name: &str,
+) -> Option<OwnedSemaphorePermit> {
+    table_write_slot(table_write_slots, table_name)
+        .try_acquire_owned()
+        .ok()
+}
+
+/// Materializes one table's pending inlined rows on the maintenance pool.
+async fn flush_table_inlined_data_in_background(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    table_name: DuckLakeTableName,
+) -> EtlResult<bool> {
+    let Some(table_write_permit) = try_acquire_table_write_slot(&table_write_slots, &table_name)
+    else {
+        return Ok(false);
+    };
+
+    run_duckdb_blocking(pool, blocking_slots, move |conn| {
+        let _table_write_permit = table_write_permit;
+        flush_table_inlined_data(conn, &table_name, DuckLakeTableBatchKind::Mutation)?;
+        Ok(())
+    })
+    .await?;
+
+    Ok(true)
+}
+
+/// Runs targeted rewrite and merge maintenance for one table.
+async fn run_targeted_table_maintenance(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    table_name: DuckLakeTableName,
+) -> EtlResult<bool> {
+    let Some(table_write_permit) = try_acquire_table_write_slot(&table_write_slots, &table_name)
+    else {
+        return Ok(false);
+    };
+
+    run_duckdb_blocking(pool, blocking_slots, move |conn| {
+        let _table_write_permit = table_write_permit;
+        let rewritten_files = rewrite_table_data_files(conn, &table_name)?;
+        let merged_files = merge_adjacent_table_files(conn, &table_name)?;
+        info!(
+            table = %table_name,
+            rewritten_files,
+            merged_files,
+            "ducklake targeted maintenance completed"
+        );
+        Ok(())
+    })
+    .await?;
+
+    Ok(true)
+}
+
+/// Runs a coarse-grained checkpoint to keep catalog maintenance moving.
+async fn run_background_checkpoint(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+) -> EtlResult<()> {
+    run_duckdb_blocking(pool, blocking_slots, |conn| {
+        conn.execute_batch("CHECKPOINT").map_err(|error| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake checkpoint failed",
+                source: error
+            )
+        })?;
+        info!("ducklake background checkpoint completed");
+        Ok(())
+    })
+    .await
+}
+
 /// Returns whether a DuckLake DDL error indicates another transaction already
 /// created the requested table.
 fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) -> bool {
@@ -456,12 +812,14 @@ fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) -> bool {
 /// database.
 ///
 /// All writes are wrapped in explicit transactions so that each batch of rows
-/// is committed as a single Parquet snapshot rather than one file per row.
+/// is committed atomically in DuckLake while file materialization can be
+/// deferred to background maintenance.
 #[derive(Clone)]
 pub struct DuckLakeDestination<S> {
     manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
+    maintenance_worker: Arc<Option<DuckLakeMaintenanceWorker>>,
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
     table_creation_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
@@ -482,6 +840,7 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
+        self.shutdown_maintenance_worker().await?;
         self.shutdown_metrics_sampler().await?;
         self.dump_duckdb_logs_inner().await
     }
@@ -580,6 +939,7 @@ where
             manager,
             pool: Arc::new(pool),
             blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
+            maintenance_worker: Arc::new(None),
             metrics_sampler: Arc::new(None),
             table_creation_slots: Arc::new(Semaphore::new(1)),
             table_write_slots: Arc::default(),
@@ -590,6 +950,19 @@ where
         };
         gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
         destination.ensure_applied_batches_table_exists().await?;
+        destination.maintenance_worker = Arc::new(
+            spawn_ducklake_maintenance_worker(
+                DuckLakeConnectionManager {
+                    setup_sql: Arc::clone(&setup_sql),
+                    disable_extension_autoload,
+                    #[cfg(feature = "test-utils")]
+                    open_count: Arc::new(AtomicUsize::new(0)),
+                },
+                Arc::clone(&destination.table_write_slots),
+            )
+            .await?
+            .into(),
+        );
         destination.metrics_sampler = Arc::new(
             spawn_ducklake_metrics_sampler(
                 DuckLakeConnectionManager {
@@ -659,7 +1032,7 @@ where
     /// Bulk-inserts rows into the destination table inside a single transaction.
     ///
     /// Wrapping all inserts in one `BEGIN` / `COMMIT` ensures they are written
-    /// as a single Parquet snapshot rather than one file per row.
+    /// as one atomic DuckLake change rather than one file per row.
     ///
     /// Copy batches are recorded in the replay marker table so a retry after an
     /// ambiguous post-commit failure can detect already applied rows.
@@ -674,17 +1047,35 @@ where
             return Ok(());
         }
 
+        let approx_bytes = table_rows
+            .iter()
+            .map(|row| row.size_hint() as u64)
+            .sum::<u64>();
+        let inserted_rows = table_rows.len() as u64;
+
         // Here we can have concurrent table writers because it's INSERTs only and CDC (write_events) won't start before the copy phase is complete
         self.ensure_applied_batches_table_exists().await?;
         let table_schema = self.get_table_schema(table_id).await?;
         let prepared_batch = prepare_copy_table_batch(&table_schema, table_name, table_rows)?;
+        let table_name = prepared_batch.table_name.clone();
         apply_table_batch_with_retry(
             Arc::clone(&self.manager),
             Arc::clone(&self.pool),
             Arc::clone(&self.blocking_slots),
             prepared_batch,
         )
-        .await
+        .await?;
+
+        self.notify_background_maintenance(TableMaintenanceNotification {
+            table_name,
+            approx_bytes,
+            inserted_rows,
+            deleted_rows: 0,
+            commit_count: 1,
+        })
+        .await;
+
+        Ok(())
     }
 
     /// Writes streaming CDC events to the destination.
@@ -701,6 +1092,8 @@ where
         while event_iter.peek().is_some() {
             let mut table_id_to_mutations: HashMap<TableId, Vec<TrackedTableMutation>> =
                 HashMap::new();
+            let mut table_id_to_stats: HashMap<TableId, TableMaintenanceNotification> =
+                HashMap::new();
 
             // Accumulate non-truncate events, stopping at the first Truncate.
             while let Some(event) = event_iter.peek() {
@@ -712,6 +1105,7 @@ where
                 let event = event_iter.next().unwrap();
                 match event {
                     Event::Insert(insert) => {
+                        let approx_bytes = insert.table_row.size_hint() as u64;
                         table_id_to_mutations
                             .entry(insert.table_id)
                             .or_default()
@@ -720,13 +1114,18 @@ where
                                 commit_lsn: insert.commit_lsn,
                                 mutation: TableMutation::Insert(insert.table_row),
                             });
+                        let stats = table_id_to_stats.entry(insert.table_id).or_default();
+                        stats.approx_bytes = stats.approx_bytes.saturating_add(approx_bytes);
+                        stats.inserted_rows = stats.inserted_rows.saturating_add(1);
                     }
                     Event::Update(update) => {
                         let table_id = update.table_id;
                         let table_row = update.table_row;
                         let old_table_row = update.old_table_row;
+                        let upsert_bytes = table_row.size_hint() as u64;
                         let mutations = table_id_to_mutations.entry(table_id).or_default();
-                        if let Some((_, old_row)) = old_table_row {
+                        let delete_bytes = if let Some((_, old_row)) = old_table_row {
+                            let delete_bytes = old_row.size_hint() as u64;
                             mutations.push(TrackedTableMutation {
                                 start_lsn: update.start_lsn,
                                 commit_lsn: update.commit_lsn,
@@ -735,6 +1134,7 @@ where
                                     upsert_row: table_row,
                                 },
                             });
+                            delete_bytes
                         } else {
                             debug!(
                                 "update event has no old row, deleting by primary key from new row"
@@ -744,13 +1144,21 @@ where
                                 commit_lsn: update.commit_lsn,
                                 mutation: TableMutation::Replace(table_row),
                             });
-                        }
+                            upsert_bytes
+                        };
+                        let stats = table_id_to_stats.entry(table_id).or_default();
+                        stats.approx_bytes = stats
+                            .approx_bytes
+                            .saturating_add(upsert_bytes.saturating_add(delete_bytes));
+                        stats.inserted_rows = stats.inserted_rows.saturating_add(1);
+                        stats.deleted_rows = stats.deleted_rows.saturating_add(1);
                     }
                     Event::Delete(delete) => {
                         let Some((_, old_row)) = delete.old_table_row else {
                             info!("delete event has no old row, skipping");
                             continue;
                         };
+                        let approx_bytes = old_row.size_hint() as u64;
                         table_id_to_mutations
                             .entry(delete.table_id)
                             .or_default()
@@ -759,6 +1167,9 @@ where
                                 commit_lsn: delete.commit_lsn,
                                 mutation: TableMutation::Delete(old_row),
                             });
+                        let stats = table_id_to_stats.entry(delete.table_id).or_default();
+                        stats.approx_bytes = stats.approx_bytes.saturating_add(approx_bytes);
+                        stats.deleted_rows = stats.deleted_rows.saturating_add(1);
                     }
                     event => {
                         debug!(event_type = %event.event_type(), "skipping unsupported event type");
@@ -779,6 +1190,14 @@ where
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     let prepared_batches =
                         prepare_mutation_table_batches(&table_schema, table_name, mutations)?;
+                    let commit_count = prepared_batches.len() as u64;
+                    let maintenance_notification =
+                        table_id_to_stats.remove(&table_id).map(|mut stats| {
+                            stats.table_name = prepared_batches[0].table_name.clone();
+                            stats.commit_count = commit_count;
+                            stats
+                        });
+                    let maintenance_worker = Arc::clone(&self.maintenance_worker);
 
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
@@ -788,7 +1207,16 @@ where
                             blocking_slots,
                             prepared_batches,
                         )
-                        .await
+                        .await?;
+                        if let (Some(worker), Some(notification)) =
+                            (maintenance_worker.as_ref(), maintenance_notification)
+                        {
+                            let _ = worker
+                                .notification_tx
+                                .send_timeout(notification, NOTIFICATION_SEND_TIMEOUT)
+                                .await;
+                        }
+                        Ok::<(), etl::error::EtlError>(())
                     });
                 }
 
@@ -1044,14 +1472,7 @@ where
 
     /// Serializes table-local truncate and CDC mutation writes.
     async fn acquire_table_write_slot(&self, table_name: &str) -> EtlResult<OwnedSemaphorePermit> {
-        let table_slot = {
-            let mut table_write_slots = self.table_write_slots.lock();
-            Arc::clone(
-                table_write_slots
-                    .entry(table_name.to_string())
-                    .or_insert_with(|| Arc::new(Semaphore::new(1))),
-            )
-        };
+        let table_slot = table_write_slot(&self.table_write_slots, table_name);
 
         table_slot.acquire_owned().await.map_err(|_| {
             etl_error!(
@@ -1086,6 +1507,24 @@ where
             .await
     }
 
+    /// Stops the background DuckLake maintenance worker.
+    async fn shutdown_maintenance_worker(&self) -> EtlResult<()> {
+        if let Some(maintenance_worker) = &*self.maintenance_worker {
+            let _ = maintenance_worker.shutdown_tx.send(());
+            let handle = maintenance_worker.handle.lock().take();
+            if let Some(handle) = handle {
+                handle.await.map_err(|_| {
+                    etl_error!(
+                        ErrorKind::ApplyWorkerPanic,
+                        "DuckLake maintenance worker task panicked"
+                    )
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Stops the background DuckLake metrics sampler.
     async fn shutdown_metrics_sampler(&self) -> EtlResult<()> {
         if let Some(metrics_sampler) = &*self.metrics_sampler {
@@ -1102,6 +1541,31 @@ where
         }
 
         Ok(())
+    }
+
+    /// Sends one table write notification to the maintenance worker.
+    async fn notify_background_maintenance(&self, notification: TableMaintenanceNotification) {
+        if let Some(maintenance_worker) = &*self.maintenance_worker
+            && let Err(error) = maintenance_worker
+                .notification_tx
+                .send_timeout(notification, NOTIFICATION_SEND_TIMEOUT)
+                .await
+        {
+            match error {
+                mpsc::error::SendTimeoutError::Timeout(t) => {
+                    warn!(
+                        table = %t.table_name,
+                        "ducklake maintenance notification timed out"
+                    );
+                }
+                mpsc::error::SendTimeoutError::Closed(t) => {
+                    warn!(
+                        table = %t.table_name,
+                        "ducklake maintenance notification dropped"
+                    );
+                }
+            }
+        }
     }
 
     /// Returns how many DuckDB connections have been initialized for tests.
@@ -1355,17 +1819,7 @@ async fn apply_table_batches_with_retry(
                     duration_ms = operation_started.elapsed().as_millis() as u64,
                     "ducklake batch ---- "
                 );
-                let operation_started = std::time::Instant::now();
-                let res = flush_table_inlined_data(
-                    conn,
-                    &attempt_batches[0].table_name,
-                    DuckLakeTableBatchKind::Mutation,
-                );
-                info!(
-                    duration_ms = operation_started.elapsed().as_millis() as u64,
-                    "ducklake inlining flush >>>>>"
-                );
-                res
+                Ok(())
             }
         })
         .await
@@ -2165,6 +2619,50 @@ fn flush_table_inlined_data(
     maybe_fail_after_flushed_batch_for_tests(batch_kind, table_name)?;
 
     Ok(())
+}
+
+/// Rewrites one table's delete-heavy files and returns created file count.
+fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlResult<u64> {
+    let sql = format!(
+        r#"SELECT COALESCE(SUM(files_created), 0)
+         FROM ducklake_rewrite_data_files({}, {});"#,
+        quote_literal(LAKE_CATALOG),
+        quote_literal(table_name),
+    );
+    let files_created: i64 = conn
+        .query_row(&sql, [], |row| row.get(0))
+        .map_err(|error| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake rewrite data files failed",
+                format_query_error_detail(&sql, &error),
+                source: error
+            )
+        })?;
+
+    Ok(files_created.max(0) as u64)
+}
+
+/// Merges one table's adjacent files and returns created file count.
+fn merge_adjacent_table_files(conn: &duckdb::Connection, table_name: &str) -> EtlResult<u64> {
+    let sql = format!(
+        r#"SELECT COALESCE(SUM(files_created), 0)
+         FROM ducklake_merge_adjacent_files({}, {});"#,
+        quote_literal(LAKE_CATALOG),
+        quote_literal(table_name),
+    );
+    let files_created: i64 = conn
+        .query_row(&sql, [], |row| row.get(0))
+        .map_err(|error| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake merge adjacent files failed",
+                format_query_error_detail(&sql, &error),
+                source: error
+            )
+        })?;
+
+    Ok(files_created.max(0) as u64)
 }
 
 /// Applies the truncate action inside an open transaction.
@@ -4123,5 +4621,70 @@ mod tests {
         assert!(metrics.files_scheduled_for_deletion_total >= 0);
         assert!(metrics.files_scheduled_for_deletion_bytes >= 0);
         assert!(metrics.oldest_scheduled_deletion_age_seconds >= 0);
+    }
+
+    #[test]
+    fn test_table_maintenance_state_flushes_on_row_threshold() {
+        let now = Instant::now();
+        let mut state = TableMaintenanceState {
+            pending_bytes: 0,
+            pending_inserted_rows: 0,
+            pending_deleted_rows: 0,
+            pending_commit_count: 0,
+            dirty_since_compaction: false,
+            last_write_at: now,
+            last_compaction_at: None,
+        };
+        let notification = TableMaintenanceNotification {
+            table_name: "public_users".to_string(),
+            approx_bytes: 256,
+            inserted_rows: MAINTENANCE_PENDING_ROWS_THRESHOLD,
+            deleted_rows: 0,
+            commit_count: 1,
+        };
+
+        state.record(&notification, now);
+
+        assert!(state.should_flush(now));
+    }
+
+    #[test]
+    fn test_table_maintenance_state_flushes_after_idle_window() {
+        let now = Instant::now();
+        let state = TableMaintenanceState {
+            pending_bytes: 128,
+            pending_inserted_rows: 1,
+            pending_deleted_rows: 0,
+            pending_commit_count: 1,
+            dirty_since_compaction: true,
+            last_write_at: now,
+            last_compaction_at: None,
+        };
+
+        assert!(!state.should_flush(now + Duration::from_secs(5)));
+        assert!(state.should_flush(now + MAINTENANCE_IDLE_FLUSH_THRESHOLD));
+    }
+
+    #[test]
+    fn test_table_maintenance_state_compacts_only_when_idle_and_dirty() {
+        let now = Instant::now();
+        let state = TableMaintenanceState {
+            pending_bytes: 0,
+            pending_inserted_rows: 0,
+            pending_deleted_rows: 0,
+            pending_commit_count: 0,
+            dirty_since_compaction: true,
+            last_write_at: now,
+            last_compaction_at: Some(now),
+        };
+
+        assert!(
+            !state.should_compact(now + MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD),
+            "compaction should wait for the minimum compaction interval"
+        );
+        assert!(state.should_compact(
+            now + MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD
+                + MAINTENANCE_TABLE_COMPACTION_INTERVAL,
+        ));
     }
 }
