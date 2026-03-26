@@ -1603,7 +1603,6 @@ dependencies = [
  "chrono",
  "configcat",
  "constant_time_eq",
- "etl",
  "etl-config",
  "etl-destinations",
  "etl-postgres",
