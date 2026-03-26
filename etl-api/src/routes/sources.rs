@@ -4,7 +4,7 @@ use crate::configs::source::{FullApiSourceConfig, StoredSourceConfig, StrippedAp
 use crate::db::sources::SourcesDbError;
 use crate::k8s::TrustedRootCertsCache;
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
-use crate::validation::ValidationError;
+use crate::validation::{FailureType, ValidationError, ValidationFailure};
 use crate::{db, routes::common, routes::utils};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
@@ -135,6 +135,37 @@ pub struct ReadSourcesResponse {
     pub sources: Vec<ReadSourceResponse>,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidateSourceRequest {
+    #[schema(required = true)]
+    pub config: FullApiSourceConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidationFailureResponse {
+    #[schema(example = "source Role Mismatch")]
+    pub name: String,
+    #[schema(example = "Source role 'postgres' does not match trusted username 'etl_user'")]
+    pub reason: String,
+    #[schema(example = "critical")]
+    pub failure_type: FailureType,
+}
+
+impl From<ValidationFailure> for ValidationFailureResponse {
+    fn from(failure: ValidationFailure) -> Self {
+        Self {
+            name: failure.name,
+            reason: failure.reason,
+            failure_type: failure.failure_type,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ValidateSourceResponse {
+    pub validation_failures: Vec<ValidationFailureResponse>,
+}
+
 #[utoipa::path(
     summary = "Create a source",
     description = "Creates a source for the specified tenant.",
@@ -179,6 +210,43 @@ pub async fn create_source(
     .await?;
 
     let response = CreateSourceResponse { id };
+
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    summary = "Validate source configuration",
+    description = "Validates source access using the source validation checks configured for the API.",
+    request_body = ValidateSourceRequest,
+    params(
+        ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
+    ),
+    responses(
+        (status = 200, description = "Validation completed", body = ValidateSourceResponse),
+        (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 500, description = "Internal server error", body = ErrorMessage)
+    ),
+    tag = "Sources"
+)]
+#[post("/sources/validate")]
+pub async fn validate_source(
+    req: HttpRequest,
+    api_config: Data<ApiConfig>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    request: Json<ValidateSourceRequest>,
+) -> Result<impl Responder, SourceError> {
+    let _tenant_id = extract_tenant_id(&req)?;
+    let request = request.into_inner();
+
+    let failures = common::validate_source_config(
+        request.config.into(),
+        api_config.as_ref(),
+        trusted_root_certs_cache.as_ref(),
+    )
+    .await?;
+    let response = ValidateSourceResponse {
+        validation_failures: failures.into_iter().map(Into::into).collect(),
+    };
 
     Ok(Json(response))
 }

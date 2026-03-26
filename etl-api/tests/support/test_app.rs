@@ -16,7 +16,7 @@ use etl_api::routes::pipelines::{
     CreatePipelineRequest, RollbackTablesRequest, UpdatePipelineRequest,
     UpdatePipelineVersionRequest,
 };
-use etl_api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
+use etl_api::routes::sources::{CreateSourceRequest, UpdateSourceRequest, ValidateSourceRequest};
 use etl_api::routes::tenants::{
     CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest,
 };
@@ -181,6 +181,19 @@ impl TestApp {
             .send()
             .await
             .expect("failed to execute request")
+    }
+
+    pub async fn validate_source(
+        &self,
+        tenant_id: &str,
+        source: &ValidateSourceRequest,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!("{}/v1/sources/validate", &self.address))
+            .header("tenant_id", tenant_id)
+            .json(source)
+            .send()
+            .await
+            .expect("Failed to execute request.")
     }
 
     pub async fn create_destination(

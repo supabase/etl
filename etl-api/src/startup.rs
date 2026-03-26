@@ -54,14 +54,15 @@ use crate::{
         },
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
-            UpdateSourceRequest, create_source, delete_source,
+            UpdateSourceRequest, ValidateSourceRequest, ValidateSourceResponse, create_source,
+            delete_source,
             publications::{
                 CreatePublicationRequest, UpdatePublicationRequest, create_publication,
                 delete_publication, read_all_publications, read_publication, update_publication,
             },
             read_all_sources, read_source,
             tables::read_table_names,
-            update_source,
+            update_source, validate_source,
         },
         tenants::{
             CreateOrUpdateTenantRequest, CreateOrUpdateTenantResponse, CreateTenantRequest,
@@ -265,6 +266,8 @@ pub async fn run(
             UpdateSourceRequest,
             ReadSourceResponse,
             ReadSourcesResponse,
+            ValidateSourceRequest,
+            ValidateSourceResponse,
             CreatePublicationRequest,
             UpdatePublicationRequest,
             Publication,
@@ -316,6 +319,7 @@ pub async fn run(
         crate::routes::sources::update_source,
         crate::routes::sources::delete_source,
         crate::routes::sources::read_all_sources,
+        crate::routes::sources::validate_source,
         crate::routes::sources::publications::create_publication,
         crate::routes::sources::publications::read_publication,
         crate::routes::sources::publications::update_publication,
@@ -368,6 +372,7 @@ pub async fn run(
                     .service(read_all_tenants)
                     // sources
                     .service(create_source)
+                    .service(validate_source)
                     .service(read_source)
                     .service(update_source)
                     .service(delete_source)
