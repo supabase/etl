@@ -43,15 +43,16 @@ use crate::ducklake::metrics::{
     ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS, ETL_DUCKLAKE_DELETE_PREDICATES,
     ETL_DUCKLAKE_FAILED_BATCHES_TOTAL, ETL_DUCKLAKE_FILES_SCHEDULED_FOR_DELETION_BYTES,
     ETL_DUCKLAKE_FILES_SCHEDULED_FOR_DELETION_TOTAL, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
-    ETL_DUCKLAKE_INLINE_FLUSH_ROWS, ETL_DUCKLAKE_OLDEST_SCHEDULED_DELETION_AGE_SECONDS,
-    ETL_DUCKLAKE_OLDEST_SNAPSHOT_AGE_SECONDS, ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
-    ETL_DUCKLAKE_POOL_SIZE, ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL, ETL_DUCKLAKE_RETRIES_TOTAL,
-    ETL_DUCKLAKE_SNAPSHOTS_TOTAL, ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES,
-    ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILE_AVG_SIZE_BYTES, ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES,
-    ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_BYTES, ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_FILES,
-    ETL_DUCKLAKE_TABLE_DELETED_ROW_RATIO, ETL_DUCKLAKE_TABLE_SMALL_FILE_RATIO,
-    ETL_DUCKLAKE_UPSERT_ROWS, PREPARED_ROWS_KIND_LABEL, RESULT_LABEL, RETRY_SCOPE_LABEL,
-    SUB_BATCH_KIND_LABEL, register_metrics,
+    ETL_DUCKLAKE_INLINE_FLUSH_ROWS, ETL_DUCKLAKE_MAINTENANCE_FAILURES_TOTAL,
+    ETL_DUCKLAKE_OLDEST_SCHEDULED_DELETION_AGE_SECONDS, ETL_DUCKLAKE_OLDEST_SNAPSHOT_AGE_SECONDS,
+    ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS, ETL_DUCKLAKE_POOL_SIZE,
+    ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL, ETL_DUCKLAKE_RETRIES_TOTAL, ETL_DUCKLAKE_SNAPSHOTS_TOTAL,
+    ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES, ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILE_AVG_SIZE_BYTES,
+    ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES, ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_BYTES,
+    ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_FILES, ETL_DUCKLAKE_TABLE_DELETED_ROW_RATIO,
+    ETL_DUCKLAKE_TABLE_SMALL_FILE_RATIO, ETL_DUCKLAKE_UPSERT_ROWS, MAINTENANCE_TASK_LABEL,
+    PREPARED_ROWS_KIND_LABEL, RESULT_LABEL, RETRY_SCOPE_LABEL, SUB_BATCH_KIND_LABEL,
+    register_metrics,
 };
 use crate::ducklake::schema::build_create_table_sql_ducklake;
 use crate::table_name::try_stringify_table_name;
@@ -440,6 +441,19 @@ struct DuckLakeMaintenanceWorker {
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
+const MAINTENANCE_TASK_FLUSH: &str = "flush";
+const MAINTENANCE_TASK_TARGETED_MAINTENANCE: &str = "targeted_maintenance";
+const MAINTENANCE_TASK_CHECKPOINT: &str = "checkpoint";
+
+/// Records one failed DuckLake background maintenance run.
+fn record_ducklake_maintenance_failure(task: &'static str) {
+    counter!(
+        ETL_DUCKLAKE_MAINTENANCE_FAILURES_TOTAL,
+        MAINTENANCE_TASK_LABEL => task,
+    )
+    .increment(1);
+}
+
 // ── connection manager ────────────────────────────────────────────────────────
 
 /// Custom r2d2 connection manager that opens an in-memory DuckDB connection and
@@ -737,6 +751,7 @@ async fn run_ducklake_maintenance_worker(
                                 }
                             }
                             Err(error) => {
+                                record_ducklake_maintenance_failure(MAINTENANCE_TASK_FLUSH);
                                 warn!(
                                     table = %table_name,
                                     error = ?error,
@@ -762,6 +777,9 @@ async fn run_ducklake_maintenance_worker(
                                 }
                             }
                             Err(error) => {
+                                record_ducklake_maintenance_failure(
+                                    MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+                                );
                                 warn!(
                                     table = %table_name,
                                     error = ?error,
@@ -791,6 +809,7 @@ async fn run_ducklake_maintenance_worker(
                 )
                 .await
                 {
+                    record_ducklake_maintenance_failure(MAINTENANCE_TASK_CHECKPOINT);
                     warn!(error = ?error, "ducklake background checkpoint failed");
                 }
             }
@@ -3992,6 +4011,7 @@ mod tests {
     use etl::store::both::memory::MemoryStore;
     use etl::store::schema::SchemaStore;
     use etl::types::{ColumnSchema, Type as PgType};
+    use etl_telemetry::metrics::init_metrics_handle;
     use pg_escape::{quote_identifier, quote_literal};
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
@@ -4023,6 +4043,23 @@ mod tests {
         }
 
         Connection::open_in_memory().expect("failed to open in-memory DuckDB")
+    }
+
+    fn maintenance_failure_counter_value(rendered: &str, task: &str) -> f64 {
+        let task_label = format!(r#"{MAINTENANCE_TASK_LABEL}="{task}""#);
+
+        rendered
+            .lines()
+            .find_map(|line| {
+                if line.starts_with(ETL_DUCKLAKE_MAINTENANCE_FAILURES_TOTAL)
+                    && line.contains(&task_label)
+                {
+                    line.split_whitespace().last()?.parse::<f64>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.0)
     }
 
     fn ducklake_load_sql() -> String {
@@ -4921,6 +4958,49 @@ mod tests {
         assert!(metrics.files_scheduled_for_deletion_total >= 0);
         assert!(metrics.files_scheduled_for_deletion_bytes >= 0);
         assert!(metrics.oldest_scheduled_deletion_age_seconds >= 0);
+    }
+
+    #[tokio::test]
+    async fn test_maintenance_failure_metrics_are_exported_by_task() {
+        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
+        register_metrics();
+
+        let rendered_before = handle.render();
+        let flush_before =
+            maintenance_failure_counter_value(&rendered_before, MAINTENANCE_TASK_FLUSH);
+        let targeted_before = maintenance_failure_counter_value(
+            &rendered_before,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+        );
+        let checkpoint_before =
+            maintenance_failure_counter_value(&rendered_before, MAINTENANCE_TASK_CHECKPOINT);
+
+        record_ducklake_maintenance_failure(MAINTENANCE_TASK_FLUSH);
+        record_ducklake_maintenance_failure(MAINTENANCE_TASK_TARGETED_MAINTENANCE);
+        record_ducklake_maintenance_failure(MAINTENANCE_TASK_CHECKPOINT);
+
+        let rendered_after = handle.render();
+        let flush_after =
+            maintenance_failure_counter_value(&rendered_after, MAINTENANCE_TASK_FLUSH);
+        let targeted_after = maintenance_failure_counter_value(
+            &rendered_after,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+        );
+        let checkpoint_after =
+            maintenance_failure_counter_value(&rendered_after, MAINTENANCE_TASK_CHECKPOINT);
+
+        assert!(
+            flush_after > flush_before,
+            "flush failure counter did not increase"
+        );
+        assert!(
+            targeted_after > targeted_before,
+            "targeted maintenance failure counter did not increase"
+        );
+        assert!(
+            checkpoint_after > checkpoint_before,
+            "checkpoint failure counter did not increase"
+        );
     }
 
     #[test]

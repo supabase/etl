@@ -23,6 +23,8 @@ pub(crate) const ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS: &str =
 pub(crate) const ETL_DUCKLAKE_RETRIES_TOTAL: &str = "etl_ducklake_retries_total";
 pub(crate) const ETL_DUCKLAKE_FAILED_BATCHES_TOTAL: &str = "etl_ducklake_failed_batches_total";
 pub(crate) const ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL: &str = "etl_ducklake_replayed_batches_total";
+pub(crate) const ETL_DUCKLAKE_MAINTENANCE_FAILURES_TOTAL: &str =
+    "etl_ducklake_maintenance_failures_total";
 pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES: &str =
     "etl_ducklake_table_active_data_files";
 pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES: &str =
@@ -52,6 +54,7 @@ pub(crate) const PREPARED_ROWS_KIND_LABEL: &str = "prepared_rows_kind";
 pub(crate) const DELETE_ORIGIN_LABEL: &str = "delete_origin";
 pub(crate) const RETRY_SCOPE_LABEL: &str = "retry_scope";
 pub(crate) const RESULT_LABEL: &str = "result";
+pub(crate) const MAINTENANCE_TASK_LABEL: &str = "task";
 
 /// Registers DuckLake metrics once per process.
 pub(crate) fn register_metrics() {
@@ -121,6 +124,11 @@ pub(crate) fn register_metrics() {
             ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL,
             Unit::Count,
             "DuckLake batches skipped because an applied marker already existed, labeled by batch_kind."
+        );
+        describe_counter!(
+            ETL_DUCKLAKE_MAINTENANCE_FAILURES_TOTAL,
+            Unit::Count,
+            "DuckLake background maintenance runs that failed, labeled by task."
         );
 
         describe_histogram!(
