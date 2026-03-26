@@ -1910,7 +1910,7 @@ pub(super) fn flush_table_inlined_data(
     conn: &duckdb::Connection,
     table_name: &str,
     batch_kind: DuckLakeTableBatchKind,
-) -> EtlResult<()> {
+) -> EtlResult<u64> {
     let flush_started = Instant::now();
     let sql = format!(
         r#"SELECT COALESCE(SUM(rows_flushed), 0)
@@ -1926,6 +1926,7 @@ pub(super) fn flush_table_inlined_data(
             source: e
         )
     })?;
+    let rows_flushed = rows_flushed.max(0) as u64;
     let flush_result = if rows_flushed > 0 { "flushed" } else { "noop" };
     histogram!(
         ETL_DUCKLAKE_INLINE_FLUSH_ROWS,
@@ -1958,7 +1959,7 @@ pub(super) fn flush_table_inlined_data(
     #[cfg(feature = "test-utils")]
     maybe_fail_after_flushed_batch_for_tests(batch_kind, table_name)?;
 
-    Ok(())
+    Ok(rows_flushed)
 }
 
 /// Applies the truncate action inside an open transaction.

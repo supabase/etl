@@ -3,12 +3,15 @@
 This directory exposes DuckLake-specific metrics to help tune write-path
 behavior and the maintenance settings described in the DuckLake docs.
 
-The metrics fall into three groups:
+The metrics fall into four groups:
 
 - write-path metrics: show how the ETL writer is batching, waiting, retrying,
   and flushing inline data.
+- maintenance counters: operation-level counters emitted by the background
+  maintenance worker with the primary reason and outcome for each maintenance
+  attempt.
 - table-health samples: histograms recorded by a background sampler every
-  30 seconds on a dedicated DuckDB pool of size 2. They describe the current
+  30 seconds on a dedicated DuckDB pool of size 1. They describe the current
   shape of tables known to the current destination instance.
 - catalog-backlog gauges: current global snapshot and deletion backlog in the
   attached DuckLake catalog.
@@ -67,6 +70,34 @@ How to read them:
 - if `inline_flush_rows` is often meaningfully larger than `upsert_rows`, the
   inlining limit is helping consolidate multiple atomic batches before files are
   materialized.
+
+### Background maintenance metrics
+
+- `etl_ducklake_maintenance_total`
+
+This counter is emitted once per background maintenance operation with labels:
+
+- `task`: `flush`, `targeted_maintenance`, or `checkpoint`
+- `operation`: `flush_inlined_data`, `rewrite_data_files`,
+  `merge_adjacent_files`, or `checkpoint`
+- `reason`: the primary cause for the maintenance decision
+- `outcome`: `applied`, `noop`, `skipped_busy`, or `failed`
+
+How to read it:
+
+- `task="flush"` with `reason="pending_bytes_threshold"` means the flush was
+  scheduled because pending inlined bytes crossed the configured threshold.
+- `task="flush"` with `reason="idle_flush_threshold"` means none of the size
+  thresholds fired first, and the table was flushed because it stayed idle long
+  enough with pending inline work.
+- `task="targeted_maintenance"` can emit up to two counter events for one
+  maintenance cycle: one for `rewrite_data_files` and one for
+  `merge_adjacent_files`.
+- `outcome="skipped_busy"` means the worker wanted to run maintenance but the
+  table-local write slot was still busy.
+- rising `outcome="failed"` counts point to maintenance execution issues,
+  while many `outcome="noop"` counts usually mean maintenance is polling more
+  often than work is actually accumulating.
 
 ### Table-health sampling metrics
 
