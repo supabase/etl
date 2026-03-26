@@ -6,21 +6,24 @@ use etl::etl_error;
 use metrics::{Unit, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, MissedTickBehavior};
+use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tracing::{info, warn};
 
 use crate::ducklake::client::{
     DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
     format_query_error_detail, run_duckdb_blocking,
 };
+use crate::ducklake::maintenance::{
+    TableMaintenanceNotification, TableMetricsSample, send_maintenance_notification,
+};
 use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG};
 
 static REGISTER_METRICS: Once = Once::new();
 
 /// Files smaller than this are usually too small to be efficient in object storage.
-const SMALL_FILE_SIZE_BYTES: i64 = 5_000_000; // 5MB
+pub(super) const SMALL_FILE_SIZE_BYTES: i64 = 5_000_000; // 5MB
 /// Dedicated pool size for background DuckLake metrics sampling.
 const METRICS_POOL_SIZE: u32 = 1;
 /// Frequency of background DuckLake metrics sampling.
@@ -90,6 +93,7 @@ pub(super) struct DuckLakeMetricsSampler {
 }
 
 /// Aggregated storage health sampled for one DuckLake table.
+#[derive(Clone, Debug)]
 pub(super) struct DuckLakeTableStorageMetrics {
     pub(super) active_data_files: i64,
     pub(super) active_data_bytes: i64,
@@ -98,6 +102,35 @@ pub(super) struct DuckLakeTableStorageMetrics {
     pub(super) active_delete_files: i64,
     pub(super) active_delete_bytes: i64,
     pub(super) deleted_rows: i64,
+}
+
+impl DuckLakeTableStorageMetrics {
+    /// Returns the average active data-file size in bytes.
+    pub(super) fn average_data_file_size_bytes(&self) -> f64 {
+        if self.active_data_files > 0 {
+            self.active_data_bytes.max(0) as f64 / self.active_data_files as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Returns the ratio of active data files smaller than the shared 5 MiB floor.
+    pub(super) fn small_file_ratio(&self) -> f64 {
+        if self.active_data_files > 0 {
+            self.small_data_files.max(0) as f64 / self.active_data_files as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Returns the ratio of deleted rows to active data-file rows.
+    pub(super) fn deleted_row_ratio(&self) -> f64 {
+        if self.active_data_rows > 0 {
+            self.deleted_rows.max(0) as f64 / self.active_data_rows as f64
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Global maintenance backlog sampled from the DuckLake catalog.
@@ -255,6 +288,7 @@ pub(crate) fn register_metrics() {
 pub(super) async fn spawn_ducklake_metrics_sampler(
     manager: DuckLakeConnectionManager,
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+    maintenance_notification_tx: mpsc::Sender<TableMaintenanceNotification>,
 ) -> EtlResult<DuckLakeMetricsSampler> {
     let pool = Arc::new(build_warm_ducklake_pool(manager, METRICS_POOL_SIZE, "metrics").await?);
     let blocking_slots = Arc::new(Semaphore::new(METRICS_POOL_SIZE as usize));
@@ -263,6 +297,7 @@ pub(super) async fn spawn_ducklake_metrics_sampler(
         pool,
         blocking_slots,
         created_tables,
+        maintenance_notification_tx,
         shutdown_rx,
     ));
 
@@ -277,6 +312,7 @@ async fn run_ducklake_metrics_sampler(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
+    maintenance_notification_tx: mpsc::Sender<TableMaintenanceNotification>,
     mut shutdown_rx: watch::Receiver<()>,
 ) {
     let mut interval = tokio::time::interval(METRICS_POLL_INTERVAL);
@@ -311,6 +347,7 @@ async fn run_ducklake_metrics_sampler(
                         Arc::clone(&pool),
                         Arc::clone(&blocking_slots),
                         table_name.clone(),
+                        &maintenance_notification_tx,
                     )
                     .await
                     {
@@ -331,27 +368,16 @@ async fn record_table_storage_metrics(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
     table_name: DuckLakeTableName,
+    maintenance_notification_tx: &mpsc::Sender<TableMaintenanceNotification>,
 ) -> EtlResult<()> {
-    let metrics = query_table_storage_metrics(pool, blocking_slots, table_name).await?;
+    let metrics = query_table_storage_metrics(pool, blocking_slots, table_name.clone()).await?;
     let active_data_files = metrics.active_data_files.max(0) as f64;
     let active_data_bytes = metrics.active_data_bytes.max(0) as f64;
     let active_delete_files = metrics.active_delete_files.max(0) as f64;
     let active_delete_bytes = metrics.active_delete_bytes.max(0) as f64;
-    let small_file_ratio = if metrics.active_data_files > 0 {
-        metrics.small_data_files.max(0) as f64 / metrics.active_data_files as f64
-    } else {
-        0.0
-    };
-    let average_data_file_size_bytes = if metrics.active_data_files > 0 {
-        metrics.active_data_bytes.max(0) as f64 / metrics.active_data_files as f64
-    } else {
-        0.0
-    };
-    let deleted_row_ratio = if metrics.active_data_rows > 0 {
-        metrics.deleted_rows.max(0) as f64 / metrics.active_data_rows as f64
-    } else {
-        0.0
-    };
+    let small_file_ratio = metrics.small_file_ratio();
+    let average_data_file_size_bytes = metrics.average_data_file_size_bytes();
+    let deleted_row_ratio = metrics.deleted_row_ratio();
 
     histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES).record(active_data_files);
     histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES).record(active_data_bytes);
@@ -361,6 +387,15 @@ async fn record_table_storage_metrics(
     histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_FILES).record(active_delete_files);
     histogram!(ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_BYTES).record(active_delete_bytes);
     histogram!(ETL_DUCKLAKE_TABLE_DELETED_ROW_RATIO).record(deleted_row_ratio);
+    send_maintenance_notification(
+        maintenance_notification_tx,
+        TableMaintenanceNotification::TableMetricsSample(TableMetricsSample {
+            table_name,
+            sampled_at: Instant::now(),
+            metrics,
+        }),
+    )
+    .await;
 
     Ok(())
 }

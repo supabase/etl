@@ -18,28 +18,38 @@ use crate::ducklake::client::{
     DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
     format_query_error_detail, run_duckdb_blocking,
 };
-use crate::ducklake::core::{DuckLakeTableBatchKind, flush_table_inlined_data};
+use crate::ducklake::core::{DuckLakeInlineFlushKind, flush_table_inlined_data};
 use crate::ducklake::metrics::{
-    ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS, ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL,
-    MAINTENANCE_OPERATION_LABEL, MAINTENANCE_OUTCOME_LABEL, MAINTENANCE_REASON_LABEL,
-    MAINTENANCE_TASK_LABEL,
+    DuckLakeTableStorageMetrics, ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
+    ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL, MAINTENANCE_OPERATION_LABEL, MAINTENANCE_OUTCOME_LABEL,
+    MAINTENANCE_REASON_LABEL, MAINTENANCE_TASK_LABEL, SMALL_FILE_SIZE_BYTES,
 };
 use crate::ducklake::{ATTACH_DATA_INLINING_ROW_LIMIT, DuckLakeTableName, LAKE_CATALOG};
 
 /// Dedicated pool size for background DuckLake maintenance work.
 const MAINTENANCE_POOL_SIZE: u32 = 1;
 /// Poll interval for checking per-table inline flush thresholds.
-const MAINTENANCE_FLUSH_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const MAINTENANCE_FLUSH_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// How long a table can stay idle before pending inlined data is materialized.
 const MAINTENANCE_IDLE_FLUSH_THRESHOLD: Duration = Duration::from_secs(60 * 5);
 /// Pending bytes threshold that triggers a background inline flush.
-const MAINTENANCE_PENDING_BYTES_THRESHOLD: u64 = 5_000_000; // 5MB
+const MAINTENANCE_PENDING_BYTES_THRESHOLD: u64 = SMALL_FILE_SIZE_BYTES as u64;
 /// Pending inserted rows threshold that triggers a background inline flush.
 const MAINTENANCE_PENDING_ROWS_THRESHOLD: u64 = ATTACH_DATA_INLINING_ROW_LIMIT - 100;
 /// Minimum idle window before targeted table maintenance runs, to not have maintenances ran too frequently.
 const MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD: Duration = Duration::from_secs(90);
 /// Minimum delay between targeted maintenance runs for the same table.
 const MAINTENANCE_TABLE_COMPACTION_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// Minimum active delete-file count before idle rewrite is worth attempting.
+const MAINTENANCE_IDLE_REWRITE_DELETE_FILES_THRESHOLD: i64 = 32;
+/// Deleted-row ratio that makes idle rewrite worthwhile.
+const MAINTENANCE_IDLE_REWRITE_DELETED_ROW_RATIO_THRESHOLD: f64 = 0.10;
+/// Active delete-file count that warrants emergency rewrite.
+const MAINTENANCE_EMERGENCY_REWRITE_DELETE_FILES_THRESHOLD: i64 = 128;
+/// Deleted-row ratio that warrants emergency rewrite.
+const MAINTENANCE_EMERGENCY_REWRITE_DELETED_ROW_RATIO_THRESHOLD: f64 = 0.25;
+/// Small-file ratio threshold that makes merge worth attempting.
+const MAINTENANCE_MERGE_SMALL_FILE_RATIO_THRESHOLD: f64 = 0.5;
 /// Global checkpoint interval used to keep catalog maintenance moving.
 const MAINTENANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// Timeout for sending a notification to the maintenance worker.
@@ -79,7 +89,10 @@ enum MaintenanceReason {
     PendingBytesThreshold,
     PendingInsertedRowsThreshold,
     IdleFlushThreshold,
-    DirtyIdleWindow,
+    IdleRewriteMetricsThreshold,
+    EmergencyRewriteMetricsThreshold,
+    IdleMergeMetricsThreshold,
+    EmergencyMergeMetricsThreshold,
     CheckpointInterval,
 }
 
@@ -90,7 +103,10 @@ impl MaintenanceReason {
             Self::PendingBytesThreshold => "pending_bytes_threshold",
             Self::PendingInsertedRowsThreshold => "pending_inserted_rows_threshold",
             Self::IdleFlushThreshold => "idle_flush_threshold",
-            Self::DirtyIdleWindow => "dirty_idle_window",
+            Self::IdleRewriteMetricsThreshold => "idle_rewrite_metrics_threshold",
+            Self::EmergencyRewriteMetricsThreshold => "emergency_rewrite_metrics_threshold",
+            Self::IdleMergeMetricsThreshold => "idle_merge_metrics_threshold",
+            Self::EmergencyMergeMetricsThreshold => "emergency_merge_metrics_threshold",
             Self::CheckpointInterval => "checkpoint_interval",
         }
     }
@@ -130,31 +146,88 @@ impl From<u64> for MaintenanceOutcome {
 
 /// Per-table write activity sent to the background maintenance worker.
 #[derive(Clone, Debug, Default)]
-pub(super) struct TableMaintenanceNotification {
+pub(super) struct TableWriteActivity {
     pub(super) table_name: DuckLakeTableName,
     pub(super) approx_bytes: u64,
     pub(super) inserted_rows: u64,
 }
 
+/// Table-health metrics sent from the background sampler to maintenance.
+#[derive(Clone, Debug)]
+pub(super) struct TableMetricsSample {
+    pub(super) table_name: DuckLakeTableName,
+    pub(super) sampled_at: Instant,
+    pub(super) metrics: DuckLakeTableStorageMetrics,
+}
+
+/// Notifications consumed by the background DuckLake maintenance worker.
+#[derive(Clone, Debug)]
+pub(super) enum TableMaintenanceNotification {
+    WriteActivity(TableWriteActivity),
+    TableMetricsSample(TableMetricsSample),
+}
+
+impl TableMaintenanceNotification {
+    /// Returns the table name carried by this notification.
+    fn table_name(&self) -> &str {
+        match self {
+            Self::WriteActivity(activity) => &activity.table_name,
+            Self::TableMetricsSample(sample) => &sample.table_name,
+        }
+    }
+}
+
+/// Trigger scope for one targeted maintenance selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TargetedMaintenanceScope {
+    /// When the table has been idle long enough
+    Idle,
+    /// When ducklake state is not healthy (files fragmented, ...)
+    Emergency,
+}
+
+/// Selected targeted-maintenance operations for one table.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TargetedMaintenancePlan {
+    rewrite_reason: Option<MaintenanceReason>,
+    merge_reason: Option<MaintenanceReason>,
+}
+
+impl TargetedMaintenancePlan {
+    /// Returns whether this plan selected any maintenance work.
+    fn has_work(self) -> bool {
+        self.rewrite_reason.is_some() || self.merge_reason.is_some()
+    }
+}
+
 /// Coalesced maintenance state for one DuckLake table.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct TableMaintenanceState {
     pending_bytes: u64,
     pending_inserted_rows: u64,
     dirty_since_compaction: bool,
-    last_write_at: Instant,
-    last_compaction_at: Option<Instant>,
+    last_write_at: Option<Instant>,
+    last_targeted_maintenance_at: Option<Instant>,
+    latest_storage_metrics: Option<DuckLakeTableStorageMetrics>,
+    latest_storage_metrics_sampled_at: Option<Instant>,
+    last_emergency_assessment_at: Option<Instant>,
 }
 
 impl TableMaintenanceState {
     /// Aggregates one write notification into the existing table state.
-    fn record(&mut self, notification: &TableMaintenanceNotification, now: Instant) {
+    fn record_write_activity(&mut self, notification: &TableWriteActivity, now: Instant) {
         self.pending_bytes = self.pending_bytes.saturating_add(notification.approx_bytes);
         self.pending_inserted_rows = self
             .pending_inserted_rows
             .saturating_add(notification.inserted_rows);
         self.dirty_since_compaction = true;
-        self.last_write_at = now;
+        self.last_write_at = Some(now);
+    }
+
+    /// Records one sampled metrics snapshot for this table.
+    fn record_metrics_sample(&mut self, sample: TableMetricsSample) {
+        self.latest_storage_metrics = Some(sample.metrics);
+        self.latest_storage_metrics_sampled_at = Some(sample.sampled_at);
     }
 
     /// Returns whether the table still has pending inline work.
@@ -172,7 +245,8 @@ impl TableMaintenanceState {
             return Some(MaintenanceReason::PendingInsertedRowsThreshold);
         }
 
-        let idle = now.saturating_duration_since(self.last_write_at);
+        let last_write_at = self.last_write_at?;
+        let idle = now.saturating_duration_since(last_write_at);
         if self.has_pending_flush_work() && idle >= MAINTENANCE_IDLE_FLUSH_THRESHOLD {
             return Some(MaintenanceReason::IdleFlushThreshold);
         }
@@ -186,15 +260,31 @@ impl TableMaintenanceState {
         self.pending_inserted_rows = 0;
     }
 
-    /// Returns the reason targeted maintenance should run for this table.
-    fn compact_reason(&self, now: Instant) -> Option<MaintenanceReason> {
+    /// Returns the latest metrics sample covering the current dirty period.
+    fn current_storage_metrics(&self) -> Option<(&DuckLakeTableStorageMetrics, Instant)> {
+        let metrics = self.latest_storage_metrics.as_ref()?;
+        let sampled_at = self.latest_storage_metrics_sampled_at?;
+
+        if let Some(last_write_at) = self.last_write_at
+            && sampled_at < last_write_at
+        {
+            return None;
+        }
+
+        Some((metrics, sampled_at))
+    }
+
+    /// Returns the plan for idle targeted maintenance, if it is due.
+    fn idle_targeted_maintenance_plan(&self, now: Instant) -> Option<TargetedMaintenancePlan> {
         if !self.dirty_since_compaction {
             return None;
         }
 
-        let idle = now.saturating_duration_since(self.last_write_at);
+        let last_write_at = self.last_write_at?;
+        let (metrics, _) = self.current_storage_metrics()?;
+        let idle = now.saturating_duration_since(last_write_at);
         let enough_idle = idle >= MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD;
-        let enough_gap = match self.last_compaction_at {
+        let enough_gap = match self.last_targeted_maintenance_at {
             Some(last) => {
                 now.saturating_duration_since(last) >= MAINTENANCE_TABLE_COMPACTION_INTERVAL
             }
@@ -202,10 +292,55 @@ impl TableMaintenanceState {
         };
 
         if enough_idle && enough_gap {
-            Some(MaintenanceReason::DirtyIdleWindow)
+            Some(targeted_maintenance_plan(
+                metrics,
+                TargetedMaintenanceScope::Idle,
+            ))
         } else {
             None
         }
+    }
+
+    /// Returns the plan for emergency targeted maintenance from a fresh sample.
+    fn emergency_targeted_maintenance_plan(
+        &self,
+        now: Instant,
+    ) -> Option<(TargetedMaintenancePlan, Instant)> {
+        if !self.dirty_since_compaction {
+            return None;
+        }
+
+        let (metrics, sampled_at) = self.current_storage_metrics()?;
+        let enough_gap = match self.last_targeted_maintenance_at {
+            Some(last) => {
+                now.saturating_duration_since(last) >= MAINTENANCE_TABLE_COMPACTION_INTERVAL
+            }
+            None => true,
+        };
+        let unseen_sample = match self.last_emergency_assessment_at {
+            Some(last_assessment_at) => sampled_at > last_assessment_at,
+            None => true,
+        };
+
+        if enough_gap && unseen_sample {
+            Some((
+                targeted_maintenance_plan(metrics, TargetedMaintenanceScope::Emergency),
+                sampled_at,
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Marks one completed idle maintenance assessment.
+    fn complete_idle_targeted_maintenance(&mut self, now: Instant) {
+        self.dirty_since_compaction = false;
+        self.last_targeted_maintenance_at = Some(now);
+    }
+
+    /// Marks one completed targeted maintenance run.
+    fn complete_targeted_maintenance(&mut self, now: Instant) {
+        self.complete_idle_targeted_maintenance(now);
     }
 }
 
@@ -250,15 +385,20 @@ fn record_ducklake_maintenance_skipped(
     .increment(1);
 }
 
-/// Records both targeted-maintenance operations as skipped because the table is busy.
-fn record_skipped_targeted_maintenance(reason: MaintenanceReason) {
-    for operation in [
-        MaintenanceOperation::RewriteDataFiles,
-        MaintenanceOperation::MergeAdjacentFiles,
-    ] {
+/// Records all selected targeted-maintenance operations as skipped because the table is busy.
+fn record_skipped_targeted_maintenance(plan: TargetedMaintenancePlan) {
+    if let Some(reason) = plan.rewrite_reason {
         record_ducklake_maintenance_skipped(
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
-            operation,
+            MaintenanceOperation::RewriteDataFiles,
+            reason,
+        );
+    }
+
+    if let Some(reason) = plan.merge_reason {
+        record_ducklake_maintenance_skipped(
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::MergeAdjacentFiles,
             reason,
         );
     }
@@ -266,18 +406,87 @@ fn record_skipped_targeted_maintenance(reason: MaintenanceReason) {
 
 /// Returns the targeted-maintenance cycle outcome from successful per-operation outcomes.
 fn targeted_maintenance_outcome(
-    rewrite_outcome: MaintenanceOutcome,
-    merge_outcome: MaintenanceOutcome,
+    rewrite_outcome: Option<MaintenanceOutcome>,
+    merge_outcome: Option<MaintenanceOutcome>,
 ) -> MaintenanceOutcome {
-    debug_assert!(rewrite_outcome.is_completed());
-    debug_assert!(merge_outcome.is_completed());
+    debug_assert!(rewrite_outcome.is_none_or(MaintenanceOutcome::is_completed));
+    debug_assert!(merge_outcome.is_none_or(MaintenanceOutcome::is_completed));
 
-    if rewrite_outcome == MaintenanceOutcome::Applied
-        || merge_outcome == MaintenanceOutcome::Applied
+    if rewrite_outcome == Some(MaintenanceOutcome::Applied)
+        || merge_outcome == Some(MaintenanceOutcome::Applied)
     {
         MaintenanceOutcome::Applied
     } else {
         MaintenanceOutcome::Noop
+    }
+}
+
+/// Returns the targeted-maintenance plan implied by one metrics sample.
+fn targeted_maintenance_plan(
+    metrics: &DuckLakeTableStorageMetrics,
+    scope: TargetedMaintenanceScope,
+) -> TargetedMaintenancePlan {
+    let mut plan = TargetedMaintenancePlan::default();
+    let active_delete_files = metrics.active_delete_files.max(0);
+    let deleted_row_ratio = metrics.deleted_row_ratio();
+    let small_file_ratio = metrics.small_file_ratio();
+    let average_data_file_size_bytes = metrics.average_data_file_size_bytes();
+
+    match scope {
+        TargetedMaintenanceScope::Idle => {
+            if active_delete_files >= MAINTENANCE_IDLE_REWRITE_DELETE_FILES_THRESHOLD
+                && deleted_row_ratio >= MAINTENANCE_IDLE_REWRITE_DELETED_ROW_RATIO_THRESHOLD
+            {
+                plan.rewrite_reason = Some(MaintenanceReason::IdleRewriteMetricsThreshold);
+            }
+
+            if small_file_ratio > MAINTENANCE_MERGE_SMALL_FILE_RATIO_THRESHOLD
+                && average_data_file_size_bytes < SMALL_FILE_SIZE_BYTES as f64
+            {
+                plan.merge_reason = Some(MaintenanceReason::IdleMergeMetricsThreshold);
+            }
+        }
+        TargetedMaintenanceScope::Emergency => {
+            if active_delete_files >= MAINTENANCE_EMERGENCY_REWRITE_DELETE_FILES_THRESHOLD
+                || deleted_row_ratio >= MAINTENANCE_EMERGENCY_REWRITE_DELETED_ROW_RATIO_THRESHOLD
+            {
+                plan.rewrite_reason = Some(MaintenanceReason::EmergencyRewriteMetricsThreshold);
+            }
+
+            if small_file_ratio > MAINTENANCE_MERGE_SMALL_FILE_RATIO_THRESHOLD
+                && average_data_file_size_bytes < SMALL_FILE_SIZE_BYTES as f64
+            {
+                plan.merge_reason = Some(MaintenanceReason::EmergencyMergeMetricsThreshold);
+            }
+        }
+    }
+
+    plan
+}
+
+/// Sends one maintenance notification without blocking the caller indefinitely.
+pub(super) async fn send_maintenance_notification(
+    notification_tx: &mpsc::Sender<TableMaintenanceNotification>,
+    notification: TableMaintenanceNotification,
+) {
+    if let Err(error) = notification_tx
+        .send_timeout(notification, NOTIFICATION_SEND_TIMEOUT)
+        .await
+    {
+        match error {
+            mpsc::error::SendTimeoutError::Timeout(notification) => {
+                warn!(
+                    table = %notification.table_name(),
+                    "ducklake maintenance notification timed out"
+                );
+            }
+            mpsc::error::SendTimeoutError::Closed(notification) => {
+                warn!(
+                    table = %notification.table_name(),
+                    "ducklake maintenance notification dropped"
+                );
+            }
+        }
     }
 }
 
@@ -306,7 +515,7 @@ pub(super) async fn spawn_ducklake_maintenance_worker(
     })
 }
 
-/// Coalesces write notifications and runs background DuckLake maintenance.
+/// Coalesces notifications and runs background DuckLake maintenance.
 async fn run_ducklake_maintenance_worker(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
@@ -339,17 +548,25 @@ async fn run_ducklake_maintenance_worker(
 
                 let now = Instant::now();
                 table_states
-                    .entry(notification.table_name.clone())
-                    .and_modify(|state| state.record(&notification, now))
+                    .entry(notification.table_name().to_string())
+                    .and_modify(|state| match &notification {
+                        TableMaintenanceNotification::WriteActivity(activity) => {
+                            state.record_write_activity(activity, now);
+                        }
+                        TableMaintenanceNotification::TableMetricsSample(sample) => {
+                            state.record_metrics_sample(sample.clone());
+                        }
+                    })
                     .or_insert_with(|| {
-                        let mut state = TableMaintenanceState {
-                            pending_bytes: 0,
-                            pending_inserted_rows: 0,
-                            dirty_since_compaction: true,
-                            last_write_at: now,
-                            last_compaction_at: None,
-                        };
-                        state.record(&notification, now);
+                        let mut state = TableMaintenanceState::default();
+                        match notification {
+                            TableMaintenanceNotification::WriteActivity(activity) => {
+                                state.record_write_activity(&activity, now);
+                            }
+                            TableMaintenanceNotification::TableMetricsSample(sample) => {
+                                state.record_metrics_sample(sample);
+                            }
+                        }
                         state
                     });
             }
@@ -384,27 +601,61 @@ async fn run_ducklake_maintenance_worker(
                         }
                     }
                     now = Instant::now();
-                    // If it needs to be compacted
-                    if let Some(reason) = table_state.compact_reason(now) {
+
+                    if let Some((plan, sampled_at)) = table_state
+                        .emergency_targeted_maintenance_plan(now)
+                    {
+                        table_state.last_emergency_assessment_at = Some(sampled_at);
+                        if plan.has_work() {
+                            match run_targeted_table_maintenance(
+                                Arc::clone(&pool),
+                                Arc::clone(&blocking_slots),
+                                Arc::clone(&table_write_slots),
+                                table_name.clone(),
+                                plan,
+                            )
+                            .await
+                            {
+                                Ok(outcome) => {
+                                    if outcome.is_completed() {
+                                        table_state.complete_targeted_maintenance(Instant::now());
+                                    }
+                                }
+                                Err(error) => {
+                                    warn!(
+                                        table = %table_name,
+                                        error = ?error,
+                                        "ducklake targeted maintenance failed"
+                                    );
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
+                    if let Some(plan) = table_state.idle_targeted_maintenance_plan(now) {
+                        if !plan.has_work() {
+                            table_state.complete_idle_targeted_maintenance(Instant::now());
+                            continue;
+                        }
+
                         match run_targeted_table_maintenance(
                             Arc::clone(&pool),
                             Arc::clone(&blocking_slots),
                             Arc::clone(&table_write_slots),
                             table_name.clone(),
-                            reason,
+                            plan,
                         )
                         .await
                         {
                             Ok(outcome) => {
                                 if outcome.is_completed() {
-                                    table_state.dirty_since_compaction = false;
-                                    table_state.last_compaction_at = Some(Instant::now());
+                                    table_state.complete_targeted_maintenance(Instant::now());
                                 }
                             }
                             Err(error) => {
                                 warn!(
                                     table = %table_name,
-                                    reason = reason.as_str(),
                                     error = ?error,
                                     "ducklake targeted maintenance failed"
                                 );
@@ -414,7 +665,9 @@ async fn run_ducklake_maintenance_worker(
                 }
 
                 table_states.retain(|_, state| {
-                    state.has_pending_flush_work() || state.dirty_since_compaction
+                    state.has_pending_flush_work()
+                        || state.dirty_since_compaction
+                        || state.latest_storage_metrics.is_some()
                 });
             }
             _ = checkpoint_interval.tick() => {
@@ -498,11 +751,11 @@ async fn run_targeted_table_maintenance(
     blocking_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     table_name: DuckLakeTableName,
-    reason: MaintenanceReason,
+    plan: TargetedMaintenancePlan,
 ) -> EtlResult<MaintenanceOutcome> {
     let Some(table_write_permit) = try_acquire_table_write_slot(&table_write_slots, &table_name)
     else {
-        record_skipped_targeted_maintenance(reason);
+        record_skipped_targeted_maintenance(plan);
         return Ok(MaintenanceOutcome::SkippedBusy);
     };
 
@@ -512,7 +765,7 @@ async fn run_targeted_table_maintenance(
         DuckDbBlockingOperationKind::Maintenance,
         move |conn| {
             let _table_write_permit = table_write_permit;
-            run_targeted_table_maintenance_blocking(conn, &table_name, reason)
+            run_targeted_table_maintenance_blocking(conn, &table_name, plan)
         },
     )
     .await
@@ -540,16 +793,18 @@ fn flush_table_inlined_data_in_background_blocking(
     reason: MaintenanceReason,
 ) -> EtlResult<MaintenanceOutcome> {
     let flush_started = Instant::now();
-    let rows_flushed = flush_table_inlined_data(conn, table_name, DuckLakeTableBatchKind::Mutation)
-        .inspect_err(|_error| {
-            record_ducklake_maintenance_duration(
-                MAINTENANCE_TASK_FLUSH,
-                MaintenanceOperation::FlushInlinedData,
-                reason,
-                MaintenanceOutcome::Failed,
-                flush_started.elapsed().as_secs_f64(),
-            );
-        })?;
+    let rows_flushed =
+        flush_table_inlined_data(conn, table_name, DuckLakeInlineFlushKind::Mutation).inspect_err(
+            |_error| {
+                record_ducklake_maintenance_duration(
+                    MAINTENANCE_TASK_FLUSH,
+                    MaintenanceOperation::FlushInlinedData,
+                    reason,
+                    MaintenanceOutcome::Failed,
+                    flush_started.elapsed().as_secs_f64(),
+                );
+            },
+        )?;
     let outcome = MaintenanceOutcome::from(rows_flushed);
     record_ducklake_maintenance_duration(
         MAINTENANCE_TASK_FLUSH,
@@ -565,48 +820,61 @@ fn flush_table_inlined_data_in_background_blocking(
 fn run_targeted_table_maintenance_blocking(
     conn: &duckdb::Connection,
     table_name: &str,
-    reason: MaintenanceReason,
+    plan: TargetedMaintenancePlan,
 ) -> EtlResult<MaintenanceOutcome> {
-    let rewrite_started = Instant::now();
-    let rewritten_files = rewrite_table_data_files(conn, table_name).inspect_err(|_error| {
+    let mut rewritten_files = 0u64;
+    let mut merged_files = 0u64;
+    let mut rewrite_outcome = None;
+    let mut merge_outcome = None;
+
+    if let Some(reason) = plan.rewrite_reason {
+        let rewrite_started = Instant::now();
+        rewritten_files = rewrite_table_data_files(conn, table_name).inspect_err(|_error| {
+            record_ducklake_maintenance_duration(
+                MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+                MaintenanceOperation::RewriteDataFiles,
+                reason,
+                MaintenanceOutcome::Failed,
+                rewrite_started.elapsed().as_secs_f64(),
+            );
+        })?;
+        let outcome = MaintenanceOutcome::from(rewritten_files);
         record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
             reason,
-            MaintenanceOutcome::Failed,
+            outcome,
             rewrite_started.elapsed().as_secs_f64(),
         );
-    })?;
-    let rewrite_outcome = MaintenanceOutcome::from(rewritten_files);
-    record_ducklake_maintenance_duration(
-        MAINTENANCE_TASK_TARGETED_MAINTENANCE,
-        MaintenanceOperation::RewriteDataFiles,
-        reason,
-        rewrite_outcome,
-        rewrite_started.elapsed().as_secs_f64(),
-    );
+        rewrite_outcome = Some(outcome);
+    }
 
-    let merge_started = Instant::now();
-    let merged_files = merge_adjacent_table_files(conn, table_name).inspect_err(|_error| {
+    if let Some(reason) = plan.merge_reason {
+        let merge_started = Instant::now();
+        merged_files = merge_adjacent_table_files(conn, table_name).inspect_err(|_error| {
+            record_ducklake_maintenance_duration(
+                MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+                MaintenanceOperation::MergeAdjacentFiles,
+                reason,
+                MaintenanceOutcome::Failed,
+                merge_started.elapsed().as_secs_f64(),
+            );
+        })?;
+        let outcome = MaintenanceOutcome::from(merged_files);
         record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
             reason,
-            MaintenanceOutcome::Failed,
+            outcome,
             merge_started.elapsed().as_secs_f64(),
         );
-    })?;
-    let merge_outcome = MaintenanceOutcome::from(merged_files);
-    record_ducklake_maintenance_duration(
-        MAINTENANCE_TASK_TARGETED_MAINTENANCE,
-        MaintenanceOperation::MergeAdjacentFiles,
-        reason,
-        merge_outcome,
-        merge_started.elapsed().as_secs_f64(),
-    );
+        merge_outcome = Some(outcome);
+    }
 
     info!(
         table = %table_name,
+        rewrite_selected = plan.rewrite_reason.is_some(),
+        merge_selected = plan.merge_reason.is_some(),
         rewritten_files,
         merged_files,
         "ducklake targeted maintenance completed"
@@ -687,9 +955,10 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
 fn merge_adjacent_table_files(conn: &duckdb::Connection, table_name: &str) -> EtlResult<u64> {
     let sql = format!(
         r#"SELECT COALESCE(SUM(files_created), 0)
-         FROM ducklake_merge_adjacent_files({}, {});"#,
+         FROM ducklake_merge_adjacent_files({}, {}, max_file_size => {});"#,
         quote_literal(LAKE_CATALOG),
         quote_literal(table_name),
+        SMALL_FILE_SIZE_BYTES,
     );
     let files_created: i64 = conn
         .query_row(&sql, [], |row| row.get(0))
@@ -769,6 +1038,45 @@ mod tests {
             .unwrap_or(0.0)
     }
 
+    fn write_activity(approx_bytes: u64, inserted_rows: u64) -> TableWriteActivity {
+        TableWriteActivity {
+            table_name: "public_users".to_string(),
+            approx_bytes,
+            inserted_rows,
+        }
+    }
+
+    fn table_metrics_sample(
+        sampled_at: Instant,
+        metrics: DuckLakeTableStorageMetrics,
+    ) -> TableMetricsSample {
+        TableMetricsSample {
+            table_name: "public_users".to_string(),
+            sampled_at,
+            metrics,
+        }
+    }
+
+    fn storage_metrics(
+        active_data_files: i64,
+        active_data_bytes: i64,
+        small_data_files: i64,
+        active_data_rows: i64,
+        active_delete_files: i64,
+        active_delete_bytes: i64,
+        deleted_rows: i64,
+    ) -> DuckLakeTableStorageMetrics {
+        DuckLakeTableStorageMetrics {
+            active_data_files,
+            active_data_bytes,
+            small_data_files,
+            active_data_rows,
+            active_delete_files,
+            active_delete_bytes,
+            deleted_rows,
+        }
+    }
+
     #[tokio::test]
     async fn test_maintenance_duration_histogram_counts_are_exported_with_labels() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
@@ -793,14 +1101,14 @@ mod tests {
             &rendered_before,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::IdleRewriteMetricsThreshold,
             MaintenanceOutcome::Applied,
         );
         let merge_noop_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::IdleMergeMetricsThreshold,
             MaintenanceOutcome::Noop,
         );
         let checkpoint_failed_before = maintenance_duration_count(
@@ -828,14 +1136,14 @@ mod tests {
         record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::IdleRewriteMetricsThreshold,
             MaintenanceOutcome::Applied,
             1.0,
         );
         record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::IdleMergeMetricsThreshold,
             MaintenanceOutcome::Noop,
             0.4,
         );
@@ -866,14 +1174,14 @@ mod tests {
             &rendered_after,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::IdleRewriteMetricsThreshold,
             MaintenanceOutcome::Applied,
         );
         let merge_noop_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::IdleMergeMetricsThreshold,
             MaintenanceOutcome::Noop,
         );
         let checkpoint_failed_after = maintenance_duration_count(
@@ -907,65 +1215,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_targeted_maintenance_busy_emits_two_skip_counter_events_and_no_durations() {
+    async fn test_targeted_maintenance_busy_emits_skip_counter_only_for_selected_operations() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
+        let plan = TargetedMaintenancePlan {
+            rewrite_reason: Some(MaintenanceReason::EmergencyRewriteMetricsThreshold),
+            merge_reason: None,
+        };
 
         let rendered_before = handle.render();
         let rewrite_before = maintenance_skipped_counter_value(
             &rendered_before,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::EmergencyRewriteMetricsThreshold,
         );
         let merge_before = maintenance_skipped_counter_value(
             &rendered_before,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::EmergencyMergeMetricsThreshold,
         );
         let rewrite_duration_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::EmergencyRewriteMetricsThreshold,
             MaintenanceOutcome::SkippedBusy,
         );
         let merge_duration_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::EmergencyMergeMetricsThreshold,
             MaintenanceOutcome::SkippedBusy,
         );
 
-        record_skipped_targeted_maintenance(MaintenanceReason::DirtyIdleWindow);
+        record_skipped_targeted_maintenance(plan);
 
         let rendered_after = handle.render();
         let rewrite_after = maintenance_skipped_counter_value(
             &rendered_after,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::EmergencyRewriteMetricsThreshold,
         );
         let merge_after = maintenance_skipped_counter_value(
             &rendered_after,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::EmergencyMergeMetricsThreshold,
         );
         let rewrite_duration_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::EmergencyRewriteMetricsThreshold,
             MaintenanceOutcome::SkippedBusy,
         );
         let merge_duration_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::EmergencyMergeMetricsThreshold,
             MaintenanceOutcome::SkippedBusy,
         );
 
@@ -974,8 +1286,8 @@ mod tests {
             "rewrite skipped counter did not increase"
         );
         assert!(
-            merge_after > merge_before,
-            "merge skipped counter did not increase"
+            (merge_after - merge_before).abs() < f64::EPSILON,
+            "merge skipped counter should stay unchanged when merge was not selected"
         );
         assert_eq!(
             rewrite_duration_after, rewrite_duration_before,
@@ -990,13 +1302,14 @@ mod tests {
     #[test]
     fn test_table_maintenance_state_prefers_pending_bytes_flush_reason() {
         let now = Instant::now();
-        let state = TableMaintenanceState {
-            pending_bytes: MAINTENANCE_PENDING_BYTES_THRESHOLD,
-            pending_inserted_rows: MAINTENANCE_PENDING_ROWS_THRESHOLD,
-            dirty_since_compaction: true,
-            last_write_at: now - MAINTENANCE_IDLE_FLUSH_THRESHOLD,
-            last_compaction_at: None,
-        };
+        let mut state = TableMaintenanceState::default();
+        state.record_write_activity(
+            &write_activity(
+                MAINTENANCE_PENDING_BYTES_THRESHOLD,
+                MAINTENANCE_PENDING_ROWS_THRESHOLD,
+            ),
+            now - MAINTENANCE_IDLE_FLUSH_THRESHOLD,
+        );
 
         assert_eq!(
             state.flush_reason(now),
@@ -1007,13 +1320,14 @@ mod tests {
     #[test]
     fn test_table_maintenance_state_uses_pending_inserted_rows_flush_reason() {
         let now = Instant::now();
-        let state = TableMaintenanceState {
-            pending_bytes: MAINTENANCE_PENDING_BYTES_THRESHOLD - 1,
-            pending_inserted_rows: MAINTENANCE_PENDING_ROWS_THRESHOLD,
-            dirty_since_compaction: true,
-            last_write_at: now,
-            last_compaction_at: None,
-        };
+        let mut state = TableMaintenanceState::default();
+        state.record_write_activity(
+            &write_activity(
+                MAINTENANCE_PENDING_BYTES_THRESHOLD - 1,
+                MAINTENANCE_PENDING_ROWS_THRESHOLD,
+            ),
+            now,
+        );
 
         assert_eq!(
             state.flush_reason(now),
@@ -1024,13 +1338,8 @@ mod tests {
     #[test]
     fn test_table_maintenance_state_uses_idle_flush_reason() {
         let now = Instant::now();
-        let state = TableMaintenanceState {
-            pending_bytes: 128,
-            pending_inserted_rows: 1,
-            dirty_since_compaction: true,
-            last_write_at: now,
-            last_compaction_at: None,
-        };
+        let mut state = TableMaintenanceState::default();
+        state.record_write_activity(&write_activity(128, 1), now);
 
         assert_eq!(state.flush_reason(now + Duration::from_secs(5)), None);
         assert_eq!(
@@ -1040,28 +1349,139 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_compacts_only_when_idle_and_dirty() {
+    fn test_table_maintenance_state_records_metrics_samples() {
         let now = Instant::now();
-        let state = TableMaintenanceState {
-            pending_bytes: 0,
-            pending_inserted_rows: 0,
-            dirty_since_compaction: true,
-            last_write_at: now,
-            last_compaction_at: Some(now),
-        };
+        let metrics = storage_metrics(10, 20_000_000, 6, 1000, 4, 1024, 25);
+        let mut state = TableMaintenanceState::default();
+        state.record_metrics_sample(table_metrics_sample(now, metrics.clone()));
+        let (recorded_metrics, sampled_at) = state
+            .current_storage_metrics()
+            .expect("metrics sample should be visible");
+
+        assert_eq!(sampled_at, now);
+        assert_eq!(recorded_metrics.small_data_files, metrics.small_data_files);
+    }
+
+    #[test]
+    fn test_table_maintenance_state_waits_for_fresh_sample_after_write() {
+        let now = Instant::now();
+        let mut state = TableMaintenanceState::default();
+        let stale_metrics = storage_metrics(8, 16_000_000, 6, 1000, 0, 0, 0);
+        state.record_metrics_sample(table_metrics_sample(now, stale_metrics));
+        state.record_write_activity(&write_activity(1024, 1), now + Duration::from_secs(1));
 
         assert!(
             state
-                .compact_reason(now + MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD)
+                .idle_targeted_maintenance_plan(
+                    now + MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD
+                        + MAINTENANCE_TABLE_COMPACTION_INTERVAL,
+                )
                 .is_none(),
-            "compaction should wait for the minimum compaction interval"
+            "maintenance should wait for a sample that includes the latest write"
         );
+    }
+
+    #[test]
+    fn test_table_maintenance_state_selects_idle_merge_from_small_file_ratio() {
+        let now = Instant::now();
+        let mut state = TableMaintenanceState::default();
+        state.record_write_activity(&write_activity(1024, 1), now);
+        state.record_metrics_sample(table_metrics_sample(
+            now + Duration::from_secs(1),
+            storage_metrics(10, 20_000_000, 6, 1000, 0, 0, 0),
+        ));
+
         assert_eq!(
-            state.compact_reason(
+            state.idle_targeted_maintenance_plan(
                 now + MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD
                     + MAINTENANCE_TABLE_COMPACTION_INTERVAL,
             ),
-            Some(MaintenanceReason::DirtyIdleWindow)
+            Some(TargetedMaintenancePlan {
+                rewrite_reason: None,
+                merge_reason: Some(MaintenanceReason::IdleMergeMetricsThreshold),
+            })
+        );
+    }
+
+    #[test]
+    fn test_table_maintenance_state_does_not_select_merge_when_ratio_is_half() {
+        let now = Instant::now();
+        let mut state = TableMaintenanceState::default();
+        state.record_write_activity(&write_activity(1024, 1), now);
+        state.record_metrics_sample(table_metrics_sample(
+            now + Duration::from_secs(1),
+            storage_metrics(10, 20_000_000, 5, 1000, 0, 0, 0),
+        ));
+
+        assert_eq!(
+            state.idle_targeted_maintenance_plan(
+                now + MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD
+                    + MAINTENANCE_TABLE_COMPACTION_INTERVAL,
+            ),
+            Some(TargetedMaintenancePlan::default())
+        );
+    }
+
+    #[test]
+    fn test_table_maintenance_state_does_not_select_merge_when_average_size_is_healthy() {
+        let now = Instant::now();
+        let mut state = TableMaintenanceState::default();
+        state.record_write_activity(&write_activity(1024, 1), now);
+        state.record_metrics_sample(table_metrics_sample(
+            now + Duration::from_secs(1),
+            storage_metrics(10, 80_000_000, 6, 1000, 0, 0, 0),
+        ));
+
+        assert_eq!(
+            state.idle_targeted_maintenance_plan(
+                now + MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD
+                    + MAINTENANCE_TABLE_COMPACTION_INTERVAL,
+            ),
+            Some(TargetedMaintenancePlan::default())
+        );
+    }
+
+    #[test]
+    fn test_table_maintenance_state_selects_idle_rewrite_from_delete_pressure() {
+        let now = Instant::now();
+        let mut state = TableMaintenanceState::default();
+        state.record_write_activity(&write_activity(1024, 1), now);
+        state.record_metrics_sample(table_metrics_sample(
+            now + Duration::from_secs(1),
+            storage_metrics(10, 20_000_000, 2, 1000, 32, 10_000, 150),
+        ));
+
+        assert_eq!(
+            state.idle_targeted_maintenance_plan(
+                now + MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD
+                    + MAINTENANCE_TABLE_COMPACTION_INTERVAL,
+            ),
+            Some(TargetedMaintenancePlan {
+                rewrite_reason: Some(MaintenanceReason::IdleRewriteMetricsThreshold),
+                merge_reason: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_table_maintenance_state_selects_emergency_rewrite_from_delete_pressure() {
+        let now = Instant::now();
+        let mut state = TableMaintenanceState::default();
+        state.record_write_activity(&write_activity(1024, 1), now);
+        state.record_metrics_sample(table_metrics_sample(
+            now + Duration::from_secs(1),
+            storage_metrics(10, 20_000_000, 2, 1000, 128, 10_000, 150),
+        ));
+
+        assert_eq!(
+            state.emergency_targeted_maintenance_plan(now + MAINTENANCE_TABLE_COMPACTION_INTERVAL,),
+            Some((
+                TargetedMaintenancePlan {
+                    rewrite_reason: Some(MaintenanceReason::EmergencyRewriteMetricsThreshold,),
+                    merge_reason: None,
+                },
+                now + Duration::from_secs(1),
+            ))
         );
     }
 
@@ -1080,15 +1500,24 @@ mod tests {
     #[test]
     fn test_targeted_maintenance_outcome_is_applied_when_any_operation_applies() {
         assert_eq!(
-            targeted_maintenance_outcome(MaintenanceOutcome::Noop, MaintenanceOutcome::Noop),
+            targeted_maintenance_outcome(
+                Some(MaintenanceOutcome::Noop),
+                Some(MaintenanceOutcome::Noop),
+            ),
             MaintenanceOutcome::Noop
         );
         assert_eq!(
-            targeted_maintenance_outcome(MaintenanceOutcome::Applied, MaintenanceOutcome::Noop),
+            targeted_maintenance_outcome(
+                Some(MaintenanceOutcome::Applied),
+                Some(MaintenanceOutcome::Noop),
+            ),
             MaintenanceOutcome::Applied
         );
         assert_eq!(
-            targeted_maintenance_outcome(MaintenanceOutcome::Noop, MaintenanceOutcome::Applied),
+            targeted_maintenance_outcome(
+                Some(MaintenanceOutcome::Noop),
+                Some(MaintenanceOutcome::Applied),
+            ),
             MaintenanceOutcome::Applied
         );
     }
@@ -1147,21 +1576,24 @@ mod tests {
             &rendered_before,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::IdleRewriteMetricsThreshold,
             MaintenanceOutcome::Failed,
         );
         let merge_failed_before = maintenance_duration_count(
             &rendered_before,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::IdleMergeMetricsThreshold,
             MaintenanceOutcome::Failed,
         );
 
         let error = run_targeted_table_maintenance_blocking(
             &conn,
             "public_users",
-            MaintenanceReason::DirtyIdleWindow,
+            TargetedMaintenancePlan {
+                rewrite_reason: Some(MaintenanceReason::IdleRewriteMetricsThreshold),
+                merge_reason: Some(MaintenanceReason::IdleMergeMetricsThreshold),
+            },
         )
         .expect_err("targeted maintenance should fail without ducklake functions");
 
@@ -1176,14 +1608,14 @@ mod tests {
             &rendered_after,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::RewriteDataFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::IdleRewriteMetricsThreshold,
             MaintenanceOutcome::Failed,
         );
         let merge_failed_after = maintenance_duration_count(
             &rendered_after,
             MAINTENANCE_TASK_TARGETED_MAINTENANCE,
             MaintenanceOperation::MergeAdjacentFiles,
-            MaintenanceReason::DirtyIdleWindow,
+            MaintenanceReason::IdleMergeMetricsThreshold,
             MaintenanceOutcome::Failed,
         );
 

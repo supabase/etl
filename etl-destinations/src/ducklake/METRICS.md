@@ -58,7 +58,13 @@ These explain the pressure your writer is putting on DuckLake:
 
 The destination attaches DuckLake with `DATA_INLINING_ROW_LIMIT = 10000` and then
 lets a background maintenance worker flush and checkpoint inlined data after
-writes. These metrics tell you whether that strategy is helping.
+writes. Destination shutdown also runs one final best-effort inline flush sweep
+for known tables. These metrics tell you whether that strategy is helping.
+
+The `batch_kind` label on these metrics uses:
+
+- `mutation` for background CDC flushes
+- `shutdown` for the final best-effort shutdown sweep
 
 How to read them:
 
@@ -70,6 +76,8 @@ How to read them:
 - if `inline_flush_rows` is often meaningfully larger than `upsert_rows`, the
   inlining limit is helping consolidate multiple atomic batches before files are
   materialized.
+- if `batch_kind="shutdown"` shows meaningful work, the process is still
+  relying on final shutdown cleanup to drain inline backlogs.
 
 ### Background maintenance metrics
 
@@ -99,9 +107,16 @@ How to read it:
 - `task="flush"` with `reason="idle_flush_threshold"` means none of the size
   thresholds fired first, and the table was flushed because it stayed idle long
   enough with pending inline work.
-- `task="targeted_maintenance"` can emit up to two duration series for one
-  maintenance cycle: one for `rewrite_data_files` and one for
-  `merge_adjacent_files`.
+- `task="targeted_maintenance"` with
+  `reason="idle_rewrite_metrics_threshold"` or
+  `reason="emergency_rewrite_metrics_threshold"` means rewrite was selected
+  from sampled delete pressure.
+- `task="targeted_maintenance"` with
+  `reason="idle_merge_metrics_threshold"` or
+  `reason="emergency_merge_metrics_threshold"` means merge was selected from
+  sampled small-file pressure.
+- `task="targeted_maintenance"` may emit one duration series or two for a
+  maintenance cycle, depending on which operations crossed their thresholds.
 - rising `etl_ducklake_maintenance_skipped_total` means the worker wants to run
   maintenance but the table-local write slot is still busy.
 - rising histogram `_count` for `outcome="failed"` points to maintenance

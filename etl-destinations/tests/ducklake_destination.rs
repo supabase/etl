@@ -1260,6 +1260,172 @@ async fn test_write_events_background_flush_materializes_large_inline_backlog() 
     assert_eq!(flush_inlined_rows(&conn, &table_name), 0);
 }
 
+/// Shutdown should materialize copy rows that were still inlined.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_shutdown_flushes_inlined_copy_rows() {
+    let dir = make_test_dir("shutdown_flushes_inlined_copy_rows");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let table_id = TableId::new(34);
+    let schema = make_schema(34, "public", "shutdown_copy_flush");
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            table_id,
+            vec![TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("pending copy row".to_string()),
+            ])],
+        )
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(count_rows(&conn, &table_name), 1);
+    assert_eq!(
+        count_table_files(&conn, &table_name),
+        0,
+        "small copy batch should stay inlined before shutdown"
+    );
+    drop(conn);
+
+    destination.shutdown().await.unwrap();
+
+    wait_for_condition(Duration::from_secs(10), || {
+        let conn = open_lake_conn(&catalog_url, &data_url);
+        count_table_files(&conn, &table_name) >= 1
+    })
+    .await;
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(count_rows(&conn, &table_name), 1);
+    assert!(
+        count_table_files(&conn, &table_name) >= 1,
+        "shutdown should materialize inlined copy rows"
+    );
+    assert_eq!(
+        flush_inlined_rows(&conn, &table_name),
+        0,
+        "shutdown should leave no inlined copy rows pending"
+    );
+}
+
+/// Shutdown should flush inlined CDC rows for all known tables.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
+    use etl::types::{InsertEvent, PgLsn};
+
+    let dir = make_test_dir("shutdown_flushes_inlined_cdc_rows_for_all_known_tables");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let table_id_a = TableId::new(35);
+    let table_id_b = TableId::new(36);
+    let schema_a = make_schema(35, "public", "shutdown_cdc_alpha");
+    let schema_b = make_schema(36, "public", "shutdown_cdc_beta");
+    let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
+    let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema_a).await.unwrap();
+    store.store_table_schema(schema_b).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    let lsn = PgLsn::from(900u64);
+    destination
+        .write_events(vec![
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                table_id: table_id_a,
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("alpha".to_string())]),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                table_id: table_id_b,
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("beta".to_string())]),
+            }),
+        ])
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(count_rows(&conn, &table_name_a), 1);
+    assert_eq!(count_rows(&conn, &table_name_b), 1);
+    assert_eq!(
+        count_table_files(&conn, &table_name_a),
+        0,
+        "small CDC batch should stay inlined before shutdown for alpha"
+    );
+    assert_eq!(
+        count_table_files(&conn, &table_name_b),
+        0,
+        "small CDC batch should stay inlined before shutdown for beta"
+    );
+    drop(conn);
+
+    destination.shutdown().await.unwrap();
+
+    wait_for_condition(Duration::from_secs(10), || {
+        let conn = open_lake_conn(&catalog_url, &data_url);
+        count_table_files(&conn, &table_name_a) >= 1 && count_table_files(&conn, &table_name_b) >= 1
+    })
+    .await;
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(count_rows(&conn, &table_name_a), 1);
+    assert_eq!(count_rows(&conn, &table_name_b), 1);
+    assert_eq!(
+        flush_inlined_rows(&conn, &table_name_a),
+        0,
+        "shutdown should leave no inlined CDC rows pending for alpha"
+    );
+    assert_eq!(
+        flush_inlined_rows(&conn, &table_name_b),
+        0,
+        "shutdown should leave no inlined CDC rows pending for beta"
+    );
+}
+
 /// Shutdown should dump file-backed DuckDB logs when logging is enabled.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_shutdown_dumps_duckdb_logs() {
