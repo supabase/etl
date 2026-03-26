@@ -38,7 +38,6 @@ use etl_destinations::ducklake::{
 #[cfg(feature = "test-utils")]
 use etl_destinations::ducklake::{
     arm_fail_after_atomic_batch_commit_once_for_tests,
-    arm_fail_after_atomic_batch_flush_once_for_tests,
     arm_fail_after_copy_batch_commit_once_for_tests,
     arm_fail_after_copy_batch_flush_once_for_tests, reset_ducklake_test_hooks,
 };
@@ -893,12 +892,12 @@ async fn test_write_events() {
     assert_eq!(name, "Gadget");
 }
 
-/// Small CDC batches should be flushed to Parquet before the caller returns.
+/// Small CDC batches should remain inlined after the caller returns.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_events_auto_flushes_inlined_data() {
+async fn test_write_events_small_batch_stays_inlined_after_return() {
     use etl::types::{InsertEvent, PgLsn};
 
-    let dir = make_test_dir("write_events_auto_flushes_inlined_data");
+    let dir = make_test_dir("write_events_small_batch_stays_inlined_after_return");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
@@ -939,6 +938,11 @@ async fn test_write_events_auto_flushes_inlined_data() {
     let conn = open_lake_conn(&catalog_url, &data_url);
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
+    assert_eq!(
+        count_table_files(&conn, &table_name),
+        0,
+        "small CDC batch should remain inlined until background maintenance"
+    );
 }
 
 /// `write_events` keeps update events with old rows on the current-state path.
@@ -1540,102 +1544,6 @@ async fn test_write_table_rows_retry_after_post_flush_failure_is_idempotent() {
         "copy batch should be materialized after retry"
     );
     assert_eq!(flush_inlined_rows(&conn, &table_name), 0);
-
-    reset_ducklake_test_hooks();
-}
-
-/// A post-flush retry should not duplicate CDC rows.
-#[cfg(feature = "test-utils")]
-#[tokio::test(flavor = "multi_thread")]
-async fn test_write_events_retry_after_post_flush_failure_is_idempotent() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
-
-    let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
-    reset_ducklake_test_hooks();
-
-    let dir = make_test_dir("write_events_retry_after_post_flush_failure_is_idempotent");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
-
-    let table_id = TableId::new(19);
-    let schema = make_schema(19, "public", "mutation_flush_retry");
-    let table_name = table_name_to_ducklake_table_name(&schema.name);
-
-    let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
-
-    let destination = DuckLakeDestination::new(
-        catalog_url.clone(),
-        data_url.clone(),
-        1,
-        None,
-        None,
-        None,
-        store,
-    )
-    .await
-    .unwrap();
-
-    arm_fail_after_atomic_batch_flush_once_for_tests(&table_name);
-
-    let lsn = PgLsn::from(800u64);
-    destination
-        .write_events(vec![
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
-            }),
-            Event::Update(UpdateEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("posted".to_string())]),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
-                )),
-            }),
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                table_id,
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_string())]),
-            }),
-            Event::Delete(DeleteEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                table_id,
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_string())]),
-                )),
-            }),
-        ])
-        .await
-        .unwrap();
-
-    let conn = open_lake_conn(&catalog_url, &data_url);
-    assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
-
-    let name: String = conn
-        .query_row(
-            &format!(
-                "SELECT name FROM {}.{} WHERE id = 1",
-                quote_identifier("lake"),
-                quote_identifier(&table_name)
-            ),
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(name, "posted");
 
     reset_ducklake_test_hooks();
 }

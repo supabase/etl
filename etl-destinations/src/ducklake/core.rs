@@ -2266,9 +2266,6 @@ static FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE: LazyLock<Mutex<Option<String>>> =
 static FAIL_AFTER_COPY_BATCH_COMMIT_TABLE: LazyLock<Mutex<Option<String>>> =
     LazyLock::new(|| Mutex::new(None));
 #[cfg(feature = "test-utils")]
-static FAIL_AFTER_ATOMIC_BATCH_FLUSH_TABLE: LazyLock<Mutex<Option<String>>> =
-    LazyLock::new(|| Mutex::new(None));
-#[cfg(feature = "test-utils")]
 static FAIL_AFTER_COPY_BATCH_FLUSH_TABLE: LazyLock<Mutex<Option<String>>> =
     LazyLock::new(|| Mutex::new(None));
 
@@ -2284,12 +2281,6 @@ pub fn arm_fail_after_copy_batch_commit_once_for_tests(table_name: &str) {
     *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_string());
 }
 
-/// Arms a test hook that injects one failure after flushing a mutation batch.
-#[cfg(feature = "test-utils")]
-pub fn arm_fail_after_atomic_batch_flush_once_for_tests(table_name: &str) {
-    *FAIL_AFTER_ATOMIC_BATCH_FLUSH_TABLE.lock() = Some(table_name.to_string());
-}
-
 /// Arms a test hook that injects one failure after flushing a copy batch.
 #[cfg(feature = "test-utils")]
 pub fn arm_fail_after_copy_batch_flush_once_for_tests(table_name: &str) {
@@ -2301,7 +2292,6 @@ pub fn arm_fail_after_copy_batch_flush_once_for_tests(table_name: &str) {
 pub fn reset_ducklake_test_hooks() {
     *FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock() = None;
     *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = None;
-    *FAIL_AFTER_ATOMIC_BATCH_FLUSH_TABLE.lock() = None;
     *FAIL_AFTER_COPY_BATCH_FLUSH_TABLE.lock() = None;
 }
 
@@ -2319,7 +2309,7 @@ fn maybe_fail_after_committed_batch_for_tests(
     }
 }
 
-/// Injects a synthetic failure after flush so retries must avoid reapplying rows.
+/// Injects a synthetic failure after flush so copy retries must avoid reapplying rows.
 #[cfg(feature = "test-utils")]
 fn maybe_fail_after_flushed_batch_for_tests(
     batch_kind: DuckLakeTableBatchKind,
@@ -2327,10 +2317,7 @@ fn maybe_fail_after_flushed_batch_for_tests(
 ) -> EtlResult<()> {
     match batch_kind {
         DuckLakeTableBatchKind::Copy => maybe_fail_after_copy_batch_flush_for_tests(table_name),
-        DuckLakeTableBatchKind::Mutation => {
-            maybe_fail_after_atomic_batch_flush_for_tests(table_name)
-        }
-        DuckLakeTableBatchKind::Truncate => Ok(()),
+        DuckLakeTableBatchKind::Mutation | DuckLakeTableBatchKind::Truncate => Ok(()),
     }
 }
 
@@ -2343,21 +2330,6 @@ fn maybe_fail_after_atomic_batch_commit_for_tests(table_name: &str) -> EtlResult
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
             "ducklake test hook injected post-commit failure"
-        ));
-    }
-
-    Ok(())
-}
-
-/// Injects a synthetic failure after flush so mutation retries re-enter at flush only.
-#[cfg(feature = "test-utils")]
-fn maybe_fail_after_atomic_batch_flush_for_tests(table_name: &str) -> EtlResult<()> {
-    let mut fail_table = FAIL_AFTER_ATOMIC_BATCH_FLUSH_TABLE.lock();
-    if fail_table.as_deref() == Some(table_name) {
-        *fail_table = None;
-        return Err(etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "ducklake test hook injected post-flush failure"
         ));
     }
 
