@@ -103,10 +103,11 @@ It is labeled by `task`, `operation`, and `reason`.
 How to read it:
 
 - `task="flush"` with `reason="pending_bytes_threshold"` means the flush was
-  scheduled because pending inlined bytes crossed the configured threshold.
-- `task="flush"` with `reason="idle_flush_threshold"` means none of the size
-  thresholds fired first, and the table was flushed because it stayed idle long
-  enough with pending inline work.
+  scheduled because estimated pre-compression inline bytes crossed the
+  configured threshold. The current heuristic assumes a 4:1 raw-to-parquet
+  compression ratio.
+- `task="flush"` with `reason="pending_inserted_rows_threshold"` means the
+  optional row-count threshold was enabled in code and fired before shutdown.
 - `task="targeted_maintenance"` with
   `reason="idle_rewrite_metrics_threshold"` or
   `reason="emergency_rewrite_metrics_threshold"` means rewrite was selected

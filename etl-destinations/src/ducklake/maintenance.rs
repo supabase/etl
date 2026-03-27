@@ -24,18 +24,19 @@ use crate::ducklake::metrics::{
     ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL, MAINTENANCE_OPERATION_LABEL, MAINTENANCE_OUTCOME_LABEL,
     MAINTENANCE_REASON_LABEL, MAINTENANCE_TASK_LABEL, SMALL_FILE_SIZE_BYTES,
 };
-use crate::ducklake::{ATTACH_DATA_INLINING_ROW_LIMIT, DuckLakeTableName, LAKE_CATALOG};
+use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG};
 
 /// Dedicated pool size for background DuckLake maintenance work.
 const MAINTENANCE_POOL_SIZE: u32 = 1;
 /// Poll interval for checking per-table inline flush thresholds.
 const MAINTENANCE_FLUSH_POLL_INTERVAL: Duration = Duration::from_secs(30);
-/// How long a table can stay idle before pending inlined data is materialized.
-const MAINTENANCE_IDLE_FLUSH_THRESHOLD: Duration = Duration::from_secs(60 * 5);
+/// Estimated ratio from raw row payload to compressed parquet bytes.
+const PARQUET_COMPRESSION_RATIO_ESTIMATE: u64 = 4;
 /// Pending bytes threshold that triggers a background inline flush.
-const MAINTENANCE_PENDING_BYTES_THRESHOLD: u64 = SMALL_FILE_SIZE_BYTES as u64;
-/// Pending inserted rows threshold that triggers a background inline flush.
-const MAINTENANCE_PENDING_ROWS_THRESHOLD: u64 = ATTACH_DATA_INLINING_ROW_LIMIT - 100;
+const MAINTENANCE_PENDING_BYTES_THRESHOLD: u64 =
+    SMALL_FILE_SIZE_BYTES as u64 * PARQUET_COMPRESSION_RATIO_ESTIMATE;
+/// Optional pending inserted-rows threshold that triggers a background inline flush.
+const MAINTENANCE_PENDING_ROWS_THRESHOLD: Option<u64> = None;
 /// Minimum idle window before targeted table maintenance runs, to not have maintenances ran too frequently.
 const MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD: Duration = Duration::from_secs(90);
 /// Minimum delay between targeted maintenance runs for the same table.
@@ -88,7 +89,6 @@ impl MaintenanceOperation {
 enum MaintenanceReason {
     PendingBytesThreshold,
     PendingInsertedRowsThreshold,
-    IdleFlushThreshold,
     IdleRewriteMetricsThreshold,
     EmergencyRewriteMetricsThreshold,
     IdleMergeMetricsThreshold,
@@ -102,7 +102,6 @@ impl MaintenanceReason {
         match self {
             Self::PendingBytesThreshold => "pending_bytes_threshold",
             Self::PendingInsertedRowsThreshold => "pending_inserted_rows_threshold",
-            Self::IdleFlushThreshold => "idle_flush_threshold",
             Self::IdleRewriteMetricsThreshold => "idle_rewrite_metrics_threshold",
             Self::EmergencyRewriteMetricsThreshold => "emergency_rewrite_metrics_threshold",
             Self::IdleMergeMetricsThreshold => "idle_merge_metrics_threshold",
@@ -237,18 +236,23 @@ impl TableMaintenanceState {
 
     /// Returns the primary reason that pending inlined work should be flushed.
     fn flush_reason(&self, now: Instant) -> Option<MaintenanceReason> {
+        self.flush_reason_with_pending_rows_threshold(now, MAINTENANCE_PENDING_ROWS_THRESHOLD)
+    }
+
+    /// Returns the primary reason that pending inlined work should be flushed.
+    fn flush_reason_with_pending_rows_threshold(
+        &self,
+        _now: Instant,
+        pending_rows_threshold: Option<u64>,
+    ) -> Option<MaintenanceReason> {
         if self.pending_bytes >= MAINTENANCE_PENDING_BYTES_THRESHOLD {
             return Some(MaintenanceReason::PendingBytesThreshold);
         }
 
-        if self.pending_inserted_rows >= MAINTENANCE_PENDING_ROWS_THRESHOLD {
+        if let Some(pending_rows_threshold) = pending_rows_threshold
+            && self.pending_inserted_rows >= pending_rows_threshold
+        {
             return Some(MaintenanceReason::PendingInsertedRowsThreshold);
-        }
-
-        let last_write_at = self.last_write_at?;
-        let idle = now.saturating_duration_since(last_write_at);
-        if self.has_pending_flush_work() && idle >= MAINTENANCE_IDLE_FLUSH_THRESHOLD {
-            return Some(MaintenanceReason::IdleFlushThreshold);
         }
 
         None
@@ -1094,7 +1098,7 @@ mod tests {
             &rendered_before,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::IdleFlushThreshold,
+            MaintenanceReason::PendingInsertedRowsThreshold,
             MaintenanceOutcome::Noop,
         );
         let rewrite_applied_before = maintenance_duration_count(
@@ -1129,7 +1133,7 @@ mod tests {
         record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::IdleFlushThreshold,
+            MaintenanceReason::PendingInsertedRowsThreshold,
             MaintenanceOutcome::Noop,
             0.15,
         );
@@ -1167,7 +1171,7 @@ mod tests {
             &rendered_after,
             MAINTENANCE_TASK_FLUSH,
             MaintenanceOperation::FlushInlinedData,
-            MaintenanceReason::IdleFlushThreshold,
+            MaintenanceReason::PendingInsertedRowsThreshold,
             MaintenanceOutcome::Noop,
         );
         let rewrite_applied_after = maintenance_duration_count(
@@ -1303,49 +1307,48 @@ mod tests {
     fn test_table_maintenance_state_prefers_pending_bytes_flush_reason() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
-        state.record_write_activity(
-            &write_activity(
-                MAINTENANCE_PENDING_BYTES_THRESHOLD,
-                MAINTENANCE_PENDING_ROWS_THRESHOLD,
-            ),
-            now - MAINTENANCE_IDLE_FLUSH_THRESHOLD,
-        );
+        state.record_write_activity(&write_activity(MAINTENANCE_PENDING_BYTES_THRESHOLD, 1), now);
 
         assert_eq!(
-            state.flush_reason(now),
+            state.flush_reason_with_pending_rows_threshold(now, Some(1)),
             Some(MaintenanceReason::PendingBytesThreshold)
         );
     }
 
     #[test]
-    fn test_table_maintenance_state_uses_pending_inserted_rows_flush_reason() {
+    fn test_table_maintenance_state_disables_pending_inserted_rows_flush_reason_by_default() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(
-            &write_activity(
-                MAINTENANCE_PENDING_BYTES_THRESHOLD - 1,
-                MAINTENANCE_PENDING_ROWS_THRESHOLD,
-            ),
+            &write_activity(MAINTENANCE_PENDING_BYTES_THRESHOLD - 1, 10_000),
+            now,
+        );
+
+        assert_eq!(state.flush_reason(now), None);
+    }
+
+    #[test]
+    fn test_table_maintenance_state_uses_pending_inserted_rows_flush_reason_when_enabled() {
+        let now = Instant::now();
+        let mut state = TableMaintenanceState::default();
+        state.record_write_activity(
+            &write_activity(MAINTENANCE_PENDING_BYTES_THRESHOLD - 1, 10_000),
             now,
         );
 
         assert_eq!(
-            state.flush_reason(now),
+            state.flush_reason_with_pending_rows_threshold(now, Some(10_000)),
             Some(MaintenanceReason::PendingInsertedRowsThreshold)
         );
     }
 
     #[test]
-    fn test_table_maintenance_state_uses_idle_flush_reason() {
+    fn test_table_maintenance_state_does_not_use_idle_flush_reason() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(&write_activity(128, 1), now);
 
-        assert_eq!(state.flush_reason(now + Duration::from_secs(5)), None);
-        assert_eq!(
-            state.flush_reason(now + MAINTENANCE_IDLE_FLUSH_THRESHOLD),
-            Some(MaintenanceReason::IdleFlushThreshold)
-        );
+        assert_eq!(state.flush_reason(now + Duration::from_secs(60 * 10)), None);
     }
 
     #[test]
