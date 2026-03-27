@@ -261,7 +261,7 @@ where
                     }
                 }
             } else {
-                info!(table_id = table_id.0, "skipping table copy")
+                info!(table_id = table_id.0, "skipping table copy");
             }
 
             // We commit the transaction before starting the apply loop, otherwise it will fail
