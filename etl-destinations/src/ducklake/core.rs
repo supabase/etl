@@ -1281,7 +1281,7 @@ async fn apply_table_batches_with_retry(
                 )
                 .increment(1);
                 return Err(etl_error!(
-                    ErrorKind::DuckLakeAtomicBatchRetryable,
+                    ErrorKind::DestinationAtomicBatchRetryable,
                     "DuckLake atomic table batch sequence failed after retries",
                     format!("table={table_name}, batch_count={batch_count}"),
                     source: e
@@ -1415,7 +1415,7 @@ async fn apply_table_batch_with_retry(
                 )
                 .increment(1);
                 return Err(etl_error!(
-                    ErrorKind::DuckLakeAtomicBatchRetryable,
+                    ErrorKind::DestinationAtomicBatchRetryable,
                     "DuckLake atomic table batch failed after retries",
                     format!(
                         "table={table_name}, batch_id={batch_id}, batch_kind={}",

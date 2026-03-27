@@ -86,7 +86,7 @@ pub enum ErrorKind {
     // Query & Execution Errors
     SourceQueryFailed,
     DestinationQueryFailed,
-    DuckLakeAtomicBatchRetryable,
+    DestinationAtomicBatchRetryable,
     SourceLockTimeout,
     SourceOperationCanceled,
 

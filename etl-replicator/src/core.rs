@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use crate::error::{ReplicatorError, ReplicatorResult};
 use crate::error_notification::ErrorNotificationClient;
@@ -13,8 +12,8 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::PipelineId;
 use etl::{config::IcebergConfig, destination::Destination};
-use etl_config::Environment;
 use etl_config::shared::{DestinationConfig, PgConnectionConfig, ReplicatorConfig};
+use etl_config::{Environment, parse_ducklake_url};
 use etl_destinations::iceberg::{
     DestinationNamespace, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
 };
@@ -29,7 +28,6 @@ use etl_destinations::{
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
-use url::Url;
 
 /// Starts the replicator service with the provided configuration.
 ///
@@ -298,28 +296,4 @@ where
     result?;
 
     Ok(())
-}
-
-fn parse_ducklake_url(value: &str) -> Result<Url, std::io::Error> {
-    if value.contains("://") {
-        return Url::parse(value).map_err(std::io::Error::other);
-    }
-
-    if let Ok(url) = Url::parse(value) {
-        return Ok(url);
-    }
-
-    let path = PathBuf::from(value);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-
-    Url::from_file_path(&path).map_err(|_| {
-        std::io::Error::other(format!(
-            "failed to convert path `{}` to a file url",
-            path.display()
-        ))
-    })
 }

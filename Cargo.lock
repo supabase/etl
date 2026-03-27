@@ -1858,6 +1858,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "tokio-postgres",
+ "url",
  "utoipa",
 ]
 
@@ -1902,6 +1903,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "etl",
+ "etl-config",
  "etl-destinations",
  "etl-telemetry",
  "rustls",

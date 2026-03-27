@@ -1,10 +1,10 @@
 //! Built-in validators for ETL pipeline and destination prerequisites.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use async_trait::async_trait;
 use etl::store::both::memory::MemoryStore;
+use etl_config::parse_ducklake_url;
 use etl_destinations::bigquery::BigQueryClient;
 use etl_destinations::ducklake::{
     DuckDbLogConfig as DucklakeDuckDbLogConfig, DuckLakeDestination, S3Config as DucklakeS3Config,
@@ -14,7 +14,6 @@ use etl_destinations::iceberg::{
 };
 use secrecy::ExposeSecret;
 use sqlx::FromRow;
-use url::Url;
 
 use crate::configs::destination::{
     DuckDbLogConfig as ApiDuckDbLogConfig, FullApiDestinationConfig, FullApiIcebergConfig,
@@ -680,6 +679,7 @@ struct DucklakeValidator {
 }
 
 impl DucklakeValidator {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         catalog_url: String,
         data_path: String,
@@ -733,7 +733,7 @@ impl Validator for DucklakeValidator {
             Err(error) => {
                 return Ok(vec![ValidationFailure::critical(
                     "Ducklake Catalog Url Invalid",
-                    error,
+                    error.to_string(),
                 )]);
             }
         };
@@ -743,7 +743,7 @@ impl Validator for DucklakeValidator {
             Err(error) => {
                 return Ok(vec![ValidationFailure::critical(
                     "Ducklake Data Path Invalid",
-                    error,
+                    error.to_string(),
                 )]);
             }
         };
@@ -955,26 +955,4 @@ impl Validator for DestinationValidator {
             }
         }
     }
-}
-
-fn parse_ducklake_url(value: &str) -> Result<Url, String> {
-    if value.contains("://") {
-        return Url::parse(value).map_err(|error| error.to_string());
-    }
-
-    if let Ok(url) = Url::parse(value) {
-        return Ok(url);
-    }
-
-    let path = PathBuf::from(value);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        std::env::current_dir()
-            .map_err(|error| error.to_string())?
-            .join(path)
-    };
-
-    Url::from_file_path(&path)
-        .map_err(|_| format!("failed to convert path `{}` to a file url", path.display()))
 }

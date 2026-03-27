@@ -17,6 +17,7 @@ path = "src/bin/ducklake.rs"
 
 [dependencies]
 etl = { workspace = true }
+etl-config = { workspace = true }
 etl-destinations = { workspace = true, features = ["bigquery", "ducklake"] }
 etl-telemetry = { workspace = true }
 

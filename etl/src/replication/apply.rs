@@ -1504,7 +1504,7 @@ where
             )
             .await?;
 
-        info!(
+        debug!(
             worker_type = %self.worker_context.worker_type(),
             %last_received_lsn,
             %current_lsn,

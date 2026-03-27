@@ -186,7 +186,7 @@ fn vendored_extension_path(extension_dir: &Path, filename: &str) -> EtlResult<St
 
 /// S3-compatible storage credentials for DuckDB's httpfs extension.
 ///
-/// Used when `data_path` points to an S3, GCS, or Azure URI. The `endpoint`
+/// Used when `data_path` points to an S3 or GCS URI. The `endpoint`
 /// field supports an optional path prefix (e.g. `localhost:5000/s3` for
 /// Supabase Storage or other S3-compatible services mounted at a sub-path).
 #[derive(Debug, Clone)]

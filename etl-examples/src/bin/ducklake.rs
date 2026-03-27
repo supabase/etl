@@ -38,9 +38,9 @@ use etl::config::{
 };
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
+use etl_config::parse_ducklake_url;
 use etl_destinations::ducklake::{DuckDbLogConfig, DuckLakeDestination, S3Config};
 use std::error::Error;
-use std::path::PathBuf;
 use std::sync::Once;
 use tokio::signal;
 use tracing::{error, info};
@@ -174,28 +174,6 @@ fn set_log_level() {
             std::env::set_var("RUST_LOG", "info");
         }
     }
-}
-
-fn parse_ducklake_url(value: &str) -> Result<Url, String> {
-    if value.contains("://") {
-        return Url::parse(value).map_err(|e| e.to_string());
-    }
-
-    if let Ok(url) = Url::parse(value) {
-        return Ok(url);
-    }
-
-    let path = PathBuf::from(value);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join(path)
-    };
-
-    Url::from_file_path(&path)
-        .map_err(|_| format!("failed to convert path `{}` to a file url", path.display()))
 }
 
 async fn main_impl() -> Result<(), Box<dyn Error>> {
