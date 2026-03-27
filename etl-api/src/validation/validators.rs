@@ -6,18 +6,14 @@ use async_trait::async_trait;
 use etl::store::both::memory::MemoryStore;
 use etl_config::parse_ducklake_url;
 use etl_destinations::bigquery::BigQueryClient;
-use etl_destinations::ducklake::{
-    DuckDbLogConfig as DucklakeDuckDbLogConfig, DuckLakeDestination, S3Config as DucklakeS3Config,
-};
+use etl_destinations::ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config};
 use etl_destinations::iceberg::{
     IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
 };
 use secrecy::ExposeSecret;
 use sqlx::FromRow;
 
-use crate::configs::destination::{
-    DuckDbLogConfig as ApiDuckDbLogConfig, FullApiDestinationConfig, FullApiIcebergConfig,
-};
+use crate::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
 use crate::configs::pipeline::FullApiPipelineConfig;
 
 use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
@@ -675,7 +671,6 @@ struct DucklakeValidator {
     s3_url_style: Option<String>,
     s3_use_ssl: Option<bool>,
     metadata_schema: Option<String>,
-    duckdb_log: Option<DucklakeDuckDbLogConfig>,
 }
 
 impl DucklakeValidator {
@@ -691,7 +686,6 @@ impl DucklakeValidator {
         s3_url_style: Option<String>,
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
-        duckdb_log: Option<ApiDuckDbLogConfig>,
     ) -> Self {
         Self {
             catalog_url,
@@ -704,10 +698,6 @@ impl DucklakeValidator {
             s3_url_style,
             s3_use_ssl,
             metadata_schema,
-            duckdb_log: duckdb_log.map(|duckdb_log| DucklakeDuckDbLogConfig {
-                storage_path: duckdb_log.storage_path,
-                dump_path: duckdb_log.dump_path,
-            }),
         }
     }
 }
@@ -775,7 +765,6 @@ impl Validator for DucklakeValidator {
             self.pool_size,
             s3_config,
             self.metadata_schema.clone(),
-            self.duckdb_log.clone(),
             MemoryStore::new(),
         )
         .await
@@ -930,7 +919,6 @@ impl Validator for DestinationValidator {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_log,
             } => {
                 let validator = DucklakeValidator::new(
                     catalog_url.clone(),
@@ -949,7 +937,6 @@ impl Validator for DestinationValidator {
                     s3_url_style.clone(),
                     *s3_use_ssl,
                     metadata_schema.clone(),
-                    duckdb_log.clone(),
                 );
                 validator.validate(ctx).await
             }

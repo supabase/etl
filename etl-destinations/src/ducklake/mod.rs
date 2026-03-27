@@ -19,7 +19,7 @@ pub(super) type DuckLakeTableName = String;
 /// materialized to Parquet by the background maintenance worker.
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 
-pub use config::{DuckDbLogConfig, S3Config};
+pub use config::S3Config;
 pub use core::{DuckLakeDestination, table_name_to_ducklake_table_name};
 #[cfg(feature = "test-utils")]
 pub use core::{

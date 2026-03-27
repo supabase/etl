@@ -204,19 +204,6 @@ pub struct S3Config {
     pub use_ssl: bool,
 }
 
-/// Optional DuckDB logging configuration for DuckLake connections.
-///
-/// `storage_path` is shared across the fresh DuckDB connections opened by the
-/// destination, while `dump_path` is written once on shutdown from
-/// `SELECT * FROM duckdb_logs`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DuckDbLogConfig {
-    /// Path passed to `CALL enable_logging(storage_path = ...)`.
-    pub storage_path: String,
-    /// CSV file written from `duckdb_logs` during destination shutdown.
-    pub dump_path: String,
-}
-
 /// Serializes a PostgreSQL catalog [`Url`] to the libpq key=value format that
 /// DuckLake expects for `postgres:` catalog attachments.
 pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> {
@@ -492,7 +479,6 @@ pub(super) fn build_setup_sql(
     data_path: &Url,
     s3: Option<&S3Config>,
     metadata_schema: Option<&str>,
-    duckdb_log: Option<&DuckDbLogConfig>,
 ) -> EtlResult<String> {
     let strategy = current_duckdb_extension_strategy()?;
     let vendored_root = match strategy {
@@ -511,7 +497,6 @@ pub(super) fn build_setup_sql(
         data_path,
         s3,
         metadata_schema,
-        duckdb_log,
         strategy,
         vendored_root.as_deref(),
     )
@@ -522,7 +507,6 @@ fn build_setup_sql_with_strategy(
     data_path: &Url,
     s3: Option<&S3Config>,
     metadata_schema: Option<&str>,
-    duckdb_log: Option<&DuckDbLogConfig>,
     strategy: DuckDbExtensionStrategy,
     vendored_root: Option<&Path>,
 ) -> EtlResult<String> {
@@ -625,13 +609,6 @@ fn build_setup_sql_with_strategy(
         quote_literal(data_path),
         super::ATTACH_DATA_INLINING_ROW_LIMIT
     ));
-
-    if let Some(duckdb_log) = duckdb_log {
-        sql.push_str(&format!(
-            " CALL enable_logging(storage_path = {});",
-            quote_literal(&duckdb_log.storage_path)
-        ));
-    }
 
     Ok(sql)
 }
@@ -756,7 +733,6 @@ mod tests {
             &Url::parse("https://example.com/lake").unwrap(),
             None,
             None,
-            None,
         )
         .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ConfigError);
@@ -764,7 +740,6 @@ mod tests {
         let err = build_setup_sql(
             &Url::from_file_path("/tmp/catalog.ducklake").unwrap(),
             &Url::parse("az://container/lake").unwrap(),
-            None,
             None,
             None,
         )
@@ -906,7 +881,6 @@ mod tests {
             &data_url,
             None,
             None,
-            None,
             DuckDbExtensionStrategy::VendoredLinux {
                 platform_dir: "linux_amd64",
             },
@@ -948,7 +922,6 @@ mod tests {
             &data_url,
             None,
             None,
-            None,
             DuckDbExtensionStrategy::InstallFromRepository,
             None,
         )
@@ -983,7 +956,6 @@ mod tests {
         let sql = build_setup_sql_with_strategy(
             &catalog_url,
             &data_url,
-            None,
             None,
             None,
             DuckDbExtensionStrategy::VendoredLinux {
@@ -1021,14 +993,8 @@ mod tests {
             use_ssl: false,
         };
         let metadata_schema = "duck'lake";
-        let sql = build_setup_sql(
-            &catalog_url,
-            &data_url,
-            Some(&s3),
-            Some(metadata_schema),
-            None,
-        )
-        .unwrap();
+        let sql =
+            build_setup_sql(&catalog_url, &data_url, Some(&s3), Some(metadata_schema)).unwrap();
 
         assert!(sql.contains(&format!("KEY_ID {}", quote_literal(&s3.access_key_id))));
         assert!(sql.contains(&format!("SECRET {}", quote_literal(&s3.secret_access_key))));
@@ -1040,32 +1006,5 @@ mod tests {
             "METADATA_SCHEMA {}",
             quote_literal(metadata_schema)
         )));
-    }
-
-    #[test]
-    fn test_build_setup_sql_includes_duckdb_logging_when_configured() {
-        let catalog_url = Url::from_file_path("/tmp/catalog.ducklake").unwrap();
-        let data_url = Url::from_file_path("/tmp/lake_data").unwrap();
-        let duckdb_log = DuckDbLogConfig {
-            storage_path: "/tmp/duckdb_logs".to_string(),
-            dump_path: "/tmp/duckdb_logs_dump.csv".to_string(),
-        };
-
-        let sql = build_setup_sql_with_strategy(
-            &catalog_url,
-            &data_url,
-            None,
-            None,
-            Some(&duckdb_log),
-            DuckDbExtensionStrategy::InstallFromRepository,
-            None,
-        )
-        .unwrap();
-
-        assert!(sql.contains(&format!(
-            "CALL enable_logging(storage_path = {});",
-            quote_literal(&duckdb_log.storage_path)
-        )));
-        assert!(!sql.contains("storage = 'stdout'"));
     }
 }

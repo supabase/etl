@@ -39,7 +39,7 @@ use etl::config::{
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
 use etl_config::parse_ducklake_url;
-use etl_destinations::ducklake::{DuckDbLogConfig, DuckLakeDestination, S3Config};
+use etl_destinations::ducklake::{DuckLakeDestination, S3Config};
 use std::error::Error;
 use std::sync::Once;
 use tokio::signal;
@@ -232,17 +232,6 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.ducklake_args.pool_size,
         s3_config,
         args.ducklake_args.metadata_schema,
-        match (
-            args.ducklake_args.duckdb_log_storage_path,
-            args.ducklake_args.duckdb_log_dump_path,
-        ) {
-            (Some(storage_path), Some(dump_path)) => Some(DuckDbLogConfig {
-                storage_path,
-                dump_path,
-            }),
-            (None, None) => None,
-            _ => unreachable!("clap should enforce paired duckdb log arguments"),
-        },
         store.clone(),
     )
     .await?;

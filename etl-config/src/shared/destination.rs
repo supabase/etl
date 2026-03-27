@@ -9,15 +9,6 @@ const fn default_ducklake_pool_size() -> u32 {
     DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
 }
 
-/// Optional DuckDB logging for DuckLake destinations.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DuckDbLogConfig {
-    /// Path used by `CALL enable_logging(storage_path = ...)`.
-    pub storage_path: String,
-    /// CSV path written from `duckdb_logs` during shutdown.
-    pub dump_path: String,
-}
-
 /// Configuration for supported ETL data destinations.
 ///
 /// Specifies the destination type and its associated configuration parameters.
@@ -81,9 +72,6 @@ pub enum DestinationConfig {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
-        /// Optional DuckDB log storage and shutdown dump paths.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        duckdb_log: Option<DuckDbLogConfig>,
     },
 }
 
@@ -258,8 +246,6 @@ pub enum DestinationConfigWithoutSecrets {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
-        /// Optional DuckDB log storage and shutdown dump paths.
-        duckdb_log: Option<DuckDbLogConfig>,
     },
 }
 
@@ -292,7 +278,6 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_log,
             } => DestinationConfigWithoutSecrets::Ducklake {
                 catalog_url,
                 data_path,
@@ -302,7 +287,6 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_log,
             },
         }
     }

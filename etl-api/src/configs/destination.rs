@@ -1,7 +1,5 @@
 use etl_config::SerializableSecretString;
-use etl_config::shared::{
-    DestinationConfig, DuckDbLogConfig as SharedDuckDbLogConfig, IcebergConfig,
-};
+use etl_config::shared::{DestinationConfig, IcebergConfig};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -20,35 +18,6 @@ pub const fn default_connection_pool_size() -> usize {
 /// Returns the default connection pool size for DuckLake destinations.
 pub const fn default_ducklake_pool_size() -> u32 {
     DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
-}
-
-/// API-facing DuckDB logging configuration for DuckLake destinations.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
-pub struct DuckDbLogConfig {
-    #[schema(example = "/tmp/duckdb_logs")]
-    #[serde(deserialize_with = "crate::utils::trim_string")]
-    pub storage_path: String,
-    #[schema(example = "/tmp/duckdb_logs_dump.csv")]
-    #[serde(deserialize_with = "crate::utils::trim_string")]
-    pub dump_path: String,
-}
-
-impl From<SharedDuckDbLogConfig> for DuckDbLogConfig {
-    fn from(value: SharedDuckDbLogConfig) -> Self {
-        Self {
-            storage_path: value.storage_path,
-            dump_path: value.dump_path,
-        }
-    }
-}
-
-impl From<DuckDbLogConfig> for SharedDuckDbLogConfig {
-    fn from(value: DuckDbLogConfig) -> Self {
-        Self {
-            storage_path: value.storage_path,
-            dump_path: value.dump_path,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -129,8 +98,6 @@ pub enum FullApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         metadata_schema: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        duckdb_log: Option<DuckDbLogConfig>,
     },
 }
 
@@ -199,7 +166,6 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_log,
             } => Self::Ducklake {
                 catalog_url,
                 data_path,
@@ -211,7 +177,6 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_log: duckdb_log.map(Into::into),
             },
         }
     }
@@ -240,7 +205,6 @@ pub enum StoredDestinationConfig {
         s3_url_style: Option<String>,
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
-        duckdb_log: Option<DuckDbLogConfig>,
     },
 }
 
@@ -309,7 +273,6 @@ impl StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_log,
             } => DestinationConfig::Ducklake {
                 catalog_url,
                 data_path,
@@ -321,7 +284,6 @@ impl StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_log: duckdb_log.map(Into::into),
             },
         }
     }
@@ -393,7 +355,6 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_log,
             } => Self::Ducklake {
                 catalog_url,
                 data_path,
@@ -405,7 +366,6 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_log,
             },
         }
     }
@@ -504,7 +464,6 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_log,
             } => {
                 let s3_access_key_id = s3_access_key_id
                     .map(|value| encrypt_text(value.expose_secret().to_owned(), encryption_key))
@@ -524,7 +483,6 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     s3_url_style,
                     s3_use_ssl,
                     metadata_schema,
-                    duckdb_log,
                 })
             }
         }
@@ -558,8 +516,6 @@ pub enum EncryptedStoredDestinationConfig {
         s3_url_style: Option<String>,
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        duckdb_log: Option<DuckDbLogConfig>,
     },
 }
 
@@ -669,7 +625,6 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_log,
             } => Ok(StoredDestinationConfig::Ducklake {
                 catalog_url,
                 data_path,
@@ -689,7 +644,6 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                duckdb_log,
             }),
         }
     }
@@ -1159,7 +1113,6 @@ mod tests {
             s3_url_style: Some("path".to_string()),
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_string()),
-            duckdb_log: None,
         };
 
         let key = EncryptionKey {
@@ -1183,7 +1136,6 @@ mod tests {
                     s3_url_style: u1,
                     s3_use_ssl: ssl1,
                     metadata_schema: m1,
-                    duckdb_log: l1,
                 },
                 StoredDestinationConfig::Ducklake {
                     catalog_url: c2,
@@ -1196,7 +1148,6 @@ mod tests {
                     s3_url_style: u2,
                     s3_use_ssl: ssl2,
                     metadata_schema: m2,
-                    duckdb_log: l2,
                 },
             ) => {
                 assert_eq!(c1, c2);
@@ -1215,7 +1166,6 @@ mod tests {
                 assert_eq!(u1, u2);
                 assert_eq!(ssl1, ssl2);
                 assert_eq!(m1, m2);
-                assert_eq!(l1, l2);
             }
             _ => panic!("Config types don't match"),
         }
@@ -1234,7 +1184,6 @@ mod tests {
             s3_url_style: None,
             s3_use_ssl: None,
             metadata_schema: Some("ducklake".to_string()),
-            duckdb_log: None,
         };
 
         let stored: StoredDestinationConfig = full_config.clone().into();
@@ -1268,39 +1217,6 @@ mod tests {
     }
 
     #[test]
-    fn test_full_api_destination_config_conversion_ducklake_preserves_duckdb_log() {
-        let full_config = FullApiDestinationConfig::Ducklake {
-            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_string(),
-            data_path: "file:///absolute/path/to/lake_data".to_string(),
-            pool_size: Some(4),
-            s3_access_key_id: None,
-            s3_secret_access_key: None,
-            s3_region: None,
-            s3_endpoint: None,
-            s3_url_style: None,
-            s3_use_ssl: None,
-            metadata_schema: Some("ducklake".to_string()),
-            duckdb_log: Some(DuckDbLogConfig {
-                storage_path: "/tmp/duckdb_logs".to_string(),
-                dump_path: "/tmp/duckdb_logs_dump.csv".to_string(),
-            }),
-        };
-
-        let stored: StoredDestinationConfig = full_config.clone().into();
-        let back_to_full: FullApiDestinationConfig = stored.into();
-
-        match (full_config, back_to_full) {
-            (
-                FullApiDestinationConfig::Ducklake { duckdb_log: l1, .. },
-                FullApiDestinationConfig::Ducklake { duckdb_log: l2, .. },
-            ) => {
-                assert_eq!(l1, l2);
-            }
-            _ => panic!("Config types don't match"),
-        }
-    }
-
-    #[test]
     fn test_full_api_destination_config_serialization_ducklake() {
         let full_config = FullApiDestinationConfig::Ducklake {
             catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_string(),
@@ -1313,7 +1229,6 @@ mod tests {
             s3_url_style: Some("path".to_string()),
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_string()),
-            duckdb_log: None,
         };
 
         assert_json_snapshot!(full_config);
@@ -1333,7 +1248,6 @@ mod tests {
                     s3_url_style: u1,
                     s3_use_ssl: ssl1,
                     metadata_schema: m1,
-                    duckdb_log: l1,
                 },
                 FullApiDestinationConfig::Ducklake {
                     catalog_url: c2,
@@ -1346,7 +1260,6 @@ mod tests {
                     s3_url_style: u2,
                     s3_use_ssl: ssl2,
                     metadata_schema: m2,
-                    duckdb_log: l2,
                 },
             ) => {
                 assert_eq!(c1, &c2);
@@ -1365,7 +1278,6 @@ mod tests {
                 assert_eq!(u1, &u2);
                 assert_eq!(ssl1, &ssl2);
                 assert_eq!(m1, &m2);
-                assert_eq!(l1, &l2);
             }
             _ => panic!("Deserialization failed or variant mismatch"),
         }

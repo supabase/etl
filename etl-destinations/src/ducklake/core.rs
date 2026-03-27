@@ -1,8 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
 use std::sync::Arc;
 #[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
@@ -33,9 +31,7 @@ use crate::ducklake::client::{
     DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
     format_query_error_detail, run_duckdb_blocking,
 };
-use crate::ducklake::config::{
-    DuckDbLogConfig, build_setup_sql, current_duckdb_extension_strategy,
-};
+use crate::ducklake::config::{build_setup_sql, current_duckdb_extension_strategy};
 use crate::ducklake::encoding::{
     PreparedRows, cell_to_sql_literal_ref, prepare_rows, table_row_to_sql_literal_ref,
 };
@@ -234,7 +230,6 @@ pub struct DuckLakeDestination<S> {
     table_creation_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     store: S,
-    duckdb_log: Option<Arc<DuckDbLogConfig>>,
     /// Cache of table names whose DDL has already been executed.
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
     /// Cache tracking whether the ETL batch marker table already exists. If it's set then the table has already been created
@@ -253,7 +248,8 @@ where
         self.shutdown_maintenance_worker().await?;
         self.shutdown_metrics_sampler().await?;
         self.flush_known_tables_on_shutdown().await;
-        self.dump_duckdb_logs_inner().await
+
+        Ok(())
     }
 
     async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
@@ -308,7 +304,6 @@ where
         pool_size: u32,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
-        duckdb_log: Option<DuckDbLogConfig>,
         store: S,
     ) -> EtlResult<Self> {
         register_metrics();
@@ -328,13 +323,11 @@ where
         {
             info!(platform = platform_dir, "using vendored duckdb extensions");
         }
-        ensure_duckdb_log_paths(duckdb_log.as_ref())?;
         let setup_sql = Arc::new(build_setup_sql(
             &catalog_url,
             &data_path,
             s3.as_ref(),
             metadata_schema.as_deref(),
-            duckdb_log.as_ref(),
         )?);
 
         let manager = Arc::new(DuckLakeConnectionManager {
@@ -355,7 +348,6 @@ where
             table_creation_slots: Arc::new(Semaphore::new(1)),
             table_write_slots: Arc::default(),
             store,
-            duckdb_log: duckdb_log.map(Arc::new),
             created_tables: Arc::clone(&created_tables),
             applied_batches_table_created: Arc::default(),
         };
@@ -910,18 +902,6 @@ where
         .await
     }
 
-    /// Dumps file-backed DuckDB logs on destination shutdown when configured.
-    async fn dump_duckdb_logs_inner(&self) -> EtlResult<()> {
-        let Some(duckdb_log) = self.duckdb_log.as_ref().map(Arc::clone) else {
-            return Ok(());
-        };
-
-        self.run_duckdb_blocking(DuckDbBlockingOperationKind::Foreground, move |conn| {
-            dump_duckdb_logs(conn, duckdb_log.as_ref())
-        })
-        .await
-    }
-
     /// Flushes any remaining inlined rows for known tables before shutdown completes.
     async fn flush_known_tables_on_shutdown(&self) {
         let table_names = {
@@ -1078,126 +1058,6 @@ where
 /// Returns an error if the table name cannot be converted.
 pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> EtlResult<DuckLakeTableName> {
     try_stringify_table_name(table_name)
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-/// Creates parent directories for configured DuckDB log storage paths.
-fn ensure_duckdb_log_paths(duckdb_log: Option<&DuckDbLogConfig>) -> EtlResult<()> {
-    let Some(duckdb_log) = duckdb_log else {
-        return Ok(());
-    };
-
-    ensure_duckdb_log_storage_path(Path::new(&duckdb_log.storage_path))?;
-    ensure_parent_directory(
-        Path::new(&duckdb_log.dump_path),
-        "DuckDB log dump path parent directory creation failed",
-    )?;
-
-    Ok(())
-}
-
-/// Prepares the file-backed storage path used by `CALL enable_logging(...)`.
-fn ensure_duckdb_log_storage_path(storage_path: &Path) -> EtlResult<()> {
-    let is_csv_file = storage_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"));
-
-    if is_csv_file {
-        ensure_parent_directory(
-            storage_path,
-            "DuckDB log storage parent directory creation failed",
-        )
-    } else {
-        fs::create_dir_all(storage_path).map_err(|error| {
-            etl_error!(
-                ErrorKind::ConfigError,
-                "DuckDB log storage directory creation failed",
-                storage_path.display().to_string(),
-                source: error
-            )
-        })
-    }
-}
-
-/// Creates the parent directory of `path` when one is present.
-fn ensure_parent_directory(path: &Path, description: &'static str) -> EtlResult<()> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    if parent.as_os_str().is_empty() {
-        return Ok(());
-    }
-
-    fs::create_dir_all(parent).map_err(|error| {
-        etl_error!(
-            ErrorKind::ConfigError,
-            description,
-            parent.display().to_string(),
-            source: error
-        )
-    })
-}
-
-/// Dumps the current `duckdb_logs` relation to the configured CSV file.
-fn dump_duckdb_logs(conn: &duckdb::Connection, duckdb_log: &DuckDbLogConfig) -> EtlResult<()> {
-    let select_sql = "SELECT * FROM duckdb_logs";
-    let mut statement = conn.prepare(select_sql).map_err(|error| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckDB log dump query preparation failed",
-            format_query_error_detail(select_sql, &error),
-            source: error
-        )
-    })?;
-    let mut rows = statement.query([]).map_err(|error| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckDB log dump query failed",
-            format_query_error_detail(select_sql, &error),
-            source: error
-        )
-    })?;
-    let mut row_count = 0usize;
-
-    while rows
-        .next()
-        .map_err(|error| {
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckDB log dump row fetch failed",
-                format_query_error_detail(select_sql, &error),
-                source: error
-            )
-        })?
-        .is_some()
-    {
-        row_count += 1;
-    }
-    drop(rows);
-    drop(statement);
-
-    let copy_sql = format!(
-        "COPY (SELECT * FROM duckdb_logs) TO {} (FORMAT CSV, HEADER);",
-        quote_literal(&duckdb_log.dump_path)
-    );
-    conn.execute_batch(&copy_sql).map_err(|error| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckDB log dump copy failed",
-            format_query_error_detail(&copy_sql, &error),
-            source: error
-        )
-    })?;
-
-    info!(
-        row_count,
-        dump_path = %duckdb_log.dump_path,
-        "duckdb logs dumped"
-    );
-
-    Ok(())
 }
 
 /// Maximum number of times a failed write attempt is retried before giving up.
@@ -3133,7 +2993,7 @@ mod tests {
             .expect("failed to seed schema");
 
         let destination =
-            DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, None, store)
+            DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, store)
                 .await
                 .expect("failed to create destination");
 
@@ -3186,7 +3046,7 @@ mod tests {
             .expect("failed to seed schema");
 
         let destination =
-            DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, None, store)
+            DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, store)
                 .await
                 .expect("failed to create destination");
 

@@ -19,10 +19,7 @@ use etl_destinations::iceberg::{
 };
 use etl_destinations::{
     bigquery::BigQueryDestination,
-    ducklake::{
-        DuckDbLogConfig as DucklakeDuckDbLogConfig, DuckLakeDestination,
-        S3Config as DucklakeS3Config,
-    },
+    ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
     iceberg::{IcebergClient, IcebergDestination},
 };
 use secrecy::ExposeSecret;
@@ -152,7 +149,6 @@ pub async fn start_replicator_with_config(
             s3_url_style,
             s3_use_ssl,
             metadata_schema,
-            duckdb_log,
         } => {
             set_destination_scope::<DuckLakeDestination<PostgresStore>>();
 
@@ -179,12 +175,6 @@ pub async fn start_replicator_with_config(
                 *pool_size,
                 s3_config,
                 metadata_schema.clone(),
-                duckdb_log
-                    .clone()
-                    .map(|duckdb_log| DucklakeDuckDbLogConfig {
-                        storage_path: duckdb_log.storage_path,
-                        dump_path: duckdb_log.dump_path,
-                    }),
                 state_store.clone(),
             )
             .await?;
