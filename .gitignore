@@ -38,3 +38,4 @@ vendor/duckdb/extensions/
 
 # Configuration files
 etl-replicator/configuration
+configuration
