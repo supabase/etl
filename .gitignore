@@ -35,3 +35,6 @@ pyvenv.cfg
 
 # Optional local DuckDB extension vendoring.
 vendor/duckdb/extensions/
+
+# Configuration files
+etl-replicator/configuration
