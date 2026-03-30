@@ -52,11 +52,10 @@ test-utils = ["dep:uuid"]
 etl = { workspace = true }
 
 arrow = { workspace = true, optional = true }
-duckdb = { workspace = true, optional = true, features = ["bundled", "r2d2"] }
-r2d2 = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 chrono = { workspace = true }
+duckdb = { workspace = true, optional = true, features = ["bundled", "r2d2"] }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
@@ -65,6 +64,7 @@ parking_lot = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
 pg_escape = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
+r2d2 = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }
 reqwest = { workspace = true, optional = true, features = ["json"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
@@ -77,9 +77,9 @@ url = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true, features = ["v4"] }
 
 [dev-dependencies]
+duckdb = { workspace = true, features = ["bundled"] }
 etl = { workspace = true, features = ["test-utils"] }
 etl-telemetry = { workspace = true }
-duckdb = { workspace = true, features = ["bundled"] }
 tempfile = { workspace = true }
 
 chrono = { workspace = true }
