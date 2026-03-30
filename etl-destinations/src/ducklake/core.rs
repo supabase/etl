@@ -53,6 +53,7 @@ use crate::ducklake::metrics::{
 };
 use crate::ducklake::schema::build_create_table_sql_ducklake;
 use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG, S3Config};
+use crate::retry::{RetryAttempt, RetryDecision, RetryPolicy, retry_with_backoff};
 use crate::table_name::try_stringify_table_name;
 
 /// Maximum number of rows per SQL `INSERT ... VALUES` batch when nested values
@@ -1118,6 +1119,12 @@ const MAX_RETRY_DELAY_MS: u64 = 2_000;
 /// Minimum retry delay for transient delete-file visibility failures.
 const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
 
+/// Applies jitter to one DuckLake retry delay.
+fn jitter_ducklake_retry_delay(base_delay: Duration) -> Duration {
+    let jitter_ratio = rand::rng().random_range(0.5..=1.5_f64);
+    base_delay.mul_f64(jitter_ratio)
+}
+
 /// Applies all prepared atomic batches for one table, reusing one DuckDB
 /// connection per attempt and skipping already committed segments by marker.
 async fn apply_table_batches_with_retry(
@@ -1132,65 +1139,66 @@ async fn apply_table_batches_with_retry(
 
     let batch_count = batches.len();
     let batches = Arc::new(batches);
-    let table_name = &batches[0].table_name;
-    let mut delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS);
+    let table_name = batches[0].table_name.clone();
 
-    // This retry mechanism is safe because
-    for attempt in 0..=MAX_COMMIT_RETRIES {
-        let attempt_batches = Arc::clone(&batches);
-        match run_duckdb_blocking(
-            Arc::clone(&pool),
-            Arc::clone(&blocking_slots),
-            DuckDbBlockingOperationKind::Foreground,
-            {
-                let manager = Arc::clone(&manager);
-                move |conn| {
-                    apply_table_batches(manager.as_ref(), conn, attempt_batches.as_ref())?;
-                    Ok(())
-                }
-            },
+    retry_with_backoff(
+        RetryPolicy {
+            max_retries: MAX_COMMIT_RETRIES,
+            initial_delay: Duration::from_millis(INITIAL_RETRY_DELAY_MS),
+            max_delay: Duration::from_millis(MAX_RETRY_DELAY_MS),
+        },
+        |_| RetryDecision::Retry,
+        jitter_ducklake_retry_delay,
+        |attempt: RetryAttempt<'_, etl::error::EtlError>| {
+            counter!(
+                ETL_DUCKLAKE_RETRIES_TOTAL,
+                BATCH_KIND_LABEL => DuckLakeTableBatchKind::Mutation.as_str(),
+                RETRY_SCOPE_LABEL => "table_sequence",
+            )
+            .increment(1);
+            warn!(
+                attempt = attempt.retry_index,
+                max = attempt.max_retries,
+                table = %table_name,
+                batch_count,
+                error = ?attempt.error,
+                "ducklake table batch sequence failed, retrying"
+            );
+        },
+        move || {
+            let attempt_batches = Arc::clone(&batches);
+            let manager = Arc::clone(&manager);
+            let pool = Arc::clone(&pool);
+            let blocking_slots = Arc::clone(&blocking_slots);
+            async move {
+                run_duckdb_blocking(
+                    pool,
+                    blocking_slots,
+                    DuckDbBlockingOperationKind::Foreground,
+                    move |conn| {
+                        apply_table_batches(manager.as_ref(), conn, attempt_batches.as_ref())?;
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        },
+    )
+    .await
+    .map_err(|failure| {
+        counter!(
+            ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
+            BATCH_KIND_LABEL => DuckLakeTableBatchKind::Mutation.as_str(),
+            RETRY_SCOPE_LABEL => "table_sequence",
         )
-        .await
-        {
-            Ok(()) => return Ok(()),
-            Err(e) if attempt < MAX_COMMIT_RETRIES => {
-                counter!(
-                    ETL_DUCKLAKE_RETRIES_TOTAL,
-                    BATCH_KIND_LABEL => DuckLakeTableBatchKind::Mutation.as_str(),
-                    RETRY_SCOPE_LABEL => "table_sequence",
-                )
-                .increment(1);
-                let jitter_ratio = rand::rng().random_range(0.5..=1.5_f64);
-                let jittered = delay.mul_f64(jitter_ratio);
-                warn!(
-                    attempt = attempt + 1,
-                    max = MAX_COMMIT_RETRIES,
-                    table = %table_name,
-                    batch_count,
-                    error = ?e,
-                    "ducklake table batch sequence failed, retrying"
-                );
-                tokio::time::sleep(jittered).await;
-                delay = std::cmp::min(delay * 2, Duration::from_millis(MAX_RETRY_DELAY_MS));
-            }
-            Err(e) => {
-                counter!(
-                    ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
-                    BATCH_KIND_LABEL => DuckLakeTableBatchKind::Mutation.as_str(),
-                    RETRY_SCOPE_LABEL => "table_sequence",
-                )
-                .increment(1);
-                return Err(etl_error!(
-                    ErrorKind::DestinationAtomicBatchRetryable,
-                    "DuckLake atomic table batch sequence failed after retries",
-                    format!("table={table_name}, batch_count={batch_count}"),
-                    source: e
-                ));
-            }
-        }
-    }
-
-    Ok(())
+        .increment(1);
+        etl_error!(
+            ErrorKind::DestinationAtomicBatchRetryable,
+            "DuckLake atomic table batch sequence failed after retries",
+            format!("table={table_name}, batch_count={batch_count}"),
+            source: failure.last_error
+        )
+    })
 }
 
 /// Applies all prepared atomic batches for one table on the same connection.
@@ -1246,88 +1254,87 @@ async fn apply_table_batch_with_retry(
     let batch_id = batch.batch_id.clone();
     let batch_kind = batch.batch_kind;
     let batch = Arc::new(batch);
-    let mut delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS);
 
-    for attempt in 0..=MAX_COMMIT_RETRIES {
-        let attempt_batch = Arc::clone(&batch);
-        match run_duckdb_blocking(
-            Arc::clone(&pool),
-            Arc::clone(&blocking_slots),
-            DuckDbBlockingOperationKind::Foreground,
-            {
-                let manager = Arc::clone(&manager);
-                move |conn| {
-                    if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
-                        counter!(
-                            ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL,
-                            BATCH_KIND_LABEL => batch_kind.as_str(),
-                        )
-                        .increment(1);
-                        debug!(
-                            table = %attempt_batch.table_name,
-                            batch_id = %attempt_batch.batch_id,
-                            batch_kind = batch_kind.as_str(),
-                            "ducklake table batch already committed, skipping replay"
-                        );
+    retry_with_backoff(
+        RetryPolicy {
+            max_retries: MAX_COMMIT_RETRIES,
+            initial_delay: Duration::from_millis(INITIAL_RETRY_DELAY_MS),
+            max_delay: Duration::from_millis(
+                MAX_RETRY_DELAY_MS.max(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
+            ),
+        },
+        |_| RetryDecision::Retry,
+        jitter_ducklake_retry_delay,
+        |attempt: RetryAttempt<'_, etl::error::EtlError>| {
+            counter!(
+                ETL_DUCKLAKE_RETRIES_TOTAL,
+                BATCH_KIND_LABEL => batch_kind.as_str(),
+                RETRY_SCOPE_LABEL => "single_batch",
+            )
+            .increment(1);
+            warn!(
+                attempt = attempt.retry_index,
+                max = attempt.max_retries,
+                table = %table_name,
+                batch_id = %batch_id,
+                error = ?attempt.error,
+                "ducklake table mutation attempt failed, retrying"
+            );
+        },
+        move || {
+            let attempt_batch = Arc::clone(&batch);
+            let manager = Arc::clone(&manager);
+            let pool = Arc::clone(&pool);
+            let blocking_slots = Arc::clone(&blocking_slots);
+            async move {
+                run_duckdb_blocking(
+                    pool,
+                    blocking_slots,
+                    DuckDbBlockingOperationKind::Foreground,
+                    move |conn| {
+                        if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
+                            counter!(
+                                ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL,
+                                BATCH_KIND_LABEL => batch_kind.as_str(),
+                            )
+                            .increment(1);
+                            debug!(
+                                table = %attempt_batch.table_name,
+                                batch_id = %attempt_batch.batch_id,
+                                batch_kind = batch_kind.as_str(),
+                                "ducklake table batch already committed, skipping replay"
+                            );
 
-                        return Ok(());
-                    }
+                            return Ok(());
+                        }
 
-                    apply_table_batch(manager.as_ref(), conn, attempt_batch.as_ref())?;
+                        apply_table_batch(manager.as_ref(), conn, attempt_batch.as_ref())?;
 
-                    Ok(())
-                }
-            },
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        },
+    )
+    .await
+    .map_err(|failure| {
+        counter!(
+            ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
+            BATCH_KIND_LABEL => batch_kind.as_str(),
+            RETRY_SCOPE_LABEL => "single_batch",
         )
-        .await
-        {
-            Ok(()) => return Ok(()),
-            Err(e) if attempt < MAX_COMMIT_RETRIES => {
-                counter!(
-                    ETL_DUCKLAKE_RETRIES_TOTAL,
-                    BATCH_KIND_LABEL => batch_kind.as_str(),
-                    RETRY_SCOPE_LABEL => "single_batch",
-                )
-                .increment(1);
-                let jitter_ratio = rand::rng().random_range(0.5..=1.5_f64);
-                let jittered = delay.mul_f64(jitter_ratio);
-                warn!(
-                    attempt = attempt + 1,
-                    max = MAX_COMMIT_RETRIES,
-                    table = %table_name,
-                    batch_id = %batch_id,
-                    error = ?e,
-                    "ducklake table mutation attempt failed, retrying"
-                );
-                tokio::time::sleep(jittered).await;
-                delay = std::cmp::min(
-                    delay * 2,
-                    Duration::from_millis(
-                        MAX_RETRY_DELAY_MS.max(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
-                    ),
-                );
-            }
-            Err(e) => {
-                counter!(
-                    ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
-                    BATCH_KIND_LABEL => batch_kind.as_str(),
-                    RETRY_SCOPE_LABEL => "single_batch",
-                )
-                .increment(1);
-                return Err(etl_error!(
-                    ErrorKind::DestinationAtomicBatchRetryable,
-                    "DuckLake atomic table batch failed after retries",
-                    format!(
-                        "table={table_name}, batch_id={batch_id}, batch_kind={}",
-                        batch_kind.as_str()
-                    ),
-                    source: e
-                ));
-            }
-        }
-    }
-
-    Ok(())
+        .increment(1);
+        etl_error!(
+            ErrorKind::DestinationAtomicBatchRetryable,
+            "DuckLake atomic table batch failed after retries",
+            format!(
+                "table={table_name}, batch_id={batch_id}, batch_kind={}",
+                batch_kind.as_str()
+            ),
+            source: failure.last_error
+        )
+    })
 }
 
 /// Prepares ordered atomic batches for one table's CDC mutations.
