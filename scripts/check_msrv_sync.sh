@@ -7,7 +7,16 @@ repo_root=$(cd -- "${script_dir}/.." && pwd)
 cd "${repo_root}"
 
 cargo_msrv=$(
-  sed -nE '/^\[workspace\.package\]$/,/^\[/{s/^rust-version = "([^"]+)"$/\1/p;}' Cargo.toml | head -n 1
+  python - <<'PY'
+import sys, tomllib
+
+try:
+    with open("Cargo.toml", "rb") as f:
+        data = tomllib.load(f)
+    print(data["workspace"]["package"]["rust-version"])
+except Exception:
+    sys.exit(1)
+PY
 )
 
 if [[ -z "${cargo_msrv}" ]]; then
