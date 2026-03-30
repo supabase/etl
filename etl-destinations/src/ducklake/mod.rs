@@ -1,3 +1,4 @@
+mod batches;
 mod client;
 mod config;
 mod core;
@@ -19,10 +20,10 @@ pub(super) type DuckLakeTableName = String;
 /// materialized to Parquet by the background maintenance worker.
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 
-pub use config::S3Config;
-pub use core::{DuckLakeDestination, table_name_to_ducklake_table_name};
 #[cfg(feature = "test-utils")]
-pub use core::{
+pub use batches::{
     arm_fail_after_atomic_batch_commit_once_for_tests,
     arm_fail_after_copy_batch_commit_once_for_tests, reset_ducklake_test_hooks,
 };
+pub use config::S3Config;
+pub use core::{DuckLakeDestination, table_name_to_ducklake_table_name};
