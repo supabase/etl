@@ -1397,11 +1397,11 @@ async fn table_processing_with_schema_change_errors_table() {
         destination.clone(),
     );
 
-    // Register notifications for initial table copy completion.
+    // Register notification for the ready state.
     let orders_state_notify = store
         .notify_on_table_state_type(
             database_schema.orders_schema().id,
-            TableReplicationPhaseType::FinishedCopy,
+            TableReplicationPhaseType::Ready,
         )
         .await;
 
@@ -1409,12 +1409,9 @@ async fn table_processing_with_schema_change_errors_table() {
 
     orders_state_notify.notified().await;
 
-    // Register notification for the sync done state.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
+    // Wait for two insert events to be processed.
+    let insert_events_notify = destination
+        .wait_for_events_count(vec![(EventType::Insert, 2)])
         .await;
 
     // Insert new data in the table.
@@ -1427,16 +1424,6 @@ async fn table_processing_with_schema_change_errors_table() {
         .await
         .unwrap();
 
-    orders_state_notify.notified().await;
-
-    // Register notification for the ready state.
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
-        .await;
-
     // Insert new data in the table.
     database
         .insert_values(
@@ -1447,7 +1434,7 @@ async fn table_processing_with_schema_change_errors_table() {
         .await
         .unwrap();
 
-    orders_state_notify.notified().await;
+    insert_events_notify.notified().await;
 
     // Register notification for the errored state.
     let orders_state_notify = store

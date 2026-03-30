@@ -1,6 +1,7 @@
 #![cfg(feature = "test-utils")]
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use etl::error::ErrorKind;
 use etl::replication::client::{
@@ -194,6 +195,20 @@ async fn test_replication_client_doesnt_recreate_slot() {
         client.create_slot(&slot_name).await,
         Err(ref err) if err.kind() == ErrorKind::ReplicationSlotAlreadyExists
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_replication_client_reads_wal_sender_timeout() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let wal_sender_timeout = client.get_wal_sender_timeout().await.unwrap();
+
+    assert_eq!(wal_sender_timeout, Some(Duration::from_secs(10)));
 }
 
 #[tokio::test(flavor = "multi_thread")]

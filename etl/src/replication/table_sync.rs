@@ -11,6 +11,7 @@ use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
+use crate::destination::async_result::{TruncateTableResult, WriteTableRowsResult};
 use crate::error::{ErrorKind, EtlResult};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, etl_fail_point};
@@ -152,15 +153,22 @@ where
             // introduce atomicity there.
             let existing_table_schema = store.get_table_schema(&table_id).await?;
             let existing_table_mapping = store.get_table_mapping(&table_id).await?;
-            if existing_table_schema.is_some()
-                && existing_table_mapping.is_some()
-                && let Err(err) = destination.truncate_table(table_id).await
-            {
-                warn!(
-                    table_id = table_id.0,
-                    error = %err,
-                    "failed to truncate destination table before copy, continuing"
-                );
+            if existing_table_schema.is_some() && existing_table_mapping.is_some() {
+                let (truncate_result, pending_truncate_result) = TruncateTableResult::new(());
+
+                if let Err(err) = destination.truncate_table(table_id, truncate_result).await {
+                    warn!(
+                        table_id = table_id.0,
+                        error = %err,
+                        "failed to dispatch destination table truncation before copy, continuing"
+                    );
+                } else if let Err(err) = pending_truncate_result.await.into_result() {
+                    warn!(
+                        table_id = table_id.0,
+                        error = %err,
+                        "failed to truncate destination table before copy, continuing"
+                    );
+                }
             }
 
             // We are ready to start copying table data, and we update the state accordingly.
@@ -252,6 +260,8 @@ where
                         return Ok(TableSyncResult::SyncStopped);
                     }
                 }
+            } else {
+                info!(table_id = table_id.0, "skipping table copy");
             }
 
             // We commit the transaction before starting the apply loop, otherwise it will fail
@@ -261,7 +271,11 @@ where
             // If no table rows were written, we call the method nonetheless with no rows, to kickstart
             // table creation.
             if total_table_copy_rows == 0 {
-                destination.write_table_rows(table_id, vec![]).await?;
+                let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
+                destination
+                    .write_table_rows(table_id, vec![], flush_result)
+                    .await?;
+                pending_flush_result.await.into_result()?;
                 info!(
                     table_id = table_id.0,
                     "writing empty table rows for empty table"

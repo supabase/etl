@@ -80,7 +80,7 @@ pub struct CustomStore {
 
 impl CustomStore {
     pub fn new() -> Self {
-        info!("Creating custom store");
+        info!("creating custom store");
         Self {
             tables: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -138,7 +138,7 @@ impl StateStore for CustomStore {
         table_id: TableId,
         state: TableReplicationPhase,
     ) -> EtlResult<()> {
-        info!("Table {} -> {:?}", table_id.0, state);
+        info!("table {} -> {:?}", table_id.0, state);
         let mut tables = self.tables.lock().await;
         tables.entry(table_id).or_default().state = Some(state);
         Ok(())
@@ -236,8 +236,8 @@ impl HttpDestination {
                 Ok(resp) if resp.status().is_client_error() => {
                     bail!(ErrorKind::Unknown, "Client error", resp.status());
                 }
-                Ok(resp) => warn!("Attempt {}/3: status {}", attempt, resp.status()),
-                Err(e) => warn!("Attempt {}/3: {}", attempt, e),
+                Ok(resp) => warn!("attempt {}/3: status {}", attempt, resp.status()),
+                Err(e) => warn!("attempt {}/3: {}", attempt, e),
             }
             if attempt < 3 {
                 tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
@@ -252,16 +252,28 @@ impl Destination for HttpDestination {
         "http"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        info!("Truncating table {}", table_id.0);
-        self.post(&format!("tables/{}/truncate", table_id.0), json!({})).await
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
+        info!("truncating table {}", table_id.0);
+        let result = self.post(&format!("tables/{}/truncate", table_id.0), json!({})).await;
+        async_result.send(result);
+        Ok(())
     }
 
-    async fn write_table_rows(&self, table_id: TableId, rows: Vec<TableRow>) -> EtlResult<()> {
+    async fn write_table_rows(
+        &self,
+        table_id: TableId,
+        rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
+    ) -> EtlResult<()> {
         if rows.is_empty() {
+            async_result.send(Ok(()));
             return Ok(());
         }
-        info!("Writing {} rows to table {}", rows.len(), table_id.0);
+        info!("writing {} rows to table {}", rows.len(), table_id.0);
 
         let payload = json!({
             "table_id": table_id.0,
@@ -270,14 +282,21 @@ impl Destination for HttpDestination {
             }).collect::<Vec<_>>()
         });
 
-        self.post(&format!("tables/{}/rows", table_id.0), payload).await
+        let result = self.post(&format!("tables/{}/rows", table_id.0), payload).await;
+        async_result.send(result);
+        Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
         if events.is_empty() {
+            async_result.send(Ok(()));
             return Ok(());
         }
-        info!("Writing {} events", events.len());
+        info!("writing {} events", events.len());
 
         let payload = json!({
             "events": events.iter().map(|e| {
@@ -294,7 +313,9 @@ impl Destination for HttpDestination {
             }).collect::<Vec<_>>()
         });
 
-        self.post("events", payload).await
+        let result = self.post("events", payload).await;
+        async_result.send(result);
+        Ok(())
     }
 }
 ```

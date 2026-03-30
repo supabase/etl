@@ -4,7 +4,7 @@ use etl_api::routes::tenants::ReadTenantResponse;
 use etl_api::routes::tenants_sources::{CreateTenantSourceRequest, CreateTenantSourceResponse};
 use etl_config::SerializableSecretString;
 use etl_config::shared::PgConnectionConfig;
-use etl_postgres::sqlx::test_utils::create_pg_database;
+use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 use secrecy::ExposeSecret;
@@ -149,6 +149,8 @@ async fn tenant_and_source_creation_with_non_matching_trusted_username_fails() {
     let response = app.create_tenant_source(&tenant_source).await;
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -175,4 +177,6 @@ async fn tenant_and_source_creation_with_invalid_trusted_role_profile_fails() {
 
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(body.contains("ETL needs to work properly"));
+
+    drop_pg_database(&source_db_config).await;
 }

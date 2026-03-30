@@ -30,6 +30,8 @@ use tracing::{Instrument, error, info, warn};
 /// Slot deletion uses `WAIT`, which can block until the slot is no longer in use.
 /// This timeout ensures calls are bounded and cannot wait forever.
 const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default duration unit used when `pg_settings.unit` is empty.
+const PG_SETTINGS_DEFAULT_DURATION_UNIT: &str = "ms";
 
 /// Spawns a background task to monitor a Postgres connection until it terminates.
 fn spawn_postgres_connection<T>(
@@ -549,6 +551,50 @@ impl PgReplicationClient {
     /// Executes a simple query on the underlying connection and returns all result messages.
     pub async fn simple_query(&self, query: &str) -> EtlResult<Vec<SimpleQueryMessage>> {
         Ok(self.client.simple_query(query).await?)
+    }
+
+    /// Returns the configured `wal_sender_timeout`, if PostgreSQL has it enabled.
+    pub async fn get_wal_sender_timeout(&self) -> EtlResult<Option<Duration>> {
+        let query = "select setting, unit from pg_settings where name = 'wal_sender_timeout';";
+
+        for result in self.client.simple_query(query).await? {
+            if let SimpleQueryMessage::Row(row) = result {
+                let setting = Self::get_row_value::<u64>(&row, "setting", "pg_settings")?;
+                if setting == 0 {
+                    return Ok(None);
+                }
+
+                let unit = row
+                    .try_get("unit")?
+                    .unwrap_or(PG_SETTINGS_DEFAULT_DURATION_UNIT);
+
+                let duration = match unit {
+                    "ms" => Duration::from_millis(setting),
+                    "s" => Duration::from_secs(setting),
+                    "min" => Duration::from_secs(setting.saturating_mul(60)),
+                    "h" => Duration::from_secs(setting.saturating_mul(60 * 60)),
+                    "d" => Duration::from_secs(setting.saturating_mul(60 * 60 * 24)),
+                    unsupported_unit => {
+                        return Err(etl_error!(
+                            ErrorKind::ConversionError,
+                            "Unsupported wal sender timeout unit",
+                            format!(
+                                "Unsupported wal_sender_timeout unit '{}' returned by pg_settings",
+                                unsupported_unit
+                            )
+                        ));
+                    }
+                };
+
+                return Ok(Some(duration));
+            }
+        }
+
+        bail!(
+            ErrorKind::SourceConnectionFailed,
+            "Wal sender timeout not found",
+            "The table pg_settings did not return wal_sender_timeout".to_string()
+        )
     }
 
     /// Creates a new logical replication slot with the specified name and a transaction pinned

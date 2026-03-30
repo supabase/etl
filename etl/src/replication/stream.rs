@@ -108,6 +108,8 @@ pub enum StatusUpdateType {
     KeepAlive,
     /// Represents an update immediately after a successful batch flush.
     BatchFlush,
+    /// Represents a periodic heartbeat sent while the apply loop is otherwise idle.
+    PeriodicKeepAlive,
     /// Represents an update before shutdown that requires acknowledgement from Postgres.
     ShutdownFlush,
 }
@@ -118,6 +120,7 @@ impl StatusUpdateType {
         match self {
             Self::KeepAlive => false,
             Self::BatchFlush => false,
+            Self::PeriodicKeepAlive => true,
             Self::ShutdownFlush => true,
         }
     }
@@ -128,6 +131,7 @@ impl Display for StatusUpdateType {
         match self {
             Self::KeepAlive => write!(f, "keep_alive"),
             Self::BatchFlush => write!(f, "batch_flush"),
+            Self::PeriodicKeepAlive => write!(f, "periodic_keep_alive"),
             Self::ShutdownFlush => write!(f, "shutdown_flush"),
         }
     }

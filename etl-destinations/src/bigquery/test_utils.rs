@@ -238,7 +238,7 @@ impl BigQueryDatabase {
         schema_store: S,
     ) -> BigQueryDestination<S>
     where
-        S: StateStore + SchemaStore + Send + Sync,
+        S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
     {
         BigQueryDestination::new_with_key_path(
             self.project_id.clone(),

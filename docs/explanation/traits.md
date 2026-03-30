@@ -12,9 +12,9 @@ Receives replicated data. This is the primary extension point for sending data t
 pub trait Destination {
     fn name() -> &'static str;
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
-    fn truncate_table(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send;
-    fn write_table_rows(&self, table_id: TableId, table_rows: Vec<TableRow>) -> impl Future<Output = EtlResult<()>> + Send;
-    fn write_events(&self, events: Vec<Event>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn truncate_table(&self, table_id: TableId, async_result: TruncateTableResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_table_rows(&self, table_id: TableId, table_rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
@@ -33,6 +33,10 @@ pub trait Destination {
 - Operations should be idempotent when possible (ETL may retry on failure)
 - Handle concurrent calls safely (parallel table sync workers)
 - Process events in order to maintain data consistency
+- All three write-like methods use async results, but ETL waits differently:
+- `truncate_table()` waits immediately.
+- `write_table_rows()` also waits immediately, requesting the next batch only after the current one finishes for that copy partition.
+- `write_events()` is the method where ETL can keep processing while the destination finishes the current batch.
 
 See [Event Types](events.md) for details on the events received by `write_events()`.
 
