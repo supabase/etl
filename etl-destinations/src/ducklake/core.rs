@@ -1827,7 +1827,7 @@ fn apply_table_batch(
                     last_commit_lsn = ?batch.last_commit_lsn,
                     row_count_after,
                     sub_batch_kind = batch_log_kind(batch),
-                    insert_sub_batch_rows = insert_sub_batch_rows(batch),
+                    insert_sub_batch_rows = apply_sub_batch_rows(batch),
                     "ducklake batch committed"
                 );
             }
@@ -2137,7 +2137,7 @@ fn prepared_mutation_count(batch: &PreparedDuckLakeTableBatch) -> usize {
 }
 
 /// Returns the insert row count when the batch is a pure insert sub-batch.
-fn insert_sub_batch_rows(batch: &PreparedDuckLakeTableBatch) -> Option<usize> {
+fn apply_sub_batch_rows(batch: &PreparedDuckLakeTableBatch) -> Option<usize> {
     let PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) = &batch.action else {
         return None;
     };

@@ -8,8 +8,8 @@ repository.workspace = true
 homepage.workspace = true
 
 [[bin]]
-name = "etl-examples"
-path = "src/main.rs"
+name = "bigquery"
+path = "src/bin/bigquery.rs"
 
 [[bin]]
 name = "ducklake"

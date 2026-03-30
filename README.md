@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-For tutorials and deeper guidance, see the [Documentation](https://supabase.github.io/etl) or jump into the [examples](etl-examples/README.md).
+For tutorials and deeper guidance, see the [Documentation](https://supabase.github.io/etl) or jump into the [examples](etl-examples/README.md), which document the runnable `bigquery` and `ducklake` binaries in `etl-examples`.
 
 ## Destinations
 

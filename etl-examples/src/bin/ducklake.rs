@@ -7,13 +7,13 @@ data from Postgres to DuckLake using change data capture (CDC).
 
 DuckLake separates storage into two components:
 - Catalog: metadata stored in a PostgreSQL database
-- Data: row data written as Parquet files (local directory or S3/GCS/Azure)
+- Data: row data written as Parquet files (local directory or S3 / S3-compatible object storage)
 
 Prerequisites:
 1. Postgres server with logical replication enabled (wal_level = logical)
 2. A publication created in Postgres (CREATE PUBLICATION my_pub FOR ALL TABLES;)
 3. A PostgreSQL database for the DuckLake catalog
-4. A local directory or object-storage bucket for Parquet files
+4. A local directory or S3 / S3-compatible bucket for Parquet files
 
 Usage:
     cargo run --bin ducklake -p etl-examples -- \
@@ -97,7 +97,7 @@ struct DuckLakeArgs {
     /// Plain local paths are accepted and converted to absolute `file://` URLs.
     #[arg(long, value_parser = parse_ducklake_url)]
     catalog_url: Url,
-    /// Local directory or cloud URI for Parquet files (e.g., file:///tmp/lake_data or s3://bucket/)
+    /// Local directory or S3 / S3-compatible URI for Parquet files (e.g., file:///tmp/lake_data or s3://bucket/)
     ///
     /// Plain local paths are accepted and converted to absolute `file://` URLs.
     #[arg(long, value_parser = parse_ducklake_url)]

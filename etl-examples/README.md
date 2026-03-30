@@ -7,7 +7,7 @@ Postgres to various destinations using the ETL pipeline.
 
 | Example | Binary | Destination |
 |---------|--------|-------------|
-| [BigQuery](#bigquery) | `etl-examples` | Google BigQuery (cloud data warehouse) |
+| [BigQuery](#bigquery) | `bigquery` | Google BigQuery (cloud data warehouse) |
 | [DuckLake](#ducklake) | `ducklake` | DuckLake (open data lake format) |
 
 ---
@@ -48,11 +48,11 @@ DuckLake separates storage into two components:
 | Component | Role | Example |
 |-----------|------|---------|
 | **Catalog** | Metadata (tables, snapshots, stats) | PostgreSQL database |
-| **Data** | Row data as Parquet files | Local directory or S3/GCS/Azure |
+| **Data** | Row data as Parquet files | Local directory or S3 / S3-compatible object storage |
 
-The `ducklake` DuckDB extension (a core extension, autoloaded) handles reads
-and writes. Each batch of rows is committed as a single Parquet snapshot so
-the lake stays consistent and queryable at all times.
+The destination loads the required DuckDB extensions before attaching the lake.
+Each batch of rows is committed as a single Parquet snapshot so the lake stays
+consistent and queryable at all times.
 
 ### How it works
 
@@ -75,8 +75,8 @@ the lake stays consistent and queryable at all times.
    ```sql
    CREATE DATABASE ducklake_catalog;
    ```
-2. A **data directory** (local) or an object-storage bucket (S3/GCS/Azure)
-   where Parquet files will be written.
+2. A **data directory** (local) or an S3 / S3-compatible bucket where Parquet
+   files will be written.
 
 ### Run (local data)
 
@@ -145,8 +145,9 @@ cargo run --bin ducklake -p etl-examples -- \
     --metadata-schema <schema-name>
 ```
 
-When the `--data-path` starts with `s3://` or `gs://` the pipeline
-automatically loads the `httpfs` DuckDB extension for cloud storage access.
+The example CLI exposes S3 / S3-compatible cloud credentials today. For
+`s3://` data paths, the destination loads DuckDB's `httpfs` extension during
+connection setup.
 
 ### All flags
 
@@ -158,7 +159,7 @@ automatically loads the `httpfs` DuckDB extension for cloud storage access.
 | `--db-username` | *(required)* | Postgres user (must have REPLICATION) |
 | `--db-password` | — | Postgres password (omit for trust auth) |
 | `--catalog-url` | *(required)* | DuckLake catalog URL (`postgres://...` or `file://...`) |
-| `--data-path` | *(required)* | Local `file://` URL or cloud URI for Parquet files |
+| `--data-path` | *(required)* | Local path / `file://` URL or `s3://` URI for Parquet files |
 | `--pool-size` | `4` | DuckDB connection pool size |
 | `--max-batch-fill-duration-ms` | `5000` | Max time to wait before flushing a batch |
 | `--max-table-sync-workers` | `4` | Concurrent workers during initial copy |
@@ -212,7 +213,7 @@ Replicates a Postgres publication to a Google BigQuery dataset.
 ### Run
 
 ```bash
-cargo run -p etl-examples -- \
+cargo run --bin bigquery -p etl-examples -- \
     --db-host localhost \
     --db-port 5432 \
     --db-name postgres \

@@ -11,7 +11,7 @@ use metrics::histogram;
 use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::info;
+use tracing::trace;
 
 use crate::ducklake::metrics::{
     ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS, ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS,
@@ -227,7 +227,7 @@ pub(super) async fn build_warm_ducklake_pool(
         }
         drop(warmed_connections);
 
-        info!(
+        trace!(
             purpose,
             pool_size,
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -311,7 +311,7 @@ where
         })?;
     histogram!(ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS)
         .record(slot_wait_started.elapsed().as_secs_f64());
-    info!(
+    trace!(
         wait_ms = slot_wait_started.elapsed().as_millis() as u64,
         "wait for ducklake blocking slot"
     );
@@ -348,7 +348,7 @@ where
         })?;
         histogram!(ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS)
             .record(checkout_started.elapsed().as_secs_f64());
-        info!(
+        trace!(
             wait_ms = checkout_started.elapsed().as_millis() as u64,
             "wait for ducklake pool checkout"
         );
@@ -369,7 +369,7 @@ where
         watchdog.finish();
         histogram!(ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS)
             .record(operation_started.elapsed().as_secs_f64());
-        info!(
+        trace!(
             duration_ms = operation_started.elapsed().as_millis() as u64,
             "ducklake blocking operation finished"
         );
