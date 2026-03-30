@@ -214,5 +214,4 @@ mod tests {
         // Different errors should produce different hashes.
         assert_ne!(hash1, hash2);
     }
-
 }
