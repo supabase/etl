@@ -4,11 +4,13 @@
 //! secret handling, and shared configuration types for various ETL services
 //! and components.
 
+mod ducklake;
 mod environment;
 mod load;
 mod secret;
 pub mod shared;
 
+pub use ducklake::*;
 pub use environment::*;
 pub use load::*;
 pub use secret::*;

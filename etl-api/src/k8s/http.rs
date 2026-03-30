@@ -29,6 +29,12 @@ const ICEBERG_CATALOG_TOKEN_KEY_NAME: &str = "catalog-token";
 const ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME: &str = "s3-access-key-id";
 /// Name of s3 acess key id in the iceberg secret and its reference.
 const ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME: &str = "s3-secret-access-key";
+/// Secret name suffix for ducklake secrets (includes s3 access key id and s3 secret access key).
+const DUCKLAKE_SECRET_NAME_SUFFIX: &str = "ducklake";
+/// Name of s3 access key id in the ducklake secret and its reference.
+const DUCKLAKE_S3_ACCESS_KEY_ID_KEY_NAME: &str = "s3-access-key-id";
+/// Name of s3 secret access key in the ducklake secret and its reference.
+const DUCKLAKE_S3_SECRET_ACCESS_KEY_KEY_NAME: &str = "s3-secret-access-key";
 /// Secret name suffix for the Postgres password.
 const POSTGRES_SECRET_NAME_SUFFIX: &str = "postgres-password";
 /// ConfigMap name suffix for the replicator configuration files.
@@ -343,6 +349,35 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
+    async fn create_or_update_ducklake_secret(
+        &self,
+        prefix: &str,
+        s3_access_key_id: &str,
+        s3_secret_access_key: &str,
+    ) -> Result<(), K8sError> {
+        debug!("patching ducklake secret");
+
+        let encoded_s3_access_key_id = BASE64_STANDARD.encode(s3_access_key_id);
+        let encoded_s3_secret_access_key = BASE64_STANDARD.encode(s3_secret_access_key);
+
+        let ducklake_secret_name = create_ducklake_secret_name(prefix);
+        let replicator_app_name = create_replicator_app_name(prefix);
+        let ducklake_secret_json = create_ducklake_secret_json(
+            &ducklake_secret_name,
+            &replicator_app_name,
+            &encoded_s3_access_key_id,
+            &encoded_s3_secret_access_key,
+        );
+        let secret: Secret = serde_json::from_value(ducklake_secret_json)?;
+
+        let pp = PatchParams::apply(&ducklake_secret_name).force();
+        self.secrets_api
+            .patch(&ducklake_secret_name, &pp, &Patch::Apply(secret))
+            .await?;
+
+        Ok(())
+    }
+
     async fn delete_postgres_secret(&self, prefix: &str) -> Result<(), K8sError> {
         debug!("deleting postgres secret");
 
@@ -372,6 +407,18 @@ impl K8sClient for HttpK8sClient {
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
             self.secrets_api.delete(&iceberg_secret_name, &dp).await,
+        )?;
+
+        Ok(())
+    }
+
+    async fn delete_ducklake_secret(&self, prefix: &str) -> Result<(), K8sError> {
+        debug!("deleting ducklake secret");
+
+        let ducklake_secret_name = create_ducklake_secret_name(prefix);
+        let dp = DeleteParams::default();
+        Self::handle_delete_with_404_ignore(
+            self.secrets_api.delete(&ducklake_secret_name, &dp).await,
         )?;
 
         Ok(())
@@ -552,6 +599,10 @@ fn create_iceberg_secret_name(prefix: &str) -> String {
     format!("{prefix}-{ICEBERG_SECRET_NAME_SUFFIX}")
 }
 
+fn create_ducklake_secret_name(prefix: &str) -> String {
+    format!("{prefix}-{DUCKLAKE_SECRET_NAME_SUFFIX}")
+}
+
 fn create_replicator_config_map_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_CONFIG_MAP_NAME_SUFFIX}")
 }
@@ -645,6 +696,31 @@ fn create_iceberg_secret_json(
         ICEBERG_CATALOG_TOKEN_KEY_NAME: encoded_catalog_token,
         ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME: encoded_s3_access_key_id,
         ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME: encoded_s3_secret_access_key
+      }
+    })
+}
+
+fn create_ducklake_secret_json(
+    secret_name: &str,
+    replicator_app_name: &str,
+    encoded_s3_access_key_id: &str,
+    encoded_s3_secret_access_key: &str,
+) -> serde_json::Value {
+    json!({
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+        "name": secret_name,
+        "namespace": DATA_PLANE_NAMESPACE,
+        "labels": {
+          "etl.supabase.com/app-name": replicator_app_name,
+          "etl.supabase.com/app-type": REPLICATOR_APP_LABEL,
+        }
+      },
+      "type": "Opaque",
+      "data": {
+        DUCKLAKE_S3_ACCESS_KEY_ID_KEY_NAME: encoded_s3_access_key_id,
+        DUCKLAKE_S3_SECRET_ACCESS_KEY_KEY_NAME: encoded_s3_secret_access_key
       }
     })
 }
@@ -772,6 +848,22 @@ fn create_container_environment_json(
             let iceberg_s3_secret_access_key_env_var_json =
                 create_iceberg_s3_secret_access_key_env_var_json(&iceberg_secret_name);
             container_environment.push(iceberg_s3_secret_access_key_env_var_json);
+        }
+        DestinationType::Ducklake => {
+            let postgres_secret_name = create_postgres_secret_name(prefix);
+            let postgres_secret_env_var_json =
+                create_postgres_secret_env_var_json(&postgres_secret_name);
+            container_environment.push(postgres_secret_env_var_json);
+
+            let ducklake_secret_name = create_ducklake_secret_name(prefix);
+
+            let ducklake_s3_access_key_id_env_var_json =
+                create_ducklake_s3_access_key_id_env_var_json(&ducklake_secret_name);
+            container_environment.push(ducklake_s3_access_key_id_env_var_json);
+
+            let ducklake_s3_secret_access_key_env_var_json =
+                create_ducklake_s3_secret_access_key_env_var_json(&ducklake_secret_name);
+            container_environment.push(ducklake_s3_secret_access_key_env_var_json);
         }
     }
     container_environment
@@ -951,6 +1043,34 @@ fn create_iceberg_s3_secret_access_key_env_var_json(
         "secretKeyRef": {
           "name": iceberg_secret_name,
           "key": ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME
+        }
+      }
+    })
+}
+
+fn create_ducklake_s3_access_key_id_env_var_json(ducklake_secret_name: &str) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__DUCKLAKE__S3_ACCESS_KEY_ID",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": ducklake_secret_name,
+          "key": DUCKLAKE_S3_ACCESS_KEY_ID_KEY_NAME,
+          "optional": true
+        }
+      }
+    })
+}
+
+fn create_ducklake_s3_secret_access_key_env_var_json(
+    ducklake_secret_name: &str,
+) -> serde_json::Value {
+    json!({
+      "name": "APP_DESTINATION__DUCKLAKE__S3_SECRET_ACCESS_KEY",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": ducklake_secret_name,
+          "key": DUCKLAKE_S3_SECRET_ACCESS_KEY_KEY_NAME,
+          "optional": true
         }
       }
     })
@@ -1326,6 +1446,39 @@ mod tests {
     }
 
     #[test]
+    fn test_create_ducklake_container_environment() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &Environment::Dev,
+            replicator_image,
+            DestinationType::Ducklake,
+            LogLevel::Info,
+        );
+        assert_json_snapshot!(container_environment);
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &Environment::Staging,
+            replicator_image,
+            DestinationType::Ducklake,
+            LogLevel::Info,
+        );
+        assert_json_snapshot!(container_environment);
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &Environment::Prod,
+            replicator_image,
+            DestinationType::Ducklake,
+            LogLevel::Info,
+        );
+        assert_json_snapshot!(container_environment);
+    }
+
+    #[test]
     fn test_create_node_selector() {
         let node_selector = create_node_selector_json(&Environment::Dev);
         assert_json_snapshot!(node_selector);
@@ -1571,6 +1724,109 @@ mod tests {
             &environment,
             replicator_image,
             DestinationType::Iceberg,
+            LogLevel::Info,
+        );
+
+        let node_selector = create_node_selector_json(&environment);
+        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let volumes = create_volumes_json(&prefix, &environment);
+        let volume_mounts = create_volume_mounts_json(&environment);
+
+        let stateful_set_json = create_replicator_stateful_set_json(
+            &prefix,
+            &stateful_set_name,
+            replicator_image,
+            container_environment,
+            node_selector,
+            init_containers,
+            volumes,
+            volume_mounts,
+            &config,
+        );
+
+        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
+    }
+
+    #[test]
+    fn test_create_ducklake_replicator_stateful_set_json() {
+        let prefix = create_k8s_object_prefix(TENANT_ID, 42);
+        let stateful_set_name = create_stateful_set_name(&prefix);
+        let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
+
+        // Dev env
+        let environment = Environment::Dev;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::Ducklake,
+            LogLevel::Info,
+        );
+
+        let node_selector = create_node_selector_json(&environment);
+        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let volumes = create_volumes_json(&prefix, &environment);
+        let volume_mounts = create_volume_mounts_json(&environment);
+
+        let stateful_set_json = create_replicator_stateful_set_json(
+            &prefix,
+            &stateful_set_name,
+            replicator_image,
+            container_environment,
+            node_selector,
+            init_containers,
+            volumes,
+            volume_mounts,
+            &config,
+        );
+
+        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
+
+        // Staging env
+        let environment = Environment::Staging;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::Ducklake,
+            LogLevel::Info,
+        );
+
+        let node_selector = create_node_selector_json(&environment);
+        let init_containers = create_init_containers_json(&prefix, &environment, &config);
+        let volumes = create_volumes_json(&prefix, &environment);
+        let volume_mounts = create_volume_mounts_json(&environment);
+
+        let stateful_set_json = create_replicator_stateful_set_json(
+            &prefix,
+            &stateful_set_name,
+            replicator_image,
+            container_environment,
+            node_selector,
+            init_containers,
+            volumes,
+            volume_mounts,
+            &config,
+        );
+
+        assert_json_snapshot!(stateful_set_json, { ".spec.template.metadata.annotations[\"etl.supabase.com/restarted-at\"]" => "[timestamp]"});
+        let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
+
+        // Prod env
+        let environment = Environment::Prod;
+        let config = ReplicatorResourceConfig::load(&environment).unwrap();
+
+        let container_environment = create_container_environment_json(
+            &prefix,
+            &environment,
+            replicator_image,
+            DestinationType::Ducklake,
             LogLevel::Info,
         );
 

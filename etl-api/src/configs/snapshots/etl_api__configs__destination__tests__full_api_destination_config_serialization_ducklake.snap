@@ -1,0 +1,19 @@
+---
+source: etl-api/src/configs/destination.rs
+assertion_line: 1234
+expression: full_config
+---
+{
+  "ducklake": {
+    "catalog_url": "postgres://user:pass@localhost:5432/ducklake_catalog",
+    "data_path": "s3://bucket/path",
+    "pool_size": 4,
+    "s3_access_key_id": "access",
+    "s3_secret_access_key": "secret",
+    "s3_region": "us-east-1",
+    "s3_endpoint": "127.0.0.1:5000/s3",
+    "s3_url_style": "path",
+    "s3_use_ssl": false,
+    "metadata_schema": "ducklake"
+  }
+}

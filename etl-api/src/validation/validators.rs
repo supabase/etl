@@ -3,7 +3,10 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use etl::store::both::memory::MemoryStore;
+use etl_config::parse_ducklake_url;
 use etl_destinations::bigquery::BigQueryClient;
+use etl_destinations::ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config};
 use etl_destinations::iceberg::{
     IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
 };
@@ -655,6 +658,130 @@ struct IcebergValidator {
     config: FullApiIcebergConfig,
 }
 
+/// Validates DuckLake destination connectivity.
+#[derive(Debug)]
+struct DucklakeValidator {
+    catalog_url: String,
+    data_path: String,
+    pool_size: u32,
+    s3_access_key_id: Option<String>,
+    s3_secret_access_key: Option<String>,
+    s3_region: Option<String>,
+    s3_endpoint: Option<String>,
+    s3_url_style: Option<String>,
+    s3_use_ssl: Option<bool>,
+    metadata_schema: Option<String>,
+}
+
+impl DucklakeValidator {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        catalog_url: String,
+        data_path: String,
+        pool_size: u32,
+        s3_access_key_id: Option<String>,
+        s3_secret_access_key: Option<String>,
+        s3_region: Option<String>,
+        s3_endpoint: Option<String>,
+        s3_url_style: Option<String>,
+        s3_use_ssl: Option<bool>,
+        metadata_schema: Option<String>,
+    ) -> Self {
+        Self {
+            catalog_url,
+            data_path,
+            pool_size,
+            s3_access_key_id,
+            s3_secret_access_key,
+            s3_region,
+            s3_endpoint,
+            s3_url_style,
+            s3_use_ssl,
+            metadata_schema,
+        }
+    }
+}
+
+#[async_trait]
+impl Validator for DucklakeValidator {
+    async fn validate(
+        &self,
+        _ctx: &ValidationContext,
+    ) -> Result<Vec<ValidationFailure>, ValidationError> {
+        match (&self.s3_access_key_id, &self.s3_secret_access_key) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Ok(vec![ValidationFailure::critical(
+                    "Ducklake S3 Configuration Invalid",
+                    "DuckLake S3 credentials must include both access key ID and secret access key.",
+                )]);
+            }
+            _ => {}
+        }
+
+        let catalog_url = match parse_ducklake_url(&self.catalog_url) {
+            Ok(url) => url,
+            Err(error) => {
+                return Ok(vec![ValidationFailure::critical(
+                    "Ducklake Catalog Url Invalid",
+                    error.to_string(),
+                )]);
+            }
+        };
+
+        let data_path = match parse_ducklake_url(&self.data_path) {
+            Ok(url) => url,
+            Err(error) => {
+                return Ok(vec![ValidationFailure::critical(
+                    "Ducklake Data Path Invalid",
+                    error.to_string(),
+                )]);
+            }
+        };
+
+        let s3_config = self
+            .s3_access_key_id
+            .clone()
+            .map(|access_key_id| DucklakeS3Config {
+                access_key_id,
+                secret_access_key: self
+                    .s3_secret_access_key
+                    .clone()
+                    .expect("ducklake s3 secret access key should be present"),
+                region: self
+                    .s3_region
+                    .clone()
+                    .unwrap_or_else(|| "us-east-1".to_string()),
+                endpoint: self.s3_endpoint.clone(),
+                url_style: self
+                    .s3_url_style
+                    .clone()
+                    .unwrap_or_else(|| "path".to_string()),
+                use_ssl: self.s3_use_ssl.unwrap_or(false),
+            });
+
+        match DuckLakeDestination::new(
+            catalog_url,
+            data_path,
+            self.pool_size,
+            s3_config,
+            self.metadata_schema.clone(),
+            MemoryStore::new(),
+        )
+        .await
+        {
+            Ok(_) => Ok(vec![]),
+            Err(_) => Ok(vec![ValidationFailure::critical(
+                "Ducklake Connection Failed",
+                "Unable to connect to DuckLake.\n\n\
+                Please verify:\n\
+                (1) The catalog URL and data path are valid and reachable\n\
+                (2) DuckLake catalog credentials are embedded correctly in the catalog URL\n\
+                (3) The S3-compatible credentials and endpoint are correct when using object storage",
+            )]),
+        }
+    }
+}
+
 impl IcebergValidator {
     fn new(config: FullApiIcebergConfig) -> Self {
         Self { config }
@@ -779,6 +906,38 @@ impl Validator for DestinationValidator {
             }
             FullApiDestinationConfig::Iceberg { config } => {
                 let validator = IcebergValidator::new(config.clone());
+                validator.validate(ctx).await
+            }
+            FullApiDestinationConfig::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+            } => {
+                let validator = DucklakeValidator::new(
+                    catalog_url.clone(),
+                    data_path.clone(),
+                    pool_size.unwrap_or(
+                        etl_config::shared::DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE,
+                    ),
+                    s3_access_key_id
+                        .as_ref()
+                        .map(|value| value.expose_secret().to_string()),
+                    s3_secret_access_key
+                        .as_ref()
+                        .map(|value| value.expose_secret().to_string()),
+                    s3_region.clone(),
+                    s3_endpoint.clone(),
+                    s3_url_style.clone(),
+                    *s3_use_ssl,
+                    metadata_schema.clone(),
+                );
                 validator.validate(ctx).await
             }
         }

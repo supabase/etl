@@ -174,15 +174,18 @@ if [[ "${SKIP_BUILD}" -eq 0 ]]; then
     "etl-postgres"
     "etl-replicator"
     "etl-telemetry"
+    "scripts"
   )
 
   for path in "${BUILD_CONTEXT_PATHS[@]}"; do
     if [[ -e "${REPO_ROOT}/${path}" ]]; then
+      DEST_DIR="${BUILD_CONTEXT_DIR}/$(dirname "${path}")"
+      mkdir -p "${DEST_DIR}"
       rsync -a \
         --exclude '.git' \
         --exclude 'target' \
         --exclude '.DS_Store' \
-        "${REPO_ROOT}/${path}" "${BUILD_CONTEXT_DIR}/"
+        "${REPO_ROOT}/${path}" "${DEST_DIR}/"
     fi
   done
 

@@ -86,6 +86,7 @@ pub enum ErrorKind {
     // Query & Execution Errors
     SourceQueryFailed,
     DestinationQueryFailed,
+    DestinationAtomicBatchRetryable,
     SourceLockTimeout,
     SourceOperationCanceled,
 
