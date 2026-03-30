@@ -18,6 +18,82 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  msrv-sync-changes:
+    name: Detect MSRV Sync Changes
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      should_run: ${{ steps.filter.outputs.should_run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Detect Relevant Changes
+        id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          event_name="${{ github.event_name }}"
+
+          if [[ "${event_name}" == "workflow_dispatch" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "${event_name}" == "pull_request" ]]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+          else
+            base_sha="${{ github.event.before }}"
+          fi
+
+          head_sha="${{ github.sha }}"
+
+          if [[ "${base_sha}" =~ ^0+$ ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --quiet "${base_sha}" "${head_sha}" -- Cargo.toml rust-toolchain.toml; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+
+  msrv-sync:
+    name: MSRV Sync
+    needs: msrv-sync-changes
+    if: needs.msrv-sync-changes.outputs.should_run == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: msrv-sync
+
+      - name: Install cargo-msrv
+        uses: taiki-e/install-action@328a871ad8f62ecac78390391f463ccabc974b72 # v2.69.9
+        with:
+          tool: cargo-msrv
+
+      - name: Check MSRV Sync
+        run: ./scripts/check_msrv_sync.sh
+
+      - name: Verify MSRV
+        run: |
+          cargo msrv verify \
+            --manifest-path etl/Cargo.toml \
+            --output-format minimal \
+            -- cargo check --workspace --all-features --locked
+
   check:
     name: Lint
     runs-on: blacksmith-4vcpu-ubuntu-2404

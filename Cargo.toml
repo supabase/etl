@@ -16,7 +16,7 @@ members = [
 [workspace.package]
 license = "Apache-2.0"
 edition = "2024"
-rust-version = "1.88.0"
+rust-version = "1.93.1"
 repository = "https://github.com/supabase/etl"
 homepage = "https://supabase.github.io/etl/"
 
