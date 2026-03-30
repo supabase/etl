@@ -250,26 +250,13 @@ where
     }
 }
 
-async fn wait_for_condition_real<F>(timeout: Duration, mut condition: F)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if condition() {
-            return;
-        }
-
-        assert!(
-            std::time::Instant::now() < deadline,
-            "condition not met within {timeout:?}"
-        );
-
-        tokio::task::yield_now().await;
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
+/// Forces DuckLake to checkpoint catalog metadata before cross-connection verification.
+///
+/// Some tests shut the destination down and then open a brand-new DuckDB
+/// connection to verify the resulting lake state. Without an explicit
+/// checkpoint here, that fresh connection can temporarily observe stale catalog
+/// metadata even after shutdown has finished, which makes the assertions flaky.
+/// Running `CHECKPOINT` makes the final durable state visible deterministically.
 fn checkpoint_lake(catalog: &Url, data: &Url) {
     let conn = open_lake_conn(catalog, data);
     conn.execute_batch("CHECKPOINT")

@@ -2304,7 +2304,6 @@ mod tests {
     use super::*;
 
     use duckdb::{Config, Connection};
-    use etl::destination::Destination;
     use etl::store::both::memory::MemoryStore;
     use etl::store::schema::SchemaStore;
     use etl::types::{ColumnSchema, Type as PgType};

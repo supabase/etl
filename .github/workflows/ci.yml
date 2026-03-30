@@ -71,6 +71,7 @@ jobs:
       TESTS_DATABASE_PORT: 5430
       TESTS_DATABASE_USERNAME: postgres
       TESTS_DATABASE_PASSWORD: postgres
+      ETL_DUCKDB_EXTENSION_ROOT: ${{ github.workspace }}/vendor/duckdb/extensions
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -86,6 +87,16 @@ jobs:
       - name: Start Docker Compose (Postgres ${{ matrix.postgres_version }})
         run: |
           POSTGRES_VERSION=${{ matrix.postgres_version }} docker compose -f ./scripts/docker-compose.yaml up -d
+
+      - name: Vendor DuckDB Extensions
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) duckdb_platform=linux_amd64 ;;
+            aarch64) duckdb_platform=linux_arm64 ;;
+            *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          ./scripts/vendor_duckdb_extensions.sh --platform "${duckdb_platform}"
 
       - name: Install sqlx-cli
         run: |

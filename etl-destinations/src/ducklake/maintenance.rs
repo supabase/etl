@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::Duration;
 
-use etl::error::{ErrorKind, EtlResult};
+use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
 use metrics::{counter, histogram};
 use parking_lot::Mutex;
@@ -66,6 +66,8 @@ const MAINTENANCE_TASK_CHECKPOINT: &str = "checkpoint";
 
 #[cfg(test)]
 static FAIL_CHECKPOINT_ONCE_FOR_TESTS: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FAIL_REWRITE_SINGLE_OUTPUT_FILE_ONCE_FOR_TESTS: AtomicBool = AtomicBool::new(false);
 
 /// Concrete DuckLake maintenance operations emitted in metrics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -429,6 +431,59 @@ fn targeted_maintenance_outcome(
     }
 }
 
+/// Returns whether this maintenance failure matches a known DuckLake compaction bug.
+fn is_known_ducklake_compaction_single_output_file_error(error: &EtlError) -> bool {
+    error.detail().is_some_and(|detail| {
+        detail.contains("INTERNAL Error: DuckLakeCompaction - expected a single output file")
+    })
+}
+
+/// Returns the failing maintenance operation and reason for one known compaction bug.
+fn known_ducklake_compaction_error_context(
+    plan: TargetedMaintenancePlan,
+    error: &EtlError,
+) -> Option<(MaintenanceOperation, MaintenanceReason)> {
+    if !is_known_ducklake_compaction_single_output_file_error(error) {
+        return None;
+    }
+
+    match error.description() {
+        Some("DuckLake rewrite data files failed") => plan
+            .rewrite_reason
+            .map(|reason| (MaintenanceOperation::RewriteDataFiles, reason)),
+        Some("DuckLake merge adjacent files failed") => plan
+            .merge_reason
+            .map(|reason| (MaintenanceOperation::MergeAdjacentFiles, reason)),
+        _ => None,
+    }
+}
+
+/// Logs and suppresses one known DuckLake compaction internal error.
+///
+/// Connection recycling is handled generically in [`run_duckdb_blocking`], which
+/// marks any failing DuckDB connection as broken before it returns the error to
+/// this layer. This helper stays intentionally narrow: it only decides which
+/// maintenance-only failures are safe to downgrade after the pool has already
+/// recycled the invalidated connection.
+fn suppress_known_ducklake_compaction_error(
+    table_name: &str,
+    plan: TargetedMaintenancePlan,
+    error: &EtlError,
+) -> bool {
+    let Some((operation, reason)) = known_ducklake_compaction_error_context(plan, error) else {
+        return false;
+    };
+
+    warn!(
+        table = %table_name,
+        operation = operation.as_str(),
+        reason = reason.as_str(),
+        error = ?error,
+        "ducklake targeted maintenance skipped after known duckdb internal error"
+    );
+    true
+}
+
 /// Returns the targeted-maintenance plan implied by one metrics sample.
 fn targeted_maintenance_plan(
     metrics: &DuckLakeTableStorageMetrics,
@@ -773,6 +828,8 @@ async fn run_targeted_table_maintenance(
         record_skipped_targeted_maintenance(plan);
         return Ok(MaintenanceOutcome::SkippedBusy);
     };
+    let table_name_for_query = table_name.clone();
+    let plan_for_query = plan;
 
     run_duckdb_blocking(
         pool,
@@ -780,10 +837,17 @@ async fn run_targeted_table_maintenance(
         DuckDbBlockingOperationKind::Maintenance,
         move |conn| {
             let _table_write_permit = table_write_permit;
-            run_targeted_table_maintenance_blocking(conn, &table_name, plan)
+            run_targeted_table_maintenance_blocking(conn, &table_name_for_query, plan_for_query)
         },
     )
     .await
+    .or_else(|error| {
+        if suppress_known_ducklake_compaction_error(&table_name, plan, &error) {
+            Ok(MaintenanceOutcome::Noop)
+        } else {
+            Err(error)
+        }
+    })
 }
 
 /// Runs a coarse-grained checkpoint to keep catalog maintenance moving.
@@ -952,6 +1016,20 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
         quote_literal(LAKE_CATALOG),
         quote_literal(table_name),
     );
+    #[cfg(test)]
+    if FAIL_REWRITE_SINGLE_OUTPUT_FILE_ONCE_FOR_TESTS.swap(false, AtomicOrdering::Relaxed) {
+        let source = duckdb::Error::DuckDBFailure(
+            duckdb::ffi::Error::new(1),
+            Some("INTERNAL Error: DuckLakeCompaction - expected a single output file".to_string()),
+        );
+        return Err(etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake rewrite data files failed",
+            format_query_error_detail(&sql, &source),
+            source: source
+        ));
+    }
+
     let files_created: i64 = conn
         .query_row(&sql, [], |row| row.get(0))
         .map_err(|error| {
@@ -995,6 +1073,10 @@ mod tests {
 
     use etl_telemetry::metrics::init_metrics_handle;
 
+    use crate::ducklake::client::{
+        DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
+        run_duckdb_blocking,
+    };
     use crate::ducklake::metrics::register_metrics;
 
     fn maintenance_duration_count(
@@ -1687,6 +1769,89 @@ mod tests {
         assert_eq!(
             merge_failed_after, merge_failed_before,
             "merge failed duration should not increase when rewrite fails first"
+        );
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn test_known_rewrite_single_output_file_error_is_suppressed_and_recycles_connection() {
+        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
+        register_metrics();
+        let open_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let manager = DuckLakeConnectionManager {
+            setup_sql: std::sync::Arc::new(String::new()),
+            disable_extension_autoload: cfg!(target_os = "linux"),
+            open_count: std::sync::Arc::clone(&open_count),
+        };
+        let pool = std::sync::Arc::new(
+            build_warm_ducklake_pool(manager, 1, "test")
+                .await
+                .expect("failed to build maintenance test pool"),
+        );
+        let blocking_slots = std::sync::Arc::new(Semaphore::new(1));
+        let table_write_slots = std::sync::Arc::new(Mutex::new(HashMap::new()));
+        FAIL_REWRITE_SINGLE_OUTPUT_FILE_ONCE_FOR_TESTS.store(true, AtomicOrdering::Relaxed);
+
+        let rendered_before = handle.render();
+        let rewrite_failed_before = maintenance_duration_count(
+            &rendered_before,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::RewriteDataFiles,
+            MaintenanceReason::IdleRewriteMetricsThreshold,
+            MaintenanceOutcome::Failed,
+        );
+
+        let outcome = run_targeted_table_maintenance(
+            std::sync::Arc::clone(&pool),
+            std::sync::Arc::clone(&blocking_slots),
+            std::sync::Arc::clone(&table_write_slots),
+            "public_users".to_string(),
+            TargetedMaintenancePlan {
+                rewrite_reason: Some(MaintenanceReason::IdleRewriteMetricsThreshold),
+                merge_reason: None,
+            },
+        )
+        .await
+        .expect("known DuckLake compaction bug should be suppressed");
+
+        assert_eq!(outcome, MaintenanceOutcome::Noop);
+
+        let verification = run_duckdb_blocking(
+            std::sync::Arc::clone(&pool),
+            std::sync::Arc::clone(&blocking_slots),
+            DuckDbBlockingOperationKind::Maintenance,
+            |conn| {
+                conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                    .map_err(|source| {
+                        etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake connection recycling verification query failed",
+                            source: source
+                        )
+                    })
+            },
+        )
+        .await
+        .expect("expected follow-up query to succeed on recycled connection");
+
+        assert_eq!(verification, 1);
+        assert!(
+            open_count.load(AtomicOrdering::Relaxed) > 1,
+            "expected broken duckdb connection to be recreated after internal error"
+        );
+
+        let rendered_after = handle.render();
+        let rewrite_failed_after = maintenance_duration_count(
+            &rendered_after,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::RewriteDataFiles,
+            MaintenanceReason::IdleRewriteMetricsThreshold,
+            MaintenanceOutcome::Failed,
+        );
+
+        assert!(
+            rewrite_failed_after > rewrite_failed_before,
+            "rewrite failed duration count did not increase"
         );
     }
 
