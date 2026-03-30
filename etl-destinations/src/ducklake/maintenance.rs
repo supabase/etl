@@ -51,8 +51,12 @@ const MAINTENANCE_EMERGENCY_REWRITE_DELETE_FILES_THRESHOLD: i64 = 128;
 const MAINTENANCE_EMERGENCY_REWRITE_DELETED_ROW_RATIO_THRESHOLD: f64 = 0.25;
 /// Small-file ratio threshold that makes merge worth attempting.
 const MAINTENANCE_MERGE_SMALL_FILE_RATIO_THRESHOLD: f64 = 0.5;
+/// Minimum small data-file count before merge is worth attempting.
+const MAINTENANCE_MIN_SMALL_DATA_FILES_FOR_MERGE: i64 = 2;
 /// Global checkpoint interval used to keep catalog maintenance moving.
 const MAINTENANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// Minimum active data-file count before emergency merge is worth attempting.
+const MAINTENANCE_MIN_ACTIVE_DATA_FILES: i64 = 8;
 /// Timeout for sending a notification to the maintenance worker.
 pub(super) const NOTIFICATION_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -432,6 +436,8 @@ fn targeted_maintenance_plan(
 ) -> TargetedMaintenancePlan {
     let mut plan = TargetedMaintenancePlan::default();
     let active_delete_files = metrics.active_delete_files.max(0);
+    let active_data_files = metrics.active_data_files.max(0);
+    let small_data_files = metrics.small_data_files.max(0);
     let deleted_row_ratio = metrics.deleted_row_ratio();
     let small_file_ratio = metrics.small_file_ratio();
     let average_data_file_size_bytes = metrics.average_data_file_size_bytes();
@@ -444,7 +450,8 @@ fn targeted_maintenance_plan(
                 plan.rewrite_reason = Some(MaintenanceReason::IdleRewriteMetricsThreshold);
             }
 
-            if small_file_ratio > MAINTENANCE_MERGE_SMALL_FILE_RATIO_THRESHOLD
+            if small_data_files >= MAINTENANCE_MIN_SMALL_DATA_FILES_FOR_MERGE
+                && small_file_ratio > MAINTENANCE_MERGE_SMALL_FILE_RATIO_THRESHOLD
                 && average_data_file_size_bytes < SMALL_FILE_SIZE_BYTES as f64
             {
                 plan.merge_reason = Some(MaintenanceReason::IdleMergeMetricsThreshold);
@@ -452,12 +459,16 @@ fn targeted_maintenance_plan(
         }
         TargetedMaintenanceScope::Emergency => {
             if active_delete_files >= MAINTENANCE_EMERGENCY_REWRITE_DELETE_FILES_THRESHOLD
-                || deleted_row_ratio >= MAINTENANCE_EMERGENCY_REWRITE_DELETED_ROW_RATIO_THRESHOLD
+                || (active_delete_files >= MAINTENANCE_IDLE_REWRITE_DELETE_FILES_THRESHOLD
+                    && deleted_row_ratio
+                        >= MAINTENANCE_EMERGENCY_REWRITE_DELETED_ROW_RATIO_THRESHOLD)
             {
                 plan.rewrite_reason = Some(MaintenanceReason::EmergencyRewriteMetricsThreshold);
             }
 
-            if small_file_ratio > MAINTENANCE_MERGE_SMALL_FILE_RATIO_THRESHOLD
+            if active_data_files > MAINTENANCE_MIN_ACTIVE_DATA_FILES
+                && small_data_files >= MAINTENANCE_MIN_SMALL_DATA_FILES_FOR_MERGE
+                && small_file_ratio > MAINTENANCE_MERGE_SMALL_FILE_RATIO_THRESHOLD
                 && average_data_file_size_bytes < SMALL_FILE_SIZE_BYTES as f64
             {
                 plan.merge_reason = Some(MaintenanceReason::EmergencyMergeMetricsThreshold);
@@ -1445,6 +1456,20 @@ mod tests {
     }
 
     #[test]
+    fn test_targeted_maintenance_plan_does_not_select_merge_with_one_small_file() {
+        let metrics = storage_metrics(1, 2_343_233, 1, 1000, 0, 0, 0);
+
+        assert_eq!(
+            targeted_maintenance_plan(&metrics, TargetedMaintenanceScope::Idle),
+            TargetedMaintenancePlan::default()
+        );
+        assert_eq!(
+            targeted_maintenance_plan(&metrics, TargetedMaintenanceScope::Emergency),
+            TargetedMaintenancePlan::default()
+        );
+    }
+
+    #[test]
     fn test_table_maintenance_state_selects_idle_rewrite_from_delete_pressure() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
@@ -1467,6 +1492,16 @@ mod tests {
     }
 
     #[test]
+    fn test_targeted_maintenance_plan_does_not_select_emergency_rewrite_from_ratio_alone() {
+        let metrics = storage_metrics(10, 80_000_000, 0, 1000, 1, 65_101, 936);
+
+        assert_eq!(
+            targeted_maintenance_plan(&metrics, TargetedMaintenanceScope::Emergency),
+            TargetedMaintenancePlan::default()
+        );
+    }
+
+    #[test]
     fn test_table_maintenance_state_selects_emergency_rewrite_from_delete_pressure() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
@@ -1485,6 +1520,29 @@ mod tests {
                 },
                 now + Duration::from_secs(1),
             ))
+        );
+    }
+
+    #[test]
+    fn test_targeted_maintenance_plan_selects_emergency_merge_when_table_is_fragmented() {
+        let metrics = storage_metrics(10, 20_000_000, 6, 1000, 0, 0, 0);
+
+        assert_eq!(
+            targeted_maintenance_plan(&metrics, TargetedMaintenanceScope::Emergency),
+            TargetedMaintenancePlan {
+                rewrite_reason: None,
+                merge_reason: Some(MaintenanceReason::EmergencyMergeMetricsThreshold),
+            }
+        );
+    }
+
+    #[test]
+    fn test_targeted_maintenance_plan_does_not_select_work_for_sample_shaped_metrics() {
+        let metrics = storage_metrics(1, 2_343_233, 1, 1000, 1, 65_101, 936);
+
+        assert_eq!(
+            targeted_maintenance_plan(&metrics, TargetedMaintenanceScope::Emergency),
+            TargetedMaintenancePlan::default()
         );
     }
 

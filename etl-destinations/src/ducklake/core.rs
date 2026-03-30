@@ -27,7 +27,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_postgres::types::PgLsn;
 
-use tracing::{Level, debug, info, warn};
+use tracing::{Level, debug, info, trace, warn};
 use url::Url;
 
 use crate::ducklake::client::{
@@ -62,7 +62,7 @@ const SQL_INSERT_BATCH_SIZE: usize = 256;
 ///
 /// Keep this small so each delete statement remains cheap while still avoiding
 /// one round-trip per deleted row.
-const SQL_DELETE_BATCH_SIZE: usize = 16;
+const SQL_DELETE_BATCH_SIZE: usize = 64;
 /// Maximum number of ordered CDC mutations grouped into one atomic DuckLake
 /// transaction.
 ///
@@ -610,7 +610,7 @@ where
                     }
                     Event::Delete(delete) => {
                         let Some((_, old_row)) = delete.old_table_row else {
-                            info!("delete event has no old row, skipping");
+                            debug!("delete event has no old row, skipping");
                             continue;
                         };
                         table_id_to_mutations
@@ -1138,10 +1138,6 @@ async fn apply_table_batches_with_retry(
     // This retry mechanism is safe because
     for attempt in 0..=MAX_COMMIT_RETRIES {
         let attempt_batches = Arc::clone(&batches);
-        tracing::info!(
-            "attempt_batches size -----------__> {}",
-            attempt_batches.len()
-        );
         match run_duckdb_blocking(
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),
@@ -1149,12 +1145,7 @@ async fn apply_table_batches_with_retry(
             {
                 let manager = Arc::clone(&manager);
                 move |conn| {
-                    let operation_started = std::time::Instant::now();
                     apply_table_batches(manager.as_ref(), conn, attempt_batches.as_ref())?;
-                    info!(
-                        duration_ms = operation_started.elapsed().as_millis() as u64,
-                        "ducklake batch ---- "
-                    );
                     Ok(())
                 }
             },
@@ -1816,13 +1807,8 @@ fn apply_table_batch(
     })?;
 
     let result = (|| -> EtlResult<()> {
-        let now = Instant::now();
         match &batch.action {
             PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => {
-                tracing::info!(
-                    "applied batch action length ==== {}",
-                    prepared_mutations.len()
-                );
                 for prepared_mutation in prepared_mutations {
                     apply_table_mutation(
                         conn,
@@ -1836,11 +1822,8 @@ fn apply_table_batch(
                 apply_truncate_batch_action(conn, &batch.table_name)?;
             }
         }
-        tracing::info!("applied batch action : {}", now.elapsed().as_millis());
 
-        let now = Instant::now();
         insert_applied_batch_marker(conn, batch)?;
-        tracing::info!("applied batch marker : {}", now.elapsed().as_millis());
         Ok(())
     })();
 
@@ -1868,7 +1851,7 @@ fn apply_table_batch(
             {
                 let row_count_after =
                     query_table_row_count(diagnostics_conn, &batch.table_name).ok();
-                info!(
+                trace!(
                     table = %batch.table_name,
                     batch_id = %batch.batch_id,
                     batch_kind = batch.batch_kind.as_str(),
@@ -1933,7 +1916,7 @@ pub(super) fn flush_table_inlined_data(
     .record(flush_started.elapsed().as_secs_f64());
 
     if rows_flushed > 0 {
-        info!(
+        debug!(
             table = %table_name,
             batch_kind = inline_flush_kind.as_str(),
             rows_flushed,
