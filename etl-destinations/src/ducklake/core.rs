@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use etl::destination::Destination;
+use etl::destination::async_result::{
+    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
 use etl::store::schema::SchemaStore;
@@ -252,20 +255,38 @@ where
         Ok(())
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table_inner(table_id).await
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
+        let result = self.truncate_table(table_id).await;
+        async_result.send(result);
+
+        Ok(())
     }
 
     async fn write_table_rows(
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        self.write_table_rows_inner(table_id, table_rows).await
+        let result = self.write_table_rows(table_id, table_rows).await;
+        async_result.send(result);
+
+        Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.write_events_inner(events).await
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
+        let result = self.write_events(events).await;
+        async_result.send(result);
+
+        Ok(())
     }
 }
 
@@ -273,6 +294,34 @@ impl<S> DuckLakeDestination<S>
 where
     S: StateStore + SchemaStore + Send + Sync,
 {
+    /// Deletes all rows from the destination table.
+    ///
+    /// This convenience wrapper preserves the pre-async-result direct-call API
+    /// by awaiting the truncate work inline.
+    pub async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
+        self.truncate_table_inner(table_id).await
+    }
+
+    /// Writes an initial-copy batch directly to the destination table.
+    ///
+    /// This convenience wrapper preserves the pre-async-result direct-call API
+    /// by awaiting the write inline.
+    pub async fn write_table_rows(
+        &self,
+        table_id: TableId,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        self.write_table_rows_inner(table_id, table_rows).await
+    }
+
+    /// Writes one streaming CDC batch directly to the destination.
+    ///
+    /// This convenience wrapper preserves the pre-async-result direct-call API
+    /// by awaiting the batch inline.
+    pub async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+        self.write_events_inner(events).await
+    }
+
     /// Creates a new DuckLake destination.
     ///
     /// - `catalog_url`: DuckLake catalog location. Use a PostgreSQL URL
