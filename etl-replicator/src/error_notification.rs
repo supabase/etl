@@ -113,7 +113,7 @@ impl ErrorNotificationClient {
     /// Returns the URL for the error notification endpoint.
     fn error_notification_url(&self) -> String {
         format!(
-            "{}/replication/{}/pipeline-error",
+            "{}/system/replication/{}/pipeline-error",
             self.api_url, self.project_ref
         )
     }
