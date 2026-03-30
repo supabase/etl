@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 #[cfg(feature = "test-utils")]
@@ -27,7 +26,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_postgres::types::PgLsn;
 
-use tracing::{Level, debug, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 use url::Url;
 
 use crate::ducklake::client::{
@@ -76,9 +75,6 @@ const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
 /// Inline small marker-table writes in the DuckLake metadata catalog instead of
 /// creating Parquet files for this metadata-like table.
 const APPLIED_BATCHES_TABLE_DATA_INLINING_ROW_LIMIT: usize = 256;
-/// Enables the expensive post-commit row-count diagnostics when set.
-const BATCH_DIAGNOSTICS_ENV_VAR: &str = "ETL_DUCKLAKE_BATCH_DIAGNOSTICS";
-
 /// Event-level table mutations that must be applied in order.
 enum TableMutation {
     Insert(TableRow),
@@ -226,6 +222,7 @@ fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) -> bool {
 /// deferred to background maintenance.
 #[derive(Clone)]
 pub struct DuckLakeDestination<S> {
+    #[cfg(feature = "test-utils")]
     manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
@@ -390,6 +387,7 @@ where
         let pool = build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?;
         let created_tables = Arc::default();
         let mut destination = Self {
+            #[cfg(feature = "test-utils")]
             manager,
             pool: Arc::new(pool),
             blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
@@ -522,7 +520,6 @@ where
         let prepared_batch = prepare_copy_table_batch(&table_schema, table_name, table_rows)?;
         let table_name = prepared_batch.table_name.clone();
         apply_table_batch_with_retry(
-            Arc::clone(&self.manager),
             Arc::clone(&self.pool),
             Arc::clone(&self.blocking_slots),
             prepared_batch,
@@ -637,7 +634,6 @@ where
                     let table_name = self.ensure_table_exists(table_id).await?;
                     let table_schema = self.get_table_schema(table_id).await?;
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
-                    let manager = Arc::clone(&self.manager);
                     let pool = Arc::clone(&self.pool);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     let prepared_batches =
@@ -651,13 +647,8 @@ where
 
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
-                        apply_table_batches_with_retry(
-                            manager,
-                            pool,
-                            blocking_slots,
-                            prepared_batches,
-                        )
-                        .await?;
+                        apply_table_batches_with_retry(pool, blocking_slots, prepared_batches)
+                            .await?;
                         if let (Some(worker), Some(notification)) =
                             (maintenance_worker.as_ref(), maintenance_notification)
                         {
@@ -700,14 +691,12 @@ where
                 for (table_id, truncates) in truncate_table_ids {
                     let table_name = self.ensure_table_exists(table_id).await?;
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
-                    let manager = Arc::clone(&self.manager);
                     let pool = Arc::clone(&self.pool);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     let prepared_batch = prepare_truncate_table_batch(table_name, truncates);
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
-                        apply_table_batch_with_retry(manager, pool, blocking_slots, prepared_batch)
-                            .await
+                        apply_table_batch_with_retry(pool, blocking_slots, prepared_batch).await
                     });
                 }
 
@@ -1128,7 +1117,6 @@ fn jitter_ducklake_retry_delay(base_delay: Duration) -> Duration {
 /// Applies all prepared atomic batches for one table, reusing one DuckDB
 /// connection per attempt and skipping already committed segments by marker.
 async fn apply_table_batches_with_retry(
-    manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
     batches: Vec<PreparedDuckLakeTableBatch>,
@@ -1167,7 +1155,6 @@ async fn apply_table_batches_with_retry(
         },
         move || {
             let attempt_batches = Arc::clone(&batches);
-            let manager = Arc::clone(&manager);
             let pool = Arc::clone(&pool);
             let blocking_slots = Arc::clone(&blocking_slots);
             async move {
@@ -1176,7 +1163,7 @@ async fn apply_table_batches_with_retry(
                     blocking_slots,
                     DuckDbBlockingOperationKind::Foreground,
                     move |conn| {
-                        apply_table_batches(manager.as_ref(), conn, attempt_batches.as_ref())?;
+                        apply_table_batches(conn, attempt_batches.as_ref())?;
                         Ok(())
                     },
                 )
@@ -1203,7 +1190,6 @@ async fn apply_table_batches_with_retry(
 
 /// Applies all prepared atomic batches for one table on the same connection.
 fn apply_table_batches(
-    manager: &DuckLakeConnectionManager,
     conn: &duckdb::Connection,
     batches: &[PreparedDuckLakeTableBatch],
 ) -> EtlResult<()> {
@@ -1225,7 +1211,7 @@ fn apply_table_batches(
             continue;
         }
 
-        apply_table_batch(manager, conn, batch).map_err(|error| {
+        apply_table_batch(conn, batch).map_err(|error| {
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake atomic table batch failed",
@@ -1245,7 +1231,6 @@ fn apply_table_batches(
 
 /// Applies one atomic per-table batch and retries on failure.
 async fn apply_table_batch_with_retry(
-    manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
     batch: PreparedDuckLakeTableBatch,
@@ -1283,7 +1268,6 @@ async fn apply_table_batch_with_retry(
         },
         move || {
             let attempt_batch = Arc::clone(&batch);
-            let manager = Arc::clone(&manager);
             let pool = Arc::clone(&pool);
             let blocking_slots = Arc::clone(&blocking_slots);
             async move {
@@ -1308,7 +1292,7 @@ async fn apply_table_batch_with_retry(
                             return Ok(());
                         }
 
-                        apply_table_batch(manager.as_ref(), conn, attempt_batch.as_ref())?;
+                        apply_table_batch(conn, attempt_batch.as_ref())?;
 
                         Ok(())
                     },
@@ -1782,27 +1766,10 @@ fn clear_applied_batch_markers_for_kind(
 
 /// Applies one atomic per-table batch in a single DuckLake transaction.
 fn apply_table_batch(
-    manager: &DuckLakeConnectionManager,
     conn: &duckdb::Connection,
     batch: &PreparedDuckLakeTableBatch,
 ) -> EtlResult<()> {
     let batch_started = Instant::now();
-    let diagnostics_conn = if batch_diagnostics_enabled() && tracing::enabled!(Level::INFO) {
-        match manager.open_duckdb_connection() {
-            Ok(conn) => Some(conn),
-            Err(error) => {
-                debug!(
-                    table = %batch.table_name,
-                    batch_id = %batch.batch_id,
-                    error = ?error,
-                    "ducklake diagnostics connection open failed"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
 
     conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
         tracing::error!(?e, "error transaction");
@@ -1852,24 +1819,16 @@ fn apply_table_batch(
                 SUB_BATCH_KIND_LABEL => batch_log_kind(batch),
             )
             .record(prepared_mutation_count(batch) as f64);
-
-            if tracing::enabled!(Level::INFO)
-                && let Some(diagnostics_conn) = diagnostics_conn.as_ref()
-            {
-                let row_count_after =
-                    query_table_row_count(diagnostics_conn, &batch.table_name).ok();
-                trace!(
-                    table = %batch.table_name,
-                    batch_id = %batch.batch_id,
-                    batch_kind = batch.batch_kind.as_str(),
-                    first_start_lsn = ?batch.first_start_lsn,
-                    last_commit_lsn = ?batch.last_commit_lsn,
-                    row_count_after,
-                    sub_batch_kind = batch_log_kind(batch),
-                    insert_sub_batch_rows = apply_sub_batch_rows(batch),
-                    "ducklake batch committed"
-                );
-            }
+            trace!(
+                table = %batch.table_name,
+                batch_id = %batch.batch_id,
+                batch_kind = batch.batch_kind.as_str(),
+                first_start_lsn = ?batch.first_start_lsn,
+                last_commit_lsn = ?batch.last_commit_lsn,
+                sub_batch_kind = batch_log_kind(batch),
+                insert_sub_batch_rows = apply_sub_batch_rows(batch),
+                "ducklake batch committed"
+            );
 
             #[cfg(feature = "test-utils")]
             maybe_fail_after_committed_batch_for_tests(batch.batch_kind, &batch.table_name)?;
@@ -2125,30 +2084,6 @@ fn apply_delete_mutation(
     }
 
     Ok(())
-}
-
-/// Returns whether expensive post-commit batch diagnostics are enabled.
-fn batch_diagnostics_enabled() -> bool {
-    env::var(BATCH_DIAGNOSTICS_ENV_VAR)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
-/// Returns the visible row count for one DuckLake table.
-fn query_table_row_count(
-    conn: &duckdb::Connection,
-    table_name: &str,
-) -> Result<i64, duckdb::Error> {
-    conn.query_row(
-        &format!(r#"SELECT COUNT(*) FROM {LAKE_CATALOG}."{table_name}";"#),
-        [],
-        |row| row.get(0),
-    )
 }
 
 /// Returns the number of values carried by a prepared row payload.
