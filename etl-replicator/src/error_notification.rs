@@ -5,9 +5,6 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use tracing::{info, warn};
 
-/// The endpoint of the Supabase API to which error notifications are sent.
-const API_ENDPOINT: &str = "system/etl/error-notification";
-
 /// Request payload for error notifications.
 ///
 /// Contains error information to be sent to the Supabase API for tracking
@@ -16,8 +13,6 @@ const API_ENDPOINT: &str = "system/etl/error-notification";
 pub struct NotificationRequest {
     /// Unique identifier for the pipeline that encountered the error.
     pub pipeline_id: String,
-    /// Supabase project reference identifier.
-    pub project_ref: String,
     /// Human-readable error message describing the failure.
     pub error_message: String,
     /// Stable hash of the error for grouping and deduplication.
@@ -89,7 +84,6 @@ impl ErrorNotificationClient {
 
         let notification = NotificationRequest {
             pipeline_id: self.pipeline_id.clone(),
-            project_ref: self.project_ref.clone(),
             error_message,
             error_hash,
         };
@@ -118,7 +112,10 @@ impl ErrorNotificationClient {
 
     /// Returns the URL for the error notification endpoint.
     fn error_notification_url(&self) -> String {
-        format!("{}/{}", self.api_url, API_ENDPOINT)
+        format!(
+            "{}/system/replication/{}/pipeline-error",
+            self.api_url, self.project_ref
+        )
     }
 
     /// Sends the notification request to the API endpoint.
