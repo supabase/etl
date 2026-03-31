@@ -77,6 +77,7 @@ impl DuckDbQueryWatchdog {
                 },
                 _ = tokio::time::sleep_until(deadline) => {
                     timeout_flag.store(true, Ordering::Relaxed);
+                    // If we didn't receive the interrupt_rx yet, make sure to get it to call interrupt() later
                     tokio::select! {
                         biased;
                         _ = &mut done_rx => return,
