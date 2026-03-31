@@ -289,6 +289,8 @@ async fn create_or_update_dynamic_replicator_secrets(
                         &s3_secret_access_key,
                     )
                     .await?;
+            } else {
+                k8s_client.delete_ducklake_secret(prefix).await?;
             }
         }
     }
@@ -481,7 +483,11 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_ducklake_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+        async fn delete_ducklake_secret(&self, prefix: &str) -> Result<(), K8sError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("delete-ducklake:{prefix}"));
             Ok(())
         }
 
@@ -590,7 +596,10 @@ mod tests {
 
         assert_eq!(
             client.calls(),
-            vec!["postgres:tenant-42:password".to_string()]
+            vec![
+                "postgres:tenant-42:password".to_string(),
+                "delete-ducklake:tenant-42".to_string(),
+            ]
         );
     }
 }

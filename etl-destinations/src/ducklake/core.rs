@@ -295,7 +295,13 @@ where
                     .maintenance_worker
                     .as_ref()
                     .as_ref()
-                    .expect("maintenance worker should exist before metrics sampler")
+                    .ok_or_else(|| {
+                        etl_error!(
+                            ErrorKind::DestinationError,
+                            "Ducklake initialization failed",
+                            "maintenance worker should exist before metrics sampler"
+                        )
+                    })?
                     .notification_tx
                     .clone(),
             )
