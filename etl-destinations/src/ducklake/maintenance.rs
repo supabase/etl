@@ -1071,6 +1071,8 @@ fn merge_adjacent_table_files(conn: &duckdb::Connection, table_name: &str) -> Et
 mod tests {
     use super::*;
 
+    use std::sync::{Arc, LazyLock};
+
     use etl_telemetry::metrics::init_metrics_handle;
 
     use crate::ducklake::client::{
@@ -1078,6 +1080,16 @@ mod tests {
         run_duckdb_blocking,
     };
     use crate::ducklake::metrics::register_metrics;
+
+    static CHECKPOINT_TEST_GUARD: LazyLock<Arc<Semaphore>> =
+        LazyLock::new(|| Arc::new(Semaphore::new(1)));
+
+    async fn acquire_checkpoint_test_guard() -> OwnedSemaphorePermit {
+        Arc::clone(&CHECKPOINT_TEST_GUARD)
+            .acquire_owned()
+            .await
+            .expect("checkpoint test semaphore should stay open")
+    }
 
     fn maintenance_duration_count(
         rendered: &str,
@@ -1857,6 +1869,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_success_records_applied_duration() {
+        let _checkpoint_test_guard = acquire_checkpoint_test_guard().await;
+        FAIL_CHECKPOINT_ONCE_FOR_TESTS.store(false, AtomicOrdering::Relaxed);
+
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
         let conn = duckdb::Connection::open_in_memory().expect("failed to open in-memory duckdb");
@@ -1890,6 +1905,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_failure_records_failed_duration() {
+        let _checkpoint_test_guard = acquire_checkpoint_test_guard().await;
+        FAIL_CHECKPOINT_ONCE_FOR_TESTS.store(false, AtomicOrdering::Relaxed);
+
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
         let conn = duckdb::Connection::open_in_memory().expect("failed to open in-memory duckdb");
@@ -1924,6 +1942,8 @@ mod tests {
             failed_after > failed_before,
             "checkpoint failed duration count did not increase"
         );
+
+        FAIL_CHECKPOINT_ONCE_FOR_TESTS.store(false, AtomicOrdering::Relaxed);
     }
 
     #[tokio::test]
