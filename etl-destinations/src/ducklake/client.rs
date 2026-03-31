@@ -66,17 +66,36 @@ impl DuckDbQueryWatchdog {
         let (interrupt_tx, interrupt_rx) = oneshot::channel::<Arc<duckdb::InterruptHandle>>();
         let (done_tx, done_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
+            let mut interrupt_rx = Box::pin(interrupt_rx);
+            let mut done_rx = Box::pin(done_rx);
             let interrupt_handle = tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => return,
-                result = interrupt_rx => match result {
+                biased;
+                _ = &mut done_rx => return,
+                result = &mut interrupt_rx => match result {
                     Ok(handle) => handle,
                     Err(_) => return,
                 },
+                _ = tokio::time::sleep_until(deadline) => {
+                    timeout_flag.store(true, Ordering::Relaxed);
+                    tokio::select! {
+                        biased;
+                        _ = &mut done_rx => return,
+                        result = &mut interrupt_rx => match result {
+                            Ok(handle) => handle,
+                            Err(_) => return,
+                        },
+                    }
+                },
             };
+
+            if timeout_flag.load(Ordering::Relaxed) {
+                interrupt_handle.interrupt();
+                return;
+            }
 
             tokio::select! {
                 biased;
-                _ = done_rx => {}
+                _ = &mut done_rx => {}
                 _ = tokio::time::sleep_until(deadline) => {
                     timeout_flag.store(true, Ordering::Relaxed);
                     interrupt_handle.interrupt();
@@ -364,6 +383,14 @@ where
         }
         let interrupt_handle = pooled_conn.conn.interrupt_handle();
         watchdog.publish_interrupt_handle(interrupt_handle);
+        if watchdog.timed_out() {
+            pooled_conn.broken = true;
+            return Err(duckdb_blocking_timeout_error(
+                operation_kind,
+                timeout,
+                "query_execution",
+            ));
+        }
         let operation_started = Instant::now();
         let res = operation(&pooled_conn.conn);
         watchdog.finish();
@@ -521,6 +548,27 @@ mod tests {
         assert_eq!(
             format_query_error_detail(sql, &error),
             "sql: CREATE TABLE lake.\"orders\" (\"id\" INTEGER NOT NULL); source: parser error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_watchdog_marks_timeout_when_handle_arrives_after_deadline() {
+        let conn = make_blocking_test_manager()
+            .open_duckdb_connection()
+            .expect("failed to open blocking test connection");
+        let mut watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + Duration::from_millis(10));
+        let watchdog_task = watchdog
+            .async_task_handle()
+            .expect("failed to extract watchdog task");
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        watchdog.publish_interrupt_handle(conn.interrupt_handle());
+
+        watchdog_task.await.expect("watchdog task should not panic");
+
+        assert!(
+            watchdog.timed_out(),
+            "watchdog should remain timed out when the interrupt handle is published after the deadline"
         );
     }
 }
