@@ -52,16 +52,24 @@ fn make_lake_urls(test_name: &str) -> (Url, Url) {
 }
 
 fn open_verification_connection() -> Connection {
+    let duckdb_dir = tempfile::Builder::new()
+        .prefix("etl_ducklake_verify_")
+        .tempdir()
+        .expect("failed to create verification duckdb dir")
+        .keep();
+    let duckdb_path = duckdb_dir.join("verify.duckdb");
+
     if cfg!(target_os = "linux") {
-        return Connection::open_in_memory_with_flags(
+        return Connection::open_with_flags(
+            &duckdb_path,
             Config::default()
                 .enable_autoload_extension(false)
                 .expect("failed to disable DuckDB extension autoload"),
         )
-        .expect("failed to open in-memory DuckDB");
+        .expect("failed to open verification DuckDB");
     }
 
-    Connection::open_in_memory().expect("failed to open in-memory DuckDB")
+    Connection::open(&duckdb_path).expect("failed to open verification DuckDB")
 }
 
 fn ducklake_load_sql() -> String {

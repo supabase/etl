@@ -994,16 +994,24 @@ mod tests {
     }
 
     fn open_verification_connection() -> Connection {
+        let duckdb_dir = tempfile::Builder::new()
+            .prefix("etl_ducklake_verify_")
+            .tempdir()
+            .expect("failed to create verification duckdb dir")
+            .keep();
+        let duckdb_path = duckdb_dir.join("verify.duckdb");
+
         if cfg!(target_os = "linux") {
-            return Connection::open_in_memory_with_flags(
+            return Connection::open_with_flags(
+                &duckdb_path,
                 Config::default()
                     .enable_autoload_extension(false)
                     .expect("failed to disable DuckDB extension autoload"),
             )
-            .expect("failed to open in-memory DuckDB");
+            .expect("failed to open verification DuckDB");
         }
 
-        Connection::open_in_memory().expect("failed to open in-memory DuckDB")
+        Connection::open(&duckdb_path).expect("failed to open verification DuckDB")
     }
 
     fn ducklake_load_sql() -> String {
@@ -1057,6 +1065,43 @@ mod tests {
         ))
         .expect("failed to attach DuckLake catalog");
         conn
+    }
+
+    fn lake_table_exists(conn: &Connection, table_name: &str) -> bool {
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM information_schema.tables \
+                 WHERE table_catalog = {} AND table_schema = {} AND table_name = {}",
+                quote_literal(LAKE_CATALOG),
+                quote_literal("main"),
+                quote_literal(table_name),
+            ),
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false)
+    }
+
+    async fn open_lake_conn_when_table_visible(
+        catalog: &Url,
+        data: &Url,
+        table_name: &str,
+    ) -> Connection {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let conn = open_lake_conn(catalog, data);
+            if lake_table_exists(&conn, table_name) {
+                return conn;
+            }
+
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for DuckLake table `{table_name}` to become visible",
+            );
+            drop(conn);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     #[test]
@@ -1122,7 +1167,7 @@ mod tests {
             .await
             .expect("failed to write rows");
 
-        let conn = open_lake_conn(&catalog, &data);
+        let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
         let _rows_flushed =
             flush_table_inlined_data(&conn, &table_name, DuckLakeInlineFlushKind::Mutation)
                 .expect("failed to materialize inlined rows for storage metrics test");
@@ -1153,6 +1198,7 @@ mod tests {
         let data = path_to_file_url(&dir.path().join("data"));
         let store = MemoryStore::new();
         let schema = make_schema(1, "public", "users");
+        let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
         store
             .store_table_schema(schema.clone())
@@ -1179,7 +1225,13 @@ mod tests {
             .await
             .expect("failed to truncate table");
 
-        let conn = open_lake_conn(&catalog, &data);
+        destination
+            .shutdown()
+            .await
+            .expect("failed to shutdown destination");
+        drop(destination);
+
+        let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
         let metrics = query_catalog_maintenance_metrics_blocking(&conn)
             .expect("failed to query catalog maintenance metrics");
 

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Once, OnceLock};
 
+use chrono::Utc;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
 use metrics::{Unit, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
@@ -522,33 +523,39 @@ pub(super) fn query_catalog_maintenance_metrics_blocking(
         r#"WITH snapshot_stats AS (
              SELECT
                  COUNT(*) AS snapshots_total,
-                 COALESCE(MAX(date_diff('second', snapshot_time, current_timestamp)), 0) AS oldest_snapshot_age_seconds
+                 MIN(epoch_ms(snapshot_time)) AS oldest_snapshot_epoch_ms
              FROM {metadata_namespace}.ducklake_snapshot
          ),
          scheduled_deletion_stats AS (
              SELECT
                  COUNT(*) AS files_scheduled_for_deletion_total,
                  COALESCE(SUM(data_files.file_size_bytes), 0) AS files_scheduled_for_deletion_bytes,
-                 COALESCE(MAX(date_diff('second', scheduled.schedule_start, current_timestamp)), 0) AS oldest_scheduled_deletion_age_seconds
+                 MIN(epoch_ms(scheduled.schedule_start)) AS oldest_scheduled_deletion_epoch_ms
              FROM {metadata_namespace}.ducklake_files_scheduled_for_deletion AS scheduled
              LEFT JOIN {metadata_namespace}.ducklake_data_file AS data_files USING (data_file_id)
          )
          SELECT
              snapshots_total,
-             oldest_snapshot_age_seconds,
+             oldest_snapshot_epoch_ms,
              files_scheduled_for_deletion_total,
              files_scheduled_for_deletion_bytes,
-             oldest_scheduled_deletion_age_seconds
+             oldest_scheduled_deletion_epoch_ms
          FROM snapshot_stats CROSS JOIN scheduled_deletion_stats;"#
     );
+    let now_epoch_ms = Utc::now().timestamp_millis();
 
     conn.query_row(&sql, [], |row| {
+        let oldest_snapshot_epoch_ms = row.get::<_, Option<i64>>(1)?;
+        let oldest_scheduled_deletion_epoch_ms = row.get::<_, Option<i64>>(4)?;
         Ok(DuckLakeCatalogMaintenanceMetrics {
             snapshots_total: row.get(0)?,
-            oldest_snapshot_age_seconds: row.get(1)?,
+            oldest_snapshot_age_seconds: epoch_age_seconds(now_epoch_ms, oldest_snapshot_epoch_ms),
             files_scheduled_for_deletion_total: row.get(2)?,
             files_scheduled_for_deletion_bytes: row.get(3)?,
-            oldest_scheduled_deletion_age_seconds: row.get(4)?,
+            oldest_scheduled_deletion_age_seconds: epoch_age_seconds(
+                now_epoch_ms,
+                oldest_scheduled_deletion_epoch_ms,
+            ),
         })
     })
     .map_err(|e| {
@@ -559,6 +566,12 @@ pub(super) fn query_catalog_maintenance_metrics_blocking(
             source: e
         )
     })
+}
+
+fn epoch_age_seconds(now_epoch_ms: i64, oldest_epoch_ms: Option<i64>) -> i64 {
+    oldest_epoch_ms
+        .map(|epoch_ms| now_epoch_ms.saturating_sub(epoch_ms) / 1_000)
+        .unwrap_or(0)
 }
 
 /// Returns the fully-qualified hidden DuckLake metadata namespace.

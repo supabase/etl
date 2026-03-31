@@ -85,16 +85,24 @@ async fn acquire_ducklake_test_hook_guard() -> OwnedSemaphorePermit {
 }
 
 fn open_verification_connection() -> Connection {
+    let duckdb_dir = tempfile::Builder::new()
+        .prefix("etl_ducklake_verify_")
+        .tempdir()
+        .expect("failed to create verification duckdb dir")
+        .keep();
+    let duckdb_path = duckdb_dir.join("verify.duckdb");
+
     if cfg!(target_os = "linux") {
-        return Connection::open_in_memory_with_flags(
+        return Connection::open_with_flags(
+            &duckdb_path,
             Config::default()
                 .enable_autoload_extension(false)
                 .expect("failed to disable DuckDB extension autoload"),
         )
-        .expect("failed to open in-memory DuckDB");
+        .expect("failed to open verification DuckDB");
     }
 
-    Connection::open_in_memory().expect("failed to open in-memory DuckDB")
+    Connection::open(&duckdb_path).expect("failed to open verification DuckDB")
 }
 
 fn ducklake_load_sql() -> String {
@@ -175,6 +183,46 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     ))
     .expect("failed to attach DuckLake catalog");
     conn
+}
+
+fn lake_table_exists(conn: &Connection, table_name: &str) -> bool {
+    conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_catalog = {} AND table_schema = {} AND table_name = {}",
+            quote_literal("lake"),
+            quote_literal("main"),
+            quote_literal(table_name)
+        ),
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .unwrap_or(false)
+}
+
+async fn open_lake_conn_when_tables_visible(
+    catalog: &Url,
+    data: &Url,
+    table_names: &[&str],
+) -> Connection {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let conn = open_lake_conn(catalog, data);
+        if table_names
+            .iter()
+            .all(|table_name| lake_table_exists(&conn, table_name))
+        {
+            return conn;
+        }
+
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for DuckLake tables to become visible: {table_names:?}"
+        );
+        drop(conn);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn count_rows(conn: &Connection, table_name: &str) -> i64 {
@@ -300,7 +348,7 @@ async fn test_write_table_rows_basic() {
         .await
         .expect("write_table_rows failed");
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 3);
 
     let (id, name): (i32, Option<String>) = conn
@@ -352,7 +400,7 @@ async fn test_write_table_rows_small_batch_stays_inlined_after_return() {
         .await
         .unwrap();
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
     assert_eq!(
@@ -438,7 +486,7 @@ async fn test_write_table_rows_reuses_warm_pooled_connection() {
         .unwrap();
     assert_eq!(destination.connection_open_count_for_tests(), 1);
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);
 }
 
@@ -496,7 +544,7 @@ async fn test_write_table_rows_replaces_broken_pooled_connection_after_retry() {
         .unwrap();
     assert_eq!(destination.connection_open_count_for_tests(), 2);
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);
 
     reset_ducklake_test_hooks();
@@ -541,7 +589,7 @@ async fn test_write_table_rows_retry_after_post_commit_failure_is_idempotent() {
         .await
         .unwrap();
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
 
@@ -610,7 +658,7 @@ async fn test_concurrent_same_table_copy_batches_complete() {
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 100);
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 2);
 }
@@ -642,7 +690,7 @@ async fn test_write_table_rows_empty_creates_table() {
         .await
         .expect("empty write failed");
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(
         count_rows(&conn, &table_name),
         0,
@@ -688,7 +736,7 @@ async fn test_truncate_clears_rows() {
         .await
         .expect("truncate failed");
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(
         count_rows(&conn, &table_name),
         0,
@@ -750,7 +798,7 @@ async fn test_truncate_clears_copy_markers_for_recopy() {
     destination.truncate_table(table_id).await.unwrap();
     destination.write_table_rows(table_id, rows).await.unwrap();
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
 }
@@ -819,7 +867,7 @@ async fn test_write_events() {
         .await
         .expect("write_events failed");
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
 
     let (id, name): (i32, String) = conn
@@ -874,7 +922,7 @@ async fn test_write_events_small_batch_stays_inlined_after_return() {
         .await
         .unwrap();
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
     assert_eq!(
@@ -934,7 +982,7 @@ async fn test_write_events_with_old_row_update() {
         .await
         .expect("write_events with old row update failed");
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
 
     let (id, name): (i32, String) = conn
@@ -1019,7 +1067,7 @@ async fn test_write_events_replay_is_idempotent() {
     destination.write_events(batch.clone()).await.unwrap();
     destination.write_events(batch).await.unwrap();
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
 
@@ -1075,7 +1123,7 @@ async fn test_applied_batches_table_uses_data_inlining() {
         .await
         .unwrap();
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
     assert_eq!(count_table_files(&data, "__etl_applied_table_batches"), 0);
@@ -1115,7 +1163,7 @@ async fn test_shutdown_flushes_inlined_copy_rows() {
         .await
         .unwrap();
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(
         count_table_files(&data, &table_name),
@@ -1134,7 +1182,7 @@ async fn test_shutdown_flushes_inlined_copy_rows() {
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert!(
         count_table_files(&data, &table_name) >= 1,
@@ -1197,7 +1245,12 @@ async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
         .await
         .unwrap();
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(
+        &catalog_url,
+        &data_url,
+        &[&table_name_a, &table_name_b],
+    )
+    .await;
     assert_eq!(count_rows(&conn, &table_name_a), 1);
     assert_eq!(count_rows(&conn, &table_name_b), 1);
     assert_eq!(
@@ -1222,7 +1275,12 @@ async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(
+        &catalog_url,
+        &data_url,
+        &[&table_name_a, &table_name_b],
+    )
+    .await;
     assert_eq!(count_rows(&conn, &table_name_a), 1);
     assert_eq!(count_rows(&conn, &table_name_b), 1);
     assert_eq!(
@@ -1322,7 +1380,12 @@ async fn test_write_events_mixed_multi_table_batches() {
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(
+        &catalog_url,
+        &data_url,
+        &[&table_name_a, &table_name_b],
+    )
+    .await;
     assert_eq!(count_rows(&conn, &table_name_a), 1);
     assert_eq!(count_rows(&conn, &table_name_b), 1);
     assert_eq!(count_applied_batches(&conn, &table_name_a, "mutation"), 1);
@@ -1428,7 +1491,7 @@ async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
         .await
         .unwrap();
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
     assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
 
@@ -1495,7 +1558,12 @@ async fn test_concurrent_writes_with_single_slot_complete() {
     task_a.await.unwrap().unwrap();
     task_b.await.unwrap().unwrap();
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(
+        &catalog_url,
+        &data_url,
+        &[&table_name_a, &table_name_b],
+    )
+    .await;
     assert_eq!(count_rows(&conn, &table_name_a), 50);
     assert_eq!(count_rows(&conn, &table_name_b), 50);
 }
@@ -1536,7 +1604,7 @@ async fn test_type_mapping_round_trip() {
         .await
         .expect("write failed");
 
-    let conn = open_lake_conn(&catalog_url, &data_url);
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let row: (i32, String, f64, bool, String) = conn
         .query_row(
             &format!(
