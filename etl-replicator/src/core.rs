@@ -12,13 +12,14 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::PipelineId;
 use etl::{config::IcebergConfig, destination::Destination};
-use etl_config::Environment;
 use etl_config::shared::{DestinationConfig, PgConnectionConfig, ReplicatorConfig};
+use etl_config::{Environment, parse_ducklake_url};
 use etl_destinations::iceberg::{
     DestinationNamespace, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
 };
 use etl_destinations::{
     bigquery::BigQueryDestination,
+    ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
     iceberg::{IcebergClient, IcebergDestination},
 };
 use secrecy::ExposeSecret;
@@ -133,6 +134,50 @@ pub async fn start_replicator_with_config(
                 None => DestinationNamespace::OnePerSchema,
             };
             let destination = IcebergDestination::new(client, namespace, state_store.clone());
+
+            let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
+            start_pipeline(pipeline).await?;
+        }
+        DestinationConfig::Ducklake {
+            catalog_url,
+            data_path,
+            pool_size,
+            s3_access_key_id,
+            s3_secret_access_key,
+            s3_region,
+            s3_endpoint,
+            s3_url_style,
+            s3_use_ssl,
+            metadata_schema,
+        } => {
+            set_destination_scope::<DuckLakeDestination<PostgresStore>>();
+
+            let s3_config = match (s3_access_key_id, s3_secret_access_key) {
+                (Some(access_key_id), Some(secret_access_key)) => Some(DucklakeS3Config {
+                    access_key_id: access_key_id.expose_secret().to_string(),
+                    secret_access_key: secret_access_key.expose_secret().to_string(),
+                    region: s3_region.clone().unwrap_or_else(|| "us-east-1".to_string()),
+                    endpoint: s3_endpoint.clone(),
+                    url_style: s3_url_style.clone().unwrap_or_else(|| "path".to_string()),
+                    use_ssl: s3_use_ssl.unwrap_or(false),
+                }),
+                (None, None) => None,
+                _ => {
+                    return Err(ReplicatorError::config(std::io::Error::other(
+                        "ducklake s3 credentials must include both access key id and secret access key",
+                    )));
+                }
+            };
+
+            let destination = DuckLakeDestination::new(
+                parse_ducklake_url(catalog_url).map_err(ReplicatorError::config)?,
+                parse_ducklake_url(data_path).map_err(ReplicatorError::config)?,
+                *pool_size,
+                s3_config,
+                metadata_schema.clone(),
+                state_store.clone(),
+            )
+            .await?;
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;

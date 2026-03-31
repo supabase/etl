@@ -1,33 +1,33 @@
 /*
 
-BigQuery Example
+DuckLake Example
 
 This example demonstrates how to use the pipeline to stream
-data from Postgres to BigQuery using change data capture (CDC).
+data from Postgres to DuckLake using change data capture (CDC).
+
+DuckLake separates storage into two components:
+- Catalog: metadata stored in a PostgreSQL database
+- Data: row data written as Parquet files (local directory or S3 / S3-compatible object storage)
 
 Prerequisites:
 1. Postgres server with logical replication enabled (wal_level = logical)
-2. A publication created in Postgres (CREATE PUBLICATION my_publication FOR ALL TABLES;)
-3. GCP service account with BigQuery Data Editor and Job User permissions
-4. Service account key file downloaded from GCP console
+2. A publication created in Postgres (CREATE PUBLICATION my_pub FOR ALL TABLES;)
+3. A PostgreSQL database for the DuckLake catalog
+4. A local directory or S3 / S3-compatible bucket for Parquet files
 
 Usage:
-    cargo run --example bigquery --features bigquery -- \
+    cargo run --bin ducklake -p etl-examples -- \
         --db-host localhost \
         --db-port 5432 \
         --db-name mydb \
         --db-username postgres \
         --db-password mypassword \
-        --bq-sa-key-file /path/to/service-account-key.json \
-        --bq-project-id my-gcp-project \
-        --bq-dataset-id my_dataset \
-        --publication my_publication
+        --catalog-url postgres://user:pass@localhost:5432/ducklake_catalog \
+        --data-path file:///absolute/path/to/lake_data \
+        --publication my_pub
 
-The pipeline will automatically:
-- Create tables in BigQuery matching your Postgres schema
-- Perform initial data sync for existing tables
-- Stream real-time changes using logical replication
-- Handle schema changes and DDL operations
+Plain local paths such as `./lake_data/` are also accepted and normalized to
+absolute `file://` URLs before the destination is created.
 
 */
 
@@ -38,12 +38,14 @@ use etl::config::{
 };
 use etl::pipeline::Pipeline;
 use etl::store::both::memory::MemoryStore;
-use etl_destinations::bigquery::BigQueryDestination;
+use etl_config::parse_ducklake_url;
+use etl_destinations::ducklake::{DuckLakeDestination, S3Config};
 use std::error::Error;
 use std::sync::Once;
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use url::Url;
 
 /// Ensures crypto provider is only initialized once.
 static INIT_CRYPTO: Once = Once::new();
@@ -57,29 +59,25 @@ fn install_crypto_provider() {
     });
 }
 
-// Main application arguments combining database and BigQuery configurations
 #[derive(Debug, Parser)]
-#[command(name = "bigquery", version, about, arg_required_else_help = true)]
+#[command(name = "ducklake", version, about, arg_required_else_help = true)]
 struct AppArgs {
-    // Postgres connection parameters
     #[clap(flatten)]
     db_args: DbArgs,
-    // BigQuery destination parameters
     #[clap(flatten)]
-    bq_args: BqArgs,
+    ducklake_args: DuckLakeArgs,
     /// Postgres publication name (must be created beforehand with CREATE PUBLICATION)
     #[arg(long)]
     publication: String,
 }
 
-// Postgres database connection configuration
 #[derive(Debug, Args)]
 struct DbArgs {
     /// Host on which Postgres is running (e.g., localhost or IP address)
     #[arg(long)]
     db_host: String,
     /// Port on which Postgres is running (default: 5432)
-    #[arg(long)]
+    #[arg(long, default_value = "5432")]
     db_port: u16,
     /// Postgres database name to connect to
     #[arg(long)]
@@ -92,27 +90,60 @@ struct DbArgs {
     db_password: Option<String>,
 }
 
-// BigQuery destination configuration
 #[derive(Debug, Args)]
-struct BqArgs {
-    /// Path to GCP service account key JSON file (download from GCP Console > IAM & Admin > Service Accounts)
-    #[arg(long)]
-    bq_sa_key_file: String,
-    /// BigQuery project ID (found in GCP Console project selector)
-    #[arg(long)]
-    bq_project_id: String,
-    /// BigQuery dataset ID (must exist in the specified project)
-    #[arg(long)]
-    bq_dataset_id: String,
-    /// Maximum time to wait for a batch to fill in milliseconds (lower values = lower latency, less throughput)
+struct DuckLakeArgs {
+    /// DuckLake catalog URL (e.g., postgres://user:pass@host/db or file:///tmp/catalog.ducklake)
+    ///
+    /// Plain local paths are accepted and converted to absolute `file://` URLs.
+    #[arg(long, value_parser = parse_ducklake_url)]
+    catalog_url: Url,
+    /// Local directory or S3 / S3-compatible URI for Parquet files (e.g., file:///tmp/lake_data or s3://bucket/)
+    ///
+    /// Plain local paths are accepted and converted to absolute `file://` URLs.
+    #[arg(long, value_parser = parse_ducklake_url)]
+    data_path: Url,
+    /// DuckDB connection pool size
+    #[arg(long, default_value = "4")]
+    pool_size: u32,
+    /// Maximum time to wait for a batch to fill in milliseconds
     #[arg(long, default_value = "5000")]
     max_batch_fill_duration_ms: u64,
-    /// Maximum number of concurrent table sync workers (higher values = faster initial sync, more resource usage)
+    /// Maximum number of concurrent table sync workers during initial copy
     #[arg(long, default_value = "4")]
     max_table_sync_workers: u16,
+
+    // S3 / S3-compatible storage credentials (required when --data-path is an s3:// URI)
+    /// S3 access key ID
+    #[arg(long, requires = "s3_secret_access_key")]
+    s3_access_key_id: Option<String>,
+    /// S3 secret access key
+    #[arg(long, requires = "s3_access_key_id")]
+    s3_secret_access_key: Option<String>,
+    /// S3 region (default: us-east-1)
+    #[arg(long, default_value = "us-east-1")]
+    s3_region: String,
+    /// S3-compatible endpoint, e.g. `127.0.0.1:5000/s3` for Supabase Storage
+    #[arg(long)]
+    s3_endpoint: Option<String>,
+    /// S3 URL style: `path` (for MinIO / Supabase Storage) or `vhost` (AWS default)
+    #[arg(long, default_value = "path")]
+    s3_url_style: String,
+    /// Use SSL/TLS for the S3 connection (disable for local S3-compatible services)
+    #[arg(long, default_value = "false")]
+    s3_use_ssl: bool,
+
+    /// Postgres schema used for DuckLake metadata tables (e.g. `ducklake`)
+    #[arg(long)]
+    metadata_schema: Option<String>,
+
+    /// Shared DuckDB log storage path used by `CALL enable_logging(storage_path = ...)`.
+    #[arg(long, requires = "duckdb_log_dump_path")]
+    duckdb_log_storage_path: Option<String>,
+    /// CSV file written from `duckdb_logs` during graceful shutdown.
+    #[arg(long, requires = "duckdb_log_storage_path")]
+    duckdb_log_dump_path: Option<String>,
 }
 
-// Entry point - handles error reporting and process exit
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     if let Err(e) = main_impl().await {
@@ -123,18 +154,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// Initialize structured logging with configurable log levels via RUST_LOG environment variable
 fn init_tracing() {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "bigquery=info".into()),
+                .unwrap_or_else(|_| "ducklake=info".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_line_number(true)
+                .with_file(true),
+        )
         .init();
 }
 
-// Set default log level if RUST_LOG environment variable is not set
 fn set_log_level() {
     if std::env::var("RUST_LOG").is_err() {
         unsafe {
@@ -143,20 +176,14 @@ fn set_log_level() {
     }
 }
 
-// Main implementation function containing all the pipeline setup and execution logic
 async fn main_impl() -> Result<(), Box<dyn Error>> {
-    // Set up logging and tracing
     set_log_level();
     init_tracing();
-
-    // Install required crypto provider for authentication
+    etl_telemetry::metrics::init_metrics(None)?;
     install_crypto_provider();
 
-    // Parse command line arguments
     let args = AppArgs::parse();
 
-    // Configure Postgres connection settings
-    // Note: TLS is disabled in this example - enable for production use
     let pg_connection_config = PgConnectionConfig {
         host: args.db_args.db_host,
         port: args.db_args.db_port,
@@ -165,27 +192,24 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         password: args.db_args.db_password.map(Into::into),
         tls: TlsConfig {
             trusted_root_certs: String::new(),
-            enabled: false, // Set to true and provide certs for production
+            enabled: false,
         },
         keepalive: TcpKeepaliveConfig::default(),
     };
 
-    // Create in-memory store for tracking table replication states and table schemas
-    // In production, you might want to use a persistent store like PostgresStore
     let store = MemoryStore::new();
 
-    // Create pipeline configuration with batching and retry settings
     let pipeline_config = PipelineConfig {
-        id: 1, // Using a simple ID for the example
+        id: 1,
         publication_name: args.publication,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
-            max_fill_ms: args.bq_args.max_batch_fill_duration_ms,
+            max_fill_ms: args.ducklake_args.max_batch_fill_duration_ms,
             memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
-        max_table_sync_workers: args.bq_args.max_table_sync_workers,
+        max_table_sync_workers: args.ducklake_args.max_table_sync_workers,
         memory_refresh_interval_ms: 100,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
@@ -193,36 +217,35 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
     };
 
-    // Initialize BigQuery destination with service account authentication
-    // Tables will be automatically created to match Postgres schema
-    let bigquery_destination = BigQueryDestination::new_with_key_path(
-        args.bq_args.bq_project_id,
-        args.bq_args.bq_dataset_id,
-        &args.bq_args.bq_sa_key_file,
-        None,
-        1,
-        pipeline_config.id,
+    let s3_config = args.ducklake_args.s3_access_key_id.map(|key_id| S3Config {
+        access_key_id: key_id,
+        secret_access_key: args.ducklake_args.s3_secret_access_key.unwrap(),
+        region: args.ducklake_args.s3_region,
+        endpoint: args.ducklake_args.s3_endpoint,
+        url_style: args.ducklake_args.s3_url_style,
+        use_ssl: args.ducklake_args.s3_use_ssl,
+    });
+
+    let ducklake_destination = DuckLakeDestination::new(
+        args.ducklake_args.catalog_url,
+        args.ducklake_args.data_path,
+        args.ducklake_args.pool_size,
+        s3_config,
+        args.ducklake_args.metadata_schema,
         store.clone(),
     )
     .await?;
 
-    // Create the pipeline instance with all components
-    let mut pipeline = Pipeline::new(pipeline_config, store, bigquery_destination);
+    let mut pipeline = Pipeline::new(pipeline_config, store, ducklake_destination);
 
     info!(
-        "Starting BigQuery CDC pipeline - connecting to Postgres and initializing replication..."
+        "Starting DuckLake CDC pipeline - connecting to Postgres and initializing replication..."
     );
 
-    // Start the pipeline - this will:
-    // 1. Connect to Postgres
-    // 2. Initialize table states based on the publication
-    // 3. Start apply and table sync workers
-    // 4. Begin streaming replication data
     pipeline.start().await?;
 
     info!("pipeline started, data replication is now active, press ctrl+c to stop");
 
-    // Set up signal handler for graceful shutdown on Ctrl+C
     let shutdown_signal = async {
         signal::ctrl_c()
             .await
@@ -230,8 +253,6 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         info!("received ctrl+c signal, initiating graceful shutdown");
     };
 
-    // Wait for either the pipeline to complete naturally or receive a shutdown signal
-    // The pipeline will run indefinitely unless an error occurs or it's manually stopped
     tokio::select! {
         result = pipeline.wait() => {
             info!("pipeline completed normally (this usually indicates an error condition)");

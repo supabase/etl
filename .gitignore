@@ -23,9 +23,19 @@ target/
 site/
 
 # venv files
-bin/
-lib/
+/bin/
+/lib/
 pyvenv.cfg
 
 # Log files
 *.log
+
+# Serena files
+.serena
+
+# Optional local DuckDB extension vendoring.
+vendor/duckdb/extensions/
+
+# Configuration files
+etl-replicator/configuration
+configuration

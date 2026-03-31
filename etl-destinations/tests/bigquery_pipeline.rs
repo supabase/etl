@@ -128,8 +128,15 @@ async fn table_copy_and_streaming_with_restart() {
         ]
     );
 
-    // We restart the pipeline and check that we can process events since we have load the table
-    // schema from the destination.
+    // Rebuild the destination for the restart so the test exercises state/schema
+    // recovery instead of relying on a reused, previously shut-down wrapper.
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    // We restart the pipeline and check that we can process events since we have
+    // loaded the table schema from persisted state.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,

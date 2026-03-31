@@ -23,7 +23,7 @@ use etl::types::{
 use etl::{bail, etl_error};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Suffix for changelog tables
 const ICEBERG_CHANGELOG_TABLE_SUFFIX: &str = "changelog";
@@ -316,7 +316,7 @@ where
                     Event::Delete(delete) => {
                         let sequence_key = delete.event_sequence_key().to_string();
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
-                            info!("delete event has no row, skipping");
+                            debug!("delete event has no row, skipping");
                             continue;
                         };
 

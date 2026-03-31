@@ -51,6 +51,7 @@ pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
         // connectivity/capacity failures that are expected to recover without operator intervention.
         ErrorKind::SourceConnectionFailed
         | ErrorKind::DestinationConnectionFailed
+        | ErrorKind::DestinationAtomicBatchRetryable
         | ErrorKind::SourceDatabaseShutdown
         | ErrorKind::SourceDatabaseInRecovery => {
             ErrorHandlingPolicy::new(RetryDirective::Timed, None)
