@@ -104,7 +104,7 @@ impl<'a> Stream for TableCopyStream<'a> {
 /// The status update type when sending a status update message back to Postgres.
 #[derive(Debug)]
 pub enum StatusUpdateType {
-    /// Represents a standard progress update during steady-state replication.
+    /// Represents an update in response to a keep alive from Postgres.
     KeepAlive,
     /// Represents a periodic heartbeat sent while the apply loop is otherwise idle.
     PeriodicKeepAlive,
