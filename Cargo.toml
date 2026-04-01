@@ -23,6 +23,10 @@ homepage = "https://supabase.github.io/etl/"
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
+[workspace.lints.clippy]
+await_holding_lock = "deny"
+unused_async = "deny"
+
 [workspace.dependencies]
 etl = { path = "etl", default-features = false }
 etl-config = { path = "etl-config", default-features = false }

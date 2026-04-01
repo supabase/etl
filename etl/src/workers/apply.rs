@@ -202,7 +202,7 @@ where
     /// This method initializes the apply worker by determining the starting LSN,
     /// creating coordination signals, and launching the main apply loop. The worker
     /// runs asynchronously and can be monitored through the returned handle.
-    pub async fn spawn(self) -> EtlResult<ApplyWorkerHandle> {
+    pub fn spawn(self) -> EtlResult<ApplyWorkerHandle> {
         info!("starting apply worker");
 
         let apply_worker_span = tracing::info_span!(

@@ -3,6 +3,7 @@ name = "etl"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -45,3 +46,6 @@ etl-postgres = { workspace = true, features = ["tokio", "replication", "test-uti
 etl-telemetry = { workspace = true }
 
 rand = { workspace = true, features = ["thread_rng"] }
+
+[lints]
+workspace = true

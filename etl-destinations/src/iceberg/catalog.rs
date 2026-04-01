@@ -286,9 +286,7 @@ impl SupabaseClient {
 
         let config = response.config.unwrap_or_default().into_iter().collect();
 
-        let file_io = self
-            .load_file_io(Some(metadata_location), Some(config))
-            .await?;
+        let file_io = self.load_file_io(Some(metadata_location), Some(config))?;
 
         let table_ident = TableIdent::new(namespace.clone(), creation.name.to_string());
 
@@ -337,7 +335,7 @@ impl SupabaseClient {
     /// Builds a [`FileIO`] instance from the metadata location and additional
     /// configuration properties. The file I/O instance is used for reading
     /// and writing table data and metadata files.
-    async fn load_file_io(
+    fn load_file_io(
         &self,
         metadata_location: Option<&str>,
         extra_config: Option<HashMap<String, String>>,
