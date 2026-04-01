@@ -152,6 +152,7 @@ How to read them:
 
 - `etl_ducklake_snapshots_total`
 - `etl_ducklake_oldest_snapshot_age_seconds`
+- `etl_ducklake_active_data_files_total`
 - `etl_ducklake_files_scheduled_for_deletion_total`
 - `etl_ducklake_files_scheduled_for_deletion_bytes`
 - `etl_ducklake_oldest_scheduled_deletion_age_seconds`
@@ -160,6 +161,9 @@ These are global to the DuckLake catalog.
 
 How to read them:
 
+- `active_data_files_total` is the exact current total active data-file count
+  in the catalog. Use it when you need a true total rather than the sampled
+  per-table distribution from `etl_ducklake_table_active_data_files`.
 - rising `snapshots_total` and `oldest_snapshot_age_seconds` indicate snapshot
   retention is growing. If this is not intentional for time travel or recovery,
   tighten `expire_snapshots` or run it more frequently.
