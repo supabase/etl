@@ -104,10 +104,8 @@ impl<'a> Stream for TableCopyStream<'a> {
 /// The status update type when sending a status update message back to Postgres.
 #[derive(Debug)]
 pub enum StatusUpdateType {
-    /// Represents an update in response to a keep alive from Postgres.
+    /// Represents a standard progress update during steady-state replication.
     KeepAlive,
-    /// Represents an update immediately after a successful batch flush.
-    BatchFlush,
     /// Represents a periodic heartbeat sent while the apply loop is otherwise idle.
     PeriodicKeepAlive,
     /// Represents an update before shutdown that requires acknowledgement from Postgres.
@@ -119,7 +117,6 @@ impl StatusUpdateType {
     fn request_reply(&self) -> bool {
         match self {
             Self::KeepAlive => false,
-            Self::BatchFlush => false,
             Self::PeriodicKeepAlive => true,
             Self::ShutdownFlush => true,
         }
@@ -130,7 +127,6 @@ impl Display for StatusUpdateType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::KeepAlive => write!(f, "keep_alive"),
-            Self::BatchFlush => write!(f, "batch_flush"),
             Self::PeriodicKeepAlive => write!(f, "periodic_keep_alive"),
             Self::ShutdownFlush => write!(f, "shutdown_flush"),
         }
