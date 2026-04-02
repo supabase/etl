@@ -24,7 +24,7 @@
 //! ```
 
 use chrono::NaiveDate;
-use duckdb::{Config, Connection};
+use duckdb::Connection;
 use etl::destination::Destination;
 use etl::error::ErrorKind;
 use etl::store::both::memory::MemoryStore;
@@ -48,6 +48,10 @@ use std::time::Duration;
 #[cfg(feature = "test-utils")]
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::Url;
+
+use crate::support::ducklake::{ducklake_load_sql, open_verification_connection};
+
+mod support;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -82,67 +86,6 @@ async fn acquire_ducklake_test_hook_guard() -> OwnedSemaphorePermit {
         .acquire_owned()
         .await
         .expect("ducklake test hook semaphore should stay open")
-}
-
-fn open_verification_connection() -> Connection {
-    let duckdb_dir = tempfile::Builder::new()
-        .prefix("etl_ducklake_verify_")
-        .tempdir()
-        .expect("failed to create verification duckdb dir")
-        .keep();
-    let duckdb_path = duckdb_dir.join("verify.duckdb");
-
-    if cfg!(target_os = "linux") {
-        return Connection::open_with_flags(
-            &duckdb_path,
-            Config::default()
-                .enable_autoload_extension(false)
-                .expect("failed to disable DuckDB extension autoload"),
-        )
-        .expect("failed to open verification DuckDB");
-    }
-
-    Connection::open(&duckdb_path).expect("failed to open verification DuckDB")
-}
-
-fn ducklake_load_sql() -> String {
-    if cfg!(target_os = "linux") {
-        let platform_dir = match std::env::consts::ARCH {
-            "x86_64" => "linux_amd64",
-            "aarch64" => "linux_arm64",
-            arch => panic!("unsupported linux architecture for DuckDB test extensions: {arch}"),
-        };
-        let env_override = std::env::var_os("ETL_DUCKDB_EXTENSION_ROOT").map(PathBuf::from);
-        let candidate_roots = env_override
-            .into_iter()
-            .chain([
-                PathBuf::from("/app/duckdb_extensions"),
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/duckdb/extensions"),
-            ])
-            .collect::<Vec<_>>();
-
-        for root in candidate_roots {
-            let extension_dir = root.join("1.5.1").join(platform_dir);
-            let extension_path = extension_dir.join("ducklake.duckdb_extension");
-            let json_extension_path = extension_dir.join("json.duckdb_extension");
-            let parquet_extension_path = extension_dir.join("parquet.duckdb_extension");
-
-            if extension_path.is_file()
-                && json_extension_path.is_file()
-                && parquet_extension_path.is_file()
-            {
-                return format!(
-                    "LOAD {}; LOAD {}; LOAD {};",
-                    quote_literal(&extension_path.display().to_string()),
-                    quote_literal(&json_extension_path.display().to_string()),
-                    quote_literal(&parquet_extension_path.display().to_string())
-                );
-            }
-        }
-    }
-
-    "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet;"
-        .to_string()
 }
 
 fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {

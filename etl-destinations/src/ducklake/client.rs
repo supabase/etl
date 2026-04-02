@@ -148,7 +148,7 @@ pub(super) struct DuckLakeConnectionManager {
     /// SQL executed immediately after a new connection is opened.
     /// Loads required extensions and attaches the DuckLake catalog.
     pub(super) setup_sql: Arc<String>,
-    /// Disables DuckDB extension autoload/autoinstall when vendored Linux
+    /// Disables DuckDB extension autoload/autoinstall when vendored local
     /// extensions are required.
     pub(super) disable_extension_autoload: bool,
     /// Counts successfully initialized DuckDB connections for tests.

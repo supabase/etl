@@ -66,6 +66,8 @@ pub(crate) const ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_BYTES: &str =
     "etl_ducklake_table_active_delete_bytes";
 pub(crate) const ETL_DUCKLAKE_TABLE_DELETED_ROW_RATIO: &str =
     "etl_ducklake_table_deleted_row_ratio";
+pub(crate) const ETL_DUCKLAKE_ACTIVE_DATA_FILES_TOTAL: &str =
+    "etl_ducklake_active_data_files_total";
 pub(crate) const ETL_DUCKLAKE_SNAPSHOTS_TOTAL: &str = "etl_ducklake_snapshots_total";
 pub(crate) const ETL_DUCKLAKE_OLDEST_SNAPSHOT_AGE_SECONDS: &str =
     "etl_ducklake_oldest_snapshot_age_seconds";
@@ -136,6 +138,7 @@ impl DuckLakeTableStorageMetrics {
 
 /// Global maintenance backlog sampled from the DuckLake catalog.
 pub(super) struct DuckLakeCatalogMaintenanceMetrics {
+    pub(super) active_data_files_total: i64,
     pub(super) snapshots_total: i64,
     pub(super) oldest_snapshot_age_seconds: i64,
     pub(super) files_scheduled_for_deletion_total: i64,
@@ -257,6 +260,11 @@ pub(crate) fn register_metrics() {
             "Sampled ratio of active deleted rows to active data-file rows for one DuckLake table from the background metrics task."
         );
 
+        describe_gauge!(
+            ETL_DUCKLAKE_ACTIVE_DATA_FILES_TOTAL,
+            Unit::Count,
+            "Current total number of active data files in the DuckLake catalog."
+        );
         describe_gauge!(
             ETL_DUCKLAKE_SNAPSHOTS_TOTAL,
             Unit::Count,
@@ -407,6 +415,7 @@ async fn record_catalog_maintenance_metrics(
     blocking_slots: Arc<Semaphore>,
 ) -> EtlResult<()> {
     let metrics = query_catalog_maintenance_metrics(pool, blocking_slots).await?;
+    gauge!(ETL_DUCKLAKE_ACTIVE_DATA_FILES_TOTAL).set(metrics.active_data_files_total.max(0) as f64);
     gauge!(ETL_DUCKLAKE_SNAPSHOTS_TOTAL).set(metrics.snapshots_total.max(0) as f64);
     gauge!(ETL_DUCKLAKE_OLDEST_SNAPSHOT_AGE_SECONDS)
         .set(metrics.oldest_snapshot_age_seconds.max(0) as f64);
@@ -520,7 +529,12 @@ pub(super) fn query_catalog_maintenance_metrics_blocking(
 ) -> EtlResult<DuckLakeCatalogMaintenanceMetrics> {
     let metadata_namespace = ducklake_metadata_namespace(conn)?;
     let sql = format!(
-        r#"WITH snapshot_stats AS (
+        r#"WITH active_data_file_stats AS (
+             SELECT COUNT(*) AS active_data_files_total
+             FROM {metadata_namespace}.ducklake_data_file
+             WHERE end_snapshot IS NULL
+         ),
+         snapshot_stats AS (
              SELECT
                  COUNT(*) AS snapshots_total,
                  MIN(epoch_ms(snapshot_time)) AS oldest_snapshot_epoch_ms
@@ -535,23 +549,27 @@ pub(super) fn query_catalog_maintenance_metrics_blocking(
              LEFT JOIN {metadata_namespace}.ducklake_data_file AS data_files USING (data_file_id)
          )
          SELECT
+             active_data_files_total,
              snapshots_total,
              oldest_snapshot_epoch_ms,
              files_scheduled_for_deletion_total,
              files_scheduled_for_deletion_bytes,
              oldest_scheduled_deletion_epoch_ms
-         FROM snapshot_stats CROSS JOIN scheduled_deletion_stats;"#
+         FROM active_data_file_stats
+         CROSS JOIN snapshot_stats
+         CROSS JOIN scheduled_deletion_stats;"#
     );
     let now_epoch_ms = Utc::now().timestamp_millis();
 
     conn.query_row(&sql, [], |row| {
-        let oldest_snapshot_epoch_ms = row.get::<_, Option<i64>>(1)?;
-        let oldest_scheduled_deletion_epoch_ms = row.get::<_, Option<i64>>(4)?;
+        let oldest_snapshot_epoch_ms = row.get::<_, Option<i64>>(2)?;
+        let oldest_scheduled_deletion_epoch_ms = row.get::<_, Option<i64>>(5)?;
         Ok(DuckLakeCatalogMaintenanceMetrics {
-            snapshots_total: row.get(0)?,
+            active_data_files_total: row.get(0)?,
+            snapshots_total: row.get(1)?,
             oldest_snapshot_age_seconds: epoch_age_seconds(now_epoch_ms, oldest_snapshot_epoch_ms),
-            files_scheduled_for_deletion_total: row.get(2)?,
-            files_scheduled_for_deletion_bytes: row.get(3)?,
+            files_scheduled_for_deletion_total: row.get(3)?,
+            files_scheduled_for_deletion_bytes: row.get(4)?,
             oldest_scheduled_deletion_age_seconds: epoch_age_seconds(
                 now_epoch_ms,
                 oldest_scheduled_deletion_epoch_ms,

@@ -45,19 +45,19 @@ use crate::retry::{RetryAttempt, RetryDecision, RetryPolicy, retry_with_backoff}
 
 /// Maximum number of rows per SQL `INSERT ... VALUES` batch when nested values
 /// force the staging path to bypass DuckDB's appender API.
-const SQL_INSERT_BATCH_SIZE: usize = 256;
+const SQL_INSERT_BATCH_SIZE: usize = 128;
 /// Maximum number of primary-key predicates per SQL `DELETE` batch.
 ///
 /// Keep this small so each delete statement remains cheap while still avoiding
 /// one round-trip per deleted row.
-const SQL_DELETE_BATCH_SIZE: usize = 64;
+const SQL_DELETE_BATCH_SIZE: usize = 16;
 /// Maximum number of ordered CDC mutations grouped into one atomic DuckLake
 /// transaction.
 ///
 /// Keeping mixed insert/delete/update streams in the same batch improves
 /// insert throughput on interleaved workloads while still capping transaction
 /// lifetime for DuckLake conflict handling.
-const CDC_MUTATION_BATCH_SIZE: usize = 128;
+const CDC_MUTATION_BATCH_SIZE: usize = 8;
 /// ETL-managed marker table storing per-table applied CDC batches.
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
 /// Inline small marker-table writes in the DuckLake metadata catalog instead of
