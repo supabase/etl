@@ -204,10 +204,10 @@ where
     /// - `metadata_schema`: Optional Postgres schema for DuckLake metadata tables
     ///   (e.g. `"ducklake"`). Uses the catalog default schema when not set.
     /// - `duckdb_log`: Optional DuckDB log storage and shutdown dump paths.
-    /// - On Linux, DuckDB extensions are loaded from vendored local files when
-    ///   a vendored directory is available. The root directory can be forced
-    ///   with `ETL_DUCKDB_EXTENSION_ROOT`. Otherwise, DuckDB uses the legacy
-    ///   online `INSTALL` flow. On macOS and Windows, DuckDB always uses the
+    /// - On Linux and macOS, DuckDB extensions are loaded from vendored local
+    ///   files when a vendored directory is available. The root directory can
+    ///   be forced with `ETL_DUCKDB_EXTENSION_ROOT`. Otherwise, DuckDB uses
+    ///   the legacy online `INSTALL` flow. On Windows, DuckDB always uses the
     ///   legacy online `INSTALL` flow.
     ///
     /// Pool initialization is blocking because DuckDB extensions are loaded and
@@ -233,7 +233,7 @@ where
 
         let extension_strategy = current_duckdb_extension_strategy()?;
         let disable_extension_autoload = extension_strategy.disables_autoload();
-        if let crate::ducklake::config::DuckDbExtensionStrategy::VendoredLinux { platform_dir } =
+        if let crate::ducklake::config::DuckDbExtensionStrategy::VendoredLocal { platform_dir } =
             extension_strategy
         {
             info!(platform = platform_dir, "using vendored duckdb extensions");
@@ -993,6 +993,40 @@ mod tests {
         Url::from_file_path(path).expect("failed to convert path to file url")
     }
 
+    fn current_vendored_extension_dir() -> Option<PathBuf> {
+        let platform_dir = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64" | "amd64") => "linux_amd64",
+            ("linux", "aarch64" | "arm64") => "linux_arm64",
+            ("macos", "x86_64" | "amd64") => "osx_amd64",
+            ("macos", "aarch64" | "arm64") => "osx_arm64",
+            _ => return None,
+        };
+        let env_override = std::env::var_os("ETL_DUCKDB_EXTENSION_ROOT").map(PathBuf::from);
+        let candidate_roots = env_override
+            .into_iter()
+            .chain([
+                PathBuf::from("/app/duckdb_extensions"),
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/duckdb/extensions"),
+            ])
+            .collect::<Vec<_>>();
+
+        for root in candidate_roots {
+            let extension_dir = root.join("1.5.1").join(platform_dir);
+            let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
+            let json_extension = extension_dir.join("json.duckdb_extension");
+            let parquet_extension = extension_dir.join("parquet.duckdb_extension");
+
+            if ducklake_extension.is_file()
+                && json_extension.is_file()
+                && parquet_extension.is_file()
+            {
+                return Some(extension_dir);
+            }
+        }
+
+        None
+    }
+
     fn open_verification_connection() -> Connection {
         let duckdb_dir = tempfile::Builder::new()
             .prefix("etl_ducklake_verify_")
@@ -1001,7 +1035,7 @@ mod tests {
             .keep();
         let duckdb_path = duckdb_dir.join("verify.duckdb");
 
-        if cfg!(target_os = "linux") {
+        if current_vendored_extension_dir().is_some() {
             return Connection::open_with_flags(
                 &duckdb_path,
                 Config::default()
@@ -1015,39 +1049,17 @@ mod tests {
     }
 
     fn ducklake_load_sql() -> String {
-        if cfg!(target_os = "linux") {
-            let platform_dir = match std::env::consts::ARCH {
-                "x86_64" => "linux_amd64",
-                "aarch64" => "linux_arm64",
-                arch => panic!("unsupported linux architecture for DuckDB test extensions: {arch}"),
-            };
-            let env_override = std::env::var_os("ETL_DUCKDB_EXTENSION_ROOT").map(PathBuf::from);
-            let candidate_roots = env_override
-                .into_iter()
-                .chain([
-                    PathBuf::from("/app/duckdb_extensions"),
-                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/duckdb/extensions"),
-                ])
-                .collect::<Vec<_>>();
+        if let Some(extension_dir) = current_vendored_extension_dir() {
+            let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
+            let json_extension = extension_dir.join("json.duckdb_extension");
+            let parquet_extension = extension_dir.join("parquet.duckdb_extension");
 
-            for root in candidate_roots {
-                let extension_dir = root.join("1.5.1").join(platform_dir);
-                let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
-                let json_extension = extension_dir.join("json.duckdb_extension");
-                let parquet_extension = extension_dir.join("parquet.duckdb_extension");
-
-                if ducklake_extension.is_file()
-                    && json_extension.is_file()
-                    && parquet_extension.is_file()
-                {
-                    return format!(
-                        "LOAD {}; LOAD {}; LOAD {};",
-                        quote_literal(&ducklake_extension.display().to_string()),
-                        quote_literal(&json_extension.display().to_string()),
-                        quote_literal(&parquet_extension.display().to_string()),
-                    );
-                }
-            }
+            return format!(
+                "LOAD {}; LOAD {}; LOAD {};",
+                quote_literal(&ducklake_extension.display().to_string()),
+                quote_literal(&json_extension.display().to_string()),
+                quote_literal(&parquet_extension.display().to_string()),
+            );
         }
 
         "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet;"
@@ -1192,6 +1204,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_query_catalog_maintenance_metrics_reports_active_data_files_total() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
+        let data = path_to_file_url(&dir.path().join("data"));
+        let store = MemoryStore::new();
+        let schema = make_schema(1, "public", "users");
+        let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+        store
+            .store_table_schema(schema.clone())
+            .await
+            .expect("failed to seed schema");
+
+        let destination =
+            DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, store)
+                .await
+                .expect("failed to create destination");
+
+        destination
+            .write_table_rows(
+                schema.id,
+                vec![
+                    TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
+                    TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
+                ],
+            )
+            .await
+            .expect("failed to write rows");
+
+        let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
+        let _rows_flushed =
+            flush_table_inlined_data(&conn, &table_name, DuckLakeInlineFlushKind::Mutation)
+                .expect("failed to materialize inlined rows for catalog metrics test");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let metrics = loop {
+            let metrics = query_catalog_maintenance_metrics_blocking(&conn)
+                .expect("failed to query catalog maintenance metrics");
+            if metrics.active_data_files_total >= 1 {
+                break metrics;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for active data files total after materialization"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+
+        assert!(metrics.active_data_files_total >= 1);
+    }
+
+    #[tokio::test]
     async fn test_query_catalog_maintenance_metrics_reads_ducklake_metadata() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
@@ -1235,6 +1298,7 @@ mod tests {
         let metrics = query_catalog_maintenance_metrics_blocking(&conn)
             .expect("failed to query catalog maintenance metrics");
 
+        assert!(metrics.active_data_files_total >= 0);
         assert!(metrics.snapshots_total >= 1);
         assert!(metrics.oldest_snapshot_age_seconds >= 0);
         assert!(metrics.files_scheduled_for_deletion_total >= 0);

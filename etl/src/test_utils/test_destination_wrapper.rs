@@ -34,7 +34,7 @@ struct Inner<D> {
 }
 
 impl<D> Inner<D> {
-    async fn check_conditions(&mut self) {
+    fn check_conditions(&mut self) {
         // Check event conditions
         let events = self.events.clone();
         self.event_conditions.retain(|(condition, notify)| {
@@ -147,7 +147,7 @@ impl<D> TestDestinationWrapper<D> {
             .push((Box::new(condition), notify.clone()));
 
         // Check conditions immediately in case they're already satisfied
-        inner.check_conditions().await;
+        inner.check_conditions();
 
         TimedNotify::new(notify)
     }
@@ -197,7 +197,7 @@ impl<D> TestDestinationWrapper<D> {
         inner.combined_conditions.push((condition, notify.clone()));
 
         // Check conditions immediately in case they're already satisfied.
-        inner.check_conditions().await;
+        inner.check_conditions();
 
         TimedNotify::new(notify)
     }
@@ -304,7 +304,7 @@ where
                     .extend(table_rows);
             }
 
-            inner.check_conditions().await;
+            inner.check_conditions();
         }
 
         async_result.send(result);
@@ -352,7 +352,7 @@ where
                     inner.events.extend(events);
                 }
 
-                inner.check_conditions().await;
+                inner.check_conditions();
             }
 
             async_result.send(result);

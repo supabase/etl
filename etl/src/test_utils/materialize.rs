@@ -20,7 +20,7 @@ pub trait FromTableRow: Sized {
 /// - Insert: Add new record to collection
 /// - Update: Replace existing record with same ID, or add if not found
 /// - Delete: Remove record with matching ID
-pub async fn materialize_events<T>(events: &[Event], table_id: Option<TableId>) -> Vec<T>
+pub fn materialize_events<T>(events: &[Event], table_id: Option<TableId>) -> Vec<T>
 where
     T: FromTableRow,
 {

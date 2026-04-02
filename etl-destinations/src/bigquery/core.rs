@@ -537,11 +537,7 @@ where
         let mut append_requests = Vec::with_capacity(table_rows_batches.len());
         for (batch_index, table_rows) in table_rows_batches.into_iter().enumerate() {
             if !table_rows.is_empty() {
-                histogram!(
-                    ETL_BQ_APPEND_BATCHES_BATCH_SIZE,
-                    "pipeline_id" => self.pipeline_id.to_string()
-                )
-                .record(table_rows.len() as f64);
+                histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
 
                 let append_request = self.client.create_batch_append_request(
                     self.pipeline_id,
@@ -557,10 +553,8 @@ where
 
         if !append_requests.is_empty() {
             #[allow(unused_variables)]
-            let (bytes_sent, bytes_received) = self
-                .client
-                .append_table_batches(self.pipeline_id, append_requests)
-                .await?;
+            let (bytes_sent, bytes_received) =
+                self.client.append_table_batches(append_requests).await?;
 
             #[cfg(feature = "egress")]
             log_processed_bytes(
@@ -657,11 +651,7 @@ where
                     let sequenced_bigquery_table_id_string =
                         sequenced_bigquery_table_id.to_string();
 
-                    histogram!(
-                        ETL_BQ_APPEND_BATCHES_BATCH_SIZE,
-                        "pipeline_id" => self.pipeline_id.to_string()
-                    )
-                    .record(table_rows.len() as f64);
+                    histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
 
                     let append_request = self.client.create_batch_append_request(
                         self.pipeline_id,
@@ -676,10 +666,8 @@ where
 
                 if !append_requests.is_empty() {
                     #[allow(unused_variables)]
-                    let (bytes_sent, bytes_received) = self
-                        .client
-                        .append_table_batches(self.pipeline_id, append_requests)
-                        .await?;
+                    let (bytes_sent, bytes_received) =
+                        self.client.append_table_batches(append_requests).await?;
 
                     #[cfg(feature = "egress")]
                     log_processed_bytes(

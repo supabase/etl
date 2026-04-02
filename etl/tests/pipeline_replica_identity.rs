@@ -169,8 +169,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let parsed_table_rows =
-        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
+    let parsed_table_rows = materialize_events::<ToastTable>(&destination.get_events().await, None);
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -197,7 +196,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
     // Verify the update behavior - the large_text should be replaced with
     // default value (empty string) and small_int should be updated
     let parsed_table_rows_after_update =
-        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
+        materialize_events::<ToastTable>(&destination.get_events().await, None);
     assert_eq!(parsed_table_rows_after_update.len(), 1);
 
     let expected_updated_row = ToastTable::new(1, "", updated_int_value);
@@ -301,8 +300,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let parsed_table_rows =
-        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
+    let parsed_table_rows = materialize_events::<ToastTable>(&destination.get_events().await, None);
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -329,7 +327,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
     // Verify the update behavior - the large_text should not be replaced with
     // a default value and small_int should be updated
     let parsed_table_rows_after_update =
-        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
+        materialize_events::<ToastTable>(&destination.get_events().await, None);
     assert_eq!(parsed_table_rows_after_update.len(), 1);
 
     let expected_updated_row = ToastTable::new(1, &large_text_value, updated_int_value);
@@ -424,8 +422,7 @@ async fn update_toast_values_with_default_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let parsed_table_rows =
-        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
+    let parsed_table_rows = materialize_events::<ToastTable>(&destination.get_events().await, None);
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -452,7 +449,7 @@ async fn update_toast_values_with_default_replica_identity() {
 
     // Verify that the large_text is updated
     let parsed_table_rows_after_update =
-        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
+        materialize_events::<ToastTable>(&destination.get_events().await, None);
     assert_eq!(parsed_table_rows_after_update.len(), 1);
 
     let expected_updated_row = ToastTable::new(1, &updated_large_text_value, initial_int_value);
@@ -559,8 +556,7 @@ async fn update_non_toast_values_with_none_replica_identity() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify the initial insert worked correctly
-    let parsed_table_rows =
-        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
+    let parsed_table_rows = materialize_events::<ToastTable>(&destination.get_events().await, None);
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -704,8 +700,7 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
     insert_event_notify.notified().await;
 
     // Verify the initial insert worked correctly
-    let parsed_table_rows =
-        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
+    let parsed_table_rows = materialize_events::<ToastTable>(&destination.get_events().await, None);
     assert_eq!(parsed_table_rows.len(), 1);
 
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
@@ -732,7 +727,7 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
     // Verify the update behavior - the large_text should be replaced with
     // default value (empty string) and small_int should be updated
     let parsed_table_rows_after_update =
-        materialize_events::<ToastTable>(&destination.get_events().await, None).await;
+        materialize_events::<ToastTable>(&destination.get_events().await, None);
     assert_eq!(parsed_table_rows_after_update.len(), 1);
 
     let expected_updated_row = ToastTable::new(1, "", updated_int_value);

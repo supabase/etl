@@ -37,7 +37,7 @@ use etl::config::{
     PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
 };
 use etl::pipeline::Pipeline;
-use etl::store::both::memory::MemoryStore;
+use etl::store::both::postgres::PostgresStore;
 use etl_config::parse_ducklake_url;
 use etl_destinations::ducklake::{DuckLakeDestination, S3Config};
 use std::error::Error;
@@ -179,10 +179,11 @@ fn set_log_level() {
 async fn main_impl() -> Result<(), Box<dyn Error>> {
     set_log_level();
     init_tracing();
-    etl_telemetry::metrics::init_metrics(None)?;
+    etl_telemetry::metrics::init_metrics(None, None)?;
     install_crypto_provider();
 
     let args = AppArgs::parse();
+    let pipeline_id = 1;
 
     let pg_connection_config = PgConnectionConfig {
         host: args.db_args.db_host,
@@ -197,10 +198,10 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         keepalive: TcpKeepaliveConfig::default(),
     };
 
-    let store = MemoryStore::new();
+    let store = PostgresStore::new(pipeline_id, pg_connection_config.clone()).await?;
 
     let pipeline_config = PipelineConfig {
-        id: 1,
+        id: pipeline_id,
         publication_name: args.publication,
         pg_connection: pg_connection_config,
         batch: BatchConfig {
