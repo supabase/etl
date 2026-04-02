@@ -179,7 +179,7 @@ fn set_log_level() {
 async fn main_impl() -> Result<(), Box<dyn Error>> {
     set_log_level();
     init_tracing();
-    etl_telemetry::metrics::init_metrics(None)?;
+    etl_telemetry::metrics::init_metrics(None, None)?;
     install_crypto_provider();
 
     let args = AppArgs::parse();
