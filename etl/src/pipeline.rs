@@ -164,8 +164,7 @@ where
             table_sync_worker_permits,
             memory_monitor,
         )
-        .spawn()
-        .await?;
+        .spawn()?;
 
         self.state = PipelineState::Started { apply_worker, pool };
 

@@ -3,6 +3,7 @@ name = "etl-api"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -57,3 +58,6 @@ etl-destinations = { workspace = true, features = ["test-utils", "iceberg", "big
 etl-postgres = { workspace = true, features = ["test-utils", "sqlx"] }
 
 insta = { workspace = true, features = ["json", "redactions"] }
+
+[lints]
+workspace = true

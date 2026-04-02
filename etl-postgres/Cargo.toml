@@ -3,6 +3,7 @@ name = "etl-postgres"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -27,3 +28,6 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-postgres = { workspace = true, features = ["runtime", "with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 tracing = { workspace = true }
+
+[lints]
+workspace = true

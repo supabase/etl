@@ -127,7 +127,7 @@ impl Application {
         };
 
         let k8s_client = match kube_client_result {
-            Some(client) => match HttpK8sClient::new(client).await {
+            Some(client) => match HttpK8sClient::new(client) {
                 Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
                 Err(e) => {
                     warn!(
@@ -155,8 +155,7 @@ impl Application {
             k8s_client,
             trusted_root_certs_cache,
             feature_flags_client,
-        )
-        .await?;
+        )?;
 
         Ok(Self { port, server })
     }
@@ -214,7 +213,7 @@ pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
 ///
 /// Sets up authentication, tracing, Swagger UI, and all API endpoints.
 /// The Kubernetes client and trusted root certs cache are optional to support testing scenarios.
-pub async fn run(
+pub fn run(
     config: ApiConfig,
     listener: TcpListener,
     connection_pool: PgPool,

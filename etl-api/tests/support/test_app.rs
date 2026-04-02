@@ -603,7 +603,6 @@ async fn spawn_test_app_with_services(
         trusted_root_certs_cache,
         None,
     )
-    .await
     .expect("failed to bind address");
 
     let server_handle = tokio::spawn(server);
