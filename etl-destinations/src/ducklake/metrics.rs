@@ -299,6 +299,11 @@ pub(super) async fn spawn_ducklake_metrics_sampler(
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
     maintenance_notification_tx: mpsc::Sender<TableMaintenanceNotification>,
 ) -> EtlResult<DuckLakeMetricsSampler> {
+    let started = Instant::now();
+    info!(
+        pool_size = METRICS_POOL_SIZE,
+        "starting ducklake metrics sampler"
+    );
     let pool = Arc::new(build_warm_ducklake_pool(manager, METRICS_POOL_SIZE, "metrics").await?);
     let blocking_slots = Arc::new(Semaphore::new(METRICS_POOL_SIZE as usize));
     let (shutdown_tx, shutdown_rx) = watch::channel(());
@@ -309,6 +314,11 @@ pub(super) async fn spawn_ducklake_metrics_sampler(
         maintenance_notification_tx,
         shutdown_rx,
     ));
+    info!(
+        pool_size = METRICS_POOL_SIZE,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "ducklake metrics sampler started"
+    );
 
     Ok(DuckLakeMetricsSampler {
         shutdown_tx,

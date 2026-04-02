@@ -221,6 +221,7 @@ where
         metadata_schema: Option<String>,
         store: S,
     ) -> EtlResult<Self> {
+        let initialization_started = Instant::now();
         register_metrics();
 
         if pool_size == 0 {
@@ -233,6 +234,15 @@ where
 
         let extension_strategy = current_duckdb_extension_strategy()?;
         let disable_extension_autoload = extension_strategy.disables_autoload();
+        info!(
+            pool_size,
+            catalog_scheme = catalog_url.scheme(),
+            data_path_scheme = data_path.scheme(),
+            metadata_schema = metadata_schema.as_deref().unwrap_or("default"),
+            s3_configured = s3.is_some(),
+            extension_strategy = ?extension_strategy,
+            "starting ducklake destination"
+        );
         if let crate::ducklake::config::DuckDbExtensionStrategy::VendoredLocal { platform_dir } =
             extension_strategy
         {
@@ -252,7 +262,12 @@ where
             open_count: Arc::new(AtomicUsize::new(0)),
         });
 
+        let write_pool_started = Instant::now();
         let pool = build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?;
+        info!(
+            elapsed_ms = write_pool_started.elapsed().as_millis() as u64,
+            pool_size, "ducklake write pool ready"
+        );
         let created_tables = Arc::default();
         let mut destination = Self {
             #[cfg(feature = "test-utils")]
@@ -268,7 +283,13 @@ where
             applied_batches_table_created: Arc::default(),
         };
         gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
+        let marker_table_started = Instant::now();
         destination.ensure_applied_batches_table_exists().await?;
+        info!(
+            elapsed_ms = marker_table_started.elapsed().as_millis() as u64,
+            "ducklake applied batch marker table ready"
+        );
+        let maintenance_started = Instant::now();
         destination.maintenance_worker = Arc::new(
             spawn_ducklake_maintenance_worker(
                 DuckLakeConnectionManager {
@@ -282,6 +303,11 @@ where
             .await?
             .into(),
         );
+        info!(
+            elapsed_ms = maintenance_started.elapsed().as_millis() as u64,
+            "ducklake maintenance worker ready"
+        );
+        let metrics_started = Instant::now();
         destination.metrics_sampler = Arc::new(
             spawn_ducklake_metrics_sampler(
                 DuckLakeConnectionManager {
@@ -308,6 +334,14 @@ where
             .await?
             .into(),
         );
+        info!(
+            elapsed_ms = metrics_started.elapsed().as_millis() as u64,
+            "ducklake metrics sampler ready"
+        );
+        info!(
+            elapsed_ms = initialization_started.elapsed().as_millis() as u64,
+            pool_size, "ducklake destination started"
+        );
 
         Ok(destination)
     }
@@ -317,47 +351,100 @@ where
         let table_name = self.ensure_table_exists(table_id).await?;
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.ensure_applied_batches_table_exists().await?;
-        self.run_duckdb_blocking(DuckDbBlockingOperationKind::Foreground, move |conn| -> EtlResult<()> {
-            conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
-                etl_error!(
-                    ErrorKind::DestinationQueryFailed,
-                    "DuckLake BEGIN TRANSACTION failed",
-                    source: e
-                )
-            })?;
-
-            let result = (|| -> EtlResult<()> {
-                let delete_table_sql = format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}";"#);
-                conn.execute_batch(&delete_table_sql).map_err(|e| {
+        self.run_duckdb_blocking(
+            DuckDbBlockingOperationKind::Foreground,
+            move |conn| -> EtlResult<()> {
+                let transaction_started = Instant::now();
+                let begin_started = Instant::now();
+                conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
-                        "DuckLake DELETE failed",
-                        format_query_error_detail(&delete_table_sql, &e),
+                        "DuckLake BEGIN TRANSACTION failed",
                         source: e
                     )
                 })?;
+                info!(
+                    table = %table_name,
+                    batch_kind = DuckLakeTableBatchKind::Truncate.as_str(),
+                    batch_size = 1u64,
+                    elapsed_ms = begin_started.elapsed().as_millis() as u64,
+                    "ducklake transaction opened"
+                );
 
-                clear_applied_batch_markers_for_kind(
-                    conn,
-                    &table_name,
-                    DuckLakeTableBatchKind::Copy,
-                )?;
-                Ok(())
-            })();
+                let result = (|| -> EtlResult<()> {
+                    let delete_table_sql = format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}";"#);
+                    conn.execute_batch(&delete_table_sql).map_err(|e| {
+                        etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake DELETE failed",
+                            format_query_error_detail(&delete_table_sql, &e),
+                            source: e
+                        )
+                    })?;
 
-            match result {
-                Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
-                    etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", source: e)
-                }),
-                Err(error) => {
-                    let err = conn.execute_batch("ROLLBACK");
-                    if let Err(err) = err {
-                        tracing::error!(?err, "error rollback");
+                    clear_applied_batch_markers_for_kind(
+                        conn,
+                        &table_name,
+                        DuckLakeTableBatchKind::Copy,
+                    )?;
+                    Ok(())
+                })();
+
+                match result {
+                    Ok(()) => {
+                        let commit_started = Instant::now();
+                        conn.execute_batch("COMMIT").map_err(|e| {
+                            etl_error!(
+                                ErrorKind::DestinationQueryFailed,
+                                "DuckLake COMMIT failed",
+                                source: e
+                            )
+                        })?;
+                        info!(
+                            table = %table_name,
+                            batch_kind = DuckLakeTableBatchKind::Truncate.as_str(),
+                            batch_size = 1u64,
+                            commit_elapsed_ms = commit_started.elapsed().as_millis() as u64,
+                            elapsed_ms = transaction_started.elapsed().as_millis() as u64,
+                            "ducklake transaction committed"
+                        );
+                        Ok(())
                     }
-                    Err(error)
+                    Err(error) => {
+                        let rollback_started = Instant::now();
+                        let rollback = conn.execute_batch("ROLLBACK");
+                        let rollback_elapsed_ms = rollback_started.elapsed().as_millis() as u64;
+                        match rollback {
+                            Ok(()) => {
+                                warn!(
+                                    table = %table_name,
+                                    batch_kind = DuckLakeTableBatchKind::Truncate.as_str(),
+                                    batch_size = 1u64,
+                                    rollback_elapsed_ms,
+                                    elapsed_ms = transaction_started.elapsed().as_millis() as u64,
+                                    error = ?error,
+                                    "ducklake transaction rolled back"
+                                );
+                            }
+                            Err(rollback_error) => {
+                                tracing::error!(?rollback_error, "error rollback");
+                                warn!(
+                                    table = %table_name,
+                                    batch_kind = DuckLakeTableBatchKind::Truncate.as_str(),
+                                    batch_size = 1u64,
+                                    rollback_elapsed_ms,
+                                    elapsed_ms = transaction_started.elapsed().as_millis() as u64,
+                                    error = ?error,
+                                    rollback_error = ?rollback_error,
+                                    "ducklake transaction rollback failed"
+                                );
+                            }
+                        }
+                        Err(error)
+                    }
                 }
-            }
-        })
+            },
+        )
         .await
     }
 
@@ -945,16 +1032,18 @@ pub(super) fn flush_table_inlined_data(
     .record(flush_started.elapsed().as_secs_f64());
 
     if rows_flushed > 0 {
-        debug!(
+        info!(
             table = %table_name,
             batch_kind = inline_flush_kind.as_str(),
             rows_flushed,
+            elapsed_ms = flush_started.elapsed().as_millis() as u64,
             "ducklake inlined data flushed"
         );
     } else {
-        debug!(
+        info!(
             table = %table_name,
             batch_kind = inline_flush_kind.as_str(),
+            elapsed_ms = flush_started.elapsed().as_millis() as u64,
             "ducklake inlined data already flushed"
         );
     }
