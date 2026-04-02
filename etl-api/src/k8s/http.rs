@@ -173,7 +173,7 @@ impl HttpK8sClient {
     ///
     /// Prefers in-cluster configuration and falls back to the local kubeconfig
     /// when running outside the cluster.
-    pub async fn new(client: Client) -> Result<HttpK8sClient, K8sError> {
+    pub fn new(client: Client) -> Result<HttpK8sClient, K8sError> {
         let secrets_api: Api<Secret> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let config_maps_api: Api<ConfigMap> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let stateful_sets_api: Api<StatefulSet> =

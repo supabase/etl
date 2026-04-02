@@ -3,6 +3,7 @@ name = "etl-config"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -24,3 +25,6 @@ utoipa = { workspace = true, optional = true, features = ["macros"] }
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true
