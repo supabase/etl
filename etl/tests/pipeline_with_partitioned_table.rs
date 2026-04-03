@@ -13,10 +13,15 @@ use etl::types::EventType;
 use etl::types::PipelineId;
 use etl::types::TableId;
 use etl_postgres::below_version;
+use etl_postgres::types::TableName;
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use tokio_postgres::types::Type;
+
+fn quoted_qualified_table_name(schema: &str, table: &str) -> String {
+    TableName::new(schema.to_string(), table.to_string()).as_quoted_identifier()
+}
 
 /// Tests that initial COPY replicates all rows from a partitioned table.
 /// Only the parent table is tracked, not individual child partitions.
@@ -173,7 +178,8 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     parent_ready_notify.notified().await;
 
     let new_partition_name = format!("{}_{}", table_name.name, "p3");
-    let new_partition_qualified_name = format!("{}.{}", table_name.schema, new_partition_name);
+    let new_partition_qualified_name =
+        quoted_qualified_table_name(&table_name.schema, &new_partition_name);
     database
         .run_sql(&format!(
             "create table {} partition of {} for values from (200) to (300)",
@@ -278,7 +284,8 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
 
     // Detach and drop one child partition (DDL should not generate DML events).
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
@@ -452,7 +459,8 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
 
     // We truncate the child table.
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!("truncate table {partition_p1_qualified}"))
         .await
@@ -549,7 +557,8 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
 
     // Detach partition p1 from parent.
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
@@ -664,7 +673,8 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
 
     // Detach partition p1.
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
@@ -794,7 +804,8 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
 
     // Detach partition p1.
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
@@ -919,7 +930,8 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
 
     // Detach partition p1.
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
@@ -1060,7 +1072,8 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
 
     // Detach partition p1.
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
-    let partition_p1_qualified = format!("{}.{}", table_name.schema, partition_p1_name);
+    let partition_p1_qualified =
+        quoted_qualified_table_name(&table_name.schema, &partition_p1_name);
     database
         .run_sql(&format!(
             "alter table {} detach partition {}",
@@ -1162,7 +1175,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Create first partition (simple leaf partition) (Level 2a).
     let p1_name = format!("{}_{}", table_name.name, "p1");
-    let p1_qualified = format!("{}.{}", table_name.schema, p1_name);
+    let p1_qualified = quoted_qualified_table_name(&table_name.schema, &p1_name);
     database
         .run_sql(&format!(
             "create table {} partition of {} for values from (1) to (100)",
@@ -1174,7 +1187,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Create second partition that is itself partitioned (Level 2b).
     let p2_name = format!("{}_{}", table_name.name, "p2");
-    let p2_qualified = format!("{}.{}", table_name.schema, p2_name);
+    let p2_qualified = quoted_qualified_table_name(&table_name.schema, &p2_name);
     database
         .run_sql(&format!(
             "create table {} partition of {} for values from (100) to (200) partition by range (sub_partition_key)",
@@ -1186,7 +1199,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Create sub-partitions of p2 (Level 3).
     let p2_sub1_name = format!("{}_{}", p2_name, "sub1");
-    let p2_sub1_qualified = format!("{}.{}", table_name.schema, p2_sub1_name);
+    let p2_sub1_qualified = quoted_qualified_table_name(&table_name.schema, &p2_sub1_name);
     database
         .run_sql(&format!(
             "create table {p2_sub1_qualified} partition of {p2_qualified} for values from (1) to (50)"
@@ -1195,7 +1208,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
         .unwrap();
 
     let p2_sub2_name = format!("{}_{}", p2_name, "sub2");
-    let p2_sub2_qualified = format!("{}.{}", table_name.schema, p2_sub2_name);
+    let p2_sub2_qualified = quoted_qualified_table_name(&table_name.schema, &p2_sub2_name);
     database
         .run_sql(&format!(
             "create table {p2_sub2_qualified} partition of {p2_qualified} for values from (50) to (100)"
@@ -1205,7 +1218,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Create third partition that is itself partitioned (Level 2c).
     let p3_name = format!("{}_{}", table_name.name, "p3");
-    let p3_qualified = format!("{}.{}", table_name.schema, p3_name);
+    let p3_qualified = quoted_qualified_table_name(&table_name.schema, &p3_name);
     database
         .run_sql(&format!(
             "create table {} partition of {} for values from (200) to (300) partition by range (sub_partition_key)",
@@ -1217,7 +1230,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Create sub-partitions of p3 (Level 3).
     let p3_sub1_name = format!("{}_{}", p3_name, "sub1");
-    let p3_sub1_qualified = format!("{}.{}", table_name.schema, p3_sub1_name);
+    let p3_sub1_qualified = quoted_qualified_table_name(&table_name.schema, &p3_sub1_name);
     database
         .run_sql(&format!(
             "create table {p3_sub1_qualified} partition of {p3_qualified} for values from (1) to (50)"
@@ -1226,7 +1239,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
         .unwrap();
 
     let p3_sub2_name = format!("{}_{}", p3_name, "sub2");
-    let p3_sub2_qualified = format!("{}.{}", table_name.schema, p3_sub2_name);
+    let p3_sub2_qualified = quoted_qualified_table_name(&table_name.schema, &p3_sub2_name);
     database
         .run_sql(&format!(
             "create table {p3_sub2_qualified} partition of {p3_qualified} for values from (50) to (100)"
@@ -1236,7 +1249,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Create fourth partition (simple leaf partition) (Level 2d).
     let p4_name = format!("{}_{}", table_name.name, "p4");
-    let p4_qualified = format!("{}.{}", table_name.schema, p4_name);
+    let p4_qualified = quoted_qualified_table_name(&table_name.schema, &p4_name);
     database
         .run_sql(&format!(
             "create table {} partition of {} for values from (300) to (400)",
