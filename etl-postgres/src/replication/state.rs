@@ -1,77 +1,6 @@
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, Type, postgres::types::Oid as SqlxTableId, prelude::FromRow};
-use tokio_postgres::types::PgLsn;
 
 use crate::types::TableId;
-
-/// Replication state of a table during the ETL process.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum TableReplicationState {
-    Init,
-    DataSync,
-    FinishedCopy,
-    SyncDone {
-        #[serde(with = "lsn_serde")]
-        lsn: PgLsn,
-    },
-    Ready,
-    Errored {
-        reason: String,
-        solution: Option<String>,
-        retry_policy: RetryPolicy,
-    },
-}
-
-impl TableReplicationState {
-    /// Converts state to database storage format with type and metadata.
-    ///
-    /// Separates the state type from its associated data for efficient querying.
-    pub fn to_storage_format(
-        &self,
-    ) -> Result<(TableReplicationStateType, serde_json::Value), serde_json::Error> {
-        let state_type = match self {
-            TableReplicationState::Init => TableReplicationStateType::Init,
-            TableReplicationState::DataSync => TableReplicationStateType::DataSync,
-            TableReplicationState::FinishedCopy => TableReplicationStateType::FinishedCopy,
-            TableReplicationState::SyncDone { .. } => TableReplicationStateType::SyncDone,
-            TableReplicationState::Ready => TableReplicationStateType::Ready,
-            TableReplicationState::Errored { .. } => TableReplicationStateType::Errored,
-        };
-
-        let metadata = serde_json::to_value(self)?;
-
-        Ok((state_type, metadata))
-    }
-
-    /// Returns whether this state supports manual retry operations.
-    ///
-    /// Only errored states with [`RetryPolicy::ManualRetry`] can be manually retried.
-    pub fn supports_manual_retry(&self) -> bool {
-        matches!(
-            self,
-            TableReplicationState::Errored {
-                retry_policy: RetryPolicy::ManualRetry,
-                ..
-            }
-        )
-    }
-
-    /// Returns whether this state is in an errored state.
-    pub fn is_errored(&self) -> bool {
-        matches!(self, TableReplicationState::Errored { .. })
-    }
-}
-
-/// Retry policy for handling table replication errors.
-#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum RetryPolicy {
-    NoRetry,
-    ManualRetry,
-    TimedRetry { next_retry: DateTime<Utc> },
-}
 
 /// Database enum type for table replication states.
 #[derive(Debug, Clone, Copy, Type, PartialEq)]
@@ -98,19 +27,6 @@ pub struct TableReplicationStateRow {
 }
 
 impl TableReplicationStateRow {
-    /// Deserializes metadata field into a [`TableReplicationState`].
-    ///
-    /// Performs lazy deserialization of the metadata field when the full state
-    /// information is needed.
-    pub fn deserialize_metadata(&self) -> Result<Option<TableReplicationState>, serde_json::Error> {
-        let Some(metadata) = &self.metadata else {
-            return Ok(None);
-        };
-
-        // Try to deserialize the full state from metadata
-        serde_json::from_value(metadata.clone())
-    }
-
     /// Returns the state type without deserializing metadata.
     pub fn state_type(&self) -> TableReplicationStateType {
         self.state
@@ -141,31 +57,9 @@ where
     Ok(states)
 }
 
-/// Updates table replication state with history tracking.
-///
-/// Creates a new state record and chains it to the previous state for audit history.
-/// Accepts any executor (pool, connection, or transaction) for flexibility in
-/// transaction management.
-pub async fn update_replication_state<'c, E>(
-    executor: E,
-    pipeline_id: i64,
-    table_id: TableId,
-    state: TableReplicationState,
-) -> sqlx::Result<()>
-where
-    E: PgExecutor<'c>,
-{
-    let (state_type, metadata) = state
-        .to_storage_format()
-        .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-
-    update_replication_state_raw(executor, pipeline_id, table_id, state_type, metadata).await
-}
-
 /// Updates replication state using raw database types.
 ///
-/// Internal function that performs the actual database update with pre-serialized
-/// state data and proper history chaining.
+/// Performs the database update with pre-serialized state data and proper history chaining.
 pub async fn update_replication_state_raw<'c, E>(
     executor: E,
     pipeline_id: i64,
@@ -268,7 +162,7 @@ pub async fn rollback_replication_state(
 /// Resets table replication state to initial state.
 ///
 /// Removes all existing state entries for the table (including history) and creates a new
-/// [`TableReplicationState::Init`] entry, effectively restarting replication from scratch.
+/// Init entry, effectively restarting replication from scratch.
 /// Table mappings and schemas are preserved for use on restart.
 pub async fn reset_replication_state(
     conn: &mut sqlx::PgConnection,
@@ -288,9 +182,7 @@ pub async fn reset_replication_state(
     .await?;
 
     // Insert a new `Init` state entry and return it
-    let (state_type, metadata) = TableReplicationState::Init
-        .to_storage_format()
-        .map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    let metadata = serde_json::json!({"type": "init"});
     let row: TableReplicationStateRow = sqlx::query_as(
         r#"
         insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
@@ -300,7 +192,7 @@ pub async fn reset_replication_state(
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .bind(state_type)
+    .bind(TableReplicationStateType::Init)
     .bind(metadata)
     .fetch_one(&mut *conn)
     .await?;
@@ -321,7 +213,7 @@ where
 {
     let result = sqlx::query(
         r#"
-        delete from etl.replication_state 
+        delete from etl.replication_state
         where pipeline_id = $1
         "#,
     )
@@ -379,139 +271,4 @@ where
     .await?;
 
     Ok(ids.into_iter().map(|oid| TableId::new(oid.0)).collect())
-}
-
-/// Serde serialization helpers for Postgres LSN values.
-mod lsn_serde {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use tokio_postgres::types::PgLsn;
-
-    /// Serializes a [`PgLsn`] as a string.
-    pub fn serialize<S>(lsn: &PgLsn, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        lsn.to_string().serialize(serializer)
-    }
-
-    /// Deserializes a [`PgLsn`] from a string representation.
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<PgLsn, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse()
-            .map_err(|e| serde::de::Error::custom(format!("{e:?}")))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Utc;
-    use tokio_postgres::types::PgLsn;
-
-    #[test]
-    fn test_retry_policy_serialization() {
-        // Test NoRetry
-        let no_retry = RetryPolicy::NoRetry;
-        let json = serde_json::to_value(&no_retry).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "no_retry"}));
-
-        let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
-        assert!(matches!(deserialized, RetryPolicy::NoRetry));
-
-        // Test ManualRetry
-        let manual_retry = RetryPolicy::ManualRetry;
-        let json = serde_json::to_value(&manual_retry).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "manual_retry"}));
-
-        let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
-        assert!(matches!(deserialized, RetryPolicy::ManualRetry));
-
-        // Test TimedRetry
-        let timestamp = Utc::now();
-        let timed_retry = RetryPolicy::TimedRetry {
-            next_retry: timestamp,
-        };
-        let json = serde_json::to_value(&timed_retry).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "type": "timed_retry",
-                "next_retry": timestamp
-            })
-        );
-
-        let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
-        if let RetryPolicy::TimedRetry { next_retry } = deserialized {
-            assert_eq!(next_retry, timestamp);
-        } else {
-            panic!("Expected TimedRetry variant");
-        }
-    }
-
-    #[test]
-    fn test_table_replication_phase_serialization() {
-        // Test Init
-        let init = TableReplicationState::Init;
-        let json = serde_json::to_value(&init).unwrap();
-        assert_eq!(json, serde_json::json!({"type": "init"}));
-
-        let deserialized: TableReplicationState = serde_json::from_value(json).unwrap();
-        assert_eq!(deserialized, TableReplicationState::Init);
-
-        // Test SyncDone
-        let lsn = "0/1000000".parse::<PgLsn>().unwrap();
-        let sync_done = TableReplicationState::SyncDone { lsn };
-        let json = serde_json::to_value(&sync_done).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "type": "sync_done",
-                "lsn": "0/1000000"
-            })
-        );
-
-        let deserialized: TableReplicationState = serde_json::from_value(json).unwrap();
-        if let TableReplicationState::SyncDone {
-            lsn: deserialized_lsn,
-        } = deserialized
-        {
-            assert_eq!(deserialized_lsn, lsn);
-        } else {
-            panic!("Expected SyncDone variant");
-        }
-
-        // Test Errored
-        let errored = TableReplicationState::Errored {
-            reason: "Test error".to_string(),
-            solution: Some("Test solution".to_string()),
-            retry_policy: RetryPolicy::NoRetry,
-        };
-        let json = serde_json::to_value(&errored).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "type": "errored",
-                "reason": "Test error",
-                "solution": "Test solution",
-                "retry_policy": {"type": "no_retry"}
-            })
-        );
-
-        let deserialized: TableReplicationState = serde_json::from_value(json).unwrap();
-        if let TableReplicationState::Errored {
-            reason,
-            solution,
-            retry_policy,
-        } = deserialized
-        {
-            assert_eq!(reason, "Test error");
-            assert_eq!(solution, Some("Test solution".to_string()));
-            assert!(matches!(retry_policy, RetryPolicy::NoRetry));
-        } else {
-            panic!("Expected Errored variant");
-        }
-    }
 }
