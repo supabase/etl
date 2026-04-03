@@ -1080,11 +1080,9 @@ pub async fn get_pipeline_replication_status(
         // Extract the metadata row from the database
         let phase: TableReplicationPhase = row
             .metadata
-            .as_ref()
             .ok_or(PipelineError::MissingTableReplicationState)
             .and_then(|m| {
-                serde_json::from_value(m.clone())
-                    .map_err(PipelineError::InvalidTableReplicationState)
+                serde_json::from_value(m).map_err(PipelineError::InvalidTableReplicationState)
             })?;
 
         tables.push(TableReplicationStatus {
@@ -1248,11 +1246,9 @@ pub async fn rollback_tables(
 
         let new_phase: TableReplicationPhase = new_state_row
             .metadata
-            .as_ref()
             .ok_or(PipelineError::MissingTableReplicationState)
             .and_then(|m| {
-                serde_json::from_value(m.clone())
-                    .map_err(PipelineError::InvalidTableReplicationState)
+                serde_json::from_value(m).map_err(PipelineError::InvalidTableReplicationState)
             })?;
 
         rolled_back_tables.push(RolledBackTable {

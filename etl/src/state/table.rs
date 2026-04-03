@@ -246,8 +246,8 @@ impl TableReplicationPhase {
     }
 
     /// Deserializes a [`TableReplicationPhase`] from a state store row's metadata.
-    pub fn from_state_row(row: &state::TableReplicationStateRow) -> EtlResult<Self> {
-        let Some(metadata) = &row.metadata else {
+    pub fn from_state_row(row: state::TableReplicationStateRow) -> EtlResult<Self> {
+        let Some(metadata) = row.metadata else {
             bail!(
                 ErrorKind::InvalidState,
                 "Table replication state not found",
@@ -255,7 +255,7 @@ impl TableReplicationPhase {
             );
         };
 
-        serde_json::from_value(metadata.clone()).map_err(|err| {
+        serde_json::from_value(metadata).map_err(|err| {
             etl_error!(
                 ErrorKind::DeserializationError,
                 "Table replication state deserialization failed",
@@ -522,7 +522,7 @@ mod tests {
             prev: None,
             is_current: true,
         };
-        assert!(TableReplicationPhase::from_state_row(&row).is_err());
+        assert!(TableReplicationPhase::from_state_row(row).is_err());
     }
 
     #[test]
@@ -536,7 +536,7 @@ mod tests {
             prev: None,
             is_current: true,
         };
-        assert!(TableReplicationPhase::from_state_row(&row).is_err());
+        assert!(TableReplicationPhase::from_state_row(row).is_err());
     }
 
     #[test]
@@ -568,7 +568,7 @@ mod tests {
                 prev: None,
                 is_current: true,
             };
-            let restored = TableReplicationPhase::from_state_row(&row).unwrap();
+            let restored = TableReplicationPhase::from_state_row(row).unwrap();
 
             // Compare everything except source_err (which is lossy by design)
             assert_eq!(phase.as_type(), restored.as_type());
