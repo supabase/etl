@@ -57,7 +57,7 @@ const SQL_DELETE_BATCH_SIZE: usize = 16;
 /// Keeping mixed insert/delete/update streams in the same batch improves
 /// insert throughput on interleaved workloads while still capping transaction
 /// lifetime for DuckLake conflict handling.
-const CDC_MUTATION_BATCH_SIZE: usize = 8;
+const CDC_MUTATION_BATCH_SIZE: usize = 16;
 /// ETL-managed marker table storing per-table applied CDC batches.
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
 /// Inline small marker-table writes in the DuckLake metadata catalog instead of
@@ -1113,12 +1113,12 @@ fn apply_table_batch(
 
 /// Applies the truncate action inside an open transaction.
 fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> EtlResult<()> {
-    let sql = format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}";"#);
+    let sql = format!(r#"TRUNCATE TABLE {LAKE_CATALOG}."{table_name}";"#);
     conn.execute_batch(&sql).map_err(|error| {
-        tracing::error!(?error, "error DELETE");
+        tracing::error!(?error, "error TRUNCATE TABLE");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
-            "DuckLake DELETE failed",
+            "DuckLake TRUNCATE TABLE failed",
             format_query_error_detail(&sql, &error),
             source: error
         )

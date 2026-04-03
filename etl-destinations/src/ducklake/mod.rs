@@ -27,3 +27,8 @@ pub use batches::{
 };
 pub use config::S3Config;
 pub use core::{DuckLakeDestination, table_name_to_ducklake_table_name};
+#[cfg(feature = "test-utils")]
+pub use core::{
+    arm_pause_next_streaming_write_for_tests, release_paused_streaming_write_for_tests,
+    reset_paused_streaming_write_for_tests,
+};

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use duckdb::Config;
@@ -13,10 +13,14 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{info, warn};
 
+use crate::ducklake::config::DuckLakeSetupPlan;
 use crate::ducklake::metrics::{
     ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS, ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS,
     ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS, ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
 };
+
+/// Monotonic identifier assigned to each DuckLake connection setup attempt.
+static NEXT_CONNECTION_INIT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Timeout applied to each foreground DuckLake blocking operation.
 pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(2 * 60);
@@ -145,9 +149,8 @@ impl DuckDbQueryWatchdog {
 /// is safe: DuckLake (backed by a PostgreSQL catalog) supports concurrent writers.
 #[derive(Clone)]
 pub(super) struct DuckLakeConnectionManager {
-    /// SQL executed immediately after a new connection is opened.
-    /// Loads required extensions and attaches the DuckLake catalog.
-    pub(super) setup_sql: Arc<String>,
+    /// Ordered setup phases executed immediately after a new connection opens.
+    pub(super) setup_plan: Arc<DuckLakeSetupPlan>,
     /// Disables DuckDB extension autoload/autoinstall when vendored local
     /// extensions are required.
     pub(super) disable_extension_autoload: bool,
@@ -162,10 +165,57 @@ pub(super) struct ManagedDuckLakeConnection {
     broken: bool,
 }
 
+/// Lazily builds one dedicated DuckLake pool when a background task first needs it.
+pub(super) struct LazyDuckLakePool {
+    manager: DuckLakeConnectionManager,
+    pool_size: u32,
+    purpose: &'static str,
+    pool: Option<Arc<r2d2::Pool<DuckLakeConnectionManager>>>,
+    blocking_slots: Arc<Semaphore>,
+}
+
+impl LazyDuckLakePool {
+    /// Creates one lazy pool wrapper for a dedicated background task.
+    pub(super) fn new(
+        manager: DuckLakeConnectionManager,
+        pool_size: u32,
+        purpose: &'static str,
+    ) -> Self {
+        Self {
+            manager,
+            pool_size,
+            purpose,
+            pool: None,
+            blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
+        }
+    }
+
+    /// Returns the warmed pool, initializing it on first use.
+    pub(super) async fn get_or_init_pool(
+        &mut self,
+    ) -> EtlResult<Arc<r2d2::Pool<DuckLakeConnectionManager>>> {
+        if let Some(pool) = &self.pool {
+            return Ok(Arc::clone(pool));
+        }
+
+        let pool = Arc::new(
+            build_warm_ducklake_pool(self.manager.clone(), self.pool_size, self.purpose).await?,
+        );
+        self.pool = Some(Arc::clone(&pool));
+        Ok(pool)
+    }
+
+    /// Returns the semaphore that bounds background DuckDB concurrency.
+    pub(super) fn blocking_slots(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.blocking_slots)
+    }
+}
+
 impl DuckLakeConnectionManager {
     /// Opens one fully initialized DuckDB connection and attaches the lake catalog.
     pub(super) fn open_duckdb_connection(&self) -> Result<duckdb::Connection, duckdb::Error> {
         let started = Instant::now();
+        let connection_init_id = NEXT_CONNECTION_INIT_ID.fetch_add(1, Ordering::Relaxed);
         let conn = if self.disable_extension_autoload {
             duckdb::Connection::open_in_memory_with_flags(
                 Config::default().enable_autoload_extension(false)?,
@@ -173,10 +223,34 @@ impl DuckLakeConnectionManager {
         } else {
             duckdb::Connection::open_in_memory()?
         };
-        conn.execute_batch(&self.setup_sql)?;
+        for step in self.setup_plan.steps() {
+            let phase_started = Instant::now();
+            info!(
+                connection_init_id,
+                phase = step.label,
+                "starting ducklake duckdb connection setup phase"
+            );
+            if let Err(error) = conn.execute_batch(&step.sql) {
+                warn!(
+                    connection_init_id,
+                    phase = step.label,
+                    elapsed_ms = phase_started.elapsed().as_millis() as u64,
+                    error = ?error,
+                    "ducklake duckdb connection setup phase failed"
+                );
+                return Err(error);
+            }
+            info!(
+                connection_init_id,
+                phase = step.label,
+                elapsed_ms = phase_started.elapsed().as_millis() as u64,
+                "ducklake duckdb connection setup phase finished"
+            );
+        }
         #[cfg(feature = "test-utils")]
         self.open_count.fetch_add(1, Ordering::Relaxed);
         info!(
+            connection_init_id,
             disable_extension_autoload = self.disable_extension_autoload,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "ducklake duckdb connection initialized"
@@ -489,7 +563,7 @@ mod tests {
 
     fn make_blocking_test_manager() -> DuckLakeConnectionManager {
         DuckLakeConnectionManager {
-            setup_sql: Arc::new(String::new()),
+            setup_plan: Arc::new(DuckLakeSetupPlan::default()),
             disable_extension_autoload: cfg!(target_os = "linux"),
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),

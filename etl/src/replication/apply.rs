@@ -755,7 +755,7 @@ where
             // PRIORITY 3: Handle the pending destination write result.
             // Finishing an in-flight flush may advance progress and unblock a queued batch.
             apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
-                self.handle_flush_result(apply_result)
+                self.handle_flush_result(events_stream.as_mut(), apply_result)
                     .await?;
             }
 
@@ -1141,6 +1141,7 @@ where
     /// Handles a completed batch flush result.
     async fn handle_flush_result(
         &mut self,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         flush_result: CompletedWriteEventsResult<()>,
     ) -> EtlResult<()> {
         // We clear the state up front because this flush is no longer in flight.
@@ -1177,7 +1178,7 @@ where
         // case, we don't process syncing tables, meaning that progress it not tracked, since it's
         // not going to do anything because we can only track progress at commit boundaries.
         if let Some(commit_end_lsn) = metadata.commit_end_lsn {
-            self.process_syncing_tables_after_flush(commit_end_lsn)
+            self.process_syncing_tables_after_flush(events_stream.as_mut(), commit_end_lsn)
                 .await?;
         }
 
@@ -1800,6 +1801,7 @@ where
     /// Dispatches to worker-specific implementation based on the worker context.
     async fn process_syncing_tables_after_flush(
         &mut self,
+        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         last_commit_end_lsn: PgLsn,
     ) -> EtlResult<()> {
         // Update replication progress to notify PostgreSQL of durable flush. Only reports progress
@@ -1810,10 +1812,29 @@ where
             .update_last_flush_lsn(last_commit_end_lsn);
 
         let current_lsn = self.state.replication_progress.last_flush_lsn;
+        let last_received_lsn = self.state.last_received_lsn();
         info!(
             worker_type = %self.worker_context.worker_type(),
             %current_lsn,
             "processing syncing tables after batch flush"
+        );
+
+        // Immediately acknowledge the durable flush to PostgreSQL so a transient
+        // source connection drop cannot force the next worker attempt to resume
+        // from an older confirmed_flush_lsn and replay already-applied WAL.
+        self.send_status_update(
+            events_stream.as_mut(),
+            current_lsn,
+            true,
+            StatusUpdateType::KeepAlive,
+        )
+        .await?;
+
+        debug!(
+            worker_type = %self.worker_context.worker_type(),
+            %last_received_lsn,
+            %current_lsn,
+            "reported durable flush lsn to postgres after batch flush"
         );
 
         let exit_intent = match &mut self.worker_context {

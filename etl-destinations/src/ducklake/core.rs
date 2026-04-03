@@ -10,6 +10,7 @@ use etl::destination::Destination;
 use etl::destination::async_result::{
     TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
 };
+use etl::destination::task_set::DestinationTaskSet;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
 use etl::store::schema::SchemaStore;
@@ -20,6 +21,8 @@ use etl::types::{Event, SizeHint, TableId, TableName, TableRow, TableSchema};
 use metrics::{gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
+#[cfg(feature = "test-utils")]
+use tokio::sync::oneshot;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -37,7 +40,7 @@ use crate::ducklake::client::{
     DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
     format_query_error_detail, run_duckdb_blocking,
 };
-use crate::ducklake::config::{build_setup_sql, current_duckdb_extension_strategy};
+use crate::ducklake::config::{build_setup_plan, current_duckdb_extension_strategy};
 use crate::ducklake::maintenance::{
     DuckLakeMaintenanceWorker, TableMaintenanceNotification, TableWriteActivity,
     send_maintenance_notification, spawn_ducklake_maintenance_worker, table_write_slot,
@@ -94,6 +97,7 @@ pub struct DuckLakeDestination<S> {
     manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
+    streaming_tasks: DestinationTaskSet,
     maintenance_worker: Arc<Option<DuckLakeMaintenanceWorker>>,
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
     table_creation_slots: Arc<Semaphore>,
@@ -107,13 +111,14 @@ pub struct DuckLakeDestination<S> {
 
 impl<S> Destination for DuckLakeDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
     fn name() -> &'static str {
         "ducklake"
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
+        self.streaming_tasks.drain().await?;
         self.shutdown_maintenance_worker().await?;
         self.shutdown_metrics_sampler().await?;
         self.flush_known_tables_on_shutdown().await;
@@ -149,8 +154,15 @@ where
         events: Vec<Event>,
         async_result: WriteEventsResult<()>,
     ) -> EtlResult<()> {
-        let result = self.write_events(events).await;
-        async_result.send(result);
+        self.streaming_tasks.try_reap().await?;
+
+        let destination = self.clone();
+        self.streaming_tasks
+            .spawn(async move {
+                let result = destination.write_events(events).await;
+                async_result.send(result);
+            })
+            .await;
 
         Ok(())
     }
@@ -158,7 +170,7 @@ where
 
 impl<S> DuckLakeDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
     /// Deletes all rows from the destination table.
     ///
@@ -185,6 +197,9 @@ where
     /// This convenience wrapper preserves the pre-async-result direct-call API
     /// by awaiting the batch inline.
     pub async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+        #[cfg(feature = "test-utils")]
+        wait_if_streaming_write_paused_for_tests().await;
+
         self.write_events_inner(events).await
     }
 
@@ -248,7 +263,7 @@ where
         {
             info!(platform = platform_dir, "using vendored duckdb extensions");
         }
-        let setup_sql = Arc::new(build_setup_sql(
+        let setup_plan = Arc::new(build_setup_plan(
             &catalog_url,
             &data_path,
             s3.as_ref(),
@@ -256,7 +271,7 @@ where
         )?);
 
         let manager = Arc::new(DuckLakeConnectionManager {
-            setup_sql: Arc::clone(&setup_sql),
+            setup_plan: Arc::clone(&setup_plan),
             disable_extension_autoload,
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
@@ -274,6 +289,7 @@ where
             manager,
             pool: Arc::new(pool),
             blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
+            streaming_tasks: DestinationTaskSet::new(),
             maintenance_worker: Arc::new(None),
             metrics_sampler: Arc::new(None),
             table_creation_slots: Arc::new(Semaphore::new(1)),
@@ -293,14 +309,13 @@ where
         destination.maintenance_worker = Arc::new(
             spawn_ducklake_maintenance_worker(
                 DuckLakeConnectionManager {
-                    setup_sql: Arc::clone(&setup_sql),
+                    setup_plan: Arc::clone(&setup_plan),
                     disable_extension_autoload,
                     #[cfg(feature = "test-utils")]
                     open_count: Arc::new(AtomicUsize::new(0)),
                 },
                 Arc::clone(&destination.table_write_slots),
-            )
-            .await?
+            )?
             .into(),
         );
         info!(
@@ -311,7 +326,7 @@ where
         destination.metrics_sampler = Arc::new(
             spawn_ducklake_metrics_sampler(
                 DuckLakeConnectionManager {
-                    setup_sql: Arc::clone(&setup_sql),
+                    setup_plan: Arc::clone(&setup_plan),
                     disable_extension_autoload,
                     #[cfg(feature = "test-utils")]
                     open_count: Arc::new(AtomicUsize::new(0)),
@@ -330,8 +345,7 @@ where
                     })?
                     .notification_tx
                     .clone(),
-            )
-            .await?
+            )?
             .into(),
         );
         info!(
@@ -346,7 +360,7 @@ where
         Ok(destination)
     }
 
-    /// Deletes all rows from the destination table without dropping it.
+    /// Truncates the destination table while keeping its schema and name.
     async fn truncate_table_inner(&self, table_id: TableId) -> EtlResult<()> {
         let table_name = self.ensure_table_exists(table_id).await?;
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
@@ -372,12 +386,13 @@ where
                 );
 
                 let result = (|| -> EtlResult<()> {
-                    let delete_table_sql = format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}";"#);
-                    conn.execute_batch(&delete_table_sql).map_err(|e| {
+                    let truncate_table_sql =
+                        format!(r#"TRUNCATE TABLE {LAKE_CATALOG}."{table_name}";"#);
+                    conn.execute_batch(&truncate_table_sql).map_err(|e| {
                         etl_error!(
                             ErrorKind::DestinationQueryFailed,
-                            "DuckLake DELETE failed",
-                            format_query_error_detail(&delete_table_sql, &e),
+                            "DuckLake TRUNCATE TABLE failed",
+                            format_query_error_detail(&truncate_table_sql, &e),
                             source: e
                         )
                     })?;
@@ -980,6 +995,61 @@ where
     }
 }
 
+#[cfg(feature = "test-utils")]
+struct PausedStreamingWriteHook {
+    reached_tx: oneshot::Sender<()>,
+    resume_rx: oneshot::Receiver<()>,
+}
+
+#[cfg(feature = "test-utils")]
+static PAUSED_STREAMING_WRITE_HOOK: std::sync::LazyLock<Mutex<Option<PausedStreamingWriteHook>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+#[cfg(feature = "test-utils")]
+static PAUSED_STREAMING_WRITE_RESUME_TX: std::sync::LazyLock<Mutex<Option<oneshot::Sender<()>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// Arms a one-shot hook that pauses the next streaming write before DuckLake starts applying it.
+#[cfg(feature = "test-utils")]
+pub fn arm_pause_next_streaming_write_for_tests() -> oneshot::Receiver<()> {
+    let (reached_tx, reached_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    *PAUSED_STREAMING_WRITE_HOOK.lock() = Some(PausedStreamingWriteHook {
+        reached_tx,
+        resume_rx,
+    });
+    *PAUSED_STREAMING_WRITE_RESUME_TX.lock() = Some(resume_tx);
+    reached_rx
+}
+
+/// Releases the paused streaming-write test hook, if one is armed.
+#[cfg(feature = "test-utils")]
+pub fn release_paused_streaming_write_for_tests() {
+    if let Some(resume_tx) = PAUSED_STREAMING_WRITE_RESUME_TX.lock().take() {
+        let _ = resume_tx.send(());
+    }
+}
+
+/// Clears the paused streaming-write hook without waiting for it to be released.
+#[cfg(feature = "test-utils")]
+pub fn reset_paused_streaming_write_for_tests() {
+    PAUSED_STREAMING_WRITE_HOOK.lock().take();
+    PAUSED_STREAMING_WRITE_RESUME_TX.lock().take();
+}
+
+#[cfg(feature = "test-utils")]
+async fn wait_if_streaming_write_paused_for_tests() {
+    let Some(PausedStreamingWriteHook {
+        reached_tx,
+        resume_rx,
+    }) = PAUSED_STREAMING_WRITE_HOOK.lock().take()
+    else {
+        return;
+    };
+
+    let _ = reached_tx.send(());
+    let _ = resume_rx.await;
+}
+
 /// Converts a Postgres [`TableName`] to a DuckLake table name string.
 ///
 /// Escapes underscores in schema and table name components by doubling them,
@@ -1102,13 +1172,8 @@ mod tests {
         for root in candidate_roots {
             let extension_dir = root.join("1.5.1").join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
-            let json_extension = extension_dir.join("json.duckdb_extension");
-            let parquet_extension = extension_dir.join("parquet.duckdb_extension");
 
-            if ducklake_extension.is_file()
-                && json_extension.is_file()
-                && parquet_extension.is_file()
-            {
+            if ducklake_extension.is_file() {
                 return Some(extension_dir);
             }
         }
@@ -1140,19 +1205,14 @@ mod tests {
     fn ducklake_load_sql() -> String {
         if let Some(extension_dir) = current_vendored_extension_dir() {
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
-            let json_extension = extension_dir.join("json.duckdb_extension");
-            let parquet_extension = extension_dir.join("parquet.duckdb_extension");
 
             return format!(
-                "LOAD {}; LOAD {}; LOAD {};",
+                "LOAD {};",
                 quote_literal(&ducklake_extension.display().to_string()),
-                quote_literal(&json_extension.display().to_string()),
-                quote_literal(&parquet_extension.display().to_string()),
             );
         }
 
-        "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet;"
-            .to_string()
+        "INSTALL ducklake; LOAD ducklake;".to_string()
     }
 
     fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
