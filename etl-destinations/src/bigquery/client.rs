@@ -692,7 +692,6 @@ impl BigQueryClient {
     /// outcomes and converts failures into ETL errors.
     pub async fn append_table_batches(
         &self,
-        pipeline_id: PipelineId,
         append_requests: Vec<BatchAppendRequest<BigQueryTableRow>>,
     ) -> EtlResult<(usize, usize)> {
         if append_requests.is_empty() {
@@ -715,8 +714,8 @@ impl BigQueryClient {
             .map_err(|err| {
                 let error_code = error_code_label(&err);
 
-                counter!(ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
-                    "pipeline_id" => pipeline_id.to_string(),
+                counter!(
+                    ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
                     "error_code" => error_code
                 )
                 .increment(1);
@@ -749,7 +748,7 @@ impl BigQueryClient {
                         error_count, "batch has row errors, failing append operation"
                     );
 
-                    counter!(ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL, "pipeline_id" => pipeline_id.to_string())
+                    counter!(ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL)
                         .increment(error_count as u64);
 
                     for row_error in row_errors {
@@ -764,8 +763,8 @@ impl BigQueryClient {
                         "batch failed with request error after library retries"
                     );
 
-                    counter!(ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
-                        "pipeline_id" => pipeline_id.to_string(),
+                    counter!(
+                        ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
                         "error_code" => error_code
                     )
                     .increment(1);
