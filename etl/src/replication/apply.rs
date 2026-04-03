@@ -2064,7 +2064,7 @@ mod apply_worker {
                     match result {
                         ShutdownResult::Ok(result) => {
                             let final_phase = result.replication_phase();
-                            if final_phase.as_type().is_errored() {
+                            if final_phase.is_errored() {
                                 info!(
                                     worker_type = %WorkerType::Apply,
                                     table_id = table_id.0,
@@ -2387,7 +2387,7 @@ mod apply_worker {
                     match result {
                         ShutdownResult::Ok(result) => {
                             let final_phase = result.replication_phase();
-                            if final_phase.as_type().is_errored() {
+                            if final_phase.is_errored() {
                                 info!(
                                     worker_type = %WorkerType::Apply,
                                     table_id = table_id.0,
