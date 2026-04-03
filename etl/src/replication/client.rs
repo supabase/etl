@@ -1463,6 +1463,7 @@ impl PgReplicationClient {
         row_filter: Option<&str>,
         partition: &CtidPartition,
     ) -> String {
+        let quoted_table_name = table_name.as_quoted_identifier();
         let ctid_predicate = match partition {
             CtidPartition::OpenStart { end_tid } => {
                 format!("ctid < {}::tid", quote_literal(end_tid))
@@ -1481,11 +1482,11 @@ impl PgReplicationClient {
 
         if let Some(row_filter) = row_filter {
             format!(
-                "copy (select {column_list} from {table_name} where {ctid_predicate} and ({row_filter})) to stdout with (format text);",
+                "copy (select {column_list} from {quoted_table_name} where {ctid_predicate} and ({row_filter})) to stdout with (format text);",
             )
         } else {
             format!(
-                "copy (select {column_list} from {table_name} where {ctid_predicate}) to stdout with (format text);",
+                "copy (select {column_list} from {quoted_table_name} where {ctid_predicate}) to stdout with (format text);",
             )
         }
     }
@@ -1641,5 +1642,42 @@ impl PgReplicationClient {
                 )
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CtidPartition, PgReplicationClient};
+    use etl_postgres::types::TableName;
+
+    #[test]
+    fn build_ctid_copy_query_quotes_mixed_case_table_names() {
+        let query = PgReplicationClient::build_ctid_copy_query(
+            &TableName::new("public".to_string(), "User".to_string()),
+            "\"id\", \"email\"",
+            None,
+            &CtidPartition::OpenEnd {
+                start_tid: "(0,1)".to_string(),
+            },
+        );
+
+        assert!(query.contains("from public.\"User\""));
+        assert!(!query.contains("from public.User"));
+    }
+
+    #[test]
+    fn build_ctid_copy_query_quotes_mixed_case_table_names_with_row_filter() {
+        let query = PgReplicationClient::build_ctid_copy_query(
+            &TableName::new("public".to_string(), "CommentReadStatus".to_string()),
+            "\"id\"",
+            Some("\"tenantId\" is not null"),
+            &CtidPartition::OpenStart {
+                end_tid: "(10,1)".to_string(),
+            },
+        );
+
+        assert!(query.contains("from public.\"CommentReadStatus\""));
+        assert!(query.contains("and (\"tenantId\" is not null)"));
+        assert!(!query.contains("from public.CommentReadStatus"));
     }
 }
