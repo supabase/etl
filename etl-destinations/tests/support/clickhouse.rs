@@ -12,7 +12,7 @@
 /// Fields must match the SELECT column list in the test query exactly.
 #[derive(clickhouse::Row, serde::Deserialize, Debug, Clone)]
 pub struct AllTypesRow {
-    pub id: i32,
+    pub id: i64,
     pub smallint_col: i16,
     pub integer_col: i32,
     pub bigint_col: i64,
