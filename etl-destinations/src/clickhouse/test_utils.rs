@@ -172,9 +172,22 @@ impl ClickHouseTestDatabase {
 
 impl Drop for ClickHouseTestDatabase {
     fn drop(&mut self) {
-        if let Ok(handle) = Handle::try_current() {
-            handle.block_on(self.drop_database());
-        }
+        let root_client = self.root_client.clone();
+        let database = self.database.clone();
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tokio::task::block_in_place(move || {
+                Handle::current().block_on(async move {
+                    if let Err(error) = root_client
+                        .query(&format!("DROP DATABASE IF EXISTS `{database}`"))
+                        .execute()
+                        .await
+                    {
+                        eprintln!("warning: failed to drop test ClickHouse database: {error}");
+                    }
+                });
+            });
+        }));
     }
 }
 
