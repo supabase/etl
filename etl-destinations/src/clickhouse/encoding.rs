@@ -69,7 +69,7 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> ClickHouseValue {
         Cell::Time(t) => ClickHouseValue::String(t.to_string()),
         Cell::Timestamp(dt) => ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()),
         Cell::TimestampTz(dt) => ClickHouseValue::DateTime64(dt.timestamp_micros()),
-        Cell::Uuid(u) => ClickHouseValue::Uuid(u.to_bytes_le()),
+        Cell::Uuid(u) => ClickHouseValue::Uuid(*u.as_bytes()),
         Cell::Json(j) => ClickHouseValue::String(j.to_string()),
         Cell::Bytes(b) => ClickHouseValue::String(bytes_to_hex(b)),
         Cell::String(s) => ClickHouseValue::String(s),
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn test_cell_to_clickhouse_value_uuid() {
         let u = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let expected_bytes = u.to_bytes_le();
+        let expected_bytes = *u.as_bytes();
         if let ClickHouseValue::Uuid(bytes) = cell_to_clickhouse_value(Cell::Uuid(u)) {
             assert_eq!(bytes, expected_bytes);
         } else {
