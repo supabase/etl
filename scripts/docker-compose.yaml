@@ -37,6 +37,25 @@ services:
       timeout: 5s
       retries: 5
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-etl}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-etl}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+    volumes:
+      - ${CLICKHOUSE_DATA_VOLUME:-clickhouse_data}:/var/lib/clickhouse
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" --query \"SELECT 1\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   catalog-postgres:
       image: postgres:${LAKEKEEPER_POSTGRES_VERSION:-18}
       environment:
@@ -164,6 +183,8 @@ services:
 
 volumes:
   postgres_data:
+    driver: local
+  clickhouse_data:
     driver: local
   lakekeeper_postgres_data:
     driver: local
