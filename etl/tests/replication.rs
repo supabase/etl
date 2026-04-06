@@ -17,6 +17,7 @@ use etl_postgres::types::ColumnSchema;
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
+use pg_escape::quote_identifier;
 use postgres_replication::LogicalReplicationStream;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use tokio::pin;
@@ -434,13 +435,16 @@ async fn test_table_copy_stream_respects_row_filter() {
 
     database
         .run_sql(&format!(
-            "alter table {test_table_name} replica identity full"
+            "alter table {} replica identity full",
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
     database
         .run_sql(&format!(
-            "create publication test_pub for table {test_table_name} where (age >= 18)"
+            "create publication {} for table {} where (age >= 18)",
+            quote_identifier("test_pub"),
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
@@ -515,7 +519,8 @@ async fn test_table_copy_stream_respects_column_filter() {
 
     database
         .run_sql(&format!(
-            "alter table {test_table_name} replica identity full"
+            "alter table {} replica identity full",
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
@@ -524,7 +529,9 @@ async fn test_table_copy_stream_respects_column_filter() {
     let publication_name = "test_pub";
     database
         .run_sql(&format!(
-            "create publication {publication_name} for table {test_table_name} (id, name, age)"
+            "create publication {} for table {} (id, name, age)",
+            quote_identifier(publication_name),
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
@@ -536,13 +543,15 @@ async fn test_table_copy_stream_respects_column_filter() {
     // Insert test data with all columns.
     database
         .run_sql(&format!(
-            "insert into {test_table_name} (name, age, email) values ('Alice', 25, 'alice@example.com')"
+            "insert into {} (name, age, email) values ('Alice', 25, 'alice@example.com')",
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
     database
         .run_sql(&format!(
-            "insert into {test_table_name} (name, age, email) values ('Bob', 30, 'bob@example.com')"
+            "insert into {} (name, age, email) values ('Bob', 30, 'bob@example.com')",
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
@@ -613,13 +622,16 @@ async fn test_table_copy_stream_no_row_filter() {
 
     database
         .run_sql(&format!(
-            "alter table {test_table_name} replica identity full"
+            "alter table {} replica identity full",
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
     database
         .run_sql(&format!(
-            "create publication test_pub for table {test_table_name}"
+            "create publication {} for table {}",
+            quote_identifier("test_pub"),
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
