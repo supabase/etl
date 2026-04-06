@@ -1,4 +1,5 @@
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use pg_escape::quote_identifier;
 use std::num::NonZeroI32;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -73,6 +74,7 @@ impl<G: GenericClient> PgDatabase<G> {
         table_names: &[TableName],
         publish_via_partition_root: bool,
     ) -> Result<(), tokio_postgres::Error> {
+        let quoted_publication_name = quote_identifier(publication_name);
         let table_names = table_names
             .iter()
             .map(TableName::as_quoted_identifier)
@@ -80,7 +82,7 @@ impl<G: GenericClient> PgDatabase<G> {
 
         let create_publication_query = format!(
             "create publication {} for table {} with (publish_via_partition_root = {})",
-            publication_name,
+            quoted_publication_name,
             table_names.join(", "),
             publish_via_partition_root
         );
@@ -109,15 +111,17 @@ impl<G: GenericClient> PgDatabase<G> {
         schema: Option<&str>,
     ) -> Result<(), tokio_postgres::Error> {
         let client = self.client.as_ref().unwrap();
+        let quoted_publication_name = quote_identifier(publication_name);
 
         if requires_version!(self.server_version, POSTGRES_15) {
             // PostgreSQL 15+ supports FOR ALL TABLES IN SCHEMA syntax
             let create_publication_query = match schema {
                 Some(schema_name) => format!(
-                    "create publication {publication_name} for tables in schema {schema_name} with (publish_via_partition_root = true)"
+                    "create publication {quoted_publication_name} for tables in schema {} with (publish_via_partition_root = true)",
+                    quote_identifier(schema_name),
                 ),
                 None => format!(
-                    "create publication {publication_name} for all tables with (publish_via_partition_root = true)"
+                    "create publication {quoted_publication_name} for all tables with (publish_via_partition_root = true)"
                 ),
             };
 
@@ -126,26 +130,29 @@ impl<G: GenericClient> PgDatabase<G> {
             // PostgreSQL 14 and earlier: create publication and add tables individually
             match schema {
                 Some(schema_name) => {
-                    let create_pub_query = format!("create publication {publication_name}");
+                    let create_pub_query = format!("create publication {quoted_publication_name}");
                     client.execute(&create_pub_query, &[]).await?;
 
-                    let tables_query = format!(
-                        "select schemaname, tablename from pg_tables where schemaname = '{schema_name}'"
-                    );
-                    let rows = client.query(&tables_query, &[]).await?;
+                    let rows = client
+                        .query(
+                            "select schemaname, tablename from pg_tables where schemaname = $1",
+                            &[&schema_name],
+                        )
+                        .await?;
 
                     for row in rows {
                         let schema: String = row.get(0);
                         let table: String = row.get(1);
                         let add_table_query = format!(
-                            "alter publication {publication_name} add table {schema}.{table}"
+                            "alter publication {quoted_publication_name} add table {}",
+                            TableName::new(schema, table).as_quoted_identifier()
                         );
                         client.execute(&add_table_query, &[]).await?;
                     }
                 }
                 None => {
                     let create_publication_query = format!(
-                        "create publication {publication_name} for all tables with (publish_via_partition_root = true)"
+                        "create publication {quoted_publication_name} for all tables with (publish_via_partition_root = true)"
                     );
                     client.execute(&create_publication_query, &[]).await?;
                 }

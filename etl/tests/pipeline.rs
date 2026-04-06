@@ -26,6 +26,7 @@ use etl_postgres::tokio::test_utils::{ReplicationSlotState, TableModification, i
 use etl_postgres::types::{ColumnSchema, TableId};
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
+use pg_escape::{quote_identifier, quote_literal};
 use rand::random;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -121,7 +122,8 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     // Delete the apply worker slot to simulate slot loss.
     database
         .run_sql(&format!(
-            "select pg_drop_replication_slot('{apply_slot_name}')"
+            "select pg_drop_replication_slot({})",
+            quote_literal(&apply_slot_name)
         ))
         .await
         .unwrap();
@@ -422,7 +424,7 @@ async fn table_copy_with_row_filter_and_parallel_connections() {
     database
         .run_sql(&format!(
             "create publication {} for table {} where (age >= 18)",
-            publication_name,
+            quote_identifier(&publication_name),
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1724,7 +1726,8 @@ async fn pipeline_respects_column_level_publication() {
     let publication_name = "test_pub".to_string();
     database
         .run_sql(&format!(
-            "create publication {publication_name} for table {} (id, name, age)",
+            "create publication {} for table {} (id, name, age)",
+            quote_identifier(&publication_name),
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1821,7 +1824,7 @@ async fn empty_tables_are_created_at_destination() {
     database
         .run_sql(&format!(
             "create publication {} for table {}",
-            publication_name,
+            quote_identifier(&publication_name),
             table_name.as_quoted_identifier()
         ))
         .await
