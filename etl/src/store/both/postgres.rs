@@ -258,7 +258,7 @@ impl StateStore for PostgresStore {
             state::get_table_replication_state_rows(&self.pool, self.pipeline_id as i64).await?;
 
         let mut table_states: BTreeMap<TableId, TableReplicationPhase> = BTreeMap::new();
-        for row in &replication_state_rows {
+        for row in replication_state_rows {
             let table_id = TableId::new(row.table_id.0);
             let phase = TableReplicationPhase::from_state_row(row)?;
             table_states.insert(table_id, phase);
@@ -298,13 +298,13 @@ impl StateStore for PostgresStore {
 
         // Perform all database updates in a single transaction
         let mut tx = self.pool.begin().await?;
-        for (table_id, state_type, metadata) in &db_updates {
+        for (table_id, state_type, metadata) in db_updates {
             state::update_replication_state_raw(
                 &mut *tx,
                 self.pipeline_id as i64,
-                *table_id,
-                *state_type,
-                metadata.clone(),
+                table_id,
+                state_type,
+                metadata,
             )
             .await?;
         }
@@ -339,7 +339,7 @@ impl StateStore for PostgresStore {
                     )
                 })?;
 
-        let restored_phase = TableReplicationPhase::from_state_row(&restored_row)?;
+        let restored_phase = TableReplicationPhase::from_state_row(restored_row)?;
 
         let mut inner = self.inner.lock().await;
         inner.set_table_state(table_id, restored_phase.clone());
