@@ -8,6 +8,7 @@ use etl_api::routes::pipelines::{
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
+use pg_escape::quote_identifier;
 use reqwest::StatusCode;
 use sqlx::PgPool;
 use sqlx::postgres::types::Oid;
@@ -178,7 +179,8 @@ async fn create_test_table(source_db_pool: &PgPool, table_name: &str) -> Oid {
         .unwrap();
 
     sqlx::query(&format!(
-        "create table if not exists test.{table_name} (id serial primary key, name text)"
+        "create table if not exists test.{} (id serial primary key, name text)",
+        quote_identifier(table_name)
     ))
     .execute(source_db_pool)
     .await

@@ -1751,6 +1751,7 @@ dependencies = [
  "postgres-replication",
  "rand 0.9.2",
  "rustls",
+ "serde",
  "serde_json",
  "sqlx",
  "sysinfo",

@@ -3,6 +3,7 @@ name = "etl"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -20,7 +21,7 @@ etl-postgres = { workspace = true, features = ["tokio", "replication"] }
 aws-lc-rs = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true }
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
 const-oid = { workspace = true, default-features = false }
 fail = { workspace = true }
 futures = { workspace = true }
@@ -29,6 +30,7 @@ pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
+serde = { workspace = true, features = ["derive", "alloc"] }
 serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
 sysinfo = { workspace = true, features = ["system"] }
@@ -45,3 +47,6 @@ etl-postgres = { workspace = true, features = ["tokio", "replication", "test-uti
 etl-telemetry = { workspace = true }
 
 rand = { workspace = true, features = ["thread_rng"] }
+
+[lints]
+workspace = true

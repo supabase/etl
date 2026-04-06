@@ -19,7 +19,8 @@ options:
   --output-root DIR  Root directory to populate. Defaults to vendor/duckdb/extensions.
                      This is useful for optional local testing; Docker builds
                      override it and fetch extensions inside the image build.
-  --platform NAME    Platform to fetch. May be repeated. Defaults to linux_amd64 and linux_arm64.
+  --platform NAME    Platform to fetch. May be repeated. Defaults to linux_amd64,
+                     linux_arm64, osx_amd64, and osx_arm64.
   --help             Show this help.
 EOF
 }
@@ -47,7 +48,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${#platforms[@]} -eq 0 ]]; then
-  platforms=("linux_amd64" "linux_arm64")
+  platforms=("linux_amd64" "linux_arm64" "osx_amd64" "osx_arm64")
 fi
 
 VENDOR_ROOT="${OUTPUT_ROOT}/${DUCKDB_VERSION}"

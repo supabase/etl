@@ -4,6 +4,7 @@ use actix_web::{
     post,
     web::{Data, Json, Path},
 };
+use etl::state::table::{RetryPolicy, TableReplicationPhase};
 use etl_postgres::replication::{
     TableLookupError, get_table_names_from_table_ids, health, lag, state,
 };
@@ -301,29 +302,28 @@ pub enum SimpleRetryPolicy {
     },
 }
 
-impl From<state::TableReplicationState> for SimpleTableReplicationState {
-    fn from(state: state::TableReplicationState) -> Self {
-        match state {
-            state::TableReplicationState::Init => SimpleTableReplicationState::Queued,
-            state::TableReplicationState::DataSync => SimpleTableReplicationState::CopyingTable,
-            state::TableReplicationState::FinishedCopy => SimpleTableReplicationState::CopiedTable,
-            state::TableReplicationState::SyncDone { .. } => {
-                SimpleTableReplicationState::FollowingWal
-            }
-            state::TableReplicationState::Ready => SimpleTableReplicationState::FollowingWal,
-            state::TableReplicationState::Errored {
+impl From<TableReplicationPhase> for SimpleTableReplicationState {
+    fn from(phase: TableReplicationPhase) -> Self {
+        match phase {
+            TableReplicationPhase::Init => SimpleTableReplicationState::Queued,
+            TableReplicationPhase::DataSync => SimpleTableReplicationState::CopyingTable,
+            TableReplicationPhase::FinishedCopy => SimpleTableReplicationState::CopiedTable,
+            TableReplicationPhase::SyncDone { .. }
+            | TableReplicationPhase::SyncWait { .. }
+            | TableReplicationPhase::Catchup { .. } => SimpleTableReplicationState::FollowingWal,
+            TableReplicationPhase::Ready => SimpleTableReplicationState::FollowingWal,
+            TableReplicationPhase::Errored {
                 reason,
                 solution,
                 retry_policy,
+                ..
             } => {
                 let simple_retry_policy = match retry_policy {
-                    state::RetryPolicy::NoRetry => SimpleRetryPolicy::NoRetry,
-                    state::RetryPolicy::ManualRetry => SimpleRetryPolicy::ManualRetry,
-                    state::RetryPolicy::TimedRetry { next_retry } => {
-                        SimpleRetryPolicy::TimedRetry {
-                            next_retry: next_retry.to_rfc3339(),
-                        }
-                    }
+                    RetryPolicy::NoRetry => SimpleRetryPolicy::NoRetry,
+                    RetryPolicy::ManualRetry => SimpleRetryPolicy::ManualRetry,
+                    RetryPolicy::TimedRetry { next_retry } => SimpleRetryPolicy::TimedRetry {
+                        next_retry: next_retry.to_rfc3339(),
+                    },
                 };
 
                 SimpleTableReplicationState::Error {
@@ -1078,15 +1078,17 @@ pub async fn get_pipeline_replication_status(
             .ok_or(TableLookupError::TableNotFound(table_id))?;
 
         // Extract the metadata row from the database
-        let table_replication_state = row
-            .deserialize_metadata()
-            .map_err(PipelineError::InvalidTableReplicationState)?
-            .ok_or(PipelineError::MissingTableReplicationState)?;
+        let phase: TableReplicationPhase = row
+            .metadata
+            .ok_or(PipelineError::MissingTableReplicationState)
+            .and_then(|m| {
+                serde_json::from_value(m).map_err(PipelineError::InvalidTableReplicationState)
+            })?;
 
         tables.push(TableReplicationStatus {
             table_id: table_id.into_inner(),
             table_name: table_name.to_string(),
-            state: table_replication_state.into(),
+            state: phase.into(),
             table_sync_lag: lag_metrics.table_sync.remove(&table_id).map(Into::into),
         });
     }
@@ -1183,8 +1185,10 @@ pub async fn rollback_tables(
             // All errored tables mode, find all tables in errored state
             let mut errored_table_ids = Vec::new();
             for row in &state_rows {
-                if let Ok(Some(state)) = row.deserialize_metadata()
-                    && state.is_errored()
+                if let Some(metadata) = &row.metadata
+                    && let Ok(phase) =
+                        serde_json::from_value::<TableReplicationPhase>(metadata.clone())
+                    && phase.is_errored()
                 {
                     errored_table_ids.push(row.table_id.0);
                 }
@@ -1240,14 +1244,16 @@ pub async fn rollback_tables(
             }
         };
 
-        let new_state = new_state_row
-            .deserialize_metadata()
-            .map_err(PipelineError::InvalidTableReplicationState)?
-            .ok_or(PipelineError::MissingTableReplicationState)?;
+        let new_phase: TableReplicationPhase = new_state_row
+            .metadata
+            .ok_or(PipelineError::MissingTableReplicationState)
+            .and_then(|m| {
+                serde_json::from_value(m).map_err(PipelineError::InvalidTableReplicationState)
+            })?;
 
         rolled_back_tables.push(RolledBackTable {
             table_id,
-            new_state: new_state.into(),
+            new_state: new_phase.into(),
         });
     }
 

@@ -126,6 +126,22 @@ In this example:
 - `--duckdb-log-storage-path` enables `CALL enable_logging(storage_path = ...)` for each DuckDB connection.
 - `--duckdb-log-dump-path` writes a CSV dump of `SELECT * FROM duckdb_logs` during graceful shutdown.
 
+### Vendored DuckDB extensions
+
+For offline local development on Linux or macOS, you can prefetch the required
+DuckDB extensions into the repository and point the destination at them:
+
+```bash
+./scripts/vendor_duckdb_extensions.sh
+ETL_DUCKDB_EXTENSION_ROOT="$(pwd)/vendor/duckdb/extensions" \
+  cargo run --bin ducklake -p etl-examples -- [flags]
+```
+
+If `ETL_DUCKDB_EXTENSION_ROOT` is unset, the destination also checks the
+repository-local `vendor/duckdb/extensions` directory automatically. Docker
+images do not need the env var because they already ship vendored extensions at
+`/app/duckdb_extensions`.
+
 ### Run (S3 / S3-compatible data)
 
 ```bash
