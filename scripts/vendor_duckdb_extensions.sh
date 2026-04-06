@@ -7,7 +7,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_ROOT="${REPO_ROOT}/vendor/duckdb/extensions"
 
 platforms=()
-extensions=("ducklake" "httpfs" "json" "parquet" "postgres_scanner")
+extensions=("ducklake" "httpfs" "postgres_scanner")
 
 usage() {
   cat <<'EOF'

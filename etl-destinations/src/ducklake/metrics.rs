@@ -13,7 +13,7 @@ use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tracing::{info, warn};
 
 use crate::ducklake::client::{
-    DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
+    DuckDbBlockingOperationKind, DuckLakeConnectionManager, LazyDuckLakePool,
     format_query_error_detail, run_duckdb_blocking,
 };
 use crate::ducklake::maintenance::{
@@ -31,6 +31,8 @@ const METRICS_POOL_SIZE: u32 = 1;
 const METRICS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) const ETL_DUCKLAKE_POOL_SIZE: &str = "etl_ducklake_pool_size";
+pub(crate) const ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS: &str =
+    "etl_ducklake_blocking_queue_wait_seconds";
 pub(crate) const ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS: &str =
     "etl_ducklake_blocking_slot_wait_seconds";
 pub(crate) const ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS: &str =
@@ -152,6 +154,11 @@ pub(crate) fn register_metrics() {
             "Configured size of the warm DuckLake connection pool."
         );
 
+        describe_histogram!(
+            ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS,
+            Unit::Seconds,
+            "Time spent waiting in tokio's blocking task queue after a DuckLake slot is acquired."
+        );
         describe_histogram!(
             ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS,
             Unit::Seconds,
@@ -285,22 +292,29 @@ pub(crate) fn register_metrics() {
     });
 }
 
-/// Builds the dedicated metrics pool and spawns the periodic DuckLake sampler task.
-pub(super) async fn spawn_ducklake_metrics_sampler(
+/// Spawns the periodic DuckLake sampler task with lazy pool initialization.
+pub(super) fn spawn_ducklake_metrics_sampler(
     manager: DuckLakeConnectionManager,
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
     maintenance_notification_tx: mpsc::Sender<TableMaintenanceNotification>,
 ) -> EtlResult<DuckLakeMetricsSampler> {
-    let pool = Arc::new(build_warm_ducklake_pool(manager, METRICS_POOL_SIZE, "metrics").await?);
-    let blocking_slots = Arc::new(Semaphore::new(METRICS_POOL_SIZE as usize));
+    let started = Instant::now();
+    info!(
+        pool_size = METRICS_POOL_SIZE,
+        "starting ducklake metrics sampler"
+    );
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let handle = tokio::spawn(run_ducklake_metrics_sampler(
-        pool,
-        blocking_slots,
+        manager,
         created_tables,
         maintenance_notification_tx,
         shutdown_rx,
     ));
+    info!(
+        pool_size = METRICS_POOL_SIZE,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "ducklake metrics sampler started"
+    );
 
     Ok(DuckLakeMetricsSampler {
         shutdown_tx,
@@ -310,13 +324,16 @@ pub(super) async fn spawn_ducklake_metrics_sampler(
 
 /// Periodically samples DuckLake metadata on a dedicated connection pool.
 async fn run_ducklake_metrics_sampler(
-    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
-    blocking_slots: Arc<Semaphore>,
+    manager: DuckLakeConnectionManager,
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
     maintenance_notification_tx: mpsc::Sender<TableMaintenanceNotification>,
     mut shutdown_rx: watch::Receiver<()>,
 ) {
-    let mut interval = tokio::time::interval(METRICS_POLL_INTERVAL);
+    let mut lazy_pool = LazyDuckLakePool::new(manager, METRICS_POOL_SIZE, "metrics");
+    let mut interval = tokio::time::interval_at(
+        Instant::now() + METRICS_POLL_INTERVAL,
+        METRICS_POLL_INTERVAL,
+    );
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
@@ -327,6 +344,14 @@ async fn run_ducklake_metrics_sampler(
                 break;
             }
             _ = interval.tick() => {
+                let pool = match lazy_pool.get_or_init_pool().await {
+                    Ok(pool) => pool,
+                    Err(error) => {
+                        warn!(error = ?error, "ducklake metrics pool initialization failed");
+                        continue;
+                    }
+                };
+                let blocking_slots = lazy_pool.blocking_slots();
                 if let Err(error) =
                     record_catalog_maintenance_metrics(Arc::clone(&pool), Arc::clone(&blocking_slots)).await
                 {
@@ -620,4 +645,52 @@ fn resolve_ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<S
         quote_identifier(&metadata_catalog),
         quote_identifier(&table_schema),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    #[cfg(feature = "test-utils")]
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn test_spawn_ducklake_metrics_sampler_initializes_pool_lazily() {
+        let open_count = Arc::new(AtomicUsize::new(0));
+        let (maintenance_notification_tx, _maintenance_notification_rx) = mpsc::channel(1);
+        let sampler = spawn_ducklake_metrics_sampler(
+            DuckLakeConnectionManager {
+                setup_plan: Arc::new(crate::ducklake::config::DuckLakeSetupPlan::default()),
+                disable_extension_autoload: cfg!(target_os = "linux"),
+                open_count: Arc::clone(&open_count),
+            },
+            Arc::new(Mutex::new(HashSet::new())),
+            maintenance_notification_tx,
+        )
+        .expect("failed to spawn metrics sampler");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            open_count.load(AtomicOrdering::Relaxed),
+            0,
+            "metrics sampler should not warm its pool before the first poll"
+        );
+
+        sampler
+            .shutdown_tx
+            .send(())
+            .expect("metrics sampler shutdown channel should stay open");
+        let handle = sampler
+            .handle
+            .lock()
+            .take()
+            .expect("metrics sampler handle should exist");
+        handle
+            .await
+            .expect("metrics sampler should shut down cleanly");
+    }
 }

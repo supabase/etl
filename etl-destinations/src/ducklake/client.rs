@@ -1,7 +1,7 @@
 use std::sync::Arc;
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use duckdb::Config;
@@ -11,12 +11,16 @@ use metrics::histogram;
 use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
-use tracing::trace;
+use tracing::{info, warn};
 
+use crate::ducklake::config::DuckLakeSetupPlan;
 use crate::ducklake::metrics::{
-    ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS, ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS,
-    ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
+    ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS, ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS,
+    ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS, ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
 };
+
+/// Monotonic identifier assigned to each DuckLake connection setup attempt.
+static NEXT_CONNECTION_INIT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Timeout applied to each foreground DuckLake blocking operation.
 pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(2 * 60);
@@ -145,10 +149,16 @@ impl DuckDbQueryWatchdog {
 /// is safe: DuckLake (backed by a PostgreSQL catalog) supports concurrent writers.
 #[derive(Clone)]
 pub(super) struct DuckLakeConnectionManager {
+<<<<<<< HEAD
     /// SQL executed immediately after a new connection is opened.
     /// Loads required extensions and attaches the DuckLake catalog.
     pub(super) setup_sql: Arc<String>,
     /// Disables DuckDB extension autoload/autoinstall when vendored Linux
+=======
+    /// Ordered setup phases executed immediately after a new connection opens.
+    pub(super) setup_plan: Arc<DuckLakeSetupPlan>,
+    /// Disables DuckDB extension autoload/autoinstall when vendored local
+>>>>>>> bnjjj/ducklake_looogs
     /// extensions are required.
     pub(super) disable_extension_autoload: bool,
     /// Counts successfully initialized DuckDB connections for tests.
@@ -162,9 +172,57 @@ pub(super) struct ManagedDuckLakeConnection {
     broken: bool,
 }
 
+/// Lazily builds one dedicated DuckLake pool when a background task first needs it.
+pub(super) struct LazyDuckLakePool {
+    manager: DuckLakeConnectionManager,
+    pool_size: u32,
+    purpose: &'static str,
+    pool: Option<Arc<r2d2::Pool<DuckLakeConnectionManager>>>,
+    blocking_slots: Arc<Semaphore>,
+}
+
+impl LazyDuckLakePool {
+    /// Creates one lazy pool wrapper for a dedicated background task.
+    pub(super) fn new(
+        manager: DuckLakeConnectionManager,
+        pool_size: u32,
+        purpose: &'static str,
+    ) -> Self {
+        Self {
+            manager,
+            pool_size,
+            purpose,
+            pool: None,
+            blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
+        }
+    }
+
+    /// Returns the warmed pool, initializing it on first use.
+    pub(super) async fn get_or_init_pool(
+        &mut self,
+    ) -> EtlResult<Arc<r2d2::Pool<DuckLakeConnectionManager>>> {
+        if let Some(pool) = &self.pool {
+            return Ok(Arc::clone(pool));
+        }
+
+        let pool = Arc::new(
+            build_warm_ducklake_pool(self.manager.clone(), self.pool_size, self.purpose).await?,
+        );
+        self.pool = Some(Arc::clone(&pool));
+        Ok(pool)
+    }
+
+    /// Returns the semaphore that bounds background DuckDB concurrency.
+    pub(super) fn blocking_slots(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.blocking_slots)
+    }
+}
+
 impl DuckLakeConnectionManager {
     /// Opens one fully initialized DuckDB connection and attaches the lake catalog.
     pub(super) fn open_duckdb_connection(&self) -> Result<duckdb::Connection, duckdb::Error> {
+        let started = Instant::now();
+        let connection_init_id = NEXT_CONNECTION_INIT_ID.fetch_add(1, Ordering::Relaxed);
         let conn = if self.disable_extension_autoload {
             duckdb::Connection::open_in_memory_with_flags(
                 Config::default().enable_autoload_extension(false)?,
@@ -172,9 +230,38 @@ impl DuckLakeConnectionManager {
         } else {
             duckdb::Connection::open_in_memory()?
         };
-        conn.execute_batch(&self.setup_sql)?;
+        for step in self.setup_plan.steps() {
+            let phase_started = Instant::now();
+            info!(
+                connection_init_id,
+                phase = step.label,
+                "starting ducklake duckdb connection setup phase"
+            );
+            if let Err(error) = conn.execute_batch(&step.sql) {
+                warn!(
+                    connection_init_id,
+                    phase = step.label,
+                    elapsed_ms = phase_started.elapsed().as_millis() as u64,
+                    error = ?error,
+                    "ducklake duckdb connection setup phase failed"
+                );
+                return Err(error);
+            }
+            info!(
+                connection_init_id,
+                phase = step.label,
+                elapsed_ms = phase_started.elapsed().as_millis() as u64,
+                "ducklake duckdb connection setup phase finished"
+            );
+        }
         #[cfg(feature = "test-utils")]
         self.open_count.fetch_add(1, Ordering::Relaxed);
+        info!(
+            connection_init_id,
+            disable_extension_autoload = self.disable_extension_autoload,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "ducklake duckdb connection initialized"
+        );
         Ok(conn)
     }
 
@@ -219,6 +306,7 @@ pub(super) async fn build_warm_ducklake_pool(
     pool_size: u32,
     purpose: &'static str,
 ) -> EtlResult<r2d2::Pool<DuckLakeConnectionManager>> {
+    info!(purpose, pool_size, "warming ducklake connection pool");
     tokio::task::spawn_blocking(move || -> EtlResult<_> {
         let started = Instant::now();
         let pool = r2d2::Pool::builder()
@@ -247,7 +335,7 @@ pub(super) async fn build_warm_ducklake_pool(
         }
         drop(warmed_connections);
 
-        trace!(
+        info!(
             purpose,
             pool_size,
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -318,6 +406,7 @@ where
     R: Send + 'static,
     F: FnOnce(&duckdb::Connection) -> EtlResult<R> + Send + 'static,
 {
+    let started = Instant::now();
     let deadline = Instant::now() + timeout;
     let slot_wait_started = Instant::now();
     let permit = tokio::time::timeout_at(deadline, blocking_slots.acquire_owned())
@@ -331,18 +420,30 @@ where
         })?;
     histogram!(ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS)
         .record(slot_wait_started.elapsed().as_secs_f64());
-    trace!(
+    info!(
+        operation_kind = operation_kind.as_str(),
         wait_ms = slot_wait_started.elapsed().as_millis() as u64,
-        "wait for ducklake blocking slot"
+        timeout_ms = timeout.as_millis() as u64,
+        "ducklake blocking slot acquired"
     );
 
     // This is needed to make sure we properly interrupt the blocking operation if it exceeds the timeout, we don't just cancel the task and leave the connection active.
     let mut watchdog = DuckDbQueryWatchdog::spawn(deadline);
     let watchdog_task = watchdog.async_task_handle()?;
+    let blocking_queue_started = Instant::now();
 
     let blocking_result = tokio::task::spawn_blocking(move || -> EtlResult<R> {
         // Please if you modify the code inside this blocking task do not add any
         // blocking operations that could delay other tasks waiting on this slot.
+        let blocking_queue_wait = blocking_queue_started.elapsed();
+        histogram!(ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS)
+            .record(blocking_queue_wait.as_secs_f64());
+        info!(
+            operation_kind = operation_kind.as_str(),
+            wait_ms = blocking_queue_wait.as_millis() as u64,
+            timeout_ms = timeout.as_millis() as u64,
+            "ducklake blocking task started"
+        );
         let _permit = permit;
         let checkout_timeout = deadline
             .checked_duration_since(Instant::now())
@@ -351,7 +452,7 @@ where
             return Err(duckdb_blocking_timeout_error(
                 operation_kind,
                 timeout,
-                "pool_checkout",
+                "blocking_queue",
             ));
         }
         let checkout_started = Instant::now();
@@ -368,9 +469,11 @@ where
         })?;
         histogram!(ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS)
             .record(checkout_started.elapsed().as_secs_f64());
-        trace!(
+        info!(
+            operation_kind = operation_kind.as_str(),
             wait_ms = checkout_started.elapsed().as_millis() as u64,
-            "wait for ducklake pool checkout"
+            timeout_ms = timeout.as_millis() as u64,
+            "ducklake connection checked out"
         );
         let operation_timeout = deadline
             .checked_duration_since(Instant::now())
@@ -397,7 +500,8 @@ where
         watchdog.finish();
         histogram!(ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS)
             .record(operation_started.elapsed().as_secs_f64());
-        trace!(
+        info!(
+            operation_kind = operation_kind.as_str(),
             duration_ms = operation_started.elapsed().as_millis() as u64,
             "ducklake blocking operation finished"
         );
@@ -426,25 +530,47 @@ where
         )
     })?;
 
-    blocking_result.map_err(|_| {
+    let blocking_result = blocking_result.map_err(|_| {
         etl_error!(
             ErrorKind::ApplyWorkerPanic,
             "DuckLake blocking operation task panicked"
         )
-    })?
+    })?;
+
+    match blocking_result {
+        Ok(value) => {
+            info!(
+                operation_kind = operation_kind.as_str(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                timeout_ms = timeout.as_millis() as u64,
+                "ducklake blocking operation completed"
+            );
+            Ok(value)
+        }
+        Err(error) => {
+            warn!(
+                operation_kind = operation_kind.as_str(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                timeout_ms = timeout.as_millis() as u64,
+                error = ?error,
+                "ducklake blocking operation failed"
+            );
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::sync::Arc;
+    use std::sync::{Arc, mpsc};
 
     use tokio::sync::Semaphore;
 
     fn make_blocking_test_manager() -> DuckLakeConnectionManager {
         DuckLakeConnectionManager {
-            setup_sql: Arc::new(String::new()),
+            setup_plan: Arc::new(DuckLakeSetupPlan::default()),
             disable_extension_autoload: cfg!(target_os = "linux"),
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
@@ -505,13 +631,15 @@ mod tests {
             error.description(),
             Some("DuckLake blocking operation timed out")
         );
-        // This timeout budget covers pool checkout and query execution. Under
-        // full-suite load the deadline can expire before the long-running query
-        // starts, so either stage is acceptable as long as the pool remains
-        // usable for the follow-up query below.
+        // This timeout budget covers tokio blocking-queue delay, pool checkout,
+        // and query execution. Under full-suite load the deadline can expire in
+        // any of those stages as long as the pool remains usable for the
+        // follow-up query below.
         assert!(
             error.detail().is_some_and(|detail| {
-                detail.contains("stage=pool_checkout") || detail.contains("stage=query_execution")
+                detail.contains("stage=blocking_queue")
+                    || detail.contains("stage=pool_checkout")
+                    || detail.contains("stage=query_execution")
             }),
             "unexpected error detail: {error:?}"
         );
@@ -571,5 +699,72 @@ mod tests {
             watchdog.timed_out(),
             "watchdog should remain timed out when the interrupt handle is published after the deadline"
         );
+    }
+
+    #[test]
+    fn test_run_duckdb_blocking_timeout_reports_blocking_queue_stage() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("failed to build runtime");
+
+        runtime.block_on(async {
+            let pool = Arc::new(
+                build_warm_ducklake_pool(make_blocking_test_manager(), 1, "test")
+                    .await
+                    .expect("failed to build blocking test pool"),
+            );
+            let blocking_slots = Arc::new(Semaphore::new(1));
+            let (release_tx, release_rx) = mpsc::channel();
+
+            let blocking_guard = tokio::task::spawn_blocking(move || {
+                release_rx
+                    .recv()
+                    .expect("blocking guard should receive a release signal");
+            });
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+
+            let queued_operation = tokio::spawn(run_duckdb_blocking_with_timeout(
+                Arc::clone(&pool),
+                Arc::clone(&blocking_slots),
+                DuckDbBlockingOperationKind::Foreground,
+                Duration::from_millis(10),
+                |conn| -> EtlResult<i64> {
+                    conn.query_row("SELECT 1;", [], |row| row.get::<_, i64>(0))
+                        .map_err(|source| {
+                            etl_error!(
+                                ErrorKind::DestinationQueryFailed,
+                                "DuckLake blocking queue verification query failed",
+                                source: source
+                            )
+                        })
+                },
+            ));
+
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            release_tx
+                .send(())
+                .expect("blocking guard should still be waiting");
+
+            blocking_guard
+                .await
+                .expect("blocking guard should not panic");
+
+            let error = queued_operation
+                .await
+                .expect("queued operation should not panic")
+                .expect_err("queued operation should time out");
+
+            assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+            assert!(
+                error
+                    .detail()
+                    .is_some_and(|detail| detail.contains("stage=blocking_queue")),
+                "unexpected error detail: {error:?}"
+            );
+        });
     }
 }

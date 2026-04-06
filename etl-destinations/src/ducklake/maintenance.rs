@@ -15,7 +15,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{info, warn};
 
 use crate::ducklake::client::{
-    DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
+    DuckDbBlockingOperationKind, DuckLakeConnectionManager, LazyDuckLakePool,
     format_query_error_detail, run_duckdb_blocking,
 };
 use crate::ducklake::core::{DuckLakeInlineFlushKind, flush_table_inlined_data};
@@ -560,23 +560,29 @@ pub(super) async fn send_maintenance_notification(
     }
 }
 
-/// Builds the dedicated maintenance pool and spawns the periodic DuckLake worker.
-pub(super) async fn spawn_ducklake_maintenance_worker(
+/// Spawns the periodic DuckLake worker with lazy pool initialization.
+pub(super) fn spawn_ducklake_maintenance_worker(
     manager: DuckLakeConnectionManager,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
 ) -> EtlResult<DuckLakeMaintenanceWorker> {
-    let pool =
-        Arc::new(build_warm_ducklake_pool(manager, MAINTENANCE_POOL_SIZE, "maintenance").await?);
-    let blocking_slots = Arc::new(Semaphore::new(MAINTENANCE_POOL_SIZE as usize));
+    let started = Instant::now();
+    info!(
+        pool_size = MAINTENANCE_POOL_SIZE,
+        "starting ducklake maintenance worker"
+    );
     let (notification_tx, notification_rx) = mpsc::channel(1024);
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let handle = tokio::spawn(run_ducklake_maintenance_worker(
-        pool,
-        blocking_slots,
+        manager,
         table_write_slots,
         notification_rx,
         shutdown_rx,
     ));
+    info!(
+        pool_size = MAINTENANCE_POOL_SIZE,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "ducklake maintenance worker started"
+    );
 
     Ok(DuckLakeMaintenanceWorker {
         notification_tx,
@@ -587,12 +593,12 @@ pub(super) async fn spawn_ducklake_maintenance_worker(
 
 /// Coalesces notifications and runs background DuckLake maintenance.
 async fn run_ducklake_maintenance_worker(
-    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
-    blocking_slots: Arc<Semaphore>,
+    manager: DuckLakeConnectionManager,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     mut notification_rx: mpsc::Receiver<TableMaintenanceNotification>,
     mut shutdown_rx: watch::Receiver<()>,
 ) {
+    let mut lazy_pool = LazyDuckLakePool::new(manager, MAINTENANCE_POOL_SIZE, "maintenance");
     let mut flush_interval = tokio::time::interval(MAINTENANCE_FLUSH_POLL_INTERVAL);
     flush_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut checkpoint_interval = tokio::time::interval_at(
@@ -646,9 +652,17 @@ async fn run_ducklake_maintenance_worker(
                 for (table_name, table_state) in &mut table_states {
                     // If it needs to be flushed
                     if let Some(reason) = table_state.flush_reason(now) {
+                        let pool = match lazy_pool.get_or_init_pool().await {
+                            Ok(pool) => pool,
+                            Err(error) => {
+                                warn!(error = ?error, "ducklake maintenance pool initialization failed");
+                                continue;
+                            }
+                        };
+                        let blocking_slots = lazy_pool.blocking_slots();
                         match flush_table_inlined_data_in_background(
-                            Arc::clone(&pool),
-                            Arc::clone(&blocking_slots),
+                            pool,
+                            blocking_slots,
                             Arc::clone(&table_write_slots),
                             table_name.clone(),
                             reason,
@@ -677,9 +691,17 @@ async fn run_ducklake_maintenance_worker(
                     {
                         table_state.last_emergency_assessment_at = Some(sampled_at);
                         if plan.has_work() {
+                            let pool = match lazy_pool.get_or_init_pool().await {
+                                Ok(pool) => pool,
+                                Err(error) => {
+                                    warn!(error = ?error, "ducklake maintenance pool initialization failed");
+                                    continue;
+                                }
+                            };
+                            let blocking_slots = lazy_pool.blocking_slots();
                             match run_targeted_table_maintenance(
-                                Arc::clone(&pool),
-                                Arc::clone(&blocking_slots),
+                                pool,
+                                blocking_slots,
                                 Arc::clone(&table_write_slots),
                                 table_name.clone(),
                                 plan,
@@ -709,9 +731,17 @@ async fn run_ducklake_maintenance_worker(
                             continue;
                         }
 
+                        let pool = match lazy_pool.get_or_init_pool().await {
+                            Ok(pool) => pool,
+                            Err(error) => {
+                                warn!(error = ?error, "ducklake maintenance pool initialization failed");
+                                continue;
+                            }
+                        };
+                        let blocking_slots = lazy_pool.blocking_slots();
                         match run_targeted_table_maintenance(
-                            Arc::clone(&pool),
-                            Arc::clone(&blocking_slots),
+                            pool,
+                            blocking_slots,
                             Arc::clone(&table_write_slots),
                             table_name.clone(),
                             plan,
@@ -745,9 +775,17 @@ async fn run_ducklake_maintenance_worker(
                     continue;
                 }
 
+                let pool = match lazy_pool.get_or_init_pool().await {
+                    Ok(pool) => pool,
+                    Err(error) => {
+                        warn!(error = ?error, "ducklake maintenance pool initialization failed");
+                        continue;
+                    }
+                };
+                let blocking_slots = lazy_pool.blocking_slots();
                 if let Err(error) = run_background_checkpoint(
-                    Arc::clone(&pool),
-                    Arc::clone(&blocking_slots),
+                    pool,
+                    blocking_slots,
                     MaintenanceReason::CheckpointInterval,
                 )
                 .await
@@ -874,13 +912,21 @@ fn flush_table_inlined_data_in_background_blocking(
     let flush_started = Instant::now();
     let rows_flushed =
         flush_table_inlined_data(conn, table_name, DuckLakeInlineFlushKind::Mutation).inspect_err(
-            |_error| {
+            |error| {
                 record_ducklake_maintenance_duration(
                     MAINTENANCE_TASK_FLUSH,
                     MaintenanceOperation::FlushInlinedData,
                     reason,
                     MaintenanceOutcome::Failed,
                     flush_started.elapsed().as_secs_f64(),
+                );
+                warn!(
+                    table = %table_name,
+                    operation = MaintenanceOperation::FlushInlinedData.as_str(),
+                    reason = reason.as_str(),
+                    elapsed_ms = flush_started.elapsed().as_millis() as u64,
+                    error = ?error,
+                    "ducklake maintenance operation failed"
                 );
             },
         )?;
@@ -892,6 +938,15 @@ fn flush_table_inlined_data_in_background_blocking(
         outcome,
         flush_started.elapsed().as_secs_f64(),
     );
+    info!(
+        table = %table_name,
+        operation = MaintenanceOperation::FlushInlinedData.as_str(),
+        reason = reason.as_str(),
+        outcome = outcome.as_str(),
+        rows_flushed,
+        elapsed_ms = flush_started.elapsed().as_millis() as u64,
+        "ducklake maintenance operation completed"
+    );
     Ok(outcome)
 }
 
@@ -901,6 +956,7 @@ fn run_targeted_table_maintenance_blocking(
     table_name: &str,
     plan: TargetedMaintenancePlan,
 ) -> EtlResult<MaintenanceOutcome> {
+    let maintenance_started = Instant::now();
     let mut rewritten_files = 0u64;
     let mut merged_files = 0u64;
     let mut rewrite_outcome = None;
@@ -908,13 +964,21 @@ fn run_targeted_table_maintenance_blocking(
 
     if let Some(reason) = plan.rewrite_reason {
         let rewrite_started = Instant::now();
-        rewritten_files = rewrite_table_data_files(conn, table_name).inspect_err(|_error| {
+        rewritten_files = rewrite_table_data_files(conn, table_name).inspect_err(|error| {
             record_ducklake_maintenance_duration(
                 MAINTENANCE_TASK_TARGETED_MAINTENANCE,
                 MaintenanceOperation::RewriteDataFiles,
                 reason,
                 MaintenanceOutcome::Failed,
                 rewrite_started.elapsed().as_secs_f64(),
+            );
+            warn!(
+                table = %table_name,
+                operation = MaintenanceOperation::RewriteDataFiles.as_str(),
+                reason = reason.as_str(),
+                elapsed_ms = rewrite_started.elapsed().as_millis() as u64,
+                error = ?error,
+                "ducklake maintenance operation failed"
             );
         })?;
         let outcome = MaintenanceOutcome::from(rewritten_files);
@@ -925,18 +989,35 @@ fn run_targeted_table_maintenance_blocking(
             outcome,
             rewrite_started.elapsed().as_secs_f64(),
         );
+        info!(
+            table = %table_name,
+            operation = MaintenanceOperation::RewriteDataFiles.as_str(),
+            reason = reason.as_str(),
+            outcome = outcome.as_str(),
+            files_created = rewritten_files,
+            elapsed_ms = rewrite_started.elapsed().as_millis() as u64,
+            "ducklake maintenance operation completed"
+        );
         rewrite_outcome = Some(outcome);
     }
 
     if let Some(reason) = plan.merge_reason {
         let merge_started = Instant::now();
-        merged_files = merge_adjacent_table_files(conn, table_name).inspect_err(|_error| {
+        merged_files = merge_adjacent_table_files(conn, table_name).inspect_err(|error| {
             record_ducklake_maintenance_duration(
                 MAINTENANCE_TASK_TARGETED_MAINTENANCE,
                 MaintenanceOperation::MergeAdjacentFiles,
                 reason,
                 MaintenanceOutcome::Failed,
                 merge_started.elapsed().as_secs_f64(),
+            );
+            warn!(
+                table = %table_name,
+                operation = MaintenanceOperation::MergeAdjacentFiles.as_str(),
+                reason = reason.as_str(),
+                elapsed_ms = merge_started.elapsed().as_millis() as u64,
+                error = ?error,
+                "ducklake maintenance operation failed"
             );
         })?;
         let outcome = MaintenanceOutcome::from(merged_files);
@@ -947,6 +1028,15 @@ fn run_targeted_table_maintenance_blocking(
             outcome,
             merge_started.elapsed().as_secs_f64(),
         );
+        info!(
+            table = %table_name,
+            operation = MaintenanceOperation::MergeAdjacentFiles.as_str(),
+            reason = reason.as_str(),
+            outcome = outcome.as_str(),
+            files_created = merged_files,
+            elapsed_ms = merge_started.elapsed().as_millis() as u64,
+            "ducklake maintenance operation completed"
+        );
         merge_outcome = Some(outcome);
     }
 
@@ -956,6 +1046,7 @@ fn run_targeted_table_maintenance_blocking(
         merge_selected = plan.merge_reason.is_some(),
         rewritten_files,
         merged_files,
+        elapsed_ms = maintenance_started.elapsed().as_millis() as u64,
         "ducklake targeted maintenance completed"
     );
 
@@ -977,6 +1068,12 @@ fn run_background_checkpoint_blocking(
             MaintenanceOutcome::Failed,
             checkpoint_started.elapsed().as_secs_f64(),
         );
+        warn!(
+            operation = MaintenanceOperation::Checkpoint.as_str(),
+            reason = reason.as_str(),
+            elapsed_ms = checkpoint_started.elapsed().as_millis() as u64,
+            "ducklake maintenance operation failed"
+        );
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake checkpoint failed"
@@ -991,13 +1088,25 @@ fn run_background_checkpoint_blocking(
             MaintenanceOutcome::Failed,
             checkpoint_started.elapsed().as_secs_f64(),
         );
+        warn!(
+            operation = MaintenanceOperation::Checkpoint.as_str(),
+            reason = reason.as_str(),
+            elapsed_ms = checkpoint_started.elapsed().as_millis() as u64,
+            error = ?error,
+            "ducklake maintenance operation failed"
+        );
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake checkpoint failed",
             source: error
         )
     })?;
-    info!("ducklake background checkpoint completed");
+    info!(
+        operation = MaintenanceOperation::Checkpoint.as_str(),
+        reason = reason.as_str(),
+        elapsed_ms = checkpoint_started.elapsed().as_millis() as u64,
+        "ducklake background checkpoint completed"
+    );
     record_ducklake_maintenance_duration(
         MAINTENANCE_TASK_CHECKPOINT,
         MaintenanceOperation::Checkpoint,
@@ -1075,6 +1184,7 @@ mod tests {
 
     use etl_telemetry::metrics::init_metrics_handle;
 
+    #[cfg(feature = "test-utils")]
     use crate::ducklake::client::{
         DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
         run_duckdb_blocking,
@@ -1791,7 +1901,7 @@ mod tests {
         register_metrics();
         let open_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let manager = DuckLakeConnectionManager {
-            setup_sql: std::sync::Arc::new(String::new()),
+            setup_plan: std::sync::Arc::new(crate::ducklake::config::DuckLakeSetupPlan::default()),
             disable_extension_autoload: cfg!(target_os = "linux"),
             open_count: std::sync::Arc::clone(&open_count),
         };
@@ -1865,6 +1975,44 @@ mod tests {
             rewrite_failed_after > rewrite_failed_before,
             "rewrite failed duration count did not increase"
         );
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn test_spawn_ducklake_maintenance_worker_initializes_pool_lazily() {
+        let open_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let worker = spawn_ducklake_maintenance_worker(
+            DuckLakeConnectionManager {
+                setup_plan: std::sync::Arc::new(
+                    crate::ducklake::config::DuckLakeSetupPlan::default(),
+                ),
+                disable_extension_autoload: cfg!(target_os = "linux"),
+                open_count: std::sync::Arc::clone(&open_count),
+            },
+            std::sync::Arc::new(Mutex::new(HashMap::new())),
+        )
+        .expect("failed to spawn maintenance worker");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            open_count.load(AtomicOrdering::Relaxed),
+            0,
+            "maintenance worker should not warm its pool before background work exists"
+        );
+
+        worker
+            .shutdown_tx
+            .send(())
+            .expect("maintenance worker shutdown channel should stay open");
+        let handle = worker
+            .handle
+            .lock()
+            .take()
+            .expect("maintenance worker handle should exist");
+        handle
+            .await
+            .expect("maintenance worker should shut down cleanly");
     }
 
     #[tokio::test]
