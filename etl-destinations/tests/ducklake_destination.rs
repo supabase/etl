@@ -34,15 +34,15 @@ use etl::error::ErrorKind;
 use etl::store::both::memory::MemoryStore;
 use etl::store::schema::SchemaStore;
 use etl::types::{
-    Cell, ColumnSchema, Event, TableId, TableName, TableRow, TableSchema, Type as PgType,
+    Cell, ColumnSchema, Event, PgLsn, TableId, TableName, TableRow, TableSchema, Type as PgType,
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
 #[cfg(feature = "test-utils")]
 use etl_destinations::ducklake::{
     arm_fail_after_atomic_batch_commit_once_for_tests,
     arm_fail_after_copy_batch_commit_once_for_tests, arm_pause_next_streaming_write_for_tests,
-    release_paused_streaming_write_for_tests, reset_ducklake_test_hooks,
-    reset_paused_streaming_write_for_tests,
+    ducklake_staging_table_creations_for_tests, release_paused_streaming_write_for_tests,
+    reset_ducklake_test_hooks, reset_paused_streaming_write_for_tests,
 };
 use pg_escape::{quote_identifier, quote_literal};
 use std::f64::consts::PI;
@@ -200,6 +200,34 @@ fn count_applied_batches(conn: &Connection, table_name: &str, batch_kind: &str) 
         |r| r.get(0),
     )
     .expect("batch marker count query failed")
+}
+
+fn count_streaming_progress_rows(conn: &Connection, table_name: &str) -> i64 {
+    conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM {}.{} WHERE table_name = {}",
+            quote_identifier("lake"),
+            quote_identifier("__etl_streaming_progress"),
+            quote_literal(table_name),
+        ),
+        [],
+        |r| r.get(0),
+    )
+    .expect("streaming progress count query failed")
+}
+
+fn read_streaming_progress(conn: &Connection, table_name: &str) -> Option<(u64, u64)> {
+    conn.query_row(
+        &format!(
+            "SELECT last_commit_lsn, last_tx_ordinal FROM {}.{} WHERE table_name = {}",
+            quote_identifier("lake"),
+            quote_identifier("__etl_streaming_progress"),
+            quote_literal(table_name),
+        ),
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .ok()
 }
 
 fn count_table_files(data: &Path, table_name: &str) -> usize {
@@ -959,7 +987,8 @@ async fn test_write_events_small_batch_stays_inlined_after_return() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 0);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
     assert_eq!(
         count_table_files(&data, &table_name),
         0,
@@ -1035,7 +1064,7 @@ async fn test_write_events_with_old_row_update() {
     assert_eq!(name, "Gadget");
 }
 
-/// Replaying the same CDC batch should be a no-op after the marker row is committed.
+/// Replaying the same CDC batch should be a no-op after the progress row is committed.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_replay_is_idempotent() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
@@ -1104,7 +1133,8 @@ async fn test_write_events_replay_is_idempotent() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 0);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
 
     let (id, name): (i32, String) = conn
         .query_row(
@@ -1121,11 +1151,165 @@ async fn test_write_events_replay_is_idempotent() {
     assert_eq!(name, "paid");
 }
 
+/// Streaming progress must compare transaction ordinals when commit LSNs match.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
+    use etl::types::{InsertEvent, UpdateEvent};
+
+    let dir = make_test_dir("write_events_same_commit_lsn_higher_tx_ordinal_still_applies");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let table_id = TableId::new(18);
+    let schema = make_schema(18, "public", "tx_ordinal_progress");
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination =
+        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .await
+            .unwrap();
+
+    let lsn = PgLsn::from(350u64);
+    destination
+        .write_events(vec![Event::Insert(InsertEvent {
+            start_lsn: lsn,
+            commit_lsn: lsn,
+            tx_ordinal: 0,
+            table_id,
+            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
+        })])
+        .await
+        .unwrap();
+    destination
+        .write_events(vec![Event::Update(UpdateEvent {
+            start_lsn: lsn,
+            commit_lsn: lsn,
+            tx_ordinal: 1,
+            table_id,
+            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("posted".to_string())]),
+            old_table_row: Some((
+                false,
+                TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
+            )),
+        })])
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 1);
+    assert_eq!(read_streaming_progress(&conn, &table_name), Some((350, 1)));
+
+    let name: String = conn
+        .query_row(
+            &format!(
+                "SELECT name FROM {}.{} WHERE id = 1",
+                quote_identifier("lake"),
+                quote_identifier(&table_name)
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(name, "posted");
+}
+
+/// A mixed mutation batch should reuse one temp staging table for multiple upserts.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_write_events_reuses_one_staging_table_per_atomic_batch() {
+    use etl::types::{InsertEvent, UpdateEvent};
+
+    let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
+    reset_ducklake_test_hooks();
+
+    let dir = make_test_dir("write_events_reuses_one_staging_table_per_atomic_batch");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let table_id = TableId::new(19);
+    let schema = make_schema(19, "public", "staging_reuse");
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination =
+        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .await
+            .unwrap();
+
+    let lsn = PgLsn::from(360u64);
+    destination
+        .write_events(vec![
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                table_id,
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("before".to_string())]),
+            }),
+            Event::Update(UpdateEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                table_id,
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("after".to_string())]),
+                old_table_row: Some((
+                    false,
+                    TableRow::new(vec![Cell::I32(1), Cell::String("before".to_string())]),
+                )),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 2,
+                table_id,
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tail".to_string())]),
+            }),
+        ])
+        .await
+        .unwrap();
+
+    assert_eq!(ducklake_staging_table_creations_for_tests(&table_name), 1);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 2);
+
+    let rows = conn
+        .prepare(&format!(
+            "SELECT id, name FROM {}.{} ORDER BY id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![(1, "after".to_string()), (2, "tail".to_string())]
+    );
+
+    reset_ducklake_test_hooks();
+}
+
 /// Marker-table rows should stay in the DuckLake catalog instead of creating Parquet files.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_applied_batches_table_uses_data_inlining() {
-    use etl::types::{InsertEvent, PgLsn};
-
     let dir = make_test_dir("applied_batches_table_uses_data_inlining");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -1146,21 +1330,20 @@ async fn test_applied_batches_table_uses_data_inlining() {
             .await
             .unwrap();
 
-    let lsn = PgLsn::from(600u64);
     destination
-        .write_events(vec![Event::Insert(InsertEvent {
-            start_lsn: lsn,
-            commit_lsn: lsn,
-            tx_ordinal: 0,
+        .write_table_rows(
             table_id,
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())]),
-        })])
+            vec![TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("created".to_string()),
+            ])],
+        )
         .await
         .unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
     assert_eq!(count_table_files(&data, "__etl_applied_table_batches"), 0);
 }
 
@@ -1423,8 +1606,10 @@ async fn test_write_events_mixed_multi_table_batches() {
     .await;
     assert_eq!(count_rows(&conn, &table_name_a), 1);
     assert_eq!(count_rows(&conn, &table_name_b), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name_a, "mutation"), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name_b, "mutation"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name_a, "mutation"), 0);
+    assert_eq!(count_applied_batches(&conn, &table_name_b, "mutation"), 0);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name_a), 1);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name_b), 1);
 
     let name_a: String = conn
         .query_row(
@@ -1521,8 +1706,10 @@ async fn test_write_events_truncate_retry_after_post_commit_failure_is_idempoten
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "truncate"), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "truncate"), 0);
+    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 0);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
+    assert_eq!(read_streaming_progress(&conn, &table_name), Some((800, 1)));
 
     let name: String = conn
         .query_row(
@@ -1540,7 +1727,7 @@ async fn test_write_events_truncate_retry_after_post_commit_failure_is_idempoten
     reset_ducklake_test_hooks();
 }
 
-/// A post-commit retry should detect the batch marker and avoid double-applying rows.
+/// A post-commit retry should detect the streaming progress row and avoid double-applying rows.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
@@ -1615,7 +1802,9 @@ async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 0);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
+    assert_eq!(read_streaming_progress(&conn, &table_name), Some((500, 3)));
 
     let name: String = conn
         .query_row(

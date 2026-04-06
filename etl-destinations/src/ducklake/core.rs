@@ -33,14 +33,17 @@ use url::Url;
 use crate::ducklake::batches::{
     DuckLakeTableBatchKind, TableMutation, TrackedTableMutation, TrackedTruncateEvent,
     apply_table_batch_with_retry, apply_table_batches_with_retry,
-    clear_applied_batch_markers_for_kind, ensure_applied_batches_table_exists,
+    clear_applied_batch_markers_for_kind, clear_table_streaming_progress,
+    ensure_applied_batches_table_exists, ensure_streaming_progress_table_exists,
     prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
 };
 use crate::ducklake::client::{
     DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
     format_query_error_detail, run_duckdb_blocking,
 };
-use crate::ducklake::config::{build_setup_plan, current_duckdb_extension_strategy};
+use crate::ducklake::config::{
+    build_maintenance_setup_plan, build_setup_plan, current_duckdb_extension_strategy,
+};
 use crate::ducklake::maintenance::{
     DuckLakeMaintenanceWorker, TableMaintenanceNotification, TableWriteActivity,
     send_maintenance_notification, spawn_ducklake_maintenance_worker, table_write_slot,
@@ -107,6 +110,8 @@ pub struct DuckLakeDestination<S> {
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
     /// Cache tracking whether the ETL batch marker table already exists. If it's set then the table has already been created
     applied_batches_table_created: Arc<AtomicBool>,
+    /// Cache tracking whether the ETL streaming progress table already exists.
+    streaming_progress_table_created: Arc<AtomicBool>,
 }
 
 impl<S> Destination for DuckLakeDestination<S>
@@ -269,6 +274,7 @@ where
             s3.as_ref(),
             metadata_schema.as_deref(),
         )?);
+        let maintenance_setup_plan = Arc::new(build_maintenance_setup_plan(setup_plan.as_ref()));
 
         let manager = Arc::new(DuckLakeConnectionManager {
             setup_plan: Arc::clone(&setup_plan),
@@ -297,6 +303,7 @@ where
             store,
             created_tables: Arc::clone(&created_tables),
             applied_batches_table_created: Arc::default(),
+            streaming_progress_table_created: Arc::default(),
         };
         gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
         let marker_table_started = Instant::now();
@@ -305,11 +312,17 @@ where
             elapsed_ms = marker_table_started.elapsed().as_millis() as u64,
             "ducklake applied batch marker table ready"
         );
+        let progress_table_started = Instant::now();
+        destination.ensure_streaming_progress_table_exists().await?;
+        info!(
+            elapsed_ms = progress_table_started.elapsed().as_millis() as u64,
+            "ducklake streaming progress table ready"
+        );
         let maintenance_started = Instant::now();
         destination.maintenance_worker = Arc::new(
             spawn_ducklake_maintenance_worker(
                 DuckLakeConnectionManager {
-                    setup_plan: Arc::clone(&setup_plan),
+                    setup_plan: Arc::clone(&maintenance_setup_plan),
                     disable_extension_autoload,
                     #[cfg(feature = "test-utils")]
                     open_count: Arc::new(AtomicUsize::new(0)),
@@ -365,6 +378,7 @@ where
         let table_name = self.ensure_table_exists(table_id).await?;
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.ensure_applied_batches_table_exists().await?;
+        self.ensure_streaming_progress_table_exists().await?;
         self.run_duckdb_blocking(
             DuckDbBlockingOperationKind::Foreground,
             move |conn| -> EtlResult<()> {
@@ -402,6 +416,17 @@ where
                         &table_name,
                         DuckLakeTableBatchKind::Copy,
                     )?;
+                    clear_applied_batch_markers_for_kind(
+                        conn,
+                        &table_name,
+                        DuckLakeTableBatchKind::Mutation,
+                    )?;
+                    clear_applied_batch_markers_for_kind(
+                        conn,
+                        &table_name,
+                        DuckLakeTableBatchKind::Truncate,
+                    )?;
+                    clear_table_streaming_progress(conn, &table_name)?;
                     Ok(())
                 })();
 
@@ -520,8 +545,9 @@ where
     /// parallel, each table in its own async task. Each DuckDB attempt acquires
     /// one blocking slot before entering `spawn_blocking`. Each table's ordered
     /// CDC stream is split into atomic sub-batches, applied on a reused DuckDB
-    /// connection per retry attempt, and recorded in an ETL marker table so
-    /// retries can safely detect already committed work.
+    /// connection per retry attempt, and acknowledged through one per-table
+    /// streaming replay watermark so retries can safely detect already
+    /// committed work.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -547,6 +573,7 @@ where
                             .push(TrackedTableMutation::new(
                                 insert.start_lsn,
                                 insert.commit_lsn,
+                                insert.tx_ordinal,
                                 TableMutation::Insert(insert.table_row),
                             ));
                         let stats = table_id_to_stats.entry(insert.table_id).or_default();
@@ -563,6 +590,7 @@ where
                             mutations.push(TrackedTableMutation::new(
                                 update.start_lsn,
                                 update.commit_lsn,
+                                update.tx_ordinal,
                                 TableMutation::Update {
                                     delete_row: old_row,
                                     upsert_row: table_row,
@@ -575,6 +603,7 @@ where
                             mutations.push(TrackedTableMutation::new(
                                 update.start_lsn,
                                 update.commit_lsn,
+                                update.tx_ordinal,
                                 TableMutation::Replace(table_row),
                             ));
                         }
@@ -593,6 +622,7 @@ where
                             .push(TrackedTableMutation::new(
                                 delete.start_lsn,
                                 delete.commit_lsn,
+                                delete.tx_ordinal,
                                 TableMutation::Delete(old_row),
                             ));
                     }
@@ -604,6 +634,7 @@ where
 
             if !table_id_to_mutations.is_empty() {
                 self.ensure_applied_batches_table_exists().await?;
+                self.ensure_streaming_progress_table_exists().await?;
                 let mut join_set = JoinSet::new();
 
                 for (table_id, mutations) in table_id_to_mutations {
@@ -654,6 +685,7 @@ where
                             .push(TrackedTruncateEvent::new(
                                 truncate.start_lsn,
                                 truncate.commit_lsn,
+                                truncate.tx_ordinal,
                                 truncate.options,
                             ));
                     }
@@ -662,6 +694,7 @@ where
 
             if !truncate_table_ids.is_empty() {
                 self.ensure_applied_batches_table_exists().await?;
+                self.ensure_streaming_progress_table_exists().await?;
                 let mut join_set = JoinSet::new();
 
                 for (table_id, truncates) in truncate_table_ids {
@@ -784,6 +817,17 @@ where
             Arc::clone(&self.blocking_slots),
             Arc::clone(&self.table_creation_slots),
             Arc::clone(&self.applied_batches_table_created),
+        )
+        .await
+    }
+
+    /// Ensures the ETL-managed streaming progress table exists.
+    async fn ensure_streaming_progress_table_exists(&self) -> EtlResult<()> {
+        ensure_streaming_progress_table_exists(
+            Arc::clone(&self.pool),
+            Arc::clone(&self.blocking_slots),
+            Arc::clone(&self.table_creation_slots),
+            Arc::clone(&self.streaming_progress_table_created),
         )
         .await
     }

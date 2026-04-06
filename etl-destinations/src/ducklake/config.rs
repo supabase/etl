@@ -19,6 +19,8 @@ const DUCKDB_EXTENSION_VERSION: &str = "1.5.1";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
+const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
+const MAINTENANCE_TARGET_FILE_SIZE: &str = "10MB";
 
 /// One named DuckDB setup phase for a DuckLake connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -558,6 +560,21 @@ pub(super) fn build_setup_plan(
         strategy,
         vendored_root.as_deref(),
     )
+}
+
+/// Appends the maintenance-specific setup phase for DuckLake compaction sizing.
+pub(super) fn build_maintenance_setup_plan(base_plan: &DuckLakeSetupPlan) -> DuckLakeSetupPlan {
+    let mut steps = base_plan.steps.clone();
+    steps.push(DuckLakeSetupStep {
+        label: "configure_maintenance",
+        sql: format!(
+            "CALL ducklake_set_option({}, {}, {});",
+            quote_literal(LAKE_CATALOG),
+            quote_literal(TARGET_FILE_SIZE_OPTION_NAME),
+            quote_literal(MAINTENANCE_TARGET_FILE_SIZE),
+        ),
+    });
+    DuckLakeSetupPlan { steps }
 }
 
 #[cfg(test)]
@@ -1163,6 +1180,39 @@ mod tests {
         assert!(plan.steps()[1].sql.contains("CREATE OR REPLACE SECRET"));
         assert!(plan.steps()[2].sql.contains("ATTACH"));
         assert!(plan.steps()[2].sql.contains("METADATA_SCHEMA 'ducklake'"));
+    }
+
+    #[test]
+    fn test_build_maintenance_setup_plan_appends_target_file_size_step() {
+        let catalog_url = Url::parse("file:///tmp/catalog.ducklake").unwrap();
+        let data_url = Url::parse("file:///tmp/data").unwrap();
+        let plan = build_setup_plan_with_strategy(
+            &catalog_url,
+            &data_url,
+            None,
+            None,
+            DuckDbExtensionStrategy::InstallFromRepository,
+            None,
+        )
+        .unwrap();
+
+        let maintenance_plan = build_maintenance_setup_plan(&plan);
+
+        assert_eq!(maintenance_plan.steps().len(), plan.steps().len() + 1);
+        let last_step = maintenance_plan
+            .steps()
+            .last()
+            .expect("maintenance setup should append one step");
+        assert_eq!(last_step.label, "configure_maintenance");
+        assert_eq!(
+            last_step.sql,
+            format!(
+                "CALL ducklake_set_option({}, {}, {});",
+                quote_literal(LAKE_CATALOG),
+                quote_literal(TARGET_FILE_SIZE_OPTION_NAME),
+                quote_literal(MAINTENANCE_TARGET_FILE_SIZE),
+            )
+        );
     }
 
     #[test]
