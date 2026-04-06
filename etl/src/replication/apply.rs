@@ -1819,24 +1819,6 @@ where
             "processing syncing tables after batch flush"
         );
 
-        // Immediately acknowledge the durable flush to PostgreSQL so a transient
-        // source connection drop cannot force the next worker attempt to resume
-        // from an older confirmed_flush_lsn and replay already-applied WAL.
-        self.send_status_update(
-            events_stream.as_mut(),
-            current_lsn,
-            true,
-            StatusUpdateType::KeepAlive,
-        )
-        .await?;
-
-        debug!(
-            worker_type = %self.worker_context.worker_type(),
-            %last_received_lsn,
-            %current_lsn,
-            "reported durable flush lsn to postgres after batch flush"
-        );
-
         let exit_intent = match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
                 apply_worker::process_syncing_tables_after_flush(ctx, current_lsn).await?;
@@ -2085,7 +2067,7 @@ mod apply_worker {
                     match result {
                         ShutdownResult::Ok(result) => {
                             let final_phase = result.replication_phase();
-                            if final_phase.is_errored() {
+                            if final_phase.as_type().is_errored() {
                                 info!(
                                     worker_type = %WorkerType::Apply,
                                     table_id = table_id.0,
@@ -2408,7 +2390,7 @@ mod apply_worker {
                     match result {
                         ShutdownResult::Ok(result) => {
                             let final_phase = result.replication_phase();
-                            if final_phase.is_errored() {
+                            if final_phase.as_type().is_errored() {
                                 info!(
                                     worker_type = %WorkerType::Apply,
                                     table_id = table_id.0,

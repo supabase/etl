@@ -17,7 +17,7 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 #[cfg(test)]
 use etl::types::Cell;
-use etl::types::{Event, SizeHint, TableId, TableName, TableRow, TableSchema};
+use etl::types::{Event, EventSequenceKey, SizeHint, TableId, TableName, TableRow, TableSchema};
 use metrics::{gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
@@ -36,6 +36,8 @@ use crate::ducklake::batches::{
     clear_applied_batch_markers_for_kind, clear_table_streaming_progress,
     ensure_applied_batches_table_exists, ensure_streaming_progress_table_exists,
     prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
+    read_table_streaming_progress_sequence_key, retain_mutations_after_sequence_key,
+    retain_truncates_after_sequence_key,
 };
 use crate::ducklake::client::{
     DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
@@ -554,7 +556,6 @@ where
         while event_iter.peek().is_some() {
             let mut table_id_to_mutations: HashMap<TableId, Vec<TrackedTableMutation>> =
                 HashMap::new();
-            let mut table_id_to_stats: HashMap<TableId, TableWriteActivity> = HashMap::new();
 
             // Accumulate non-truncate events, stopping at the first Truncate.
             while let Some(event) = event_iter.peek() {
@@ -566,7 +567,6 @@ where
                 let event = event_iter.next().unwrap();
                 match event {
                     Event::Insert(insert) => {
-                        let approx_bytes = insert.table_row.size_hint() as u64;
                         table_id_to_mutations
                             .entry(insert.table_id)
                             .or_default()
@@ -576,15 +576,11 @@ where
                                 insert.tx_ordinal,
                                 TableMutation::Insert(insert.table_row),
                             ));
-                        let stats = table_id_to_stats.entry(insert.table_id).or_default();
-                        stats.approx_bytes = stats.approx_bytes.saturating_add(approx_bytes);
-                        stats.inserted_rows = stats.inserted_rows.saturating_add(1);
                     }
                     Event::Update(update) => {
                         let table_id = update.table_id;
                         let table_row = update.table_row;
                         let old_table_row = update.old_table_row;
-                        let upsert_bytes = table_row.size_hint() as u64;
                         let mutations = table_id_to_mutations.entry(table_id).or_default();
                         if let Some((_, old_row)) = old_table_row {
                             mutations.push(TrackedTableMutation::new(
@@ -607,9 +603,6 @@ where
                                 TableMutation::Replace(table_row),
                             ));
                         }
-                        let stats = table_id_to_stats.entry(table_id).or_default();
-                        stats.approx_bytes = stats.approx_bytes.saturating_add(upsert_bytes);
-                        stats.inserted_rows = stats.inserted_rows.saturating_add(1);
                     }
                     Event::Delete(delete) => {
                         let Some((_, old_row)) = delete.old_table_row else {
@@ -643,17 +636,42 @@ where
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
                     let pool = Arc::clone(&self.pool);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
-                    let prepared_batches =
-                        prepare_mutation_table_batches(&table_schema, table_name, mutations)?;
-                    let maintenance_notification =
-                        table_id_to_stats.remove(&table_id).map(|mut stats| {
-                            stats.table_name = prepared_batches[0].table_name().to_owned();
-                            TableMaintenanceNotification::WriteActivity(stats)
-                        });
+                    let destination_table_name = table_name.clone();
                     let maintenance_worker = Arc::clone(&self.maintenance_worker);
 
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
+                        let last_sequence_key =
+                            read_table_streaming_progress_sequence_key_blocking(
+                                Arc::clone(&pool),
+                                Arc::clone(&blocking_slots),
+                                destination_table_name.clone(),
+                            )
+                            .await?;
+                        let pending_mutations =
+                            retain_mutations_after_sequence_key(mutations, last_sequence_key);
+                        if pending_mutations.is_empty() {
+                            debug!(
+                                table = %destination_table_name,
+                                "ducklake streaming mutation replay skipped, no pending events"
+                            );
+                            return Ok::<(), etl::error::EtlError>(());
+                        }
+
+                        let maintenance_notification =
+                            maintenance_worker.as_ref().as_ref().map(|_| {
+                                TableMaintenanceNotification::WriteActivity(
+                                    table_write_activity_for_mutations(
+                                        destination_table_name.clone(),
+                                        pending_mutations.as_slice(),
+                                    ),
+                                )
+                            });
+                        let prepared_batches = prepare_mutation_table_batches(
+                            &table_schema,
+                            destination_table_name.clone(),
+                            pending_mutations,
+                        )?;
                         apply_table_batches_with_retry(pool, blocking_slots, prepared_batches)
                             .await?;
                         if let (Some(worker), Some(notification)) =
@@ -702,9 +720,27 @@ where
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
                     let pool = Arc::clone(&self.pool);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
-                    let prepared_batch = prepare_truncate_table_batch(table_name, truncates);
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
+                        let last_sequence_key =
+                            read_table_streaming_progress_sequence_key_blocking(
+                                Arc::clone(&pool),
+                                Arc::clone(&blocking_slots),
+                                table_name.clone(),
+                            )
+                            .await?;
+                        let pending_truncates =
+                            retain_truncates_after_sequence_key(truncates, last_sequence_key);
+                        if pending_truncates.is_empty() {
+                            debug!(
+                                table = %table_name,
+                                "ducklake streaming truncate replay skipped, no pending events"
+                            );
+                            return Ok(());
+                        }
+
+                        let prepared_batch =
+                            prepare_truncate_table_batch(table_name, pending_truncates);
                         apply_table_batch_with_retry(pool, blocking_slots, prepared_batch).await
                     });
                 }
@@ -1037,6 +1073,44 @@ where
     pub fn connection_open_count_for_tests(&self) -> usize {
         self.manager.open_count_for_tests()
     }
+}
+
+/// Reads the persisted streaming replay watermark for one table on DuckDB's blocking pool.
+async fn read_table_streaming_progress_sequence_key_blocking(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    table_name: DuckLakeTableName,
+) -> EtlResult<Option<EventSequenceKey>> {
+    run_duckdb_blocking(
+        pool,
+        blocking_slots,
+        DuckDbBlockingOperationKind::Foreground,
+        move |conn| read_table_streaming_progress_sequence_key(conn, &table_name),
+    )
+    .await
+}
+
+/// Recomputes maintenance stats from the suffix of mutations that still needs applying.
+fn table_write_activity_for_mutations(
+    table_name: DuckLakeTableName,
+    tracked_mutations: &[TrackedTableMutation],
+) -> TableWriteActivity {
+    let mut write_activity = TableWriteActivity {
+        table_name,
+        approx_bytes: 0,
+        inserted_rows: 0,
+    };
+
+    for tracked_mutation in tracked_mutations {
+        if let Some(row) = tracked_mutation.upsert_row() {
+            write_activity.approx_bytes = write_activity
+                .approx_bytes
+                .saturating_add(row.size_hint() as u64);
+            write_activity.inserted_rows = write_activity.inserted_rows.saturating_add(1);
+        }
+    }
+
+    write_activity
 }
 
 #[cfg(feature = "test-utils")]

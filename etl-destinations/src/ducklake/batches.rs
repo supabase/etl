@@ -130,6 +130,15 @@ impl TrackedTableMutation {
     fn sequence_key(&self) -> EventSequenceKey {
         EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
     }
+
+    /// Returns the row that will be upserted for this mutation, if any.
+    pub(super) fn upsert_row(&self) -> Option<&TableRow> {
+        match &self.mutation {
+            TableMutation::Insert(row) | TableMutation::Replace(row) => Some(row),
+            TableMutation::Update { upsert_row, .. } => Some(upsert_row),
+            TableMutation::Delete(_) => None,
+        }
+    }
 }
 
 /// Truncate event metadata preserved for idempotent replay.
@@ -768,6 +777,48 @@ fn read_table_streaming_progress(
     Ok(Some(TableStreamingProgress {
         last_sequence_key: EventSequenceKey::new(PgLsn::from(last_commit_lsn), last_tx_ordinal),
     }))
+}
+
+/// Reads the last applied streaming sequence key for one table.
+pub(super) fn read_table_streaming_progress_sequence_key(
+    conn: &duckdb::Connection,
+    table_name: &str,
+) -> EtlResult<Option<EventSequenceKey>> {
+    Ok(read_table_streaming_progress(conn, table_name)?.map(|progress| progress.last_sequence_key))
+}
+
+/// Drops already-applied tracked mutations using the persisted sequence key.
+pub(super) fn retain_mutations_after_sequence_key(
+    tracked_mutations: Vec<TrackedTableMutation>,
+    last_sequence_key: Option<EventSequenceKey>,
+) -> Vec<TrackedTableMutation> {
+    match last_sequence_key {
+        Some(last_sequence_key) => tracked_mutations
+            .into_iter()
+            .filter(|tracked_mutation| {
+                compare_sequence_keys(tracked_mutation.sequence_key(), last_sequence_key)
+                    == std::cmp::Ordering::Greater
+            })
+            .collect(),
+        None => tracked_mutations,
+    }
+}
+
+/// Drops already-applied tracked truncates using the persisted sequence key.
+pub(super) fn retain_truncates_after_sequence_key(
+    tracked_truncates: Vec<TrackedTruncateEvent>,
+    last_sequence_key: Option<EventSequenceKey>,
+) -> Vec<TrackedTruncateEvent> {
+    match last_sequence_key {
+        Some(last_sequence_key) => tracked_truncates
+            .into_iter()
+            .filter(|tracked_truncate| {
+                compare_sequence_keys(tracked_truncate.sequence_key(), last_sequence_key)
+                    == std::cmp::Ordering::Greater
+            })
+            .collect(),
+        None => tracked_truncates,
+    }
 }
 
 /// Decides whether a streaming batch must be replayed or skipped.
@@ -2346,6 +2397,70 @@ mod tests {
             }
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
         }
+    }
+
+    #[test]
+    fn test_retain_mutations_after_sequence_key_drops_applied_prefix() {
+        let retained = retain_mutations_after_sequence_key(
+            vec![
+                TrackedTableMutation::new(
+                    PgLsn::from(100),
+                    PgLsn::from(110),
+                    0,
+                    TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(1),
+                        Cell::String("one".to_string()),
+                    ])),
+                ),
+                TrackedTableMutation::new(
+                    PgLsn::from(100),
+                    PgLsn::from(120),
+                    0,
+                    TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(2),
+                        Cell::String("two".to_string()),
+                    ])),
+                ),
+                TrackedTableMutation::new(
+                    PgLsn::from(100),
+                    PgLsn::from(130),
+                    0,
+                    TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(3),
+                        Cell::String("three".to_string()),
+                    ])),
+                ),
+            ],
+            Some(EventSequenceKey::new(PgLsn::from(120), 0)),
+        );
+
+        assert_eq!(retained.len(), 1);
+        assert_eq!(
+            retained[0].sequence_key(),
+            EventSequenceKey::new(PgLsn::from(130), 0)
+        );
+    }
+
+    #[test]
+    fn test_retain_truncates_after_sequence_key_drops_applied_prefix() {
+        let retained = retain_truncates_after_sequence_key(
+            vec![
+                TrackedTruncateEvent::new(PgLsn::from(100), PgLsn::from(200), 0, 0),
+                TrackedTruncateEvent::new(PgLsn::from(100), PgLsn::from(200), 1, 0),
+                TrackedTruncateEvent::new(PgLsn::from(100), PgLsn::from(210), 0, 0),
+            ],
+            Some(EventSequenceKey::new(PgLsn::from(200), 0)),
+        );
+
+        assert_eq!(retained.len(), 2);
+        assert_eq!(
+            retained[0].sequence_key(),
+            EventSequenceKey::new(PgLsn::from(200), 1)
+        );
+        assert_eq!(
+            retained[1].sequence_key(),
+            EventSequenceKey::new(PgLsn::from(210), 0)
+        );
     }
 
     #[test]

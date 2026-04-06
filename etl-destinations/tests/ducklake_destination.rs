@@ -1220,6 +1220,106 @@ async fn test_write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
     assert_eq!(name, "posted");
 }
 
+/// Restart replays should drop already-applied events before rebatching larger overlaps.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_write_events_restart_overlap_rebatches_only_pending_suffix() {
+    use etl::types::InsertEvent;
+
+    let dir = make_test_dir("write_events_restart_overlap_rebatches_only_pending_suffix");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let table_id = TableId::new(19);
+    let schema = make_schema(19, "public", "restart_overlap_progress");
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_events(
+            (0..8)
+                .map(|idx| {
+                    let lsn = PgLsn::from(400u64 + idx as u64);
+                    Event::Insert(InsertEvent {
+                        start_lsn: lsn,
+                        commit_lsn: lsn,
+                        tx_ordinal: 0,
+                        table_id,
+                        table_row: TableRow::new(vec![
+                            Cell::I32(idx + 1),
+                            Cell::String(format!("name-{}", idx + 1)),
+                        ]),
+                    })
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    drop(destination);
+
+    let destination =
+        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .await
+            .unwrap();
+
+    destination
+        .write_events(
+            (3..16)
+                .map(|idx| {
+                    let lsn = PgLsn::from(400u64 + idx as u64);
+                    Event::Insert(InsertEvent {
+                        start_lsn: lsn,
+                        commit_lsn: lsn,
+                        tx_ordinal: 0,
+                        table_id,
+                        table_row: TableRow::new(vec![
+                            Cell::I32(idx + 1),
+                            Cell::String(format!("name-{}", idx + 1)),
+                        ]),
+                    })
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 16);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
+    assert_eq!(read_streaming_progress(&conn, &table_name), Some((415, 0)));
+
+    let names: Vec<String> = conn
+        .prepare(&format!(
+            "SELECT name FROM {}.{} ORDER BY id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(names.len(), 16);
+    assert_eq!(names[0], "name-1");
+    assert_eq!(names[15], "name-16");
+}
+
 /// A mixed mutation batch should reuse one temp staging table for multiple upserts.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
