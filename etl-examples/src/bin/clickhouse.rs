@@ -203,8 +203,8 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     //   total_memory * memory_budget_ratio / max_table_sync_workers
     let max_bytes_per_insert = {
         let total_memory = MemorySnapshot::from_system(&mut sysinfo::System::new()).total();
-        let budget = (total_memory as f64 * f64::from(BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO))
-            as u64;
+        let budget =
+            (total_memory as f64 * f64::from(BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO)) as u64;
         (budget / u64::from(args.ch_args.max_table_sync_workers)).max(1)
     };
 
@@ -215,7 +215,9 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         args.ch_args.ch_user,
         args.ch_args.ch_password,
         args.ch_args.ch_database,
-        ClickHouseInserterConfig { max_bytes_per_insert },
+        ClickHouseInserterConfig {
+            max_bytes_per_insert,
+        },
         store.clone(),
     )?;
 

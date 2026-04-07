@@ -45,8 +45,7 @@ pub fn skip_if_missing_clickhouse_env_vars() -> bool {
 ///
 /// Panics if [`CLICKHOUSE_URL_ENV`] is not set.
 pub fn get_clickhouse_url() -> String {
-    std::env::var(CLICKHOUSE_URL_ENV)
-        .unwrap_or_else(|_| panic!("{CLICKHOUSE_URL_ENV} must be set"))
+    std::env::var(CLICKHOUSE_URL_ENV).unwrap_or_else(|_| panic!("{CLICKHOUSE_URL_ENV} must be set"))
 }
 
 /// Returns the ClickHouse user name from the environment.
@@ -61,7 +60,9 @@ pub fn get_clickhouse_user() -> String {
 
 /// Returns the ClickHouse password from the environment, or `None` if unset.
 pub fn get_clickhouse_password() -> Option<String> {
-    std::env::var(CLICKHOUSE_PASSWORD_ENV).ok().filter(|s| !s.is_empty())
+    std::env::var(CLICKHOUSE_PASSWORD_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// Generates a unique database name for test isolation.
@@ -121,10 +122,7 @@ impl ClickHouseTestDatabase {
     /// Drops the test database from ClickHouse.
     pub async fn drop_database(&self) {
         self.root_client
-            .query(&format!(
-                "DROP DATABASE IF EXISTS `{}`",
-                self.database
-            ))
+            .query(&format!("DROP DATABASE IF EXISTS `{}`", self.database))
             .execute()
             .await
             .expect("Failed to drop test ClickHouse database");

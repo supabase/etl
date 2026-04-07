@@ -129,7 +129,10 @@ mod tests {
 
     #[test]
     fn test_scalar_type_mapping() {
-        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BOOL), "Boolean");
+        assert_eq!(
+            postgres_column_type_to_clickhouse_sql(&Type::BOOL),
+            "Boolean"
+        );
         assert_eq!(
             postgres_column_type_to_clickhouse_sql(&Type::CHAR),
             "String"
@@ -245,7 +248,10 @@ mod tests {
             },
         ];
         let sql = build_create_table_sql("public_users", &schemas);
-        assert!(sql.contains("\"id\" Int32"), "id should be non-nullable Int32");
+        assert!(
+            sql.contains("\"id\" Int32"),
+            "id should be non-nullable Int32"
+        );
         assert!(
             sql.contains("\"name\" Nullable(String)"),
             "name should be Nullable(String)"

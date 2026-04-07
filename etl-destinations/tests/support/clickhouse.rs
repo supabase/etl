@@ -31,11 +31,11 @@ pub struct AllTypesRow {
     pub json_col: String,
     pub integer_array_col: Vec<Option<i32>>,
     pub text_array_col: Vec<Option<String>>,
-    pub bytea_col: String,    // hex-encoded
+    pub bytea_col: String, // hex-encoded
     pub inet_col: String,
     pub cidr_col: String,
     pub macaddr_col: String,
-    pub uuid_col: String,     // via toString() in SELECT
+    pub uuid_col: String, // via toString() in SELECT
     pub cdc_operation: String,
 }
 

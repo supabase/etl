@@ -145,7 +145,6 @@ pub async fn start_replicator_with_config(
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
-<<<<<<< HEAD
         DestinationConfig::Ducklake {
             catalog_url,
             data_path,

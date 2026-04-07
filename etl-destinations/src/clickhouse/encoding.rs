@@ -249,12 +249,24 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
             // ClickHouse RowBinary UUID = two little-endian u64 (high bits then low bits).
             // Our bytes are in standard UUID big-endian order, so we split into two u64
             // and write each in little-endian.
-            let high = u64::from_be_bytes(bytes[0..8].try_into().map_err(|e: std::array::TryFromSliceError| {
-                etl_error!(ErrorKind::ConversionError, "UUID high-half conversion failed", e)
-            })?);
-            let low = u64::from_be_bytes(bytes[8..16].try_into().map_err(|e: std::array::TryFromSliceError| {
-                etl_error!(ErrorKind::ConversionError, "UUID low-half conversion failed", e)
-            })?);
+            let high = u64::from_be_bytes(bytes[0..8].try_into().map_err(
+                |e: std::array::TryFromSliceError| {
+                    etl_error!(
+                        ErrorKind::ConversionError,
+                        "UUID high-half conversion failed",
+                        e
+                    )
+                },
+            )?);
+            let low = u64::from_be_bytes(bytes[8..16].try_into().map_err(
+                |e: std::array::TryFromSliceError| {
+                    etl_error!(
+                        ErrorKind::ConversionError,
+                        "UUID low-half conversion failed",
+                        e
+                    )
+                },
+            )?);
             buf.extend_from_slice(&high.to_le_bytes());
             buf.extend_from_slice(&low.to_le_bytes());
         }

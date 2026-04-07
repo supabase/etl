@@ -87,7 +87,6 @@ tonic = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true, default-features = true }
 url = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true, features = ["v4"] }
-parking_lot = { workspace = true, optional = true }
 
 [dev-dependencies]
 duckdb = { workspace = true, features = ["bundled"] }
