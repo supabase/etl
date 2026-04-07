@@ -15,7 +15,7 @@ use metrics::{Unit, describe_gauge, gauge};
 use tikv_jemalloc_ctl::{epoch, opt, raw, stats};
 use tracing::{debug, warn};
 
-use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE, PIPELINE_ID_LABEL};
+use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE};
 
 /// Total bytes allocated by the application and currently in use.
 ///
@@ -191,11 +191,9 @@ fn register_metrics() {
 ///
 /// This function should be called after [`etl_telemetry::metrics::init_metrics`]
 /// to ensure the metrics recorder is installed.
-pub fn spawn_jemalloc_metrics_task(pipeline_id: u64) {
+pub fn spawn_jemalloc_metrics_task() {
     register_metrics();
     log_jemalloc_config();
-
-    let pipeline_id_str = pipeline_id.to_string();
 
     tokio::spawn(async move {
         // Initialize MIBs once for efficient repeated lookups.
@@ -266,43 +264,13 @@ pub fn spawn_jemalloc_metrics_task(pipeline_id: u64) {
             let retained = retained_mib.read().unwrap_or(0) as f64;
             let metadata = metadata_mib.read().unwrap_or(0) as f64;
 
-            // Update gauges with pipeline_id and app_type labels.
-            gauge!(
-                JEMALLOC_ALLOCATED_BYTES,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(allocated);
-            gauge!(
-                JEMALLOC_ACTIVE_BYTES,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(active);
-            gauge!(
-                JEMALLOC_RESIDENT_BYTES,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(resident);
-            gauge!(
-                JEMALLOC_MAPPED_BYTES,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(mapped);
-            gauge!(
-                JEMALLOC_RETAINED_BYTES,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(retained);
-            gauge!(
-                JEMALLOC_METADATA_BYTES,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(metadata);
+            // Update gauges with app_type labels.
+            gauge!(JEMALLOC_ALLOCATED_BYTES, APP_TYPE_LABEL => APP_TYPE_VALUE).set(allocated);
+            gauge!(JEMALLOC_ACTIVE_BYTES, APP_TYPE_LABEL => APP_TYPE_VALUE).set(active);
+            gauge!(JEMALLOC_RESIDENT_BYTES, APP_TYPE_LABEL => APP_TYPE_VALUE).set(resident);
+            gauge!(JEMALLOC_MAPPED_BYTES, APP_TYPE_LABEL => APP_TYPE_VALUE).set(mapped);
+            gauge!(JEMALLOC_RETAINED_BYTES, APP_TYPE_LABEL => APP_TYPE_VALUE).set(retained);
+            gauge!(JEMALLOC_METADATA_BYTES, APP_TYPE_LABEL => APP_TYPE_VALUE).set(metadata);
 
             // Calculate fragmentation ratio: (resident - allocated) / resident.
             // A ratio of 0 means no fragmentation, >0.5 indicates significant fragmentation.
@@ -311,12 +279,8 @@ pub fn spawn_jemalloc_metrics_task(pipeline_id: u64) {
             } else {
                 0.0
             };
-            gauge!(
-                JEMALLOC_FRAGMENTATION_RATIO,
-                PIPELINE_ID_LABEL => pipeline_id_str.clone(),
-                APP_TYPE_LABEL => APP_TYPE_VALUE,
-            )
-            .set(fragmentation);
+            gauge!(JEMALLOC_FRAGMENTATION_RATIO, APP_TYPE_LABEL => APP_TYPE_VALUE)
+                .set(fragmentation);
 
             debug!(
                 allocated_mb = allocated / 1_048_576.0,

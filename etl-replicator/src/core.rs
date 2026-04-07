@@ -239,7 +239,7 @@ where
 
     // We spawn metrics collection after the pipeline was started, so that if we crash before starting
     // we don't keep emitting metrics that make it look as if the system is running.
-    metrics::spawn_metrics_tasks(pipeline.id());
+    metrics::spawn_metrics_tasks();
 
     // Spawn a task to listen for shutdown signals and trigger shutdown.
     let shutdown_tx = pipeline.shutdown_tx();

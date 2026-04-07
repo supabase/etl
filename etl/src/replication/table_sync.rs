@@ -15,7 +15,7 @@ use crate::destination::async_result::{TruncateTableResult, WriteTableRowsResult
 use crate::error::{ErrorKind, EtlResult};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, etl_fail_point};
-use crate::metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL, PIPELINE_ID_LABEL};
+use crate::metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL};
 use crate::replication::client::PgReplicationClient;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
@@ -286,7 +286,6 @@ where
             let with_partitioning = config.max_copy_connections_per_table > 1;
             histogram!(
                 ETL_TABLE_COPY_DURATION_SECONDS,
-                PIPELINE_ID_LABEL => pipeline_id.to_string(),
                 PARTITIONING_LABEL => with_partitioning.to_string(),
             )
             .record(total_table_copy_duration_secs);

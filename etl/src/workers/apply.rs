@@ -16,8 +16,7 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::metrics::{
-    ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL,
-    WORKER_TYPE_LABEL,
+    ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL,
 };
 use crate::replication::apply::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState};
@@ -135,7 +134,7 @@ where
     ///
     /// Errors that happen while handling the worker error in this function are immediately propagated.
     async fn handle_apply_worker_error(
-        pipeline_id: PipelineId,
+        _pipeline_id: PipelineId,
         config: &PipelineConfig,
         shutdown_rx: &mut ShutdownRx,
         retry_attempts: &mut u32,
@@ -154,7 +153,6 @@ where
         };
         counter!(
             ETL_WORKER_ERRORS_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
             WORKER_TYPE_LABEL => "apply",
             ERROR_TYPE_LABEL => error_type,
         )
@@ -420,11 +418,7 @@ async fn handle_invalidated_slot<S: StateStore>(
     slot_name: &str,
     behavior: &InvalidatedSlotBehavior,
 ) -> EtlResult<PgLsn> {
-    counter!(
-        ETL_SLOT_INVALIDATIONS_TOTAL,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-    )
-    .increment(1);
+    counter!(ETL_SLOT_INVALIDATIONS_TOTAL).increment(1);
 
     match behavior {
         InvalidatedSlotBehavior::Error => {

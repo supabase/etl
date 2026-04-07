@@ -69,8 +69,8 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 /// and starts an HTTP server that listens on `[::]:9000/metrics`, making metrics available
 /// for Prometheus scraping.
 ///
-/// When provided, `project_ref` and `pipeline_id` are attached as global labels to
-/// all exported metrics for the current process.
+/// When provided, `project_ref` and `pipeline_id` are attached as global
+/// labels to all exported metrics for the current process.
 ///
 /// # Use Case
 ///

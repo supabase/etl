@@ -15,9 +15,7 @@ use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::metrics::{
-    ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
-};
+use crate::metrics::{ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL};
 use crate::replication::apply::{
     ApplyLoop, ApplyLoopResult, TableSyncWorkerContext, WorkerContext,
 };
@@ -410,7 +408,7 @@ where
     /// Any errors encountered while persisting error state or preparing a retry are propagated
     /// immediately.
     async fn handle_table_sync_worker_error(
-        pipeline_id: PipelineId,
+        _pipeline_id: PipelineId,
         table_id: TableId,
         config: &PipelineConfig,
         state: &TableSyncWorkerState,
@@ -458,7 +456,6 @@ where
         };
         counter!(
             ETL_WORKER_ERRORS_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
             WORKER_TYPE_LABEL => "table_sync",
             ERROR_TYPE_LABEL => error_type,
         )
