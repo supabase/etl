@@ -9,9 +9,7 @@ use tokio_postgres::types::PgLsn;
 
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
 use crate::error::{ErrorKind, EtlResult};
-use crate::metrics::{
-    ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL, PIPELINE_ID_LABEL,
-};
+use crate::metrics::{ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL};
 use crate::store::schema::SchemaStore;
 use crate::types::{
     BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, PipelineId, RelationEvent, TableRow,
@@ -115,7 +113,7 @@ pub async fn parse_event_from_insert_message<S>(
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     insert_body: &protocol::InsertBody,
-    pipeline_id: PipelineId,
+    _pipeline_id: PipelineId,
 ) -> EtlResult<InsertEvent>
 where
     S: SchemaStore,
@@ -126,21 +124,11 @@ where
     let tuple_data = insert_body.tuple().tuple_data();
     let row_size_bytes = calculate_tuple_bytes(tuple_data);
 
-    counter!(
-        ETL_BYTES_PROCESSED_TOTAL,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-        EVENT_TYPE_LABEL => "insert"
-    )
-    .increment(row_size_bytes);
+    counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "insert").increment(row_size_bytes);
 
     let table_row =
         convert_tuple_to_row(&table_schema.column_schemas, tuple_data, &mut None, false)?;
-    histogram!(
-        ETL_ROW_SIZE_BYTES,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-        EVENT_TYPE_LABEL => "insert"
-    )
-    .record(row_size_bytes as f64);
+    histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "insert").record(row_size_bytes as f64);
 
     Ok(InsertEvent {
         start_lsn,
@@ -163,7 +151,7 @@ pub async fn parse_event_from_update_message<S>(
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     update_body: &protocol::UpdateBody,
-    pipeline_id: PipelineId,
+    _pipeline_id: PipelineId,
 ) -> EtlResult<UpdateEvent>
 where
     S: SchemaStore,
@@ -182,12 +170,7 @@ where
     if let Some(identity) = &old_tuple {
         total_bytes += calculate_tuple_bytes(identity.tuple_data());
     }
-    counter!(
-        ETL_BYTES_PROCESSED_TOTAL,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-        EVENT_TYPE_LABEL => "update"
-    )
-    .increment(total_bytes);
+    counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "update").increment(total_bytes);
 
     let old_table_row = match old_tuple {
         Some(identity) => Some(convert_tuple_to_row(
@@ -207,12 +190,7 @@ where
         false,
     )?;
 
-    histogram!(
-        ETL_ROW_SIZE_BYTES,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-        EVENT_TYPE_LABEL => "update"
-    )
-    .record(total_bytes as f64);
+    histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "update").record(total_bytes as f64);
 
     let old_table_row = old_table_row_mut.map(|row| (is_key, row));
 
@@ -238,7 +216,7 @@ pub async fn parse_event_from_delete_message<S>(
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     delete_body: &protocol::DeleteBody,
-    pipeline_id: PipelineId,
+    _pipeline_id: PipelineId,
 ) -> EtlResult<DeleteEvent>
 where
     S: SchemaStore,
@@ -254,19 +232,9 @@ where
     if let Some(identity) = &old_tuple {
         let row_size_bytes = calculate_tuple_bytes(identity.tuple_data());
 
-        counter!(
-            ETL_BYTES_PROCESSED_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-            EVENT_TYPE_LABEL => "delete"
-        )
-        .increment(row_size_bytes);
+        counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "delete").increment(row_size_bytes);
 
-        histogram!(
-            ETL_ROW_SIZE_BYTES,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-            EVENT_TYPE_LABEL => "delete"
-        )
-        .record(row_size_bytes as f64);
+        histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "delete").record(row_size_bytes as f64);
     }
 
     let old_table_row = match old_tuple {

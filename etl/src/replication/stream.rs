@@ -17,8 +17,7 @@ use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 use crate::metrics::{
     ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, ETL_STATUS_UPDATES_SKIPPED_TOTAL,
-    ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, PIPELINE_ID_LABEL,
-    STATUS_UPDATE_TYPE_LABEL,
+    ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, STATUS_UPDATE_TYPE_LABEL,
 };
 use crate::types::{PipelineId, TableRow};
 use metrics::{counter, histogram};
@@ -38,7 +37,6 @@ pin_project! {
         #[pin]
         stream: CopyOutStream,
         column_schemas: &'a [ColumnSchema],
-        pipeline_id: PipelineId,
     }
 }
 
@@ -49,12 +47,11 @@ impl<'a> TableCopyStream<'a> {
     pub fn wrap(
         stream: CopyOutStream,
         column_schemas: &'a [ColumnSchema],
-        pipeline_id: PipelineId,
+        _pipeline_id: PipelineId,
     ) -> Self {
         Self {
             stream,
             column_schemas,
-            pipeline_id,
         }
     }
 }
@@ -74,19 +71,11 @@ impl<'a> Stream for TableCopyStream<'a> {
             Some(Ok(row)) => {
                 let row_size_bytes = row.len() as u64;
 
-                counter!(
-                    ETL_BYTES_PROCESSED_TOTAL,
-                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
-                    EVENT_TYPE_LABEL => "copy"
-                )
-                .increment(row_size_bytes);
+                counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "copy")
+                    .increment(row_size_bytes);
 
-                histogram!(
-                    ETL_ROW_SIZE_BYTES,
-                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
-                    EVENT_TYPE_LABEL => "copy"
-                )
-                .record(row_size_bytes as f64);
+                histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy")
+                    .record(row_size_bytes as f64);
 
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas) {
                     Ok(row) => Poll::Ready(Some(Ok(row))),
@@ -142,19 +131,17 @@ pub struct EventsStream {
         last_update: Option<Instant>,
         last_write_lsn: Option<PgLsn>,
         last_flush_lsn: Option<PgLsn>,
-        pipeline_id: PipelineId,
     }
 }
 
 impl EventsStream {
     /// Creates a new [`EventsStream`] from a [`LogicalReplicationStream`].
-    pub fn wrap(stream: LogicalReplicationStream, pipeline_id: PipelineId) -> Self {
+    pub fn wrap(stream: LogicalReplicationStream, _pipeline_id: PipelineId) -> Self {
         Self {
             stream,
             last_update: None,
             last_write_lsn: None,
             last_flush_lsn: None,
-            pipeline_id,
         }
     }
 
@@ -171,8 +158,6 @@ impl EventsStream {
         status_update_type: StatusUpdateType,
     ) -> EtlResult<()> {
         let this = self.project();
-        let pipeline_id = *this.pipeline_id;
-
         // If the new write lsn is less than the last one, we can safely ignore it, since we only want
         // to report monotonically increasing values.
         if let Some(last_write_lsn) = this.last_write_lsn
@@ -211,7 +196,6 @@ impl EventsStream {
             if flush_lsn == *last_flush && last_update.elapsed() < STATUS_UPDATE_INTERVAL {
                 counter!(
                     ETL_STATUS_UPDATES_SKIPPED_TOTAL,
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
                     STATUS_UPDATE_TYPE_LABEL => status_update_type.to_string(),
                 )
                 .increment(1);
@@ -251,7 +235,6 @@ impl EventsStream {
 
         counter!(
             ETL_STATUS_UPDATES_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
             FORCED_LABEL => force.to_string(),
             STATUS_UPDATE_TYPE_LABEL => status_update_type.to_string(),
         )

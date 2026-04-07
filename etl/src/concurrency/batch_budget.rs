@@ -6,7 +6,7 @@ use metrics::gauge;
 use tracing::debug;
 
 use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::metrics::{ETL_IDEAL_BATCH_SIZE_BYTES, PIPELINE_ID_LABEL};
+use crate::metrics::ETL_IDEAL_BATCH_SIZE_BYTES;
 use crate::types::PipelineId;
 
 /// Refresh interval for cached batch budget reads.
@@ -77,11 +77,7 @@ impl BatchBudgetController {
             "computed ideal batch budget size"
         );
 
-        gauge!(
-            ETL_IDEAL_BATCH_SIZE_BYTES,
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string()
-        )
-        .set(ideal_batch_size_bytes as f64);
+        gauge!(ETL_IDEAL_BATCH_SIZE_BYTES).set(ideal_batch_size_bytes as f64);
 
         ideal_batch_size_bytes
     }

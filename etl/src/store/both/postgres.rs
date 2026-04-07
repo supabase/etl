@@ -15,7 +15,7 @@ use tracing::{debug, info};
 
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
-use crate::metrics::{ETL_TABLES_TOTAL, PHASE_LABEL, PIPELINE_ID_LABEL};
+use crate::metrics::{ETL_TABLES_TOTAL, PHASE_LABEL};
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
@@ -84,14 +84,9 @@ async fn apply_migrations(connection_config: &PgConnectionConfig) -> Result<(), 
 }
 
 /// Emits table-related metrics which quantify the total number of tables in each phase.
-fn emit_table_metrics(pipeline_id: PipelineId, counts_by_phase: &HashMap<&'static str, u64>) {
+fn emit_table_metrics(counts_by_phase: &HashMap<&'static str, u64>) {
     for (phase, count) in counts_by_phase {
-        gauge!(
-            ETL_TABLES_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-            PHASE_LABEL => *phase
-        )
-        .set(*count as f64);
+        gauge!(ETL_TABLES_TOTAL, PHASE_LABEL => *phase).set(*count as f64);
     }
 }
 
@@ -271,7 +266,7 @@ impl StateStore for PostgresStore {
         let mut inner = self.inner.lock().await;
         inner.init_phase_counts(&table_states);
         inner.table_states = table_states;
-        emit_table_metrics(self.pipeline_id, &inner.phase_counts);
+        emit_table_metrics(&inner.phase_counts);
 
         info!(
             count = table_states_len,
@@ -315,7 +310,7 @@ impl StateStore for PostgresStore {
         for (table_id, state) in updates {
             inner.set_table_state(table_id, state);
         }
-        emit_table_metrics(self.pipeline_id, &inner.phase_counts);
+        emit_table_metrics(&inner.phase_counts);
 
         Ok(())
     }
@@ -343,7 +338,7 @@ impl StateStore for PostgresStore {
 
         let mut inner = self.inner.lock().await;
         inner.set_table_state(table_id, restored_phase.clone());
-        emit_table_metrics(self.pipeline_id, &inner.phase_counts);
+        emit_table_metrics(&inner.phase_counts);
 
         Ok(restored_phase)
     }
@@ -560,7 +555,7 @@ impl CleanupStore for PostgresStore {
         inner.remove_table_state(table_id);
         inner.table_schemas.remove(&table_id);
         inner.table_mappings.remove(&table_id);
-        emit_table_metrics(self.pipeline_id, &inner.phase_counts);
+        emit_table_metrics(&inner.phase_counts);
 
         Ok(())
     }

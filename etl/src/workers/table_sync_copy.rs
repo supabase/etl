@@ -26,7 +26,7 @@ use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
     ETL_EVENTS_PROCESSED_TOTAL, ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
     ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE, ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL,
-    PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+    WORKER_TYPE_LABEL,
 };
 use crate::replication::client::{
     CtidPartition, PgReplicationChildTransaction, PgReplicationTransaction,
@@ -83,7 +83,7 @@ async fn copy_table_rows_from_stream<D, S>(
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     table_id: TableId,
-    pipeline_id: PipelineId,
+    _pipeline_id: PipelineId,
     partitioning: &'static str,
     destination: D,
 ) -> EtlResult<ShutdownResult<u64, u64>>
@@ -155,7 +155,6 @@ where
                     ETL_EVENTS_PROCESSED_TOTAL,
                     WORKER_TYPE_LABEL => "table_sync",
                     ACTION_LABEL => "table_copy",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
                     DESTINATION_LABEL => D::name(),
                 )
                 .increment(batch_size);
@@ -165,7 +164,6 @@ where
                     ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
                     WORKER_TYPE_LABEL => "table_sync",
                     ACTION_LABEL => "table_copy",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
                     DESTINATION_LABEL => D::name(),
                     PARTITIONING_LABEL => partitioning,
                 )
@@ -300,7 +298,6 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 
     histogram!(
         ETL_TABLE_COPY_ROWS,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
         DESTINATION_LABEL => D::name(),
         PARTITIONING_LABEL => "false",
     )
@@ -503,14 +500,12 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     // Record imbalance metrics.
     histogram!(
         ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
         DESTINATION_LABEL => D::name(),
     )
     .record(time_lif);
 
     histogram!(
         ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
         DESTINATION_LABEL => D::name(),
     )
     .record(rows_lif);
@@ -653,7 +648,6 @@ where
 
     histogram!(
         ETL_TABLE_COPY_ROWS,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
         DESTINATION_LABEL => D::name(),
         PARTITIONING_LABEL => "true",
     )

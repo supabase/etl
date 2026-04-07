@@ -42,7 +42,7 @@ use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
     ETL_EVENTS_PROCESSED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_TRANSACTION_DURATION_SECONDS,
-    ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+    ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::{PgReplicationClient, PostgresConnectionUpdate};
 use crate::replication::stream::{EventsStream, StatusUpdateType};
@@ -1156,7 +1156,6 @@ where
             ETL_EVENTS_PROCESSED_TOTAL,
             WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
             ACTION_LABEL => "table_streaming",
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             DESTINATION_LABEL => D::name(),
         )
         .increment(metadata.metrics.items_count as u64);
@@ -1165,7 +1164,6 @@ where
             ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
             WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
             ACTION_LABEL => "table_streaming",
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             DESTINATION_LABEL => D::name(),
         )
         .record(metadata.metrics.dispatched_at.elapsed().as_secs_f64());
@@ -1356,7 +1354,6 @@ where
     ) -> EtlResult<HandleMessageResult> {
         counter!(
             ETL_REPLICATION_MESSAGES_TOTAL,
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
         )
         .increment(1);
@@ -1503,23 +1500,11 @@ where
         if let Some(begin_ts) = self.state.current_tx_begin_ts.take() {
             let now = Instant::now();
             let duration_seconds = (now - begin_ts).as_secs_f64();
-            histogram!(
-                ETL_TRANSACTION_DURATION_SECONDS,
-                PIPELINE_ID_LABEL => self.pipeline_id.to_string()
-            )
-            .record(duration_seconds);
+            histogram!(ETL_TRANSACTION_DURATION_SECONDS).record(duration_seconds);
 
-            counter!(
-                ETL_TRANSACTIONS_TOTAL,
-                PIPELINE_ID_LABEL => self.pipeline_id.to_string()
-            )
-            .increment(1);
+            counter!(ETL_TRANSACTIONS_TOTAL).increment(1);
 
-            histogram!(
-                ETL_TRANSACTION_SIZE,
-                PIPELINE_ID_LABEL => self.pipeline_id.to_string()
-            )
-            .record((self.state.current_tx_events - 1) as f64);
+            histogram!(ETL_TRANSACTION_SIZE).record((self.state.current_tx_events - 1) as f64);
 
             self.state.current_tx_events = 0;
         }
