@@ -33,6 +33,11 @@ per table.
 
 Use these first to separate storage-shape problems from pure concurrency or pool
 pressure. If these are high, maintenance may not be your real bottleneck.
+Each histogram is labeled by `operation_kind` with one of:
+
+- `foreground` for write-path work.
+- `maintenance` for background flush, rewrite, merge, and checkpoint work.
+- `metrics` for background catalog and table-health sampling.
 
 - high `blocking_queue_wait_seconds` with low slot and checkout wait means the
   Tokio blocking pool itself is backed up before DuckLake code even starts
@@ -48,6 +53,8 @@ pressure. If these are high, maintenance may not be your real bottleneck.
 ### Batch and retry metrics
 
 - `etl_ducklake_batch_commit_duration_seconds`
+- `etl_ducklake_batch_substage_duration_seconds`
+- `etl_ducklake_mutation_operation_duration_seconds`
 - `etl_ducklake_batch_prepared_mutations`
 - `etl_ducklake_upsert_rows`
 - `etl_ducklake_delete_predicates`
@@ -57,9 +64,30 @@ pressure. If these are high, maintenance may not be your real bottleneck.
 
 These explain the pressure your writer is putting on DuckLake:
 
+- `mutation_operation_duration_seconds` is the direct latency split between
+  DuckDB-profiled `insert` and `delete` work on the target table. It is labeled
+  by `operation_kind` and `delete_origin`.
+- `operation_kind="insert"` measures the final `INSERT ... SELECT` into the
+  DuckLake table. It uses `delete_origin="none"` and does not include
+  staging-table creation, clearing, or row-loading time before that statement
+  runs.
+- `operation_kind="delete"` records one sample per executed `DELETE`
+  statement. `delete_origin` then tells you whether that delete came from a
+  source `delete`, `replace`, or `update`. If one prepared delete mutation is
+  split into multiple chunked statements, each statement contributes its own
+  histogram sample.
+- `batch_substage_duration_seconds` records unprofiled write-path time that
+  sits outside the final target-table `INSERT` and `DELETE` statements. The
+  `substage` label currently uses `staging_prepare`, `staging_load`,
+  `progress_update`, and `commit_only`, and records one sample per substage
+  invocation.
 - larger `upsert_rows` usually means fewer, larger files.
 - larger `delete_predicates` usually means more delete pressure and more need
   for `rewrite_data_files`.
+- if `operation_kind="delete"` is consistently slower than `insert`, delete
+  files and rewrite pressure are usually the next place to investigate.
+- if `operation_kind="insert"` is high while delete stays low, look first at
+  batch shape, staging overhead, and the downstream object-store path.
 - growing retries usually points to transaction conflicts or file-visibility
   issues before it points to bad maintenance thresholds.
 

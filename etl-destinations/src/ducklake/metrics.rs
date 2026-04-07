@@ -39,8 +39,12 @@ pub(crate) const ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS: &str =
     "etl_ducklake_pool_checkout_wait_seconds";
 pub(crate) const ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS: &str =
     "etl_ducklake_blocking_operation_duration_seconds";
+pub(crate) const ETL_DUCKLAKE_MUTATION_OPERATION_DURATION_SECONDS: &str =
+    "etl_ducklake_mutation_operation_duration_seconds";
 pub(crate) const ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS: &str =
     "etl_ducklake_batch_commit_duration_seconds";
+pub(crate) const ETL_DUCKLAKE_BATCH_SUBSTAGE_DURATION_SECONDS: &str =
+    "etl_ducklake_batch_substage_duration_seconds";
 pub(crate) const ETL_DUCKLAKE_BATCH_PREPARED_MUTATIONS: &str =
     "etl_ducklake_batch_prepared_mutations";
 pub(crate) const ETL_DUCKLAKE_UPSERT_ROWS: &str = "etl_ducklake_upsert_rows";
@@ -82,6 +86,8 @@ pub(crate) const BATCH_KIND_LABEL: &str = "batch_kind";
 pub(crate) const SUB_BATCH_KIND_LABEL: &str = "sub_batch_kind";
 pub(crate) const PREPARED_ROWS_KIND_LABEL: &str = "prepared_rows_kind";
 pub(crate) const DELETE_ORIGIN_LABEL: &str = "delete_origin";
+pub(crate) const OPERATION_KIND_LABEL: &str = "operation_kind";
+pub(crate) const SUBSTAGE_LABEL: &str = "substage";
 pub(crate) const RETRY_SCOPE_LABEL: &str = "retry_scope";
 pub(crate) const RESULT_LABEL: &str = "result";
 pub(crate) const MAINTENANCE_TASK_LABEL: &str = "task";
@@ -157,27 +163,37 @@ pub(crate) fn register_metrics() {
         describe_histogram!(
             ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS,
             Unit::Seconds,
-            "Time spent waiting in tokio's blocking task queue after a DuckLake slot is acquired."
+            "Time spent waiting in tokio's blocking task queue after a DuckLake slot is acquired, labeled by operation_kind."
         );
         describe_histogram!(
             ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS,
             Unit::Seconds,
-            "Time spent waiting for a DuckLake blocking slot."
+            "Time spent waiting for a DuckLake blocking slot, labeled by operation_kind."
         );
         describe_histogram!(
             ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
             Unit::Seconds,
-            "Time spent waiting to check out a DuckLake connection from the pool."
+            "Time spent waiting to check out a DuckLake connection from the pool, labeled by operation_kind."
         );
         describe_histogram!(
             ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS,
             Unit::Seconds,
-            "Time spent executing a DuckLake blocking operation after checkout."
+            "Time spent executing a DuckLake blocking operation after checkout, labeled by operation_kind."
+        );
+        describe_histogram!(
+            ETL_DUCKLAKE_MUTATION_OPERATION_DURATION_SECONDS,
+            Unit::Seconds,
+            "DuckDB-profiled latency of one DuckLake target-table insert or delete operation, labeled by operation_kind and delete_origin. Insert samples use delete_origin=\"none\" and measure only the final target INSERT statement, excluding staging-table preparation."
         );
         describe_histogram!(
             ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS,
             Unit::Seconds,
             "End-to-end duration of a committed DuckLake atomic batch, labeled by batch_kind and sub_batch_kind."
+        );
+        describe_histogram!(
+            ETL_DUCKLAKE_BATCH_SUBSTAGE_DURATION_SECONDS,
+            Unit::Seconds,
+            "Duration of one internal DuckLake atomic-batch substage invocation, labeled by batch_kind, sub_batch_kind, and substage."
         );
         describe_histogram!(
             ETL_DUCKLAKE_BATCH_PREPARED_MUTATIONS,
@@ -647,16 +663,14 @@ fn resolve_ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<S
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use super::*;
 
     use std::collections::HashSet;
     use std::sync::Arc;
-    #[cfg(feature = "test-utils")]
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-    #[cfg(feature = "test-utils")]
     #[tokio::test]
     async fn test_spawn_ducklake_metrics_sampler_initializes_pool_lazily() {
         let open_count = Arc::new(AtomicUsize::new(0));
