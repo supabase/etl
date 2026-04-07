@@ -6,11 +6,13 @@ use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::types::PipelineId;
 use etl_destinations::clickhouse::test_utils::{
-    setup_clickhouse_database, skip_if_missing_clickhouse_env_vars,
+    ClickHouseTestDatabase, setup_clickhouse_database, skip_if_missing_clickhouse_env_vars,
 };
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::sync::Once;
+use std::time::Duration;
+use tokio::time::sleep;
 
 use crate::support::clickhouse::AllTypesRow;
 
@@ -26,13 +28,6 @@ fn install_crypto_provider() {
             .expect("failed to install default crypto provider");
     });
 }
-
-/// ClickHouse table name for `test.all_types_encoding`.
-///
-/// Derived from `table_name_to_clickhouse_table_name("test", "all_types_encoding")`:
-/// - "test"                → "test"  (no underscores)
-/// - "all_types_encoding"  → "all__types__encoding"  (underscores escaped to __)
-const ALL_TYPES_CH_TABLE: &str = "test_all__types__encoding";
 
 /// SELECT query that fetches all verified columns from the ClickHouse table.
 ///
@@ -57,6 +52,22 @@ const ALL_TYPES_SELECT: &str = concat!(
     "ORDER BY id",
 );
 
+/// A row read back from the ClickHouse `update_flow` test table.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+struct UpdateFlowRow {
+    id: i64,
+    value: String,
+    cdc_operation: String,
+    cdc_lsn: i64,
+}
+
+/// SELECT query used to verify the `update_flow` streaming test.
+const UPDATE_FLOW_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_update__flow\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
 /// Days from 1970-01-01 to 2024-01-15 (used to verify the `date_col` round-trip).
 ///
 /// Python: `(date(2024, 1, 15) - date(1970, 1, 1)).days` = 19737
@@ -67,6 +78,22 @@ const DATE_2024_01_15_DAYS: u16 = 19737;
 /// Python: `int(datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc).timestamp() * 1_000_000)`
 /// = 1705320000000000
 const TS_2024_01_15_12_00_US: i64 = 1_705_320_000_000_000;
+
+/// Waits until ClickHouse returns at least `expected_rows` from `UPDATE_FLOW_SELECT`.
+async fn wait_for_update_flow_rows(
+    ch_db: &ClickHouseTestDatabase,
+    expected_rows: usize,
+) -> Vec<UpdateFlowRow> {
+    for _ in 0..50 {
+        let rows: Vec<UpdateFlowRow> = ch_db.query(UPDATE_FLOW_SELECT).await;
+        if rows.len() >= expected_rows {
+            return rows;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!("timed out waiting for clickhouse update_flow rows");
+}
 
 /// Tests that all Postgres column types (including nullable arrays) round-trip
 /// correctly through the ClickHouse RowBinary encoding.
@@ -240,7 +267,10 @@ async fn all_types_table_copy() {
     assert_eq!(r1.integer_col, 1000);
     assert_eq!(r1.bigint_col, 9_999_999);
     assert!((r1.real_col - 1.5_f32).abs() < 1e-3, "real_col mismatch");
-    assert!((r1.double_col - 2.5_f64).abs() < 1e-6, "double_col mismatch");
+    assert!(
+        (r1.double_col - 2.5_f64).abs() < 1e-6,
+        "double_col mismatch"
+    );
     assert_eq!(r1.numeric_col, "12345.67");
     assert!(r1.boolean_col);
     assert_eq!(r1.text_col, "hello text");
@@ -300,5 +330,91 @@ async fn all_types_table_copy() {
         r2.text_array_col,
         vec![Some("alpha".to_string()), Some("beta".to_string())],
         "row 2 text_array_col mismatch — nullable-array encoding bug likely present"
+    );
+}
+
+/// Tests that UPDATE events are streamed to ClickHouse after the initial table copy.
+///
+/// ClickHouse is append-only for CDC in this destination, so the original copied row
+/// remains present with `cdc_operation = "INSERT"` and the streamed change arrives as
+/// a second row with `cdc_operation = "UPDATE"` and a positive LSN.
+#[tokio::test(flavor = "multi_thread")]
+async fn updates_are_streamed_to_clickhouse() {
+    if skip_if_missing_clickhouse_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("update_flow");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create update_flow test table");
+
+    let publication_name = "test_pub_clickhouse_updates";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create update_flow publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('before')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert initial update_flow row");
+
+    let ch_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = ch_db.build_destination(pipeline_id, store.clone());
+
+    let table_ready = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    database
+        .run_sql(&format!(
+            "UPDATE {} SET value = 'after' WHERE id = 1",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to update update_flow row");
+
+    let rows = wait_for_update_flow_rows(&ch_db, 2).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert_eq!(rows.len(), 2, "expected copied row plus streamed update");
+
+    let insert_row = &rows[0];
+    assert_eq!(insert_row.id, 1);
+    assert_eq!(insert_row.value, "before");
+    assert_eq!(insert_row.cdc_operation, "INSERT");
+    assert_eq!(insert_row.cdc_lsn, 0);
+
+    let update_row = &rows[1];
+    assert_eq!(update_row.id, 1);
+    assert_eq!(update_row.value, "after");
+    assert_eq!(update_row.cdc_operation, "UPDATE");
+    assert!(
+        update_row.cdc_lsn > insert_row.cdc_lsn,
+        "streamed update should have a positive LSN"
     );
 }
