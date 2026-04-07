@@ -8,16 +8,20 @@ use std::time::Duration;
 
 use etl::destination::Destination;
 use etl::destination::async_result::{
-    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+    TruncateTableResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
 };
 use etl::destination::task_set::DestinationTaskSet;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
+use etl::table_rows_to_arrow_batch;
 #[cfg(test)]
 use etl::types::Cell;
-use etl::types::{Event, EventSequenceKey, SizeHint, TableId, TableName, TableRow, TableSchema};
+use etl::types::{
+    Event, EventSequenceKey, SizeHint, StreamBatch, TableArrowBatch, TableChangeSet, TableId,
+    TableName, TableRow, TableSchema,
+};
 use metrics::{gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
@@ -35,8 +39,9 @@ use crate::ducklake::batches::{
     apply_table_batch_with_retry, apply_table_batches_with_retry,
     clear_applied_batch_markers_for_kind, clear_table_streaming_progress,
     ensure_applied_batches_table_exists, ensure_streaming_progress_table_exists,
-    prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
-    read_table_streaming_progress_sequence_key, retain_mutations_after_sequence_key,
+    prepare_change_table_batches, prepare_copy_arrow_batch, prepare_mutation_table_batches,
+    prepare_truncate_table_batch, read_table_streaming_progress_sequence_key,
+    retain_change_set_after_sequence_key, retain_mutations_after_sequence_key,
     retain_truncates_after_sequence_key,
 };
 use crate::ducklake::client::{
@@ -144,29 +149,28 @@ where
         Ok(())
     }
 
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        table_id: TableId,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
-        let result = self.write_table_rows(table_id, table_rows).await;
+        let result = self.write_snapshot_batch_inner(batch).await;
         async_result.send(result);
 
         Ok(())
     }
 
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         self.streaming_tasks.try_reap().await?;
 
         let destination = self.clone();
         self.streaming_tasks
             .spawn(async move {
-                let result = destination.write_events(events).await;
+                let result = destination.write_stream_batches_inner(batches).await;
                 async_result.send(result);
             })
             .await;
@@ -196,7 +200,10 @@ where
         table_id: TableId,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.write_table_rows_inner(table_id, table_rows).await
+        let table_schema = self.get_table_schema(table_id).await?;
+        let batch = table_rows_to_arrow_batch(table_schema, &table_rows)?;
+
+        self.write_snapshot_batch_inner(batch).await
     }
 
     /// Writes one streaming CDC batch directly to the destination.
@@ -226,10 +233,10 @@ where
     /// - `metadata_schema`: Optional Postgres schema for DuckLake metadata tables
     ///   (e.g. `"ducklake"`). Uses the catalog default schema when not set.
     /// - `duckdb_log`: Optional DuckDB log storage and shutdown dump paths.
-    /// - On Linux, DuckDB extensions are loaded from vendored local files when
-    ///   a vendored directory is available. The root directory can be forced
-    ///   with `ETL_DUCKDB_EXTENSION_ROOT`. Otherwise, DuckDB uses the legacy
-    ///   online `INSTALL` flow. On macOS and Windows, DuckDB always uses the
+    /// - On Linux and macOS, DuckDB extensions are loaded from vendored local
+    ///   files when a vendored directory is available. The root directory can
+    ///   be forced with `ETL_DUCKDB_EXTENSION_ROOT`. Otherwise, DuckDB uses
+    ///   the legacy online `INSTALL` flow. On Windows, DuckDB always uses the
     ///   legacy online `INSTALL` flow.
     ///
     /// Pool initialization is blocking because DuckDB extensions are loaded and
@@ -256,9 +263,6 @@ where
 
         let extension_strategy = current_duckdb_extension_strategy()?;
         let disable_extension_autoload = extension_strategy.disables_autoload();
-<<<<<<< HEAD
-        if let crate::ducklake::config::DuckDbExtensionStrategy::VendoredLinux { platform_dir } =
-=======
         info!(
             pool_size,
             catalog_scheme = catalog_url.scheme(),
@@ -269,7 +273,6 @@ where
             "starting ducklake destination"
         );
         if let crate::ducklake::config::DuckDbExtensionStrategy::VendoredLocal { platform_dir } =
->>>>>>> bnjjj/ducklake_looogs
             extension_strategy
         {
             info!(platform = platform_dir, "using vendored duckdb extensions");
@@ -504,27 +507,19 @@ where
     ///
     /// Small copy batches may stay inlined until the background maintenance
     /// worker materializes them after we emit the maintenance notification.
-    async fn write_table_rows_inner(
-        &self,
-        table_id: TableId,
-        table_rows: Vec<TableRow>,
-    ) -> EtlResult<()> {
-        let table_name = self.ensure_table_exists(table_id).await?;
-
-        if table_rows.is_empty() {
+    async fn write_snapshot_batch_inner(&self, batch: TableArrowBatch) -> EtlResult<()> {
+        if batch.row_count() == 0 {
             return Ok(());
         }
 
-        let approx_bytes = table_rows
-            .iter()
-            .map(|row| row.size_hint() as u64)
-            .sum::<u64>();
-        let inserted_rows = table_rows.len() as u64;
+        let table_name = self.ensure_table_exists(batch.table_id).await?;
+        let approx_bytes = batch.approx_bytes as u64;
+        let inserted_rows = batch.row_count() as u64;
+        let table_schema = Arc::clone(&batch.table_schema);
 
         // Here we can have concurrent table writers because it's INSERTs only and CDC (write_events) won't start before the copy phase is complete
         self.ensure_applied_batches_table_exists().await?;
-        let table_schema = self.get_table_schema(table_id).await?;
-        let prepared_batch = prepare_copy_table_batch(&table_schema, table_name, table_rows)?;
+        let prepared_batch = prepare_copy_arrow_batch(&table_schema, table_name, batch)?;
         let table_name = prepared_batch.table_name().to_owned();
         apply_table_batch_with_retry(
             Arc::clone(&self.pool),
@@ -541,6 +536,172 @@ where
             },
         ))
         .await;
+
+        Ok(())
+    }
+
+    /// Writes normalized Arrow-native CDC batches to the destination.
+    async fn write_stream_batches_inner(&self, batches: Vec<StreamBatch>) -> EtlResult<()> {
+        #[cfg(feature = "test-utils")]
+        wait_if_streaming_write_paused_for_tests().await;
+
+        let mut batch_iter = batches.into_iter().peekable();
+
+        while batch_iter.peek().is_some() {
+            let mut table_id_to_changes: HashMap<TableId, TableChangeSet> = HashMap::new();
+
+            while let Some(batch) = batch_iter.peek() {
+                if matches!(batch, StreamBatch::Truncate(_)) {
+                    break;
+                }
+
+                let StreamBatch::Changes(change_set) = batch_iter.next().unwrap() else {
+                    unreachable!("truncate batches are handled separately");
+                };
+
+                let table_id = change_set.table_id;
+                table_id_to_changes
+                    .entry(table_id)
+                    .or_insert_with(|| TableChangeSet {
+                        table_id,
+                        groups: Vec::new(),
+                    })
+                    .groups
+                    .extend(change_set.groups);
+            }
+
+            if !table_id_to_changes.is_empty() {
+                self.ensure_applied_batches_table_exists().await?;
+                self.ensure_streaming_progress_table_exists().await?;
+                let mut join_set = JoinSet::new();
+
+                for (table_id, change_set) in table_id_to_changes {
+                    if change_set.groups.is_empty() {
+                        continue;
+                    }
+                    let table_schema = Arc::clone(&change_set.groups[0].rows.table_schema);
+                    let table_name = self.ensure_table_exists(table_id).await?;
+                    let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+                    let pool = Arc::clone(&self.pool);
+                    let blocking_slots = Arc::clone(&self.blocking_slots);
+                    let destination_table_name = table_name.clone();
+                    let maintenance_worker = Arc::clone(&self.maintenance_worker);
+
+                    join_set.spawn(async move {
+                        let _table_write_permit = table_write_permit;
+                        let last_sequence_key =
+                            read_table_streaming_progress_sequence_key_blocking(
+                                Arc::clone(&pool),
+                                Arc::clone(&blocking_slots),
+                                destination_table_name.clone(),
+                            )
+                            .await?;
+                        let pending_change_set =
+                            retain_change_set_after_sequence_key(change_set, last_sequence_key)?;
+                        if pending_change_set.groups.is_empty() {
+                            debug!(
+                                table = %destination_table_name,
+                                "ducklake streaming mutation replay skipped, no pending arrow changes"
+                            );
+                            return Ok::<(), etl::error::EtlError>(());
+                        }
+
+                        let maintenance_notification =
+                            maintenance_worker.as_ref().as_ref().map(|_| {
+                                TableMaintenanceNotification::WriteActivity(
+                                    table_write_activity_for_change_set(
+                                        destination_table_name.clone(),
+                                        &pending_change_set,
+                                    ),
+                                )
+                            });
+                        let prepared_batches = prepare_change_table_batches(
+                            &table_schema,
+                            destination_table_name,
+                            pending_change_set,
+                        )?;
+                        apply_table_batches_with_retry(pool, blocking_slots, prepared_batches)
+                            .await?;
+                        if let (Some(worker), Some(notification)) =
+                            (maintenance_worker.as_ref(), maintenance_notification)
+                        {
+                            send_maintenance_notification(&worker.notification_tx, notification)
+                                .await;
+                        }
+                        Ok::<(), etl::error::EtlError>(())
+                    });
+                }
+
+                while let Some(result) = join_set.join_next().await {
+                    result.map_err(|_| {
+                        etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake write task panicked")
+                    })??;
+                }
+            }
+
+            let mut truncate_table_ids: HashMap<TableId, Vec<TrackedTruncateEvent>> =
+                HashMap::new();
+            while let Some(StreamBatch::Truncate(_)) = batch_iter.peek() {
+                let StreamBatch::Truncate(truncate) = batch_iter.next().unwrap() else {
+                    unreachable!("change batches are handled separately");
+                };
+                for table_id in truncate.rel_ids {
+                    truncate_table_ids.entry(table_id).or_default().push(
+                        TrackedTruncateEvent::new(
+                            truncate.commit_lsn,
+                            truncate.commit_lsn,
+                            truncate.tx_ordinal,
+                            truncate.options,
+                        ),
+                    );
+                }
+            }
+
+            if !truncate_table_ids.is_empty() {
+                self.ensure_applied_batches_table_exists().await?;
+                self.ensure_streaming_progress_table_exists().await?;
+                let mut join_set = JoinSet::new();
+
+                for (table_id, truncates) in truncate_table_ids {
+                    let table_name = self.ensure_table_exists(table_id).await?;
+                    let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+                    let pool = Arc::clone(&self.pool);
+                    let blocking_slots = Arc::clone(&self.blocking_slots);
+                    join_set.spawn(async move {
+                        let _table_write_permit = table_write_permit;
+                        let last_sequence_key =
+                            read_table_streaming_progress_sequence_key_blocking(
+                                Arc::clone(&pool),
+                                Arc::clone(&blocking_slots),
+                                table_name.clone(),
+                            )
+                            .await?;
+                        let pending_truncates =
+                            retain_truncates_after_sequence_key(truncates, last_sequence_key);
+                        if pending_truncates.is_empty() {
+                            debug!(
+                                table = %table_name,
+                                "ducklake streaming truncate replay skipped, no pending events"
+                            );
+                            return Ok(());
+                        }
+
+                        let prepared_batch =
+                            prepare_truncate_table_batch(table_name, pending_truncates);
+                        apply_table_batch_with_retry(pool, blocking_slots, prepared_batch).await
+                    });
+                }
+
+                while let Some(result) = join_set.join_next().await {
+                    result.map_err(|_| {
+                        etl_error!(
+                            ErrorKind::ApplyWorkerPanic,
+                            "DuckLake truncate task panicked"
+                        )
+                    })??;
+                }
+            }
+        }
 
         Ok(())
     }
@@ -1117,6 +1278,35 @@ fn table_write_activity_for_mutations(
     write_activity
 }
 
+/// Recomputes maintenance stats from the Arrow-native change suffix that still needs applying.
+fn table_write_activity_for_change_set(
+    table_name: DuckLakeTableName,
+    change_set: &TableChangeSet,
+) -> TableWriteActivity {
+    let mut write_activity = TableWriteActivity {
+        table_name,
+        approx_bytes: 0,
+        inserted_rows: 0,
+    };
+
+    for group in &change_set.groups {
+        match (group.change, group.row_image) {
+            (etl::types::ChangeKind::Insert, etl::types::RowImage::New)
+            | (etl::types::ChangeKind::Update, etl::types::RowImage::New) => {
+                write_activity.approx_bytes = write_activity
+                    .approx_bytes
+                    .saturating_add(group.rows.approx_bytes as u64);
+                write_activity.inserted_rows = write_activity
+                    .inserted_rows
+                    .saturating_add(group.rows.row_count() as u64);
+            }
+            _ => {}
+        }
+    }
+
+    write_activity
+}
+
 #[cfg(feature = "test-utils")]
 struct PausedStreamingWriteHook {
     reached_tx: oneshot::Sender<()>,
@@ -1274,8 +1464,6 @@ mod tests {
         Url::from_file_path(path).expect("failed to convert path to file url")
     }
 
-<<<<<<< HEAD
-=======
     fn current_vendored_extension_dir() -> Option<PathBuf> {
         let platform_dir = match (std::env::consts::OS, std::env::consts::ARCH) {
             ("linux", "x86_64" | "amd64") => "linux_amd64",
@@ -1296,16 +1484,19 @@ mod tests {
         for root in candidate_roots {
             let extension_dir = root.join("1.5.1").join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
+            let json_extension = extension_dir.join("json.duckdb_extension");
+            let parquet_extension = extension_dir.join("parquet.duckdb_extension");
 
-            if ducklake_extension.is_file() {
+            if ducklake_extension.is_file()
+                && json_extension.is_file()
+                && parquet_extension.is_file()
+            {
                 return Some(extension_dir);
             }
         }
 
         None
     }
-
->>>>>>> bnjjj/ducklake_looogs
     fn open_verification_connection() -> Connection {
         let duckdb_dir = tempfile::Builder::new()
             .prefix("etl_ducklake_verify_")
@@ -1314,7 +1505,7 @@ mod tests {
             .keep();
         let duckdb_path = duckdb_dir.join("verify.duckdb");
 
-        if cfg!(target_os = "linux") {
+        if current_vendored_extension_dir().is_some() {
             return Connection::open_with_flags(
                 &duckdb_path,
                 Config::default()
@@ -1328,52 +1519,21 @@ mod tests {
     }
 
     fn ducklake_load_sql() -> String {
-<<<<<<< HEAD
-        if cfg!(target_os = "linux") {
-            let platform_dir = match std::env::consts::ARCH {
-                "x86_64" => "linux_amd64",
-                "aarch64" => "linux_arm64",
-                arch => panic!("unsupported linux architecture for DuckDB test extensions: {arch}"),
-            };
-            let env_override = std::env::var_os("ETL_DUCKDB_EXTENSION_ROOT").map(PathBuf::from);
-            let candidate_roots = env_override
-                .into_iter()
-                .chain([
-                    PathBuf::from("/app/duckdb_extensions"),
-                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/duckdb/extensions"),
-                ])
-                .collect::<Vec<_>>();
-
-            for root in candidate_roots {
-                let extension_dir = root.join("1.5.1").join(platform_dir);
-                let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
-                let json_extension = extension_dir.join("json.duckdb_extension");
-                let parquet_extension = extension_dir.join("parquet.duckdb_extension");
-
-                if ducklake_extension.is_file()
-                    && json_extension.is_file()
-                    && parquet_extension.is_file()
-                {
-                    return format!(
-                        "LOAD {}; LOAD {}; LOAD {};",
-                        quote_literal(&ducklake_extension.display().to_string()),
-                        quote_literal(&json_extension.display().to_string()),
-                        quote_literal(&parquet_extension.display().to_string()),
-                    );
-                }
-            }
-=======
         if let Some(extension_dir) = current_vendored_extension_dir() {
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
+            let json_extension = extension_dir.join("json.duckdb_extension");
+            let parquet_extension = extension_dir.join("parquet.duckdb_extension");
 
             return format!(
-                "LOAD {};",
+                "LOAD {}; LOAD {}; LOAD {};",
                 quote_literal(&ducklake_extension.display().to_string()),
+                quote_literal(&json_extension.display().to_string()),
+                quote_literal(&parquet_extension.display().to_string()),
             );
->>>>>>> bnjjj/ducklake_looogs
         }
 
-        "INSTALL ducklake; LOAD ducklake;".to_string()
+        "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet;"
+            .to_string()
     }
 
     fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
@@ -1514,6 +1674,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_query_catalog_maintenance_metrics_reports_active_data_files_total() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
+        let data = path_to_file_url(&dir.path().join("data"));
+        let store = MemoryStore::new();
+        let schema = make_schema(1, "public", "users");
+        let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+        store
+            .store_table_schema(schema.clone())
+            .await
+            .expect("failed to seed schema");
+
+        let destination =
+            DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, store)
+                .await
+                .expect("failed to create destination");
+
+        destination
+            .write_table_rows(
+                schema.id,
+                vec![
+                    TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
+                    TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
+                ],
+            )
+            .await
+            .expect("failed to write rows");
+
+        let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
+        let _rows_flushed =
+            flush_table_inlined_data(&conn, &table_name, DuckLakeInlineFlushKind::Mutation)
+                .expect("failed to materialize inlined rows for catalog metrics test");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let metrics = loop {
+            let metrics = query_catalog_maintenance_metrics_blocking(&conn)
+                .expect("failed to query catalog maintenance metrics");
+            if metrics.active_data_files_total >= 1 {
+                break metrics;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for active data files total after materialization"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+
+        assert!(metrics.active_data_files_total >= 1);
+    }
+
+    #[tokio::test]
     async fn test_query_catalog_maintenance_metrics_reads_ducklake_metadata() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
@@ -1557,6 +1768,7 @@ mod tests {
         let metrics = query_catalog_maintenance_metrics_blocking(&conn)
             .expect("failed to query catalog maintenance metrics");
 
+        assert!(metrics.active_data_files_total >= 0);
         assert!(metrics.snapshots_total >= 1);
         assert!(metrics.oldest_snapshot_age_seconds >= 0);
         assert!(metrics.files_scheduled_for_deletion_total >= 0);

@@ -1,3 +1,4 @@
+mod arrow;
 mod batches;
 mod client;
 mod config;

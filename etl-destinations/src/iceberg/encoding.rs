@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arrow::{
+use crate::iceberg::arrow::{
     array::{
         ArrayRef, ArrowPrimitiveType, BooleanBuilder, FixedSizeBinaryBuilder, LargeBinaryBuilder,
         ListBuilder, PrimitiveBuilder, RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
@@ -770,8 +770,12 @@ fn build_uuid_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -
 fn build_list_array_for_strings(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     // Create a new field with Utf8 data type for string list elements
     let field = Arc::new(
-        arrow::datatypes::Field::new(field.name(), DataType::Utf8, field.is_nullable())
-            .with_metadata(field.metadata().clone()),
+        crate::iceberg::arrow::datatypes::Field::new(
+            field.name(),
+            DataType::Utf8,
+            field.is_nullable(),
+        )
+        .with_metadata(field.metadata().clone()),
     );
     let mut list_builder = ListBuilder::new(StringBuilder::new()).with_field(field);
 
@@ -948,7 +952,7 @@ fn append_array_cell_as_strings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::Array;
+    use crate::iceberg::arrow::array::Array;
     use etl::types::ArrayCell;
 
     #[test]
@@ -1141,7 +1145,7 @@ mod tests {
         let array_ref = build_array_for_field(&rows, 0, &DataType::Boolean);
         let bool_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::BooleanArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::BooleanArray>()
             .unwrap();
 
         assert_eq!(bool_array.len(), 4);
@@ -1163,7 +1167,7 @@ mod tests {
         let array_ref = build_array_for_field(&rows, 0, &DataType::Int32);
         let int_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int32Array>()
             .unwrap();
 
         assert_eq!(int_array.len(), 4);
@@ -1186,7 +1190,7 @@ mod tests {
         let array_ref = build_array_for_field(&rows, 0, &DataType::Int64);
         let int_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int64Array>()
             .unwrap();
 
         assert_eq!(int_array.len(), 5);
@@ -1209,7 +1213,7 @@ mod tests {
         let array_ref = build_array_for_field(&rows, 0, &DataType::Float32);
         let float_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::Float32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Float32Array>()
             .unwrap();
 
         assert_eq!(float_array.len(), 4);
@@ -1231,7 +1235,7 @@ mod tests {
         let array_ref = build_array_for_field(&rows, 0, &DataType::Float64);
         let float_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::Float64Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Float64Array>()
             .unwrap();
 
         assert_eq!(float_array.len(), 4);
@@ -1253,7 +1257,7 @@ mod tests {
         let array_ref = build_array_for_field(&rows, 0, &DataType::Utf8);
         let string_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
 
         assert_eq!(string_array.len(), 4);
@@ -1276,7 +1280,7 @@ mod tests {
         let array_ref = build_array_for_field(&rows, 0, &DataType::LargeBinary);
         let binary_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::LargeBinaryArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::LargeBinaryArray>()
             .unwrap();
 
         assert_eq!(binary_array.len(), 4);
@@ -1302,7 +1306,7 @@ mod tests {
         let array_ref = build_array_for_field(&rows, 0, &DataType::Date32);
         let date_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::Date32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Date32Array>()
             .unwrap();
 
         assert_eq!(date_array.len(), 4);
@@ -1331,7 +1335,7 @@ mod tests {
         let array_ref = build_array_for_field(&rows, 0, &DataType::Time64(TimeUnit::Microsecond));
         let time_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::Time64MicrosecondArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::Time64MicrosecondArray>()
             .unwrap();
 
         assert_eq!(time_array.len(), 4);
@@ -1357,7 +1361,7 @@ mod tests {
             build_array_for_field(&rows, 0, &DataType::Timestamp(TimeUnit::Microsecond, None));
         let ts_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::TimestampMicrosecondArray>()
             .unwrap();
 
         assert_eq!(ts_array.len(), 3);
@@ -1385,7 +1389,7 @@ mod tests {
         );
         let ts_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::TimestampMicrosecondArray>()
             .unwrap();
 
         assert_eq!(ts_array.len(), 3);
@@ -1411,7 +1415,7 @@ mod tests {
             build_array_for_field(&rows, 0, &DataType::FixedSizeBinary(UUID_BYTE_WIDTH));
         let uuid_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::FixedSizeBinaryArray>()
             .unwrap();
 
         assert_eq!(uuid_array.len(), 3);
@@ -1422,7 +1426,7 @@ mod tests {
 
     #[test]
     fn test_rows_to_record_batch_simple() {
-        use arrow::datatypes::{Field, Schema};
+        use crate::iceberg::arrow::datatypes::{Field, Schema};
 
         let rows = vec![
             TableRow::new(vec![
@@ -1452,7 +1456,7 @@ mod tests {
         let id_array = batch
             .column(0)
             .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int32Array>()
             .unwrap();
         assert_eq!(id_array.value(0), 42);
         assert_eq!(id_array.value(1), 100);
@@ -1460,7 +1464,7 @@ mod tests {
         let name_array = batch
             .column(1)
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(name_array.value(0), "hello");
         assert_eq!(name_array.value(1), "world");
@@ -1468,7 +1472,7 @@ mod tests {
         let active_array = batch
             .column(2)
             .as_any()
-            .downcast_ref::<arrow::array::BooleanArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::BooleanArray>()
             .unwrap();
         assert!(active_array.value(0));
         assert!(!active_array.value(1));
@@ -1476,7 +1480,7 @@ mod tests {
 
     #[test]
     fn test_rows_to_record_batch_with_nulls() {
-        use arrow::datatypes::{Field, Schema};
+        use crate::iceberg::arrow::datatypes::{Field, Schema};
 
         let rows = vec![
             TableRow::new(vec![Cell::I32(42), Cell::Null]),
@@ -1496,7 +1500,7 @@ mod tests {
         let id_array = batch
             .column(0)
             .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int32Array>()
             .unwrap();
         assert_eq!(id_array.value(0), 42);
         assert!(id_array.is_null(1));
@@ -1504,7 +1508,7 @@ mod tests {
         let name_array = batch
             .column(1)
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert!(name_array.is_null(0));
         assert_eq!(name_array.value(1), "test");
@@ -1512,7 +1516,7 @@ mod tests {
 
     #[test]
     fn test_rows_to_record_batch_temporal_types() {
-        use arrow::datatypes::{Field, Schema};
+        use crate::iceberg::arrow::datatypes::{Field, Schema};
         use chrono::{DateTime, NaiveDate, NaiveTime};
 
         let test_date = NaiveDate::from_ymd_opt(2023, 5, 15).unwrap();
@@ -1550,7 +1554,7 @@ mod tests {
         let date_array = batch
             .column(0)
             .as_any()
-            .downcast_ref::<arrow::array::Date32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Date32Array>()
             .unwrap();
         assert_eq!(
             date_array.value(0),
@@ -1560,7 +1564,7 @@ mod tests {
         let time_array = batch
             .column(1)
             .as_any()
-            .downcast_ref::<arrow::array::Time64MicrosecondArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::Time64MicrosecondArray>()
             .unwrap();
         assert_eq!(
             time_array.value(0),
@@ -1573,21 +1577,21 @@ mod tests {
         let ts_array = batch
             .column(2)
             .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::TimestampMicrosecondArray>()
             .unwrap();
         assert_eq!(ts_array.value(0), test_ts.and_utc().timestamp_micros());
 
         let ts_tz_array = batch
             .column(3)
             .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::TimestampMicrosecondArray>()
             .unwrap();
         assert_eq!(ts_tz_array.value(0), test_ts_tz.timestamp_micros());
     }
 
     #[test]
     fn test_rows_to_record_batch_binary_and_uuid() {
-        use arrow::datatypes::{Field, Schema};
+        use crate::iceberg::arrow::datatypes::{Field, Schema};
         use uuid::Uuid;
 
         let test_bytes = vec![1, 2, 3, 4, 5];
@@ -1611,21 +1615,21 @@ mod tests {
         let bytes_array = batch
             .column(0)
             .as_any()
-            .downcast_ref::<arrow::array::LargeBinaryArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::LargeBinaryArray>()
             .unwrap();
         assert_eq!(bytes_array.value(0), test_bytes);
 
         let uuid_array = batch
             .column(1)
             .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::FixedSizeBinaryArray>()
             .unwrap();
         assert_eq!(uuid_array.value(0), test_uuid.as_bytes());
     }
 
     #[test]
     fn test_rows_to_record_batch_empty() {
-        use arrow::datatypes::{Field, Schema};
+        use crate::iceberg::arrow::datatypes::{Field, Schema};
 
         let rows: Vec<TableRow> = vec![];
         let schema = Schema::new(vec![
@@ -1641,7 +1645,7 @@ mod tests {
 
     #[test]
     fn test_rows_to_record_batch_unsupported_fallback() {
-        use arrow::datatypes::{Field, Schema};
+        use crate::iceberg::arrow::datatypes::{Field, Schema};
 
         // Test with a data type that doesn't have a direct converter
         // This will test the fallback to string conversion behavior
@@ -1668,7 +1672,7 @@ mod tests {
         let id_array = batch
             .column(0)
             .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int32Array>()
             .unwrap();
         assert_eq!(id_array.value(0), 42);
         assert_eq!(id_array.value(1), 100);
@@ -1676,7 +1680,7 @@ mod tests {
         let metadata_array = batch
             .column(1)
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         // JSON should be converted to string representation
         assert_eq!(metadata_array.value(0), r#"{"key":"value","number":123}"#);
@@ -1685,7 +1689,7 @@ mod tests {
 
     #[test]
     fn test_rows_to_record_batch_schema_mismatch_length() {
-        use arrow::datatypes::{Field, Schema};
+        use crate::iceberg::arrow::datatypes::{Field, Schema};
 
         // Test what happens when row has different number of columns than schema
         let rows = vec![TableRow::new(vec![
@@ -1746,8 +1750,8 @@ mod tests {
 
     #[test]
     fn test_build_boolean_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
 
         let field = Field::new("items", DataType::Boolean, true);
         let field_ref = Arc::new(field);
@@ -1775,7 +1779,7 @@ mod tests {
         let first_list = list_array.value(0);
         let bool_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::BooleanArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::BooleanArray>()
             .unwrap();
         assert_eq!(bool_array.len(), 3);
         assert!(bool_array.value(0));
@@ -1787,7 +1791,7 @@ mod tests {
         let second_list = list_array.value(1);
         let bool_array = second_list
             .as_any()
-            .downcast_ref::<arrow::array::BooleanArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::BooleanArray>()
             .unwrap();
         assert_eq!(bool_array.len(), 1);
         assert!(bool_array.value(0));
@@ -1806,8 +1810,8 @@ mod tests {
 
     #[test]
     fn test_build_boolean_list_array_fallback() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
 
         let field = Field::new("items", DataType::Boolean, true);
         let field_ref = Arc::new(field);
@@ -1830,8 +1834,8 @@ mod tests {
 
     #[test]
     fn test_build_int32_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
 
         let field = Field::new("items", DataType::Int32, true);
         let field_ref = Arc::new(field);
@@ -1860,7 +1864,7 @@ mod tests {
         let first_list = list_array.value(0);
         let int_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int32Array>()
             .unwrap();
         assert_eq!(int_array.len(), 3);
         assert_eq!(int_array.value(0), 10);
@@ -1872,7 +1876,7 @@ mod tests {
         let second_list = list_array.value(1);
         let int_array = second_list
             .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int32Array>()
             .unwrap();
         assert_eq!(int_array.len(), 2);
         assert_eq!(int_array.value(0), 100);
@@ -1889,8 +1893,8 @@ mod tests {
 
     #[test]
     fn test_build_int64_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
 
         let field = Field::new("items", DataType::Int64, true);
         let field_ref = Arc::new(field);
@@ -1919,7 +1923,7 @@ mod tests {
         let first_list = list_array.value(0);
         let int_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int64Array>()
             .unwrap();
         assert_eq!(int_array.len(), 3);
         assert_eq!(int_array.value(0), 123456789);
@@ -1931,7 +1935,7 @@ mod tests {
         let second_list = list_array.value(1);
         let int_array = second_list
             .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int64Array>()
             .unwrap();
         assert_eq!(int_array.len(), 2);
         assert_eq!(int_array.value(0), 456);
@@ -1948,8 +1952,8 @@ mod tests {
 
     #[test]
     fn test_build_float32_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
 
         let field = Field::new("items", DataType::Float32, true);
         let field_ref = Arc::new(field);
@@ -1977,7 +1981,7 @@ mod tests {
         let first_list = list_array.value(0);
         let float_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::Float32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Float32Array>()
             .unwrap();
         assert_eq!(float_array.len(), 3);
         assert_eq!(float_array.value(0), 1.5);
@@ -1989,7 +1993,7 @@ mod tests {
         let second_list = list_array.value(1);
         let float_array = second_list
             .as_any()
-            .downcast_ref::<arrow::array::Float32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Float32Array>()
             .unwrap();
         assert_eq!(float_array.len(), 1);
         assert!((float_array.value(0) - std::f32::consts::PI).abs() < f32::EPSILON);
@@ -2005,8 +2009,8 @@ mod tests {
 
     #[test]
     fn test_build_float64_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
 
         let field = Field::new("items", DataType::Float64, true);
         let field_ref = Arc::new(field);
@@ -2034,7 +2038,7 @@ mod tests {
         let first_list = list_array.value(0);
         let float_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::Float64Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Float64Array>()
             .unwrap();
         assert_eq!(float_array.len(), 3);
         assert_eq!(float_array.value(0), 1.23456789);
@@ -2046,7 +2050,7 @@ mod tests {
         let second_list = list_array.value(1);
         let float_array = second_list
             .as_any()
-            .downcast_ref::<arrow::array::Float64Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Float64Array>()
             .unwrap();
         assert_eq!(float_array.len(), 1);
         assert!((float_array.value(0) - std::f64::consts::PI).abs() < f64::EPSILON);
@@ -2062,8 +2066,8 @@ mod tests {
 
     #[test]
     fn test_build_string_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
         use etl::types::PgNumeric;
 
         let field = Field::new("items", DataType::Utf8, true);
@@ -2099,7 +2103,7 @@ mod tests {
         let first_list = list_array.value(0);
         let string_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 3);
         assert_eq!(string_array.value(0), "hello");
@@ -2111,7 +2115,7 @@ mod tests {
         let second_list = list_array.value(1);
         let string_array = second_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 3);
         assert_eq!(string_array.value(0), "12345");
@@ -2123,7 +2127,7 @@ mod tests {
         let third_list = list_array.value(2);
         let string_array = third_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 3);
         assert_eq!(string_array.value(0), r#"{"key":"value"}"#);
@@ -2141,8 +2145,8 @@ mod tests {
 
     #[test]
     fn test_build_binary_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
 
         let field = Field::new("items", DataType::LargeBinary, true);
         let field_ref = Arc::new(field);
@@ -2174,7 +2178,7 @@ mod tests {
         let first_list = list_array.value(0);
         let binary_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::LargeBinaryArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::LargeBinaryArray>()
             .unwrap();
         assert_eq!(binary_array.len(), 3);
         assert_eq!(binary_array.value(0), test_bytes_1);
@@ -2186,7 +2190,7 @@ mod tests {
         let second_list = list_array.value(1);
         let binary_array = second_list
             .as_any()
-            .downcast_ref::<arrow::array::LargeBinaryArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::LargeBinaryArray>()
             .unwrap();
         assert_eq!(binary_array.len(), 1);
         assert_eq!(binary_array.value(0), empty_bytes);
@@ -2202,8 +2206,8 @@ mod tests {
 
     #[test]
     fn test_build_date32_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
         use chrono::NaiveDate;
 
         let field = Field::new("items", DataType::Date32, true);
@@ -2234,7 +2238,7 @@ mod tests {
         let first_list = list_array.value(0);
         let date_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::Date32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Date32Array>()
             .unwrap();
         assert_eq!(date_array.len(), 3);
         assert_eq!(
@@ -2252,7 +2256,7 @@ mod tests {
         let second_list = list_array.value(1);
         let date_array = second_list
             .as_any()
-            .downcast_ref::<arrow::array::Date32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Date32Array>()
             .unwrap();
         assert_eq!(date_array.len(), 1);
         assert_eq!(
@@ -2271,8 +2275,8 @@ mod tests {
 
     #[test]
     fn test_build_time64_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
         use chrono::NaiveTime;
 
         let field = Field::new("items", DataType::Time64(TimeUnit::Microsecond), true);
@@ -2303,7 +2307,7 @@ mod tests {
         let first_list = list_array.value(0);
         let time_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::Time64MicrosecondArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::Time64MicrosecondArray>()
             .unwrap();
         assert_eq!(time_array.len(), 3);
         assert_eq!(
@@ -2327,7 +2331,7 @@ mod tests {
         let second_list = list_array.value(1);
         let time_array = second_list
             .as_any()
-            .downcast_ref::<arrow::array::Time64MicrosecondArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::Time64MicrosecondArray>()
             .unwrap();
         assert_eq!(time_array.len(), 1);
         assert_eq!(
@@ -2349,8 +2353,8 @@ mod tests {
 
     #[test]
     fn test_build_timestamp_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
         use chrono::DateTime;
 
         let field = Field::new(
@@ -2387,7 +2391,7 @@ mod tests {
         let first_list = list_array.value(0);
         let ts_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::TimestampMicrosecondArray>()
             .unwrap();
         assert_eq!(ts_array.len(), 3);
         assert_eq!(ts_array.value(0), test_ts_1.and_utc().timestamp_micros());
@@ -2399,7 +2403,7 @@ mod tests {
         let second_list = list_array.value(1);
         let ts_array = second_list
             .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::TimestampMicrosecondArray>()
             .unwrap();
         assert_eq!(ts_array.len(), 1);
         assert_eq!(ts_array.value(0), test_ts_3.and_utc().timestamp_micros());
@@ -2415,8 +2419,8 @@ mod tests {
 
     #[test]
     fn test_build_timestamptz_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
         use chrono::DateTime;
 
         let field = Field::new(
@@ -2453,7 +2457,7 @@ mod tests {
         let first_list = list_array.value(0);
         let ts_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::TimestampMicrosecondArray>()
             .unwrap();
         assert_eq!(ts_array.len(), 3);
         assert_eq!(ts_array.value(0), test_ts_1.timestamp_micros());
@@ -2468,7 +2472,7 @@ mod tests {
         let second_list = list_array.value(1);
         let ts_array = second_list
             .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::TimestampMicrosecondArray>()
             .unwrap();
         assert_eq!(ts_array.len(), 1);
         assert_eq!(ts_array.value(0), test_ts_3.timestamp_micros());
@@ -2484,8 +2488,8 @@ mod tests {
 
     #[test]
     fn test_build_uuid_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
         use uuid::Uuid;
 
         let field = Field::new("items", DataType::FixedSizeBinary(UUID_BYTE_WIDTH), true);
@@ -2516,7 +2520,7 @@ mod tests {
         let first_list = list_array.value(0);
         let uuid_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::FixedSizeBinaryArray>()
             .unwrap();
         assert_eq!(uuid_array.len(), 3);
         assert_eq!(uuid_array.value(0), test_uuid_1.as_bytes());
@@ -2528,7 +2532,7 @@ mod tests {
         let second_list = list_array.value(1);
         let uuid_array = second_list
             .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::FixedSizeBinaryArray>()
             .unwrap();
         assert_eq!(uuid_array.len(), 1);
         assert_eq!(uuid_array.value(0), test_uuid_3.as_bytes());
@@ -2544,8 +2548,8 @@ mod tests {
 
     #[test]
     fn test_build_list_array_for_strings() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::array::ListArray;
+        use crate::iceberg::arrow::datatypes::Field;
         use chrono::{DateTime, NaiveDate, NaiveTime};
         use etl::types::PgNumeric;
         use uuid::Uuid;
@@ -2619,7 +2623,7 @@ mod tests {
         let first_list = list_array.value(0);
         let string_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "hello");
@@ -2630,7 +2634,7 @@ mod tests {
         let bool_list = list_array.value(1);
         let string_array = bool_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 3);
         assert_eq!(string_array.value(0), "true");
@@ -2642,7 +2646,7 @@ mod tests {
         let int_list = list_array.value(2);
         let string_array = int_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "42");
@@ -2653,7 +2657,7 @@ mod tests {
         let float_list = list_array.value(3);
         let string_array = float_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), std::f64::consts::PI.to_string());
@@ -2664,7 +2668,7 @@ mod tests {
         let uuid_list = list_array.value(4);
         let string_array = uuid_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), test_uuid.to_string());
@@ -2675,7 +2679,7 @@ mod tests {
         let date_list = list_array.value(5);
         let string_array = date_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(
@@ -2689,7 +2693,7 @@ mod tests {
         let time_list = list_array.value(6);
         let string_array = time_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(
@@ -2703,7 +2707,7 @@ mod tests {
         let ts_list = list_array.value(7);
         let string_array = ts_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(
@@ -2717,7 +2721,7 @@ mod tests {
         let ts_tz_list = list_array.value(8);
         let string_array = ts_tz_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), test_ts_tz.to_rfc3339());
@@ -2728,7 +2732,7 @@ mod tests {
         let numeric_list = list_array.value(9);
         let string_array = numeric_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "123.45");
@@ -2739,7 +2743,7 @@ mod tests {
         let json_list = list_array.value(10);
         let string_array = json_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), r#"{"key":"value"}"#);
@@ -2750,7 +2754,7 @@ mod tests {
         let bytes_list = list_array.value(11);
         let string_array = bytes_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert!(string_array.is_null(0)); // Bytes become null in string conversion
@@ -2762,7 +2766,7 @@ mod tests {
 
     #[test]
     fn test_append_array_cell_as_strings_comprehensive() {
-        use arrow::array::ListBuilder;
+        use crate::iceberg::arrow::array::ListBuilder;
         use chrono::{DateTime, NaiveDate, NaiveTime};
         use etl::types::PgNumeric;
         use uuid::Uuid;
@@ -2877,7 +2881,7 @@ mod tests {
             let first_list = list_array.value(0);
             let string_array = first_list
                 .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
+                .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
                 .unwrap();
 
             let total_len = string_array.len();
@@ -2901,7 +2905,7 @@ mod tests {
 
     #[test]
     fn test_build_list_array_dispatch() {
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::datatypes::Field;
 
         // Test that build_list_array correctly dispatches to the right type-specific builders
         let test_cases = vec![
@@ -2938,7 +2942,7 @@ mod tests {
             let array_ref = build_list_array(&rows, 0, field_ref);
             let list_array = array_ref
                 .as_any()
-                .downcast_ref::<arrow::array::ListArray>()
+                .downcast_ref::<crate::iceberg::arrow::array::ListArray>()
                 .unwrap();
 
             assert_eq!(list_array.len(), 2, "Failed for {test_name}");
@@ -2948,7 +2952,7 @@ mod tests {
 
     #[test]
     fn test_build_list_array_unsupported_type_fallback() {
-        use arrow::datatypes::Field;
+        use crate::iceberg::arrow::datatypes::Field;
 
         // Test with an unsupported inner type that should fall back to string representation
         let field = Field::new("item", DataType::Decimal128(10, 2), true); // Unsupported type
@@ -2962,7 +2966,7 @@ mod tests {
         let array_ref = build_list_array(&rows, 0, field_ref);
         let list_array = array_ref
             .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::ListArray>()
             .unwrap();
 
         assert_eq!(list_array.len(), 1);
@@ -2972,7 +2976,7 @@ mod tests {
         let first_list = list_array.value(0);
         let string_array = first_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "123");
@@ -2981,7 +2985,7 @@ mod tests {
 
     #[test]
     fn test_rows_to_record_batch_with_list_fields() {
-        use arrow::datatypes::{Field, Schema};
+        use crate::iceberg::arrow::datatypes::{Field, Schema};
         use uuid::Uuid;
 
         let test_uuid = Uuid::new_v4();
@@ -3048,7 +3052,7 @@ mod tests {
         let id_array = batch
             .column(0)
             .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int32Array>()
             .unwrap();
         assert_eq!(id_array.value(0), 1);
         assert_eq!(id_array.value(1), 2);
@@ -3057,7 +3061,7 @@ mod tests {
         let bool_list_array = batch
             .column(1)
             .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::ListArray>()
             .unwrap();
         assert_eq!(bool_list_array.len(), 2);
         assert!(!bool_list_array.is_null(0));
@@ -3066,7 +3070,7 @@ mod tests {
         let first_bool_list = bool_list_array.value(0);
         let bool_array = first_bool_list
             .as_any()
-            .downcast_ref::<arrow::array::BooleanArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::BooleanArray>()
             .unwrap();
         assert_eq!(bool_array.len(), 2);
         assert!(bool_array.value(0));
@@ -3079,7 +3083,7 @@ mod tests {
         let int_list_array = batch
             .column(2)
             .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::ListArray>()
             .unwrap();
         assert_eq!(int_list_array.len(), 2);
         assert!(!int_list_array.is_null(0));
@@ -3088,7 +3092,7 @@ mod tests {
         let first_int_list = int_list_array.value(0);
         let int_array = first_int_list
             .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int32Array>()
             .unwrap();
         assert_eq!(int_array.len(), 3);
         assert_eq!(int_array.value(0), 10);
@@ -3098,7 +3102,7 @@ mod tests {
         let second_int_list = int_list_array.value(1);
         let int_array = second_int_list
             .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int32Array>()
             .unwrap();
         assert_eq!(int_array.len(), 1);
         assert_eq!(int_array.value(0), 100);
@@ -3107,7 +3111,7 @@ mod tests {
         let string_list_array = batch
             .column(3)
             .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::ListArray>()
             .unwrap();
         assert_eq!(string_list_array.len(), 2);
         assert!(!string_list_array.is_null(0));
@@ -3116,7 +3120,7 @@ mod tests {
         let first_string_list = string_list_array.value(0);
         let string_array = first_string_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "hello");
@@ -3126,7 +3130,7 @@ mod tests {
         let uuid_list_array = batch
             .column(4)
             .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::ListArray>()
             .unwrap();
         assert_eq!(uuid_list_array.len(), 2);
         assert!(!uuid_list_array.is_null(0));
@@ -3135,7 +3139,7 @@ mod tests {
         let first_uuid_list = uuid_list_array.value(0);
         let uuid_array = first_uuid_list
             .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::FixedSizeBinaryArray>()
             .unwrap();
         assert_eq!(uuid_array.len(), 1);
         assert_eq!(uuid_array.value(0), test_uuid.as_bytes());
@@ -3143,7 +3147,7 @@ mod tests {
         let second_uuid_list = uuid_list_array.value(1);
         let uuid_array = second_uuid_list
             .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::FixedSizeBinaryArray>()
             .unwrap();
         assert_eq!(uuid_array.len(), 1);
         assert!(uuid_array.is_null(0)); // Null UUID
@@ -3152,7 +3156,7 @@ mod tests {
         let date_list_array = batch
             .column(5)
             .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::ListArray>()
             .unwrap();
         assert_eq!(date_list_array.len(), 2);
         assert!(!date_list_array.is_null(0));
@@ -3161,7 +3165,7 @@ mod tests {
         let first_date_list = date_list_array.value(0);
         let date_array = first_date_list
             .as_any()
-            .downcast_ref::<arrow::array::Date32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Date32Array>()
             .unwrap();
         assert_eq!(date_array.len(), 2);
         assert_eq!(
@@ -3176,7 +3180,7 @@ mod tests {
 
     #[test]
     fn test_rows_to_record_batch_mixed_scalar_and_array() {
-        use arrow::datatypes::{Field, Schema};
+        use crate::iceberg::arrow::datatypes::{Field, Schema};
 
         // Test mixing scalar and array columns in the same record batch
         let rows = vec![
@@ -3224,7 +3228,7 @@ mod tests {
         let name_array = batch
             .column(0)
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(name_array.value(0), "record1");
         assert_eq!(name_array.value(1), "record2");
@@ -3232,7 +3236,7 @@ mod tests {
         let value_array = batch
             .column(1)
             .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Int32Array>()
             .unwrap();
         assert_eq!(value_array.value(0), 42);
         assert_eq!(value_array.value(1), 84);
@@ -3241,7 +3245,7 @@ mod tests {
         let float_list_array = batch
             .column(2)
             .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::ListArray>()
             .unwrap();
         assert!(!float_list_array.is_null(0));
         assert!(!float_list_array.is_null(1));
@@ -3249,7 +3253,7 @@ mod tests {
         let first_float_list = float_list_array.value(0);
         let float_array = first_float_list
             .as_any()
-            .downcast_ref::<arrow::array::Float32Array>()
+            .downcast_ref::<crate::iceberg::arrow::array::Float32Array>()
             .unwrap();
         assert_eq!(float_array.len(), 2);
         assert_eq!(float_array.value(0), 1.1);
@@ -3262,7 +3266,7 @@ mod tests {
         let flag_array = batch
             .column(3)
             .as_any()
-            .downcast_ref::<arrow::array::BooleanArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::BooleanArray>()
             .unwrap();
         assert!(flag_array.value(0));
         assert!(!flag_array.value(1));
@@ -3271,7 +3275,7 @@ mod tests {
         let string_list_array = batch
             .column(4)
             .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::ListArray>()
             .unwrap();
         assert!(!string_list_array.is_null(0));
         assert!(string_list_array.is_null(1)); // Null array
@@ -3279,7 +3283,7 @@ mod tests {
         let first_string_list = string_list_array.value(0);
         let string_array = first_string_list
             .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
+            .downcast_ref::<crate::iceberg::arrow::array::StringArray>()
             .unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "a");

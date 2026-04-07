@@ -18,6 +18,7 @@ default = []
 etl-config = { workspace = true }
 etl-postgres = { workspace = true, features = ["tokio", "replication"] }
 
+arrow = { workspace = true }
 aws-lc-rs = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true }

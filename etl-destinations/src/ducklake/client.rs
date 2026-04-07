@@ -157,16 +157,9 @@ impl DuckDbQueryWatchdog {
 /// is safe: DuckLake (backed by a PostgreSQL catalog) supports concurrent writers.
 #[derive(Clone)]
 pub(super) struct DuckLakeConnectionManager {
-<<<<<<< HEAD
-    /// SQL executed immediately after a new connection is opened.
-    /// Loads required extensions and attaches the DuckLake catalog.
-    pub(super) setup_sql: Arc<String>,
-    /// Disables DuckDB extension autoload/autoinstall when vendored Linux
-=======
     /// Ordered setup phases executed immediately after a new connection opens.
     pub(super) setup_plan: Arc<DuckLakeSetupPlan>,
     /// Disables DuckDB extension autoload/autoinstall when vendored local
->>>>>>> bnjjj/ducklake_looogs
     /// extensions are required.
     pub(super) disable_extension_autoload: bool,
     /// Counts successfully initialized DuckDB connections for tests.

@@ -10,8 +10,9 @@ use crate::bail;
 use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::ShutdownRx;
+use crate::conversions::arrow::table_rows_to_arrow_batch;
 use crate::destination::Destination;
-use crate::destination::async_result::{TruncateTableResult, WriteTableRowsResult};
+use crate::destination::async_result::{TruncateTableResult, WriteSnapshotBatchResult};
 use crate::error::{ErrorKind, EtlResult};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, etl_fail_point};
@@ -271,9 +272,10 @@ where
             // If no table rows were written, we call the method nonetheless with no rows, to kickstart
             // table creation.
             if total_table_copy_rows == 0 {
-                let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
+                let snapshot_batch = table_rows_to_arrow_batch(table_schema.clone(), &[])?;
+                let (flush_result, pending_flush_result) = WriteSnapshotBatchResult::new(());
                 destination
-                    .write_table_rows(table_id, vec![], flush_result)
+                    .write_snapshot_batch(snapshot_batch, flush_result)
                     .await?;
                 pending_flush_result.await.into_result()?;
                 info!(

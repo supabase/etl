@@ -1,4 +1,4 @@
-use arrow::error::ArrowError;
+use crate::iceberg::arrow::error::ArrowError;
 use etl::{
     error::{ErrorKind, EtlError},
     etl_error,

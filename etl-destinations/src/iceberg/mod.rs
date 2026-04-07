@@ -7,6 +7,9 @@ mod schema;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
 
+pub(crate) use arrow57 as arrow;
+pub(crate) use parquet57 as parquet;
+
 pub use client::IcebergClient;
 #[cfg(feature = "test-utils")]
 pub use core::table_name_to_iceberg_table_name;

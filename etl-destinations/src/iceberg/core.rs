@@ -11,16 +11,17 @@ use crate::iceberg::error::iceberg_error_to_etl_error;
 use crate::table_name::try_stringify_table_name;
 use etl::destination::Destination;
 use etl::destination::async_result::{
-    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+    TruncateTableResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
 };
 use etl::destination::task_set::DestinationTaskSet;
 use etl::error::{ErrorKind, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
-    Cell, ColumnSchema, Event, EventSequenceKey, TableId, TableName, TableRow, TableSchema, Type,
+    Cell, ChangeKind, ColumnSchema, Event, EventSequenceKey, RowImage, StreamBatch,
+    TableArrowBatch, TableId, TableName, TableRow, TableSchema, Type,
 };
-use etl::{bail, etl_error};
+use etl::{bail, etl_error, record_batch_to_table_rows};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::debug;
@@ -263,17 +264,24 @@ where
         Ok(())
     }
 
+    /// Writes one destination-facing snapshot batch.
+    async fn write_snapshot_batch_inner(&self, batch: TableArrowBatch) -> EtlResult<()> {
+        let table_rows = record_batch_to_table_rows(&batch.batch);
+        self.write_table_rows(batch.table_id, table_rows).await
+    }
+
     /// Processes and writes CDC events to Iceberg tables.
     ///
     /// Handles a stream of CDC events by batching non-truncate events by table ID
     /// and processing them concurrently. Truncate events are processed separately
     /// and deduplicated for efficiency. Each event is augmented with CDC metadata
     /// including operation type and sequence key based on LSN information.
+    #[allow(dead_code)]
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
-            let mut table_id_to_table_rows = HashMap::new();
+            let mut table_id_to_table_rows: HashMap<TableId, Vec<TableRow>> = HashMap::new();
 
             // Process events until we hit a truncate event or run out of events
             while let Some(event) = event_iter.peek() {
@@ -382,6 +390,130 @@ where
                     for table_id in truncate_event.rel_ids {
                         truncate_table_ids.insert(TableId::new(table_id));
                     }
+                }
+            }
+
+            for table_id in truncate_table_ids {
+                self.truncate_table(table_id).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Processes normalized Arrow stream batches.
+    async fn write_stream_batches_inner(&self, batches: Vec<StreamBatch>) -> EtlResult<()> {
+        let mut batch_iter = batches.into_iter().peekable();
+
+        while batch_iter.peek().is_some() {
+            let mut table_id_to_table_rows: HashMap<TableId, Vec<TableRow>> = HashMap::new();
+
+            while let Some(batch) = batch_iter.peek() {
+                if matches!(batch, StreamBatch::Truncate(_)) {
+                    break;
+                }
+
+                let batch = batch_iter.next().expect("peeked batch must exist");
+                let StreamBatch::Changes(change_set) = batch else {
+                    unreachable!("truncate batches are handled separately");
+                };
+
+                for group in change_set.groups {
+                    let sequence_keys = group
+                        .commit_lsns
+                        .values()
+                        .iter()
+                        .zip(group.tx_ordinals.values().iter())
+                        .map(|(commit_lsn, tx_ordinal)| {
+                            format!("{commit_lsn:016x}/{tx_ordinal:016x}")
+                        })
+                        .collect::<Vec<_>>();
+                    let table_rows = record_batch_to_table_rows(&group.rows.batch);
+
+                    match (group.change, group.row_image) {
+                        (ChangeKind::Insert, RowImage::New) => {
+                            let target_rows: &mut Vec<TableRow> = table_id_to_table_rows
+                                .entry(change_set.table_id)
+                                .or_default();
+                            for (mut table_row, sequence_key) in
+                                table_rows.into_iter().zip(sequence_keys.into_iter())
+                            {
+                                table_row
+                                    .values_mut()
+                                    .push(IcebergOperationType::Insert.into());
+                                table_row.values_mut().push(Cell::String(sequence_key));
+                                target_rows.push(table_row);
+                            }
+                        }
+                        (ChangeKind::Update, RowImage::New) => {
+                            let target_rows: &mut Vec<TableRow> = table_id_to_table_rows
+                                .entry(change_set.table_id)
+                                .or_default();
+                            for (mut table_row, sequence_key) in
+                                table_rows.into_iter().zip(sequence_keys.into_iter())
+                            {
+                                table_row
+                                    .values_mut()
+                                    .push(IcebergOperationType::Update.into());
+                                table_row.values_mut().push(Cell::String(sequence_key));
+                                target_rows.push(table_row);
+                            }
+                        }
+                        (ChangeKind::Delete, RowImage::Old { .. }) => {
+                            let target_rows: &mut Vec<TableRow> = table_id_to_table_rows
+                                .entry(change_set.table_id)
+                                .or_default();
+                            for (mut table_row, sequence_key) in
+                                table_rows.into_iter().zip(sequence_keys.into_iter())
+                            {
+                                table_row
+                                    .values_mut()
+                                    .push(IcebergOperationType::Delete.into());
+                                table_row.values_mut().push(Cell::String(sequence_key));
+                                target_rows.push(table_row);
+                            }
+                        }
+                        (ChangeKind::Update, RowImage::Old { .. }) => {}
+                        (ChangeKind::Delete, RowImage::New)
+                        | (ChangeKind::Insert, RowImage::Old { .. }) => {}
+                    }
+                }
+            }
+
+            if !table_id_to_table_rows.is_empty() {
+                let mut join_set = JoinSet::new();
+
+                for (table_id, table_rows) in table_id_to_table_rows {
+                    let (namespace, iceberg_table_name) = {
+                        let mut inner = self.inner.lock().await;
+                        self.prepare_table_for_streaming(&mut inner, table_id)
+                            .await?
+                    };
+
+                    let client = self.client.clone();
+                    join_set.spawn(async move {
+                        client
+                            .insert_rows(namespace, iceberg_table_name, table_rows)
+                            .await
+                    });
+                }
+
+                #[cfg_attr(not(feature = "egress"), allow(unused_mut, unused_variables))]
+                let mut bytes_sent = 0;
+                #[cfg_attr(not(feature = "egress"), allow(unused_assignments))]
+                while let Some(insert_result) = join_set.join_next().await {
+                    bytes_sent += insert_result
+                        .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
+                }
+
+                #[cfg(feature = "egress")]
+                log_processed_bytes(Self::name(), PROCESSING_TYPE_STREAMING, bytes_sent, 0);
+            }
+
+            let mut truncate_table_ids = HashSet::new();
+            while let Some(StreamBatch::Truncate(_)) = batch_iter.peek() {
+                if let Some(StreamBatch::Truncate(truncate)) = batch_iter.next() {
+                    truncate_table_ids.extend(truncate.rel_ids);
                 }
             }
 
@@ -585,13 +717,12 @@ where
     /// Augments each row with CDC metadata and inserts them into the
     /// corresponding Iceberg changelog table. All rows are treated
     /// as upsert operations with generated sequence keys.
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        table_id: TableId,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
-        let result = self.write_table_rows(table_id, table_rows).await;
+        let result = self.write_snapshot_batch_inner(batch).await;
         async_result.send(result);
 
         Ok(())
@@ -602,17 +733,17 @@ where
     /// Handles insert, update, delete, and truncate events by converting
     /// them to appropriate Iceberg operations. Events are batched by table
     /// and processed concurrently for optimal performance.
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         self.streaming_tasks.try_reap().await?;
 
         let destination = self.clone();
         self.streaming_tasks
             .spawn(async move {
-                let result = destination.write_events(events).await;
+                let result = destination.write_stream_batches_inner(batches).await;
                 async_result.send(result);
             })
             .await;

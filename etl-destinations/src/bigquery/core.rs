@@ -1,13 +1,16 @@
 use etl::destination::Destination;
 use etl::destination::async_result::{
-    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+    TruncateTableResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
 };
 use etl::destination::task_set::DestinationTaskSet;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-use etl::types::{Cell, Event, PipelineId, TableId, TableName, TableRow};
-use etl::{bail, etl_error};
+use etl::types::{
+    Cell, ChangeKind, Event, PipelineId, RowImage, StreamBatch, TableArrowBatch, TableId,
+    TableName, TableRow,
+};
+use etl::{bail, etl_error, record_batch_to_table_rows};
 
 #[cfg(feature = "egress")]
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
@@ -568,15 +571,23 @@ where
         Ok(())
     }
 
+    /// Writes one destination-facing snapshot batch.
+    async fn write_snapshot_batch_inner(&self, batch: TableArrowBatch) -> EtlResult<()> {
+        let table_rows = record_batch_to_table_rows(&batch.batch);
+        self.write_table_rows(batch.table_id, table_rows).await
+    }
+
     /// Processes CDC events in batches with proper ordering and truncate handling.
     ///
     /// Groups streaming operations (insert/update/delete) by table and processes them together,
     /// then handles truncate events separately by creating new versioned tables.
+    #[allow(dead_code)]
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
-            let mut table_id_to_table_rows = HashMap::new();
+            let mut table_id_to_table_rows: HashMap<TableId, Vec<BigQueryTableRow>> =
+                HashMap::new();
 
             // Process events until we hit a truncate event or run out of events
             while let Some(event) = event_iter.peek() {
@@ -665,17 +676,23 @@ where
                 }
 
                 if !append_requests.is_empty() {
-                    #[allow(unused_variables)]
-                    let (bytes_sent, bytes_received) =
-                        self.client.append_table_batches(append_requests).await?;
-
                     #[cfg(feature = "egress")]
-                    log_processed_bytes(
-                        Self::name(),
-                        PROCESSING_TYPE_STREAMING,
-                        bytes_sent as u64,
-                        bytes_received as u64,
-                    );
+                    {
+                        let (bytes_sent, bytes_received) =
+                            self.client.append_table_batches(append_requests).await?;
+
+                        log_processed_bytes(
+                            Self::name(),
+                            PROCESSING_TYPE_STREAMING,
+                            bytes_sent as u64,
+                            bytes_received as u64,
+                        );
+                    }
+
+                    #[cfg(not(feature = "egress"))]
+                    {
+                        self.client.append_table_batches(append_requests).await?;
+                    }
                 }
             }
 
@@ -824,6 +841,132 @@ where
 
         Ok(())
     }
+
+    /// Processes normalized Arrow stream batches.
+    async fn write_stream_batches_inner(&self, batches: Vec<StreamBatch>) -> EtlResult<()> {
+        let mut batch_iter = batches.into_iter().peekable();
+
+        while batch_iter.peek().is_some() {
+            let mut table_id_to_table_rows: HashMap<TableId, Vec<BigQueryTableRow>> =
+                HashMap::new();
+
+            while let Some(batch) = batch_iter.peek() {
+                if matches!(batch, StreamBatch::Truncate(_)) {
+                    break;
+                }
+
+                let batch = batch_iter.next().expect("peeked batch must exist");
+                let StreamBatch::Changes(change_set) = batch else {
+                    unreachable!("truncate batches are handled separately");
+                };
+
+                for group in change_set.groups {
+                    let sequence_keys = group
+                        .commit_lsns
+                        .values()
+                        .iter()
+                        .zip(group.tx_ordinals.values().iter())
+                        .map(|(commit_lsn, tx_ordinal)| {
+                            format!("{commit_lsn:016x}/{tx_ordinal:016x}")
+                        })
+                        .collect::<Vec<_>>();
+                    let table_rows = record_batch_to_table_rows(&group.rows.batch);
+
+                    match (group.change, group.row_image) {
+                        (ChangeKind::Insert, RowImage::New)
+                        | (ChangeKind::Update, RowImage::New) => {
+                            let target_rows: &mut Vec<BigQueryTableRow> = table_id_to_table_rows
+                                .entry(change_set.table_id)
+                                .or_default();
+                            for (mut table_row, sequence_key) in
+                                table_rows.into_iter().zip(sequence_keys.into_iter())
+                            {
+                                table_row
+                                    .values_mut()
+                                    .push(BigQueryOperationType::Upsert.into_cell());
+                                table_row.values_mut().push(Cell::String(sequence_key));
+                                target_rows.push(BigQueryTableRow::try_from(table_row)?);
+                            }
+                        }
+                        (ChangeKind::Delete, RowImage::Old { .. }) => {
+                            let target_rows: &mut Vec<BigQueryTableRow> = table_id_to_table_rows
+                                .entry(change_set.table_id)
+                                .or_default();
+                            for (mut table_row, sequence_key) in
+                                table_rows.into_iter().zip(sequence_keys.into_iter())
+                            {
+                                table_row
+                                    .values_mut()
+                                    .push(BigQueryOperationType::Delete.into_cell());
+                                table_row.values_mut().push(Cell::String(sequence_key));
+                                target_rows.push(BigQueryTableRow::try_from(table_row)?);
+                            }
+                        }
+                        (ChangeKind::Update, RowImage::Old { .. }) => {}
+                        (ChangeKind::Delete, RowImage::New)
+                        | (ChangeKind::Insert, RowImage::Old { .. }) => {}
+                    }
+                }
+            }
+
+            if !table_id_to_table_rows.is_empty() {
+                let mut append_requests = Vec::with_capacity(table_id_to_table_rows.len());
+
+                for (batch_index, (table_id, table_rows)) in
+                    table_id_to_table_rows.into_iter().enumerate()
+                {
+                    let (sequenced_bigquery_table_id, table_descriptor) =
+                        self.prepare_table_for_streaming(&table_id, true).await?;
+                    let sequenced_bigquery_table_id_string =
+                        sequenced_bigquery_table_id.to_string();
+
+                    histogram!(
+                        ETL_BQ_APPEND_BATCHES_BATCH_SIZE,
+                        "pipeline_id" => self.pipeline_id.to_string()
+                    )
+                    .record(table_rows.len() as f64);
+
+                    let append_request = self.client.create_batch_append_request(
+                        self.pipeline_id,
+                        batch_index,
+                        &self.dataset_id,
+                        &sequenced_bigquery_table_id_string,
+                        table_descriptor.clone(),
+                        table_rows,
+                    )?;
+                    append_requests.push(append_request);
+                }
+
+                if !append_requests.is_empty() {
+                    #[allow(unused_variables)]
+                    let (bytes_sent, bytes_received) =
+                        self.client.append_table_batches(append_requests).await?;
+
+                    #[cfg(feature = "egress")]
+                    log_processed_bytes(
+                        Self::name(),
+                        PROCESSING_TYPE_STREAMING,
+                        bytes_sent as u64,
+                        bytes_received as u64,
+                    );
+                }
+            }
+
+            let mut truncate_table_ids = HashSet::new();
+            while let Some(StreamBatch::Truncate(_)) = batch_iter.peek() {
+                if let Some(StreamBatch::Truncate(truncate)) = batch_iter.next() {
+                    truncate_table_ids.extend(truncate.rel_ids);
+                }
+            }
+
+            if !truncate_table_ids.is_empty() {
+                self.process_truncate_for_table_ids(truncate_table_ids.into_iter())
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl<S> Destination for BigQueryDestination<S>
@@ -851,29 +994,28 @@ where
         Ok(())
     }
 
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        table_id: TableId,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
-        let result = self.write_table_rows(table_id, table_rows).await;
+        let result = self.write_snapshot_batch_inner(batch).await;
         async_result.send(result);
 
         Ok(())
     }
 
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         self.streaming_tasks.try_reap().await?;
 
         let destination = self.clone();
         self.streaming_tasks
             .spawn(async move {
-                let result = destination.write_events(events).await;
+                let result = destination.write_stream_batches_inner(batches).await;
                 async_result.send(result);
             })
             .await;

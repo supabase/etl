@@ -7,20 +7,152 @@ use tokio::sync::{Notify, RwLock};
 
 use std::time::Instant;
 
+use crate::conversions::arrow::record_batch_to_table_rows;
 use crate::destination::Destination;
 use crate::destination::async_result::{
-    ApplyLoopAsyncResultMetadata, DispatchMetrics, TruncateTableResult, WriteEventsResult,
-    WriteTableRowsResult,
+    ApplyLoopAsyncResultMetadata, DispatchMetrics, TruncateTableResult, WriteSnapshotBatchResult,
+    WriteStreamBatchesResult,
 };
 use crate::error::EtlResult;
 use crate::test_utils::event::{check_all_events_count, check_events_count, deduplicate_events};
 use crate::test_utils::notify::TimedNotify;
-use crate::types::{Event, EventType, TableRow};
+use crate::types::{
+    ChangeKind, DeleteEvent, Event, EventType, InsertEvent, RowImage, StreamBatch, TableArrowBatch,
+    TableChangeSet, TableRow, TruncateBatch, UpdateEvent,
+};
+use tokio_postgres::types::PgLsn;
 
 type EventCondition = Box<dyn Fn(&[Event]) -> bool + Send + Sync>;
 type TableRowCondition = Box<dyn Fn(&HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
 type CombinedCondition =
     Box<dyn Fn(&[Event], &HashMap<TableId, Vec<TableRow>>) -> bool + Send + Sync>;
+
+fn snapshot_batch_to_table_rows(batch: &TableArrowBatch) -> Vec<TableRow> {
+    record_batch_to_table_rows(&batch.batch)
+}
+
+fn table_change_set_to_events(change_set: &TableChangeSet) -> Vec<Event> {
+    let mut events = Vec::new();
+    let mut index = 0;
+
+    while index < change_set.groups.len() {
+        let group = &change_set.groups[index];
+        let rows = record_batch_to_table_rows(&group.rows.batch);
+
+        match (group.change, group.row_image) {
+            (ChangeKind::Insert, RowImage::New) => {
+                for (row_index, row) in rows.into_iter().enumerate() {
+                    let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
+                    let tx_ordinal = group.tx_ordinals.values()[row_index];
+                    events.push(Event::Insert(InsertEvent {
+                        start_lsn: commit_lsn,
+                        commit_lsn,
+                        tx_ordinal,
+                        table_id: change_set.table_id,
+                        table_row: row,
+                    }));
+                }
+                index += 1;
+            }
+            (ChangeKind::Update, RowImage::Old { key_only }) => {
+                if let Some(next_group) = change_set.groups.get(index + 1)
+                    && next_group.change == ChangeKind::Update
+                    && next_group.row_image == RowImage::New
+                {
+                    let new_rows = record_batch_to_table_rows(&next_group.rows.batch);
+                    for row_index in 0..rows.len() {
+                        let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
+                        let tx_ordinal = group.tx_ordinals.values()[row_index];
+                        events.push(Event::Update(UpdateEvent {
+                            start_lsn: commit_lsn,
+                            commit_lsn,
+                            tx_ordinal,
+                            table_id: change_set.table_id,
+                            table_row: new_rows[row_index].clone(),
+                            old_table_row: Some((key_only, rows[row_index].clone())),
+                        }));
+                    }
+                    index += 2;
+                } else {
+                    for (row_index, row) in rows.into_iter().enumerate() {
+                        let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
+                        let tx_ordinal = group.tx_ordinals.values()[row_index];
+                        events.push(Event::Delete(DeleteEvent {
+                            start_lsn: commit_lsn,
+                            commit_lsn,
+                            tx_ordinal,
+                            table_id: change_set.table_id,
+                            old_table_row: Some((key_only, row)),
+                        }));
+                    }
+                    index += 1;
+                }
+            }
+            (ChangeKind::Update, RowImage::New) => {
+                for (row_index, row) in rows.into_iter().enumerate() {
+                    let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
+                    let tx_ordinal = group.tx_ordinals.values()[row_index];
+                    events.push(Event::Update(UpdateEvent {
+                        start_lsn: commit_lsn,
+                        commit_lsn,
+                        tx_ordinal,
+                        table_id: change_set.table_id,
+                        table_row: row,
+                        old_table_row: None,
+                    }));
+                }
+                index += 1;
+            }
+            (ChangeKind::Delete, RowImage::Old { key_only }) => {
+                for (row_index, row) in rows.into_iter().enumerate() {
+                    let commit_lsn = PgLsn::from(group.commit_lsns.values()[row_index]);
+                    let tx_ordinal = group.tx_ordinals.values()[row_index];
+                    events.push(Event::Delete(DeleteEvent {
+                        start_lsn: commit_lsn,
+                        commit_lsn,
+                        tx_ordinal,
+                        table_id: change_set.table_id,
+                        old_table_row: Some((key_only, row)),
+                    }));
+                }
+                index += 1;
+            }
+            (ChangeKind::Delete, RowImage::New) | (ChangeKind::Insert, RowImage::Old { .. }) => {
+                index += 1;
+            }
+        }
+    }
+
+    events
+}
+
+fn stream_batches_to_events(batches: &[StreamBatch]) -> Vec<Event> {
+    let mut events = Vec::new();
+
+    for batch in batches {
+        match batch {
+            StreamBatch::Changes(change_set) => {
+                events.extend(table_change_set_to_events(change_set));
+            }
+            StreamBatch::Truncate(TruncateBatch {
+                rel_ids,
+                commit_lsn,
+                tx_ordinal,
+                options,
+            }) => {
+                events.push(Event::Truncate(crate::types::TruncateEvent {
+                    start_lsn: *commit_lsn,
+                    commit_lsn: *commit_lsn,
+                    tx_ordinal: *tx_ordinal,
+                    options: *options,
+                    rel_ids: rel_ids.iter().map(|table_id| table_id.0).collect(),
+                }));
+            }
+        }
+    }
+
+    events
+}
 
 struct Inner<D> {
     wrapped_destination: D,
@@ -275,21 +407,22 @@ where
         Ok(())
     }
 
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        table_id: TableId,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
         let destination = {
             let mut inner = self.inner.write().await;
             inner.write_table_rows_called += 1;
             inner.wrapped_destination.clone()
         };
+        let table_id = batch.table_id;
+        let table_rows = snapshot_batch_to_table_rows(&batch);
 
-        let (wrapped_flush_result, pending_result) = WriteTableRowsResult::new(());
+        let (wrapped_flush_result, pending_result) = WriteSnapshotBatchResult::new(());
         destination
-            .write_table_rows(table_id, table_rows.clone(), wrapped_flush_result)
+            .write_snapshot_batch(batch, wrapped_flush_result)
             .await?;
 
         let result = pending_result.await.into_result();
@@ -312,18 +445,19 @@ where
         Ok(())
     }
 
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         let destination = {
             let inner = self.inner.read().await;
             inner.wrapped_destination.clone()
         };
+        let events = stream_batches_to_events(&batches);
 
         let (wrapped_flush_result, pending_result) =
-            WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
+            WriteStreamBatchesResult::new(ApplyLoopAsyncResultMetadata {
                 commit_end_lsn: None,
                 metrics: DispatchMetrics {
                     items_count: events.len(),
@@ -331,7 +465,7 @@ where
                 },
             });
         destination
-            .write_events(events.clone(), wrapped_flush_result)
+            .write_stream_batches(batches, wrapped_flush_result)
             .await?;
 
         // We spawn a task to handle the result, this way the wrapper behaves like a transparent

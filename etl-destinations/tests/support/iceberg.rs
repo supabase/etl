@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![cfg(all(feature = "iceberg", feature = "test-utils"))]
 
-use arrow::{
+use arrow57::{
     array::{ArrayRef, RecordBatch},
     datatypes::TimeUnit,
 };
@@ -31,8 +31,8 @@ pub fn record_batch_to_table_rows(batch: &RecordBatch) -> Vec<TableRow> {
 
 /// Converts an Arrow array value at a specific index to a Cell.
 fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
-    use arrow::array::*;
-    use arrow::datatypes::DataType;
+    use arrow57::array::*;
+    use arrow57::datatypes::DataType;
 
     if array.is_null(row_idx) {
         return Cell::Null;

@@ -6,23 +6,11 @@ use pg_escape::quote_literal;
 /// Prepared row payload reused across retry attempts.
 pub(super) enum PreparedRows {
     Appender(Vec<Vec<Value>>),
-    SqlLiterals(Vec<String>),
+    Arrow(Vec<duckdb::arrow::record_batch::RecordBatch>),
 }
 
 /// Converts table rows into a retryable payload for DuckDB writes.
 pub(super) fn prepare_rows(table_rows: Vec<TableRow>) -> PreparedRows {
-    if table_rows
-        .iter()
-        .any(|row| row.values().iter().any(cell_requires_sql_literals))
-    {
-        return PreparedRows::SqlLiterals(
-            table_rows
-                .into_iter()
-                .map(table_row_to_sql_literal)
-                .collect(),
-        );
-    }
-
     PreparedRows::Appender(
         table_rows
             .into_iter()
@@ -46,16 +34,6 @@ pub(super) fn table_row_to_sql_literal_ref(row: &TableRow) -> String {
 /// Serializes a borrowed cell into a DuckDB SQL literal expression.
 pub(super) fn cell_to_sql_literal_ref(cell: &Cell) -> String {
     cell_to_sql_literal(cell_to_owned(cell))
-}
-
-/// Returns whether a cell must bypass the DuckDB appender path.
-fn cell_requires_sql_literals(cell: &Cell) -> bool {
-    matches!(cell, Cell::Array(_))
-}
-
-/// Serializes a row into a SQL `VALUES (...)` tuple.
-fn table_row_to_sql_literal(row: TableRow) -> String {
-    table_row_to_sql_literal_ref(&row)
 }
 
 /// Converts a [`Cell`] into a DuckDB SQL literal expression.
@@ -461,17 +439,17 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_rows_uses_sql_literals_for_arrays() {
+    fn test_prepare_rows_uses_appender_for_arrays() {
         let prepared = prepare_rows(vec![TableRow::new(vec![
             Cell::I32(1),
             Cell::Array(ArrayCell::I32(vec![Some(1), None, Some(3)])),
         ])]);
 
         match prepared {
-            PreparedRows::SqlLiterals(rows) => {
-                assert_eq!(rows, vec!["(1, [1, NULL, 3])"]);
+            PreparedRows::Appender(rows) => {
+                assert_eq!(rows.len(), 1);
             }
-            PreparedRows::Appender(_) => panic!("expected sql literal fallback"),
+            PreparedRows::Arrow(_) => panic!("expected appender rows"),
         }
     }
 }

@@ -11,17 +11,17 @@ use tracing::warn;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 
-/// Async completion handle used for [`crate::destination::Destination::write_table_rows`].
+/// Async completion handle used for [`crate::destination::Destination::write_snapshot_batch`].
 ///
 /// ETL waits for this result before requesting the next row batch for the same copy partition.
 /// The handle exists mostly to keep the destination API aligned with
-/// [`WriteEventsResult`], so destinations may still choose to structure their internal write
+/// [`WriteStreamBatchesResult`], so destinations may still choose to structure their internal write
 /// paths in a similar way.
-pub type WriteTableRowsResult<T = ()> = AsyncResult<T>;
-/// Pending async completion used for `Destination::write_table_rows`.
-pub type PendingWriteTableRowsResult<T = ()> = PendingAsyncResult<T, ()>;
-/// Completed async completion used for `Destination::write_table_rows`.
-pub type CompletedWriteTableRowsResult<T = ()> = CompletedAsyncResult<T, ()>;
+pub type WriteSnapshotBatchResult<T = ()> = AsyncResult<T>;
+/// Pending async completion used for `Destination::write_snapshot_batch`.
+pub type PendingWriteSnapshotBatchResult<T = ()> = PendingAsyncResult<T, ()>;
+/// Completed async completion used for `Destination::write_snapshot_batch`.
+pub type CompletedWriteSnapshotBatchResult<T = ()> = CompletedAsyncResult<T, ()>;
 
 /// Async completion handle used for [`crate::destination::Destination::truncate_table`].
 ///
@@ -33,15 +33,30 @@ pub type PendingTruncateTableResult<T = ()> = PendingAsyncResult<T, ()>;
 /// Completed async completion used for `Destination::truncate_table`.
 pub type CompletedTruncateTableResult<T = ()> = CompletedAsyncResult<T, ()>;
 
-/// Async completion handle used for [`crate::destination::Destination::write_events`].
+/// Async completion handle used for [`crate::destination::Destination::write_stream_batches`].
 ///
 /// This is the path where asynchronous completion changes ETL behavior the most: once dispatch
 /// succeeds, the apply loop may continue other work while the destination finishes the batch.
-pub type WriteEventsResult<T = ()> = AsyncResult<T>;
-/// Pending async completion used for `Destination::write_events`.
-pub type PendingWriteEventsResult<T = ()> = PendingAsyncResult<T, ApplyLoopAsyncResultMetadata>;
-/// Completed async completion used for `Destination::write_events`.
-pub type CompletedWriteEventsResult<T = ()> = CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
+pub type WriteStreamBatchesResult<T = ()> = AsyncResult<T>;
+/// Pending async completion used for `Destination::write_stream_batches`.
+pub type PendingWriteStreamBatchesResult<T = ()> =
+    PendingAsyncResult<T, ApplyLoopAsyncResultMetadata>;
+/// Completed async completion used for `Destination::write_stream_batches`.
+pub type CompletedWriteStreamBatchesResult<T = ()> =
+    CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
+
+/// Compatibility alias for callers migrating from row-based copy batches.
+pub type WriteTableRowsResult<T = ()> = WriteSnapshotBatchResult<T>;
+/// Compatibility alias for callers migrating from row-based copy batches.
+pub type PendingWriteTableRowsResult<T = ()> = PendingWriteSnapshotBatchResult<T>;
+/// Compatibility alias for callers migrating from row-based copy batches.
+pub type CompletedWriteTableRowsResult<T = ()> = CompletedWriteSnapshotBatchResult<T>;
+/// Compatibility alias for callers migrating from raw event batches.
+pub type WriteEventsResult<T = ()> = WriteStreamBatchesResult<T>;
+/// Compatibility alias for callers migrating from raw event batches.
+pub type PendingWriteEventsResult<T = ()> = PendingWriteStreamBatchesResult<T>;
+/// Compatibility alias for callers migrating from raw event batches.
+pub type CompletedWriteEventsResult<T = ()> = CompletedWriteStreamBatchesResult<T>;
 
 /// Dispatch-time metrics carried through an asynchronous completion result.
 #[derive(Debug, Clone, Copy)]
@@ -199,7 +214,7 @@ mod tests {
                 dispatched_at: Instant::now(),
             },
         };
-        let (result_tx, pending_result) = WriteEventsResult::new(metadata);
+        let (result_tx, pending_result) = WriteStreamBatchesResult::new(metadata);
 
         result_tx.send(Ok(7_u64));
 
@@ -212,7 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_async_result_surfaces_error() {
-        let (result_tx, pending_result) = WriteTableRowsResult::<()>::new(());
+        let (result_tx, pending_result) = WriteSnapshotBatchResult::<()>::new(());
         drop(result_tx);
 
         let err = pending_result.await.into_result().unwrap_err();

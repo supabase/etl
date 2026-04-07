@@ -16,8 +16,9 @@ use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::stream::TryBatchBackpressureStream;
+use crate::conversions::arrow::table_rows_to_arrow_batch;
 use crate::destination::Destination;
-use crate::destination::async_result::WriteTableRowsResult;
+use crate::destination::async_result::WriteSnapshotBatchResult;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 #[cfg(feature = "failpoints")]
@@ -82,7 +83,7 @@ async fn copy_table_rows_from_stream<D, S>(
     mut table_copy_stream: Pin<&mut S>,
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
-    table_id: TableId,
+    table_schema: Arc<TableSchema>,
     pipeline_id: PipelineId,
     partitioning: &'static str,
     destination: D,
@@ -144,10 +145,11 @@ where
                 total_rows += batch_size;
 
                 let before_sending = Instant::now();
-                let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
+                let snapshot_batch = table_rows_to_arrow_batch(table_schema.clone(), &table_rows)?;
+                let (flush_result, pending_flush_result) = WriteSnapshotBatchResult::new(());
 
                 destination
-                    .write_table_rows(table_id, table_rows, flush_result)
+                    .write_snapshot_batch(snapshot_batch, flush_result)
                     .await?;
                 pending_flush_result.await.into_result()?;
 
@@ -280,7 +282,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         table_copy_stream.as_mut(),
         shutdown_rx,
         connection_updates_rx,
-        table_id,
+        table_schema.clone(),
         pipeline_id,
         "false",
         destination,
@@ -629,7 +631,7 @@ where
         table_copy_stream.as_mut(),
         shutdown_rx,
         connection_updates_rx,
-        table_id,
+        table_schema.clone(),
         pipeline_id,
         "true",
         destination,

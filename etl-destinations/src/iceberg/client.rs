@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
-use arrow::array::RecordBatch;
+use crate::iceberg::arrow::array::RecordBatch;
+use crate::iceberg::parquet::{basic::Compression, file::properties::WriterProperties};
 use etl::{
     error::EtlResult,
     types::{ColumnSchema, TableRow},
@@ -24,7 +25,6 @@ use iceberg::{
 use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalogBuilder,
 };
-use parquet::{basic::Compression, file::properties::WriterProperties};
 use tracing::debug;
 
 use crate::iceberg::{

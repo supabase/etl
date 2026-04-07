@@ -56,13 +56,13 @@ impl DuckLakeSetupPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DuckDbExtensionStrategy {
-    VendoredLinux { platform_dir: &'static str },
+    VendoredLocal { platform_dir: &'static str },
     InstallFromRepository,
 }
 
 impl DuckDbExtensionStrategy {
     pub(super) fn disables_autoload(self) -> bool {
-        matches!(self, Self::VendoredLinux { .. })
+        matches!(self, Self::VendoredLocal { .. })
     }
 }
 
@@ -103,12 +103,35 @@ fn duckdb_extension_strategy(
             if vendored_extension_dir(platform_dir, env_override, container_root, repo_root)?
                 .is_some()
             {
-                Ok(DuckDbExtensionStrategy::VendoredLinux { platform_dir })
+                Ok(DuckDbExtensionStrategy::VendoredLocal { platform_dir })
             } else {
                 Ok(DuckDbExtensionStrategy::InstallFromRepository)
             }
         }
-        "macos" | "windows" => Ok(DuckDbExtensionStrategy::InstallFromRepository),
+        "macos" => {
+            let platform_dir = match arch {
+                "x86_64" | "amd64" => "osx_amd64",
+                "aarch64" | "arm64" => "osx_arm64",
+                _ => {
+                    return Err(etl_error!(
+                        ErrorKind::ConfigError,
+                        "Unsupported DuckDB extension platform",
+                        format!(
+                            "macos architecture `{arch}` is not supported for vendored DuckDB extensions"
+                        )
+                    ));
+                }
+            };
+
+            if vendored_extension_dir(platform_dir, env_override, container_root, repo_root)?
+                .is_some()
+            {
+                Ok(DuckDbExtensionStrategy::VendoredLocal { platform_dir })
+            } else {
+                Ok(DuckDbExtensionStrategy::InstallFromRepository)
+            }
+        }
+        "windows" => Ok(DuckDbExtensionStrategy::InstallFromRepository),
         _ => Err(etl_error!(
             ErrorKind::ConfigError,
             "Unsupported DuckDB extension platform",
@@ -495,20 +518,12 @@ pub(super) fn validate_data_path(data_path: &Url) -> EtlResult<&str> {
 
 /// Builds the one-time setup SQL executed for each new pool connection.
 ///
-<<<<<<< HEAD
-/// On Linux, required extensions are loaded from vendored local files when a
-/// vendored directory is available. Otherwise, DuckDB falls back to the legacy
-/// `INSTALL` + `LOAD` flow. The vendored root can be forced with
-/// `ETL_DUCKDB_EXTENSION_ROOT`. On macOS and Windows, the legacy `INSTALL` +
-/// `LOAD` flow is always retained for local development.
-=======
 /// On Linux and macOS, required extensions are loaded from vendored local
 /// files when a vendored directory is available. Otherwise, DuckDB falls back
 /// to the legacy `INSTALL` + `LOAD` flow. The vendored root can be forced with
 /// `ETL_DUCKDB_EXTENSION_ROOT`. On Windows, the legacy `INSTALL` + `LOAD` flow
 /// is always retained for local development.
 #[cfg(test)]
->>>>>>> bnjjj/ducklake_looogs
 pub(super) fn build_setup_sql(
     catalog_url: &Url,
     data_path: &Url,
@@ -527,7 +542,7 @@ pub(super) fn build_setup_plan(
 ) -> EtlResult<DuckLakeSetupPlan> {
     let strategy = current_duckdb_extension_strategy()?;
     let vendored_root = match strategy {
-        DuckDbExtensionStrategy::VendoredLinux { platform_dir } => {
+        DuckDbExtensionStrategy::VendoredLocal { platform_dir } => {
             Some(require_vendored_extension_dir(
                 platform_dir,
                 env::var_os(DUCKDB_EXTENSION_ROOT_ENV_VAR).map(PathBuf::from),
@@ -616,13 +631,8 @@ fn build_setup_plan_with_strategy(
         ),
     ]);
 
-<<<<<<< HEAD
-    let mut sql = match strategy {
-        DuckDbExtensionStrategy::VendoredLinux { .. } => {
-=======
     let extension_sql = match strategy {
         DuckDbExtensionStrategy::VendoredLocal { .. } => {
->>>>>>> bnjjj/ducklake_looogs
             let extension_root = vendored_root.ok_or_else(|| {
                 etl_error!(
                     ErrorKind::ConfigError,
@@ -855,20 +865,40 @@ mod tests {
                 repo_root.path(),
             )
             .unwrap(),
-            DuckDbExtensionStrategy::VendoredLinux {
+            DuckDbExtensionStrategy::VendoredLocal {
                 platform_dir: "linux_arm64"
             }
         );
     }
 
     #[test]
-    fn test_duckdb_extension_strategy_macos_uses_install_flow() {
+    fn test_duckdb_extension_strategy_macos_uses_install_flow_without_vendored_extensions() {
         let tempdir = TempDir::new().unwrap();
 
         assert_eq!(
             duckdb_extension_strategy("macos", "aarch64", None, tempdir.path(), tempdir.path())
                 .unwrap(),
             DuckDbExtensionStrategy::InstallFromRepository
+        );
+    }
+
+    #[test]
+    fn test_duckdb_extension_strategy_macos_arm64_uses_vendored_extensions_when_present() {
+        let repo_root = vendored_root_with_files("osx_arm64");
+        let container_root = TempDir::new().unwrap();
+
+        assert_eq!(
+            duckdb_extension_strategy(
+                "macos",
+                "aarch64",
+                None,
+                container_root.path(),
+                repo_root.path(),
+            )
+            .unwrap(),
+            DuckDbExtensionStrategy::VendoredLocal {
+                platform_dir: "osx_arm64"
+            }
         );
     }
 
@@ -933,6 +963,24 @@ mod tests {
     }
 
     #[test]
+    fn test_vendored_extension_dir_falls_back_to_container_root() {
+        let container_root = vendored_root_with_files("linux_amd64");
+        let repo_root = TempDir::new().unwrap();
+
+        let resolved =
+            vendored_extension_dir("linux_amd64", None, container_root.path(), repo_root.path())
+                .unwrap();
+
+        assert_eq!(
+            resolved.unwrap(),
+            container_root
+                .path()
+                .join(DUCKDB_EXTENSION_VERSION)
+                .join("linux_amd64")
+        );
+    }
+
+    #[test]
     fn test_vendored_extension_dir_rejects_missing_extensions() {
         let tempdir = TempDir::new().unwrap();
         let err = vendored_extension_dir(
@@ -964,7 +1012,7 @@ mod tests {
             &data_url,
             None,
             None,
-            DuckDbExtensionStrategy::VendoredLinux {
+            DuckDbExtensionStrategy::VendoredLocal {
                 platform_dir: "linux_amd64",
             },
             Some(
@@ -997,8 +1045,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
-=======
     fn test_build_setup_sql_macos_vendored_local() {
         let vendored_root = vendored_root_with_files("osx_arm64");
         let catalog_url = Url::from_file_path("/tmp/catalog.ducklake").unwrap();
@@ -1029,7 +1075,6 @@ mod tests {
     }
 
     #[test]
->>>>>>> bnjjj/ducklake_looogs
     fn test_build_setup_sql_legacy_install_postgres_local_data() {
         let catalog_url = Url::parse("postgres://bnj@localhost:5432/ducklake_catalog").unwrap();
         let data_url = Url::from_file_path("/tmp/lake_data").unwrap();
@@ -1074,7 +1119,7 @@ mod tests {
             &data_url,
             None,
             None,
-            DuckDbExtensionStrategy::VendoredLinux {
+            DuckDbExtensionStrategy::VendoredLocal {
                 platform_dir: "linux_arm64",
             },
             Some(&extension_dir),
@@ -1097,8 +1142,6 @@ mod tests {
     }
 
     #[test]
-<<<<<<< HEAD
-=======
     fn test_build_setup_plan_linux_vendored_postgres_s3_data_has_expected_phases() {
         let vendored_root = vendored_root_with_files("linux_arm64");
         let catalog_url = Url::parse("postgres://user:pass@host/db").unwrap();
@@ -1184,7 +1227,6 @@ mod tests {
     }
 
     #[test]
->>>>>>> bnjjj/ducklake_looogs
     fn test_build_setup_sql_uses_pg_escape_for_literals() {
         let catalog_url = Url::parse("postgres://user:pa%27ss%5Cword@localhost:5432/mydb").unwrap();
         let data_url = Url::parse("s3://bucket/path").unwrap();

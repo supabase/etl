@@ -15,9 +15,14 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use arrow::array::UInt64Array;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
-use etl::types::{Cell, EventSequenceKey, TableRow, TableSchema};
+use etl::record_batch_to_table_rows;
+use etl::types::{
+    Cell, ChangeArrowBatch, ChangeKind, EventSequenceKey, RowImage, TableArrowBatch,
+    TableChangeSet, TableRow, TableSchema,
+};
 use metrics::{counter, histogram};
 #[cfg(feature = "test-utils")]
 use parking_lot::Mutex;
@@ -28,6 +33,7 @@ use tokio::time::Instant;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info, warn};
 
+use crate::ducklake::arrow::{prepare_arrow_rows, project_primary_key_batch};
 use crate::ducklake::client::{
     DuckDbBlockingOperationKind, DuckLakeConnectionManager, format_query_error_detail,
     run_duckdb_blocking,
@@ -47,27 +53,19 @@ use crate::ducklake::metrics::{
 use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG};
 use crate::retry::{RetryAttempt, RetryDecision, RetryPolicy, retry_with_backoff};
 
-/// Maximum number of rows per SQL `INSERT ... VALUES` batch when nested values
-/// force the staging path to bypass DuckDB's appender API.
-const SQL_INSERT_BATCH_SIZE: usize = 256;
 /// Maximum number of primary-key predicates per SQL `DELETE` batch.
 ///
 /// Keep this small so each delete statement remains cheap while still avoiding
 /// one round-trip per deleted row.
-const SQL_DELETE_BATCH_SIZE: usize = 64;
+const SQL_DELETE_BATCH_SIZE: usize = 16;
 /// Maximum number of ordered CDC mutations grouped into one atomic DuckLake
 /// transaction.
 ///
 /// Keeping mixed insert/delete/update streams in the same batch improves
 /// insert throughput on interleaved workloads while still capping transaction
 /// lifetime for DuckLake conflict handling.
-<<<<<<< HEAD
-const CDC_MUTATION_BATCH_SIZE: usize = 128;
-/// ETL-managed marker table storing per-table applied CDC batches.
-=======
 const CDC_MUTATION_BATCH_SIZE: usize = 16;
 /// ETL-managed marker table storing per-table applied copy batches.
->>>>>>> bnjjj/ducklake_looogs
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
 /// Inline small marker-table writes in the DuckLake metadata catalog instead of
 /// creating Parquet files for this metadata-like table.
@@ -101,11 +99,18 @@ pub(super) enum TableMutation {
 
 /// Prepared table mutations ready for execution and retries.
 enum PreparedTableMutation {
+    Copy(PreparedRows),
     Upsert(PreparedRows),
     Delete {
         // For WHERE clause predicates used in DELETE statements.
         predicates: Vec<String>,
         // To know if it's coming from an update or delete operation.
+        origin: &'static str,
+    },
+    DeleteKeys {
+        keys: PreparedRows,
+        key_columns: Vec<String>,
+        join_predicate: String,
         origin: &'static str,
     },
 }
@@ -649,13 +654,15 @@ pub(super) fn prepare_mutation_table_batches(
     Ok(prepared_batches)
 }
 
-/// Prepares one retry-safe atomic batch for a table-copy row chunk.
-pub(super) fn prepare_copy_table_batch(
+/// Prepares one retry-safe atomic batch for an Arrow-native table-copy chunk.
+pub(super) fn prepare_copy_arrow_batch(
     table_schema: &TableSchema,
     table_name: DuckLakeTableName,
-    table_rows: Vec<TableRow>,
+    table_batch: TableArrowBatch,
 ) -> EtlResult<PreparedDuckLakeTableBatch> {
-    let identity = build_copy_batch_identity(&table_name, table_schema, &table_rows)?;
+    let identity =
+        build_copy_batch_identity_from_arrow_batch(&table_name, table_schema, &table_batch)?;
+
     Ok(PreparedDuckLakeTableBatch {
         table_name,
         batch_id: identity.batch_id,
@@ -664,10 +671,91 @@ pub(super) fn prepare_copy_table_batch(
         last_commit_lsn: identity.last_commit_lsn,
         first_sequence_key: None,
         last_sequence_key: None,
-        action: PreparedDuckLakeTableBatchAction::Mutation(vec![PreparedTableMutation::Upsert(
-            prepare_rows(table_rows),
+        action: PreparedDuckLakeTableBatchAction::Mutation(vec![PreparedTableMutation::Copy(
+            prepare_arrow_rows(&table_batch.batch)?,
         )]),
     })
+}
+
+/// Prepares ordered atomic batches for one table's Arrow-native CDC changes.
+///
+/// The same [`CDC_MUTATION_BATCH_SIZE`] cap used by the row-oriented path still
+/// applies here. Update old/new images are counted together so one logical
+/// update never gets split across two atomic DuckLake transactions.
+pub(super) fn prepare_change_table_batches(
+    table_schema: &TableSchema,
+    table_name: DuckLakeTableName,
+    change_set: TableChangeSet,
+) -> EtlResult<Vec<PreparedDuckLakeTableBatch>> {
+    let group_count = change_set.groups.len();
+    let mut prepared_batches = Vec::with_capacity(group_count);
+    let mut pending_groups = Vec::with_capacity(group_count.min(CDC_MUTATION_BATCH_SIZE));
+    let mut pending_rows = 0usize;
+    let mut groups = change_set.groups.into_iter().peekable();
+
+    while let Some(group) = groups.next() {
+        let group_rows = group.rows.row_count();
+        let starts_update_pair =
+            group.change == ChangeKind::Update && matches!(group.row_image, RowImage::Old { .. });
+        let pair_rows = if starts_update_pair {
+            let next_group = groups.peek().ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "DuckLake update batch is missing a new-row image"
+                )
+            })?;
+            if next_group.change != ChangeKind::Update || next_group.row_image != RowImage::New {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "DuckLake update batch lost old/new ordering"
+                ));
+            }
+            let next_rows = next_group.rows.row_count();
+            if next_rows != group_rows {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "DuckLake update batch row counts do not match",
+                    format!("old_rows={group_rows}, new_rows={next_rows}")
+                ));
+            }
+            next_rows
+        } else {
+            0
+        };
+        let mutation_rows = group_rows.saturating_add(pair_rows);
+        if !pending_groups.is_empty()
+            && pending_rows.saturating_add(mutation_rows) > CDC_MUTATION_BATCH_SIZE
+        {
+            push_prepared_change_batch(
+                &mut prepared_batches,
+                table_schema,
+                &table_name,
+                std::mem::take(&mut pending_groups),
+            )?;
+            pending_rows = 0;
+        }
+
+        pending_rows = pending_rows.saturating_add(mutation_rows);
+        pending_groups.push(group);
+
+        if starts_update_pair {
+            // Keep the paired new-row image in the same atomic batch as its old image.
+            pending_groups.push(
+                groups
+                    .next()
+                    .expect("peeked update pair must exist when consuming groups"),
+            );
+        }
+    }
+
+    push_prepared_change_batch(
+        &mut prepared_batches,
+        table_schema,
+        &table_name,
+        pending_groups,
+    )?;
+
+    Ok(prepared_batches)
 }
 
 /// Prepares the ordered atomic batch for one table's truncate events.
@@ -867,6 +955,161 @@ pub(super) fn retain_truncates_after_sequence_key(
     }
 }
 
+/// Drops already-applied Arrow-native CDC rows using the persisted sequence key.
+pub(super) fn retain_change_set_after_sequence_key(
+    change_set: TableChangeSet,
+    last_sequence_key: Option<EventSequenceKey>,
+) -> EtlResult<TableChangeSet> {
+    let Some(last_sequence_key) = last_sequence_key else {
+        return Ok(change_set);
+    };
+
+    let mut retained_groups = Vec::with_capacity(change_set.groups.len());
+    let mut groups = change_set.groups.into_iter().peekable();
+
+    while let Some(group) = groups.next() {
+        if group.change == ChangeKind::Update && matches!(group.row_image, RowImage::Old { .. }) {
+            let next_group = groups.next().ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "DuckLake update batch is missing a new-row image"
+                )
+            })?;
+
+            if next_group.change != ChangeKind::Update || next_group.row_image != RowImage::New {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "DuckLake update batch lost old/new ordering"
+                ));
+            }
+
+            if group.rows.row_count() != next_group.rows.row_count() {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "DuckLake update batch row counts do not match",
+                    format!(
+                        "old_rows={}, new_rows={}",
+                        group.rows.row_count(),
+                        next_group.rows.row_count()
+                    )
+                ));
+            }
+
+            let first_sequence_key = change_group_first_sequence_key(&group)
+                .or_else(|| change_group_first_sequence_key(&next_group));
+            let last_group_sequence_key = change_group_last_sequence_key(&next_group)
+                .or_else(|| change_group_last_sequence_key(&group));
+
+            if let (Some(first_sequence_key), Some(last_group_sequence_key)) =
+                (first_sequence_key, last_group_sequence_key)
+            {
+                match compare_sequence_keys(last_sequence_key, first_sequence_key) {
+                    std::cmp::Ordering::Less => {
+                        retained_groups.push(group);
+                        retained_groups.push(next_group);
+                    }
+                    std::cmp::Ordering::Greater | std::cmp::Ordering::Equal => {
+                        if compare_sequence_keys(last_sequence_key, last_group_sequence_key)
+                            == std::cmp::Ordering::Less
+                        {
+                            let first_pending_row_index =
+                                first_pending_row_index(&group, last_sequence_key).ok_or_else(|| {
+                                    etl_error!(
+                                        ErrorKind::InvalidState,
+                                        "DuckLake streaming progress landed inside an Arrow update batch without a remaining row"
+                                    )
+                                })?;
+                            retained_groups
+                                .push(slice_change_group_from(&group, first_pending_row_index));
+                            retained_groups.push(slice_change_group_from(
+                                &next_group,
+                                first_pending_row_index,
+                            ));
+                        }
+                    }
+                }
+            }
+
+            continue;
+        }
+
+        match (
+            change_group_first_sequence_key(&group),
+            change_group_last_sequence_key(&group),
+        ) {
+            (Some(first_sequence_key), Some(last_group_sequence_key)) => {
+                match compare_sequence_keys(last_sequence_key, first_sequence_key) {
+                    std::cmp::Ordering::Less => retained_groups.push(group),
+                    std::cmp::Ordering::Greater | std::cmp::Ordering::Equal => {
+                        if compare_sequence_keys(last_sequence_key, last_group_sequence_key)
+                            == std::cmp::Ordering::Less
+                        {
+                            let first_pending_row_index =
+                                first_pending_row_index(&group, last_sequence_key).ok_or_else(|| {
+                                    etl_error!(
+                                        ErrorKind::InvalidState,
+                                        "DuckLake streaming progress landed inside an Arrow batch without a remaining row"
+                                    )
+                                })?;
+                            retained_groups
+                                .push(slice_change_group_from(&group, first_pending_row_index));
+                        }
+                    }
+                }
+            }
+            _ => retained_groups.push(group),
+        }
+    }
+
+    Ok(TableChangeSet {
+        table_id: change_set.table_id,
+        groups: retained_groups,
+    })
+}
+
+/// Returns the first row index strictly after the applied sequence key.
+fn first_pending_row_index(
+    group: &ChangeArrowBatch,
+    last_sequence_key: EventSequenceKey,
+) -> Option<usize> {
+    group
+        .commit_lsns
+        .values()
+        .iter()
+        .zip(group.tx_ordinals.values().iter())
+        .position(|(commit_lsn, tx_ordinal)| {
+            compare_sequence_keys(
+                EventSequenceKey::new(PgLsn::from(*commit_lsn), *tx_ordinal),
+                last_sequence_key,
+            ) == std::cmp::Ordering::Greater
+        })
+}
+
+/// Returns one sliced change group starting at the first pending row index.
+fn slice_change_group_from(
+    group: &ChangeArrowBatch,
+    first_pending_row_index: usize,
+) -> ChangeArrowBatch {
+    let row_count = group.rows.row_count() - first_pending_row_index;
+    let batch = group.rows.batch.slice(first_pending_row_index, row_count);
+    let commit_lsns =
+        UInt64Array::from(group.commit_lsns.values()[first_pending_row_index..].to_vec());
+    let tx_ordinals =
+        UInt64Array::from(group.tx_ordinals.values()[first_pending_row_index..].to_vec());
+
+    ChangeArrowBatch {
+        rows: TableArrowBatch::new(
+            group.rows.table_id,
+            Arc::clone(&group.rows.table_schema),
+            batch,
+        ),
+        change: group.change,
+        row_image: group.row_image,
+        commit_lsns,
+        tx_ordinals,
+    }
+}
+
 /// Decides whether a streaming batch must be replayed or skipped.
 fn streaming_replay_decision(
     progress: TableStreamingProgress,
@@ -1038,6 +1281,61 @@ fn push_prepared_mutation_batch(
     Ok(())
 }
 
+/// Returns the first sequence key present in one Arrow-native change group.
+fn change_group_first_sequence_key(group: &ChangeArrowBatch) -> Option<EventSequenceKey> {
+    group
+        .commit_lsns
+        .values()
+        .first()
+        .zip(group.tx_ordinals.values().first())
+        .map(|(commit_lsn, tx_ordinal)| {
+            EventSequenceKey::new(PgLsn::from(*commit_lsn), *tx_ordinal)
+        })
+}
+
+/// Returns the last sequence key present in one Arrow-native change group.
+fn change_group_last_sequence_key(group: &ChangeArrowBatch) -> Option<EventSequenceKey> {
+    group
+        .commit_lsns
+        .values()
+        .last()
+        .zip(group.tx_ordinals.values().last())
+        .map(|(commit_lsn, tx_ordinal)| {
+            EventSequenceKey::new(PgLsn::from(*commit_lsn), *tx_ordinal)
+        })
+}
+
+/// Builds one prepared atomic batch from ordered Arrow-native CDC groups.
+fn push_prepared_change_batch(
+    prepared_batches: &mut Vec<PreparedDuckLakeTableBatch>,
+    table_schema: &TableSchema,
+    table_name: &str,
+    groups: Vec<ChangeArrowBatch>,
+) -> EtlResult<()> {
+    if groups.is_empty() {
+        return Ok(());
+    }
+
+    let identity = build_change_batch_identity(table_name, table_schema, &groups)?;
+    let first_sequence_key = groups.first().and_then(change_group_first_sequence_key);
+    let last_sequence_key = groups.last().and_then(change_group_last_sequence_key);
+    prepared_batches.push(PreparedDuckLakeTableBatch {
+        table_name: table_name.to_string(),
+        batch_id: identity.batch_id,
+        batch_kind: DuckLakeTableBatchKind::Mutation,
+        first_start_lsn: identity.first_start_lsn,
+        last_commit_lsn: identity.last_commit_lsn,
+        first_sequence_key,
+        last_sequence_key,
+        action: PreparedDuckLakeTableBatchAction::Mutation(prepare_change_table_mutations(
+            table_schema,
+            &groups,
+        )?),
+    });
+
+    Ok(())
+}
+
 /// Groups ordered row mutations into retryable DuckDB operations.
 fn prepare_table_mutations(
     table_schema: &TableSchema,
@@ -1125,6 +1423,98 @@ fn prepare_table_mutations(
     Ok(prepared_mutations)
 }
 
+/// Groups ordered Arrow-native CDC changes into retryable DuckDB operations.
+fn prepare_change_table_mutations(
+    table_schema: &TableSchema,
+    groups: &[ChangeArrowBatch],
+) -> EtlResult<Vec<PreparedTableMutation>> {
+    let mut prepared_mutations = Vec::new();
+    let mut index = 0;
+
+    while let Some(group) = groups.get(index) {
+        match (group.change, group.row_image) {
+            (ChangeKind::Insert, RowImage::New) => {
+                prepared_mutations.push(PreparedTableMutation::Upsert(prepare_arrow_rows(
+                    &group.rows.batch,
+                )?));
+                index += 1;
+            }
+            (ChangeKind::Delete, RowImage::Old { .. }) => {
+                prepared_mutations.push(PreparedTableMutation::DeleteKeys {
+                    keys: prepare_arrow_rows(&project_primary_key_batch(
+                        table_schema,
+                        &group.rows.batch,
+                    )?)?,
+                    key_columns: primary_key_column_names(table_schema),
+                    join_predicate: delete_join_predicate_from_schema(table_schema)?,
+                    origin: "delete",
+                });
+                index += 1;
+            }
+            (ChangeKind::Update, RowImage::Old { .. }) => {
+                let next_group = groups.get(index + 1).ok_or_else(|| {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "DuckLake update batch is missing a new-row image"
+                    )
+                })?;
+                if next_group.change != ChangeKind::Update || next_group.row_image != RowImage::New
+                {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "DuckLake update batch lost old/new ordering"
+                    ));
+                }
+                if group.rows.row_count() != next_group.rows.row_count() {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "DuckLake update batch row counts do not match",
+                        format!(
+                            "old_rows={}, new_rows={}",
+                            group.rows.row_count(),
+                            next_group.rows.row_count()
+                        )
+                    ));
+                }
+
+                prepared_mutations.push(PreparedTableMutation::DeleteKeys {
+                    keys: prepare_arrow_rows(&project_primary_key_batch(
+                        table_schema,
+                        &group.rows.batch,
+                    )?)?,
+                    key_columns: primary_key_column_names(table_schema),
+                    join_predicate: delete_join_predicate_from_schema(table_schema)?,
+                    origin: "update",
+                });
+                prepared_mutations.push(PreparedTableMutation::Upsert(prepare_arrow_rows(
+                    &next_group.rows.batch,
+                )?));
+                index += 2;
+            }
+            (ChangeKind::Update, RowImage::New) => {
+                prepared_mutations.push(PreparedTableMutation::DeleteKeys {
+                    keys: prepare_arrow_rows(&project_primary_key_batch(
+                        table_schema,
+                        &group.rows.batch,
+                    )?)?,
+                    key_columns: primary_key_column_names(table_schema),
+                    join_predicate: delete_join_predicate_from_schema(table_schema)?,
+                    origin: "replace",
+                });
+                prepared_mutations.push(PreparedTableMutation::Upsert(prepare_arrow_rows(
+                    &group.rows.batch,
+                )?));
+                index += 1;
+            }
+            (ChangeKind::Insert, RowImage::Old { .. }) | (ChangeKind::Delete, RowImage::New) => {
+                index += 1;
+            }
+        }
+    }
+
+    Ok(prepared_mutations)
+}
+
 /// Builds a `WHERE` clause from the primary-key values stored in `row`.
 fn delete_predicate_from_row(table_schema: &TableSchema, row: &TableRow) -> EtlResult<String> {
     if !table_schema.has_primary_keys() {
@@ -1165,6 +1555,38 @@ fn delete_predicate_from_row(table_schema: &TableSchema, row: &TableRow) -> EtlR
     }
 
     Ok(predicates.join(" AND "))
+}
+
+/// Builds a `USING` join predicate from the table's primary-key columns.
+fn delete_join_predicate_from_schema(table_schema: &TableSchema) -> EtlResult<String> {
+    if !table_schema.has_primary_keys() {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "DuckLake delete requires a primary key",
+            format!("Table '{}' has no primary key columns", table_schema.name)
+        ));
+    }
+
+    Ok(table_schema
+        .column_schemas
+        .iter()
+        .filter(|column_schema| column_schema.primary)
+        .map(|column_schema| {
+            let quoted_column = quote_identifier(&column_schema.name);
+            format!("target.{quoted_column} IS NOT DISTINCT FROM stage.{quoted_column}")
+        })
+        .collect::<Vec<_>>()
+        .join(" AND "))
+}
+
+/// Returns the ordered list of primary-key column names for a table schema.
+fn primary_key_column_names(table_schema: &TableSchema) -> Vec<String> {
+    table_schema
+        .column_schemas
+        .iter()
+        .filter(|column_schema| column_schema.primary)
+        .map(|column_schema| column_schema.name.clone())
+        .collect()
 }
 
 /// Builds a deterministic identity for one ordered mutation batch.
@@ -1218,6 +1640,70 @@ fn build_mutation_batch_identity(
     ))
 }
 
+/// Builds a deterministic identity for one ordered Arrow-native mutation batch.
+fn build_change_batch_identity(
+    table_name: &str,
+    table_schema: &TableSchema,
+    groups: &[ChangeArrowBatch],
+) -> EtlResult<DuckLakeBatchIdentity> {
+    let mut hasher = BatchIdHasher::new();
+    "mutation".hash(&mut hasher);
+    table_name.hash(&mut hasher);
+
+    let mut first_commit_lsn = None;
+    let mut last_commit_lsn = None;
+
+    for group in groups {
+        first_commit_lsn = first_commit_lsn
+            .or_else(|| group.commit_lsns.values().first().copied().map(PgLsn::from));
+        last_commit_lsn = group
+            .commit_lsns
+            .values()
+            .last()
+            .copied()
+            .map(PgLsn::from)
+            .or(last_commit_lsn);
+
+        match (group.change, group.row_image) {
+            (ChangeKind::Insert, RowImage::New) => "insert".hash(&mut hasher),
+            (ChangeKind::Update, RowImage::Old { .. }) => "update_old".hash(&mut hasher),
+            (ChangeKind::Update, RowImage::New) => "update_new".hash(&mut hasher),
+            (ChangeKind::Delete, RowImage::Old { .. }) => "delete".hash(&mut hasher),
+            (ChangeKind::Insert, RowImage::Old { .. }) => "insert_old".hash(&mut hasher),
+            (ChangeKind::Delete, RowImage::New) => "delete_new".hash(&mut hasher),
+        }
+
+        for commit_lsn in group.commit_lsns.values() {
+            commit_lsn.hash(&mut hasher);
+        }
+        for tx_ordinal in group.tx_ordinals.values() {
+            tx_ordinal.hash(&mut hasher);
+        }
+
+        let rows = record_batch_to_table_rows(&group.rows.batch);
+        match (group.change, group.row_image) {
+            (ChangeKind::Delete, RowImage::Old { .. })
+            | (ChangeKind::Update, RowImage::Old { .. }) => {
+                for row in &rows {
+                    delete_predicate_from_row(table_schema, row)?.hash(&mut hasher);
+                }
+            }
+            _ => {
+                for row in &rows {
+                    hash_table_row_ref(&mut hasher, row);
+                }
+            }
+        }
+    }
+
+    Ok(build_batch_identity(
+        DuckLakeTableBatchKind::Mutation,
+        first_commit_lsn,
+        last_commit_lsn,
+        hasher.finish(),
+    ))
+}
+
 /// Builds a deterministic identity for one ordered table-copy batch.
 fn build_copy_batch_identity(
     table_name: &str,
@@ -1239,6 +1725,19 @@ fn build_copy_batch_identity(
         None,
         hasher.finish(),
     ))
+}
+
+/// Builds a deterministic identity for one Arrow-native table-copy batch.
+fn build_copy_batch_identity_from_arrow_batch(
+    table_name: &str,
+    table_schema: &TableSchema,
+    table_batch: &TableArrowBatch,
+) -> EtlResult<DuckLakeBatchIdentity> {
+    build_copy_batch_identity(
+        table_name,
+        table_schema,
+        &record_batch_to_table_rows(&table_batch.batch),
+    )
 }
 
 /// Builds a deterministic identity for one ordered truncate batch.
@@ -1545,12 +2044,33 @@ impl ReusableStagingTable {
                     )
                 })?;
             }
-            PreparedRows::SqlLiterals(row_literals) => {
-                insert_rows_into_staging_with_sql(
-                    conn,
-                    &self.staging_name,
-                    row_literals.as_slice(),
-                )?;
+            PreparedRows::Arrow(batches) => {
+                let mut appender = conn.appender(&self.staging_name).map_err(|error| {
+                    tracing::error!(?error, "error arrow appender");
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake staging Arrow appender creation failed",
+                        source: error
+                    )
+                })?;
+                for batch in batches {
+                    append_retryable_arrow_batch(&mut appender, batch).map_err(|error| {
+                        tracing::error!(?error, "error append record batch");
+                        etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake staging append_record_batch failed",
+                            source: error
+                        )
+                    })?;
+                }
+                appender.flush().map_err(|error| {
+                    tracing::error!(?error, "error arrow flush");
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake staging Arrow appender flush failed",
+                        source: error
+                    )
+                })?;
             }
         }
         Ok(())
@@ -1829,6 +2349,21 @@ fn apply_table_mutation(
     reusable_staging_table: &mut ReusableStagingTable,
 ) -> EtlResult<()> {
     match prepared_mutation {
+        PreparedTableMutation::Copy(prepared_rows) => {
+            histogram!(
+                ETL_DUCKLAKE_UPSERT_ROWS,
+                BATCH_KIND_LABEL => batch_kind,
+                PREPARED_ROWS_KIND_LABEL => prepared_rows_kind(prepared_rows),
+            )
+            .record(prepared_rows_count(prepared_rows) as f64);
+            apply_copy_mutation(
+                conn,
+                batch_kind,
+                sub_batch_kind,
+                &reusable_staging_table.table_name,
+                prepared_rows,
+            )
+        }
         PreparedTableMutation::Upsert(prepared_rows) => {
             histogram!(
                 ETL_DUCKLAKE_UPSERT_ROWS,
@@ -1855,10 +2390,96 @@ fn apply_table_mutation(
                 conn,
                 &reusable_staging_table.table_name,
                 predicates.as_slice(),
-                *origin,
+                origin,
+            )
+        }
+        PreparedTableMutation::DeleteKeys {
+            keys,
+            key_columns,
+            join_predicate,
+            origin,
+        } => {
+            histogram!(
+                ETL_DUCKLAKE_DELETE_PREDICATES,
+                BATCH_KIND_LABEL => batch_kind,
+                DELETE_ORIGIN_LABEL => *origin,
+            )
+            .record(prepared_rows_count(keys) as f64);
+            apply_delete_keys_mutation(
+                conn,
+                (batch_kind, sub_batch_kind),
+                &reusable_staging_table.table_name,
+                keys,
+                key_columns,
+                join_predicate,
+                origin,
             )
         }
     }
+}
+
+/// Appends one retry-safe Arrow record batch to DuckDB.
+fn append_retryable_arrow_batch(
+    appender: &mut duckdb::Appender<'_>,
+    batch: &duckdb::arrow::record_batch::RecordBatch,
+) -> duckdb::Result<()> {
+    // [`RecordBatch::clone`] is shallow: it only clones the schema/column `Arc`s.
+    // The underlying source buffers stay shared while we keep the prepared payload
+    // immutable for retry-safe replays.
+    appender.append_record_batch(batch.clone())
+}
+
+/// Applies one copy batch directly into the destination table.
+fn apply_copy_mutation(
+    conn: &duckdb::Connection,
+    batch_kind: &'static str,
+    sub_batch_kind: &'static str,
+    table_name: &str,
+    prepared_rows: &PreparedRows,
+) -> EtlResult<()> {
+    let PreparedRows::Arrow(batches) = prepared_rows else {
+        let mut reusable_staging_table = ReusableStagingTable::new(table_name);
+        return reusable_staging_table.stage_and_insert(
+            conn,
+            batch_kind,
+            sub_batch_kind,
+            prepared_rows,
+        );
+    };
+
+    if batches.is_empty() {
+        return Ok(());
+    }
+
+    let mut appender = conn
+        .appender_to_catalog_and_db(table_name, LAKE_CATALOG, "main")
+        .map_err(|error| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake destination appender creation failed",
+                source: error
+            )
+        })?;
+
+    for batch in batches {
+        append_retryable_arrow_batch(&mut appender, batch).map_err(|error| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake destination append_record_batch failed",
+                source: error
+            )
+        })?;
+    }
+
+    appender.flush().map_err(|error| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake destination appender flush failed",
+            source: error
+        )
+    })?;
+
+    Ok(())
 }
 
 /// Applies one upsert batch inside an open DuckLake transaction.
@@ -1871,7 +2492,7 @@ fn apply_upsert_mutation(
 ) -> EtlResult<()> {
     let row_count = match prepared_rows {
         PreparedRows::Appender(values) => values.len(),
-        PreparedRows::SqlLiterals(values) => values.len(),
+        PreparedRows::Arrow(batches) => batches.iter().map(|batch| batch.num_rows()).sum(),
     };
 
     if row_count == 0 {
@@ -1919,11 +2540,145 @@ fn apply_delete_mutation(
     Ok(())
 }
 
+/// Applies one primary-key staging delete batch inside an open DuckLake transaction.
+fn apply_delete_keys_mutation(
+    conn: &duckdb::Connection,
+    batch_labels: (&'static str, &'static str),
+    table_name: &str,
+    prepared_rows: &PreparedRows,
+    key_columns: &[String],
+    join_predicate: &str,
+    delete_origin: &'static str,
+) -> EtlResult<()> {
+    let (batch_kind, sub_batch_kind) = batch_labels;
+    let row_count = prepared_rows_count(prepared_rows);
+    if row_count == 0 {
+        return Ok(());
+    }
+
+    let staging = format!("__staging_keys_{table_name}");
+    let selected_columns = key_columns
+        .iter()
+        .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let create_stage_sql = format!(
+        r#"CREATE OR REPLACE TEMP TABLE {staging:?} AS
+           SELECT {selected_columns} FROM {LAKE_CATALOG}."{table_name}" WHERE 1 = 0;"#
+    );
+    let prepare_started = Instant::now();
+    conn.execute_batch(&create_stage_sql).map_err(|error| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake key staging table creation failed",
+            format_query_error_detail(&create_stage_sql, &error),
+            source: error
+        )
+    })?;
+    record_batch_substage_duration(
+        batch_kind,
+        sub_batch_kind,
+        DuckLakeBatchSubstage::StagingPrepare,
+        prepare_started.elapsed().as_secs_f64(),
+    );
+
+    let load_started = Instant::now();
+    let load_result = match prepared_rows {
+        PreparedRows::Appender(values) => (|| {
+            let mut appender = conn.appender(&staging).map_err(|error| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake key staging appender creation failed",
+                    source: error
+                )
+            })?;
+            for value_row in values {
+                appender
+                    .append_row(duckdb::appender_params_from_iter(value_row))
+                    .map_err(|error| {
+                        etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake key staging append_row failed",
+                            source: error
+                        )
+                    })?;
+            }
+            appender.flush().map_err(|error| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake key staging appender flush failed",
+                    source: error
+                )
+            })
+        })(),
+        PreparedRows::Arrow(batches) => (|| {
+            let mut appender = conn.appender(&staging).map_err(|error| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake key staging Arrow appender creation failed",
+                    source: error
+                )
+            })?;
+            for batch in batches {
+                append_retryable_arrow_batch(&mut appender, batch).map_err(|error| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake key staging append_record_batch failed",
+                        source: error
+                    )
+                })?;
+            }
+            appender.flush().map_err(|error| {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake key staging Arrow appender flush failed",
+                    source: error
+                )
+            })
+        })(),
+    };
+
+    if let Err(error) = load_result {
+        let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging:?}"));
+        return Err(error);
+    }
+    record_batch_substage_duration(
+        batch_kind,
+        sub_batch_kind,
+        DuckLakeBatchSubstage::StagingLoad,
+        load_started.elapsed().as_secs_f64(),
+    );
+
+    let delete_sql = format!(
+        r#"DELETE FROM {LAKE_CATALOG}."{table_name}" AS target
+           USING {staging:?} AS stage
+           WHERE {join_predicate};"#
+    );
+    let result = conn.execute_batch(&delete_sql).map_err(|error| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake staged DELETE failed",
+            format_query_error_detail(&delete_sql, &error),
+            source: error
+        )
+    });
+    if result.is_ok() {
+        record_profiled_mutation_operation_duration(
+            conn,
+            DuckLakeMutationOperationKind::Delete,
+            delete_origin,
+        );
+    }
+
+    let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS {staging:?}"));
+    result
+}
+
 /// Returns the number of values carried by a prepared row payload.
 fn prepared_rows_count(prepared_rows: &PreparedRows) -> usize {
     match prepared_rows {
         PreparedRows::Appender(values) => values.len(),
-        PreparedRows::SqlLiterals(values) => values.len(),
+        PreparedRows::Arrow(batches) => batches.iter().map(|batch| batch.num_rows()).sum(),
     }
 }
 
@@ -1931,7 +2686,7 @@ fn prepared_rows_count(prepared_rows: &PreparedRows) -> usize {
 fn prepared_rows_kind(prepared_rows: &PreparedRows) -> &'static str {
     match prepared_rows {
         PreparedRows::Appender(_) => "appender",
-        PreparedRows::SqlLiterals(_) => "sql_literals",
+        PreparedRows::Arrow(_) => "arrow",
     }
 }
 
@@ -1960,8 +2715,13 @@ fn batch_upsert_row_count(batch: &PreparedDuckLakeTableBatch) -> usize {
         PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => prepared_mutations
             .iter()
             .map(|prepared_mutation| match prepared_mutation {
-                PreparedTableMutation::Upsert(prepared_rows) => prepared_rows_count(prepared_rows),
-                PreparedTableMutation::Delete { .. } => 0,
+                PreparedTableMutation::Copy(prepared_rows)
+                | PreparedTableMutation::Upsert(prepared_rows) => {
+                    prepared_rows_count(prepared_rows)
+                }
+                PreparedTableMutation::Delete { .. } | PreparedTableMutation::DeleteKeys { .. } => {
+                    0
+                }
             })
             .sum(),
     }
@@ -1974,8 +2734,9 @@ fn batch_delete_predicate_count(batch: &PreparedDuckLakeTableBatch) -> usize {
         PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => prepared_mutations
             .iter()
             .map(|prepared_mutation| match prepared_mutation {
-                PreparedTableMutation::Upsert(_) => 0,
+                PreparedTableMutation::Copy(_) | PreparedTableMutation::Upsert(_) => 0,
                 PreparedTableMutation::Delete { predicates, .. } => predicates.len(),
+                PreparedTableMutation::DeleteKeys { keys, .. } => prepared_rows_count(keys),
             })
             .sum(),
     }
@@ -1992,11 +2753,12 @@ fn apply_sub_batch_rows(batch: &PreparedDuckLakeTableBatch) -> Option<usize> {
     }
 
     match &prepared_mutations[0] {
+        PreparedTableMutation::Copy(prepared_rows) => Some(prepared_rows_count(prepared_rows)),
         PreparedTableMutation::Upsert(prepared_rows) => Some(match prepared_rows {
             PreparedRows::Appender(values) => values.len(),
-            PreparedRows::SqlLiterals(values) => values.len(),
+            PreparedRows::Arrow(batches) => batches.iter().map(|batch| batch.num_rows()).sum(),
         }),
-        PreparedTableMutation::Delete { .. } => None,
+        PreparedTableMutation::Delete { .. } | PreparedTableMutation::DeleteKeys { .. } => None,
     }
 }
 
@@ -2006,40 +2768,22 @@ fn batch_log_kind(batch: &PreparedDuckLakeTableBatch) -> &'static str {
         PreparedDuckLakeTableBatchAction::Truncate => "truncate",
         PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => {
             match prepared_mutations.as_slice() {
+                [PreparedTableMutation::Copy(_)] => "copy",
                 [PreparedTableMutation::Upsert(_)] => "insert",
                 [PreparedTableMutation::Delete { origin, .. }] => origin,
+                [PreparedTableMutation::DeleteKeys { origin, .. }] => origin,
                 [
                     PreparedTableMutation::Delete { origin, .. },
+                    PreparedTableMutation::Upsert(_),
+                ] => origin,
+                [
+                    PreparedTableMutation::DeleteKeys { origin, .. },
                     PreparedTableMutation::Upsert(_),
                 ] => origin,
                 _ => "mutation",
             }
         }
     }
-}
-
-/// Inserts rows into the local staging table using SQL literals.
-fn insert_rows_into_staging_with_sql(
-    conn: &duckdb::Connection,
-    staging: &str,
-    row_literals: &[String],
-) -> EtlResult<()> {
-    for chunk in row_literals.chunks(SQL_INSERT_BATCH_SIZE) {
-        conn.execute_batch(&format!(
-            "INSERT INTO {staging:?} VALUES {};",
-            chunk.join(", ")
-        ))
-        .map_err(|error| {
-            tracing::error!(?error, "error insert_rows_into_staging_with_sql");
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake staging row insert failed",
-                source: error
-            )
-        })?;
-    }
-
-    Ok(())
 }
 
 #[cfg(feature = "test-utils")]
@@ -2130,7 +2874,11 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<(
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
+    use arrow::array::UInt64Array;
     use duckdb::Connection;
+    use etl::table_rows_to_arrow_batch;
     use etl::types::{ColumnSchema, TableId, TableName, Type as PgType};
     use etl_telemetry::metrics::init_metrics_handle;
 
@@ -2145,6 +2893,9 @@ mod tests {
         )
     }
 
+    fn make_arrow_batch(table_schema: &Arc<TableSchema>, rows: &[TableRow]) -> TableArrowBatch {
+        table_rows_to_arrow_batch(Arc::clone(table_schema), rows).unwrap()
+    }
     fn open_metric_test_connection() -> Connection {
         let conn = Connection::open_in_memory().expect("failed to open metric test duckdb");
         conn.execute_batch(&format!(
@@ -2262,16 +3013,13 @@ mod tests {
                 assert_eq!(predicates, &vec!["id = 1".to_string()]);
                 assert_eq!(origin, &"replace");
             }
-            PreparedTableMutation::Upsert(_) => panic!("expected delete first"),
+            _ => panic!("expected delete first"),
         }
         match &prepared[1] {
             PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
                 assert_eq!(rows.len(), 1);
             }
-            PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
-                panic!("expected appender payload")
-            }
-            PreparedTableMutation::Delete { .. } => panic!("expected upsert second"),
+            _ => panic!("expected upsert second"),
         }
     }
 
@@ -2293,16 +3041,13 @@ mod tests {
                 assert_eq!(predicates, &vec!["id = 1".to_string()]);
                 assert_eq!(origin, &"update");
             }
-            PreparedTableMutation::Upsert(_) => panic!("expected delete first"),
+            _ => panic!("expected delete first"),
         }
         match &prepared[1] {
             PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
                 assert_eq!(rows.len(), 1);
             }
-            PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
-                panic!("expected appender payload")
-            }
-            PreparedTableMutation::Delete { .. } => panic!("expected upsert second"),
+            _ => panic!("expected upsert second"),
         }
     }
 
@@ -2344,10 +3089,7 @@ mod tests {
                     PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
                         assert_eq!(rows.len(), 2);
                     }
-                    PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
-                        panic!("expected appender payload")
-                    }
-                    PreparedTableMutation::Delete { .. } => panic!("expected upsert"),
+                    _ => panic!("expected upsert"),
                 }
             }
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
@@ -2452,7 +3194,7 @@ mod tests {
                             &vec!["id = 1".to_string(), "id = 2".to_string()]
                         );
                     }
-                    PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
+                    _ => panic!("expected delete batch"),
                 }
             }
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
@@ -2546,7 +3288,7 @@ mod tests {
                 PreparedTableMutation::Delete { predicates, .. } => {
                     assert_eq!(predicates.len(), CDC_MUTATION_BATCH_SIZE);
                 }
-                PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
+                _ => panic!("expected delete batch"),
             },
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
         }
@@ -2556,7 +3298,7 @@ mod tests {
                 PreparedTableMutation::Delete { predicates, .. } => {
                     assert_eq!(predicates.len(), 1);
                 }
-                PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
+                _ => panic!("expected delete batch"),
             },
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
         }
@@ -2691,6 +3433,92 @@ mod tests {
             retained[1].sequence_key(),
             EventSequenceKey::new(PgLsn::from(210), 0)
         );
+    }
+
+    #[test]
+    fn test_prepare_change_table_batches_keeps_update_pairs_together_at_cap() {
+        let table_schema = Arc::new(make_schema());
+        let insert_rows = (0..(CDC_MUTATION_BATCH_SIZE - 1))
+            .map(|idx| {
+                TableRow::new(vec![
+                    Cell::I32(idx as i32),
+                    Cell::String(format!("i-{idx}")),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let old_row = TableRow::new(vec![Cell::I32(999), Cell::String("before".to_string())]);
+        let new_row = TableRow::new(vec![Cell::I32(999), Cell::String("after".to_string())]);
+
+        let change_set = TableChangeSet {
+            table_id: table_schema.id,
+            groups: vec![
+                ChangeArrowBatch {
+                    rows: make_arrow_batch(&table_schema, &insert_rows),
+                    change: ChangeKind::Insert,
+                    row_image: RowImage::New,
+                    commit_lsns: UInt64Array::from(vec![10_u64; insert_rows.len()]),
+                    tx_ordinals: UInt64Array::from(vec![0_u64; insert_rows.len()]),
+                },
+                ChangeArrowBatch {
+                    rows: make_arrow_batch(&table_schema, std::slice::from_ref(&old_row)),
+                    change: ChangeKind::Update,
+                    row_image: RowImage::Old { key_only: false },
+                    commit_lsns: UInt64Array::from(vec![11_u64]),
+                    tx_ordinals: UInt64Array::from(vec![1_u64]),
+                },
+                ChangeArrowBatch {
+                    rows: make_arrow_batch(&table_schema, std::slice::from_ref(&new_row)),
+                    change: ChangeKind::Update,
+                    row_image: RowImage::New,
+                    commit_lsns: UInt64Array::from(vec![11_u64]),
+                    tx_ordinals: UInt64Array::from(vec![1_u64]),
+                },
+            ],
+        };
+
+        let batches = prepare_change_table_batches(
+            table_schema.as_ref(),
+            "public_users".to_string(),
+            change_set,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 2);
+
+        match &batches[0].action {
+            PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
+                assert_eq!(prepared.len(), 1);
+                match &prepared[0] {
+                    PreparedTableMutation::Upsert(PreparedRows::Arrow(rows)) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0].num_rows(), CDC_MUTATION_BATCH_SIZE - 1);
+                    }
+                    _ => panic!("expected insert upsert batch"),
+                }
+            }
+            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+        }
+
+        match &batches[1].action {
+            PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
+                assert_eq!(prepared.len(), 2);
+                assert!(matches!(
+                    prepared[0],
+                    PreparedTableMutation::DeleteKeys {
+                        origin: "update",
+                        ..
+                    }
+                ));
+                match &prepared[1] {
+                    PreparedTableMutation::Upsert(PreparedRows::Arrow(rows)) => {
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0].num_rows(), 1);
+                    }
+                    _ => panic!("expected update upsert batch"),
+                }
+            }
+            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+        }
     }
 
     #[test]

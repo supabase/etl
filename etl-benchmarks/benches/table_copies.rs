@@ -1,13 +1,13 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use etl::destination::Destination;
 use etl::destination::async_result::{
-    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+    TruncateTableResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
 };
 use etl::error::EtlResult;
 use etl::pipeline::Pipeline;
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::notifying_store::NotifyingStore;
-use etl::types::{Event, TableRow};
+use etl::types::{StreamBatch, TableArrowBatch};
 use etl_config::Environment;
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
@@ -483,32 +483,29 @@ impl Destination for BenchDestination {
         }
     }
 
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        table_id: TableId,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
         match self {
-            BenchDestination::Null(dest) => {
-                dest.write_table_rows(table_id, table_rows, async_result)
-                    .await
-            }
+            BenchDestination::Null(dest) => dest.write_snapshot_batch(batch, async_result).await,
             BenchDestination::BigQuery(dest) => {
-                dest.write_table_rows(table_id, table_rows, async_result)
-                    .await
+                dest.write_snapshot_batch(batch, async_result).await
             }
         }
     }
 
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         match self {
-            BenchDestination::Null(dest) => dest.write_events(events, async_result).await,
-            BenchDestination::BigQuery(dest) => dest.write_events(events, async_result).await,
+            BenchDestination::Null(dest) => dest.write_stream_batches(batches, async_result).await,
+            BenchDestination::BigQuery(dest) => {
+                dest.write_stream_batches(batches, async_result).await
+            }
         }
     }
 }
@@ -528,23 +525,22 @@ impl Destination for NullDestination {
         Ok(())
     }
 
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        _table_id: TableId,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
         self.row_count
-            .fetch_add(table_rows.len() as u64, Ordering::Relaxed);
+            .fetch_add(batch.batch.num_rows() as u64, Ordering::Relaxed);
         async_result.send(Ok(()));
 
         Ok(())
     }
 
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        _events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        _batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         async_result.send(Ok(()));
 

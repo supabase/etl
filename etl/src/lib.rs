@@ -50,11 +50,11 @@
 //! ```rust,no_run
 //! use etl::{
 //!     config::{BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TcpKeepaliveConfig, TlsConfig, TableSyncCopyConfig},
-//!     destination::{Destination, async_result::{WriteEventsResult, WriteTableRowsResult}},
+//!     destination::{Destination, async_result::{WriteSnapshotBatchResult, WriteStreamBatchesResult}},
 //!     error::EtlResult,
 //!     pipeline::Pipeline,
 //!     store::both::memory::MemoryStore,
-//!     types::{Event, TableRow},
+//!     types::{StreamBatch, TableArrowBatch},
 //! };
 //! use etl_postgres::types::TableId;
 //!
@@ -67,11 +67,11 @@
 //!         async_result.send(Ok(()));
 //!         Ok(())
 //!     }
-//!     async fn write_table_rows(&self, _table_id: TableId, _table_rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> EtlResult<()> {
+//!     async fn write_snapshot_batch(&self, _batch: TableArrowBatch, async_result: WriteSnapshotBatchResult<()>) -> EtlResult<()> {
 //!         async_result.send(Ok(()));
 //!         Ok(())
 //!     }
-//!     async fn write_events(&self, _events: Vec<Event>, async_result: WriteEventsResult<()>) -> EtlResult<()> {
+//!     async fn write_stream_batches(&self, _batches: Vec<StreamBatch>, async_result: WriteStreamBatchesResult<()>) -> EtlResult<()> {
 //!         async_result.send(Ok(()));
 //!         Ok(())
 //!     }
@@ -128,7 +128,7 @@
 
 mod concurrency;
 pub mod config;
-mod conversions;
+pub mod conversions;
 pub mod destination;
 #[cfg(feature = "egress")]
 pub mod egress;
@@ -146,3 +146,7 @@ pub mod test_utils;
 pub mod types;
 mod utils;
 pub mod workers;
+
+pub use crate::conversions::arrow::{
+    record_batch_to_table_rows, table_rows_to_arrow_batch, table_schema_to_arrow_schema,
+};

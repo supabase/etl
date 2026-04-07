@@ -23,18 +23,21 @@
 //! "
 //! ```
 
+use arrow::array::UInt64Array;
 use chrono::NaiveDate;
-use duckdb::{Config, Connection};
+use duckdb::Connection;
 use etl::destination::Destination;
-#[cfg(feature = "test-utils")]
 use etl::destination::async_result::{
-    ApplyLoopAsyncResultMetadata, DispatchMetrics, WriteEventsResult,
+    ApplyLoopAsyncResultMetadata, DispatchMetrics, WriteSnapshotBatchResult,
+    WriteStreamBatchesResult,
 };
 use etl::error::ErrorKind;
 use etl::store::both::memory::MemoryStore;
 use etl::store::schema::SchemaStore;
+use etl::table_rows_to_arrow_batch;
 use etl::types::{
-    Cell, ColumnSchema, Event, PgLsn, TableId, TableName, TableRow, TableSchema, Type as PgType,
+    Cell, ChangeArrowBatch, ChangeKind, ColumnSchema, Event, PgLsn, RowImage, StreamBatch,
+    TableChangeSet, TableId, TableName, TableRow, TableSchema, Type as PgType,
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
 #[cfg(feature = "test-utils")]
@@ -50,10 +53,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[cfg(feature = "test-utils")]
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::Url;
+
+use crate::support::ducklake::{ducklake_load_sql, open_verification_connection};
+
+mod support;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -88,67 +95,6 @@ async fn acquire_ducklake_test_hook_guard() -> OwnedSemaphorePermit {
         .acquire_owned()
         .await
         .expect("ducklake test hook semaphore should stay open")
-}
-
-fn open_verification_connection() -> Connection {
-    let duckdb_dir = tempfile::Builder::new()
-        .prefix("etl_ducklake_verify_")
-        .tempdir()
-        .expect("failed to create verification duckdb dir")
-        .keep();
-    let duckdb_path = duckdb_dir.join("verify.duckdb");
-
-    if cfg!(target_os = "linux") {
-        return Connection::open_with_flags(
-            &duckdb_path,
-            Config::default()
-                .enable_autoload_extension(false)
-                .expect("failed to disable DuckDB extension autoload"),
-        )
-        .expect("failed to open verification DuckDB");
-    }
-
-    Connection::open(&duckdb_path).expect("failed to open verification DuckDB")
-}
-
-fn ducklake_load_sql() -> String {
-    if cfg!(target_os = "linux") {
-        let platform_dir = match std::env::consts::ARCH {
-            "x86_64" => "linux_amd64",
-            "aarch64" => "linux_arm64",
-            arch => panic!("unsupported linux architecture for DuckDB test extensions: {arch}"),
-        };
-        let env_override = std::env::var_os("ETL_DUCKDB_EXTENSION_ROOT").map(PathBuf::from);
-        let candidate_roots = env_override
-            .into_iter()
-            .chain([
-                PathBuf::from("/app/duckdb_extensions"),
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/duckdb/extensions"),
-            ])
-            .collect::<Vec<_>>();
-
-        for root in candidate_roots {
-            let extension_dir = root.join("1.5.1").join(platform_dir);
-            let extension_path = extension_dir.join("ducklake.duckdb_extension");
-            let json_extension_path = extension_dir.join("json.duckdb_extension");
-            let parquet_extension_path = extension_dir.join("parquet.duckdb_extension");
-
-            if extension_path.is_file()
-                && json_extension_path.is_file()
-                && parquet_extension_path.is_file()
-            {
-                return format!(
-                    "LOAD {}; LOAD {}; LOAD {};",
-                    quote_literal(&extension_path.display().to_string()),
-                    quote_literal(&json_extension_path.display().to_string()),
-                    quote_literal(&parquet_extension_path.display().to_string())
-                );
-            }
-        }
-    }
-
-    "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet;"
-        .to_string()
 }
 
 fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
@@ -345,6 +291,43 @@ fn checkpoint_lake(catalog: &Url, data: &Url) {
         .expect("failed to checkpoint DuckLake catalog");
 }
 
+async fn write_snapshot_batch_via_destination(
+    destination: &DuckLakeDestination<MemoryStore>,
+    batch: etl::types::TableArrowBatch,
+) {
+    let (async_result, pending_result) = WriteSnapshotBatchResult::new(());
+
+    Destination::write_snapshot_batch(destination, batch, async_result)
+        .await
+        .expect("snapshot batch dispatch failed");
+    pending_result
+        .await
+        .into_result()
+        .expect("snapshot batch completion failed");
+}
+
+async fn write_stream_batches_via_destination(
+    destination: &DuckLakeDestination<MemoryStore>,
+    batches: Vec<StreamBatch>,
+) {
+    let (async_result, pending_result) =
+        WriteStreamBatchesResult::new(ApplyLoopAsyncResultMetadata {
+            commit_end_lsn: None,
+            metrics: DispatchMetrics {
+                items_count: batches.len(),
+                dispatched_at: Instant::now(),
+            },
+        });
+
+    Destination::write_stream_batches(destination, batches, async_result)
+        .await
+        .expect("stream batch dispatch failed");
+    pending_result
+        .await
+        .into_result()
+        .expect("stream batch completion failed");
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 /// `write_table_rows` inserts rows that can be queried back through the DuckLake
@@ -398,6 +381,54 @@ async fn test_write_table_rows_basic() {
         .unwrap();
     assert_eq!(id, 1);
     assert_eq!(name.as_deref(), Some("Alice"));
+}
+
+/// `write_snapshot_batch` inserts rows through the Arrow-native destination API.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_write_snapshot_batch_arrow_basic() {
+    let dir = make_test_dir("write_snapshot_batch_arrow_basic");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let schema = make_schema(101, "public", "arrow_users");
+    let table_id = schema.id;
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema.clone()).await.unwrap();
+
+    let destination =
+        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .await
+            .unwrap();
+    let rows = vec![
+        TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_string())]),
+        TableRow::new(vec![Cell::I32(2), Cell::Null]),
+    ];
+    let batch = table_rows_to_arrow_batch(Arc::new(schema), &rows).unwrap();
+
+    write_snapshot_batch_via_destination(&destination, batch).await;
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(count_rows(&conn, &table_name), 2);
+    let rows: Vec<(i32, Option<String>)> = conn
+        .prepare(&format!(
+            "SELECT id, name FROM {}.{} ORDER BY id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(rows, vec![(1, Some("Alice".to_string())), (2, None)]);
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
+    assert_eq!(table_id, TableId::new(101));
 }
 
 /// Small copy batches should remain inlined after the caller returns.
@@ -923,8 +954,6 @@ async fn test_write_events() {
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_trait_write_events_dispatches_asynchronously_for_ducklake() {
-    use etl::types::{InsertEvent, PgLsn};
-
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
     reset_paused_streaming_write_for_tests();
@@ -957,26 +986,36 @@ async fn test_trait_write_events_dispatches_asynchronously_for_ducklake() {
             dispatched_at: std::time::Instant::now(),
         },
     };
-    let (async_result, pending_result) = WriteEventsResult::new(metadata);
+    let (async_result, pending_result) = WriteStreamBatchesResult::new(metadata);
     tokio::pin!(pending_result);
 
-    let lsn = PgLsn::from(900u64);
+    let lsn = PgLsn::from(900_u64);
+    let rows = vec![TableRow::new(vec![
+        Cell::I32(1),
+        Cell::String("accepted".to_string()),
+    ])];
+    let batch =
+        table_rows_to_arrow_batch(Arc::new(make_schema(18, "public", "async_dispatch")), &rows)
+            .unwrap();
     tokio::time::timeout(
         Duration::from_millis(100),
-        Destination::write_events(
+        Destination::write_stream_batches(
             &destination,
-            vec![Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
+            vec![StreamBatch::Changes(TableChangeSet {
                 table_id,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("accepted".to_string())]),
+                groups: vec![ChangeArrowBatch {
+                    rows: batch,
+                    change: ChangeKind::Insert,
+                    row_image: RowImage::New,
+                    commit_lsns: UInt64Array::from(vec![u64::from(lsn)]),
+                    tx_ordinals: UInt64Array::from(vec![0_u64]),
+                }],
             })],
             async_result,
         ),
     )
     .await
-    .expect("ducklake trait write_events should return after dispatch")
+    .expect("ducklake trait write_stream_batches should return after dispatch")
     .unwrap();
 
     tokio::time::timeout(Duration::from_secs(1), reached_rx)
@@ -1003,6 +1042,91 @@ async fn test_trait_write_events_dispatches_asynchronously_for_ducklake() {
 
     reset_paused_streaming_write_for_tests();
     reset_ducklake_test_hooks();
+}
+
+/// `write_stream_batches` applies Arrow-native CDC batches through the
+/// destination trait without materializing rows at the call site.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_write_stream_batches_arrow_cdc() {
+    let dir = make_test_dir("write_stream_batches_arrow_cdc");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let schema = make_schema(104, "public", "arrow_cdc_products");
+    let table_id = schema.id;
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema.clone()).await.unwrap();
+
+    let destination =
+        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
+            .await
+            .unwrap();
+
+    let snapshot_rows = vec![TableRow::new(vec![
+        Cell::I32(1),
+        Cell::String("Widget".to_string()),
+    ])];
+    let snapshot_batch =
+        table_rows_to_arrow_batch(Arc::new(schema.clone()), &snapshot_rows).unwrap();
+    write_snapshot_batch_via_destination(&destination, snapshot_batch).await;
+
+    let delete_rows = vec![TableRow::new(vec![
+        Cell::I32(1),
+        Cell::String("Widget".to_string()),
+    ])];
+    let insert_rows = vec![TableRow::new(vec![
+        Cell::I32(2),
+        Cell::String("Gadget".to_string()),
+    ])];
+    let delete_batch = table_rows_to_arrow_batch(Arc::new(schema.clone()), &delete_rows).unwrap();
+    let insert_batch = table_rows_to_arrow_batch(Arc::new(schema), &insert_rows).unwrap();
+
+    write_stream_batches_via_destination(
+        &destination,
+        vec![StreamBatch::Changes(TableChangeSet {
+            table_id,
+            groups: vec![
+                ChangeArrowBatch {
+                    rows: delete_batch,
+                    change: ChangeKind::Delete,
+                    row_image: RowImage::Old { key_only: false },
+                    commit_lsns: UInt64Array::from(vec![200_u64]),
+                    tx_ordinals: UInt64Array::from(vec![0_u64]),
+                },
+                ChangeArrowBatch {
+                    rows: insert_batch,
+                    change: ChangeKind::Insert,
+                    row_image: RowImage::New,
+                    commit_lsns: UInt64Array::from(vec![200_u64]),
+                    tx_ordinals: UInt64Array::from(vec![1_u64]),
+                },
+            ],
+        })],
+    )
+    .await;
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(count_rows(&conn, &table_name), 1);
+    let rows: Vec<(i32, String)> = conn
+        .prepare(&format!(
+            "SELECT id, name FROM {}.{} ORDER BY id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+    assert_eq!(rows, vec![(2, "Gadget".to_string())]);
+    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 0);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
 }
 
 /// Small CDC batches should remain inlined after the caller returns.

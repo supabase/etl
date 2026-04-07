@@ -38,7 +38,7 @@ actix-web = { version = "4.11.0", default-features = false }
 actix-web-httpauth = { version = "0.8.2", default-features = false }
 actix-web-metrics = { version = "0.3.0", default-features = false }
 anyhow = { version = "1.0.98", default-features = false }
-arrow = { version = "57.0", default-features = false }
+arrow = { version = "=58.0.0", default-features = false }
 async-trait = { version = "0.1.88" }
 aws-lc-rs = { version = "1.13.3", default-features = false }
 base64 = { version = "0.22.1", default-features = false }
@@ -62,7 +62,7 @@ kube = { version = "1.1.0", default-features = false }
 metrics = { version = "0.24.2", default-features = false }
 metrics-exporter-prometheus = { version = "0.17.2", default-features = false }
 parking_lot = { version = "0.12.5" }
-parquet = { version = "57.0", default-features = false }
+parquet = { version = "58.0", default-features = false }
 pg_escape = { version = "0.1.1", default-features = false }
 pin-project-lite = { version = "0.2.16", default-features = false }
 postgres-replication = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, rev = "c4b473b478b3adfbf8667d2fbe895d8423f1290b" }

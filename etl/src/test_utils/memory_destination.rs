@@ -4,11 +4,11 @@ use tracing::info;
 
 use crate::destination::Destination;
 use crate::destination::async_result::{
-    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+    TruncateTableResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
 };
 use crate::error::EtlResult;
 use crate::store::state::StateStore;
-use crate::types::{Event, TableRow};
+use crate::types::StreamBatch;
 
 /// In-memory destination for tests that only logs incoming data.
 #[derive(Debug, Clone)]
@@ -45,12 +45,12 @@ where
         Ok(())
     }
 
-    async fn write_table_rows(
+    async fn write_snapshot_batch(
         &self,
-        table_id: TableId,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: crate::types::TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> EtlResult<()> {
+        let table_id = batch.table_id;
         let result = self
             .state_store
             .store_table_mapping(table_id, format!("memory_destination_table_{}", table_id.0))
@@ -59,8 +59,8 @@ where
         if result.is_ok() {
             info!(
                 table_id = table_id.0,
-                row_count = table_rows.len(),
-                "writing table rows"
+                row_count = batch.batch.num_rows(),
+                "writing snapshot batch"
             );
         }
 
@@ -69,33 +69,23 @@ where
         Ok(())
     }
 
-    async fn write_events(
+    async fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         let result = async {
             let mut table_ids = HashSet::new();
-            for event in &events {
-                match event {
-                    Event::Insert(event) => {
-                        table_ids.insert(event.table_id);
+            for batch in &batches {
+                match batch {
+                    StreamBatch::Changes(change_set) => {
+                        table_ids.insert(change_set.table_id);
                     }
-                    Event::Update(event) => {
-                        table_ids.insert(event.table_id);
-                    }
-                    Event::Delete(event) => {
-                        table_ids.insert(event.table_id);
-                    }
-                    Event::Relation(event) => {
-                        table_ids.insert(event.table_schema.id);
-                    }
-                    Event::Truncate(event) => {
-                        for table_id in &event.rel_ids {
-                            table_ids.insert(TableId::new(*table_id));
+                    StreamBatch::Truncate(truncate) => {
+                        for table_id in &truncate.rel_ids {
+                            table_ids.insert(*table_id);
                         }
                     }
-                    Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
                 }
             }
 
@@ -108,7 +98,7 @@ where
                     .await?;
             }
 
-            info!(event_count = events.len(), "writing events");
+            info!(batch_count = batches.len(), "writing stream batches");
 
             Ok(())
         }

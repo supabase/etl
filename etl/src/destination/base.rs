@@ -2,10 +2,10 @@ use etl_postgres::types::TableId;
 use std::future::Future;
 
 use crate::destination::async_result::{
-    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+    TruncateTableResult, WriteSnapshotBatchResult, WriteStreamBatchesResult,
 };
 use crate::error::EtlResult;
-use crate::types::{Event, TableRow};
+use crate::types::{StreamBatch, TableArrowBatch};
 
 /// Trait for systems that can receive replicated data from ETL pipelines.
 ///
@@ -51,17 +51,16 @@ pub trait Destination {
         async_result: TruncateTableResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
-    /// Writes a batch of table rows to the destination.
+    /// Writes a snapshot batch to the destination.
     ///
     /// This method is used during initial table synchronization to bulk load existing data.
-    /// Rows are provided as [`TableRow`] instances with typed cell values. ETL may call this
-    /// method multiple times with different batches, including in parallel with other destination
-    /// work.
+    /// ETL may call this method multiple times with different batches, including in parallel with
+    /// other destination work.
     ///
     /// This method is called even if the source table has no data, so the destination can prepare
     /// its initial state before streaming begins. ETL does not impose a meaningful ordering
-    /// requirement on these row batches; it just provides the data that should be written for the
-    /// initial snapshot.
+    /// requirement on these Arrow batches; it just provides the data that should be written for
+    /// the initial snapshot.
     ///
     /// Implementations report asynchronous completion through `async_result`. The method return
     /// value is reserved for immediate dispatch/setup failures before the work has been accepted.
@@ -74,18 +73,17 @@ pub trait Destination {
     ///
     /// This immediate waiting is intentional: it preserves backpressure and avoids accumulating too
     /// many in-flight row batches in memory.
-    fn write_table_rows(
+    fn write_snapshot_batch(
         &self,
-        table_id: TableId,
-        table_rows: Vec<TableRow>,
-        async_result: WriteTableRowsResult<()>,
+        batch: TableArrowBatch,
+        async_result: WriteSnapshotBatchResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
-    /// Writes streaming replication events to the destination.
+    /// Writes normalized streaming batches to the destination.
     ///
-    /// This method handles real-time changes from the Postgres replication stream. Events include
-    /// inserts, updates, deletes, and transaction boundaries. ETL may call this method multiple
-    /// times with different streaming batches.
+    /// This method handles real-time changes from the Postgres replication stream after ETL has
+    /// normalized them into per-table Arrow batches and truncate control items. ETL may call this
+    /// method multiple times with different streaming batches.
     ///
     /// The main ordering guarantee is per table: ETL preserves the required order for streaming
     /// operations on the same table.
@@ -107,12 +105,11 @@ pub trait Destination {
     /// During the initial copy phase, transaction boundaries are not a stable global invariant
     /// across all tables. A source transaction may be split across multiple streaming deliveries as
     /// some tables are already ready for streaming and others are still being copied. In practice,
-    /// destinations should rely on per-table event ordering and not assume that `begin`/`commit`
-    /// boundaries always describe a complete all-tables transaction until initial copy has fully
-    /// finished.
-    fn write_events(
+    /// destinations should rely on per-table batch ordering rather than assume complete
+    /// all-tables transaction boundaries until initial copy has fully finished.
+    fn write_stream_batches(
         &self,
-        events: Vec<Event>,
-        async_result: WriteEventsResult<()>,
+        batches: Vec<StreamBatch>,
+        async_result: WriteStreamBatchesResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 }

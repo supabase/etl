@@ -5,12 +5,14 @@
 //! to enable different behavior based on the worker type (apply worker vs table sync
 //! worker) at various points in the replication cycle.
 
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arrow::array::UInt64Array;
 use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use etl_postgres::types::TableId;
@@ -27,6 +29,7 @@ use crate::concurrency::batch_budget::{BatchBudgetController, CachedBatchBudget}
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::stream::BackpressureStream;
+use crate::conversions::arrow::table_rows_to_arrow_batch;
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
@@ -35,8 +38,8 @@ use crate::conversions::event::{
 };
 use crate::destination::Destination;
 use crate::destination::async_result::{
-    ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
-    PendingWriteEventsResult, WriteEventsResult,
+    ApplyLoopAsyncResultMetadata, CompletedWriteStreamBatchesResult, DispatchMetrics,
+    PendingWriteStreamBatchesResult, WriteStreamBatchesResult,
 };
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{
@@ -51,7 +54,10 @@ use crate::state::table::{
 };
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
-use crate::types::{Event, PipelineId, SizeHint};
+use crate::types::{
+    ChangeArrowBatch, ChangeKind, Event, PipelineId, RowImage, SizeHint, StreamBatch,
+    TableChangeSet, TableRow, TruncateBatch,
+};
 use crate::workers::pool::TableSyncWorkerPool;
 use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
 use crate::{bail, etl_error};
@@ -351,7 +357,7 @@ struct ApplyLoopState {
     /// The deadline for the next proactive keep alive status update.
     keep_alive_deadline: Instant,
     /// Destination write result waiting to be applied to replication progress.
-    pending_flush_result: Option<PendingWriteEventsResult<()>>,
+    pending_flush_result: Option<PendingWriteStreamBatchesResult<()>>,
     /// The strongest exit that this apply loop invocation should eventually return.
     ///
     /// Once set, the loop stops ingesting new replication messages and instead drains any
@@ -557,6 +563,78 @@ impl ApplyLoopState {
     }
 }
 
+#[derive(Debug)]
+struct PendingChangeRows {
+    change: ChangeKind,
+    row_image: RowImage,
+    table_rows: Vec<TableRow>,
+    commit_lsns: Vec<u64>,
+    tx_ordinals: Vec<u64>,
+}
+
+impl PendingChangeRows {
+    fn new(change: ChangeKind, row_image: RowImage) -> Self {
+        Self {
+            change,
+            row_image,
+            table_rows: Vec::new(),
+            commit_lsns: Vec::new(),
+            tx_ordinals: Vec::new(),
+        }
+    }
+
+    fn push_row(&mut self, table_row: TableRow, commit_lsn: PgLsn, tx_ordinal: u64) {
+        self.table_rows.push(table_row);
+        self.commit_lsns.push(u64::from(commit_lsn));
+        self.tx_ordinals.push(tx_ordinal);
+    }
+}
+
+#[derive(Debug, Default)]
+struct PendingTableChangeSet {
+    groups: Vec<PendingChangeRows>,
+}
+
+#[derive(Debug)]
+struct PendingChange {
+    table_id: TableId,
+    change: ChangeKind,
+    row_image: RowImage,
+    table_row: TableRow,
+    commit_lsn: PgLsn,
+    tx_ordinal: u64,
+}
+
+fn push_pending_change(
+    table_changes: &mut HashMap<TableId, PendingTableChangeSet>,
+    table_order: &mut Vec<TableId>,
+    pending_change: PendingChange,
+) {
+    let PendingChange {
+        table_id,
+        change,
+        row_image,
+        table_row,
+        commit_lsn,
+        tx_ordinal,
+    } = pending_change;
+    let entry = table_changes.entry(table_id).or_insert_with(|| {
+        table_order.push(table_id);
+        PendingTableChangeSet::default()
+    });
+
+    match entry.groups.last_mut() {
+        Some(group) if group.change == change && group.row_image == row_image => {
+            group.push_row(table_row, commit_lsn, tx_ordinal);
+        }
+        _ => {
+            let mut group = PendingChangeRows::new(change, row_image);
+            group.push_row(table_row, commit_lsn, tx_ordinal);
+            entry.groups.push(group);
+        }
+    }
+}
+
 /// Main apply loop implementation that processes replication events.
 ///
 /// [`ApplyLoop`] encapsulates the apply loop's immutable dependencies plus its mutable runtime
@@ -755,7 +833,7 @@ where
             // PRIORITY 3: Handle the pending destination write result.
             // Finishing an in-flight flush may advance progress and unblock a queued batch.
             apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
-                self.handle_flush_result(events_stream.as_mut(), apply_result)
+                self.handle_flush_result(apply_result)
                     .await?;
             }
 
@@ -1128,10 +1206,155 @@ where
             .await
     }
 
+    /// Normalizes raw logical-replication events into destination-facing Arrow batches.
+    async fn normalize_events_batch(&self, events: Vec<Event>) -> EtlResult<Vec<StreamBatch>> {
+        let mut batches = Vec::new();
+        let mut event_iter = events.into_iter().peekable();
+        let mut schema_cache: HashMap<TableId, Arc<etl_postgres::types::TableSchema>> =
+            HashMap::new();
+
+        while event_iter.peek().is_some() {
+            let mut table_changes: HashMap<TableId, PendingTableChangeSet> = HashMap::new();
+            let mut table_order = Vec::new();
+
+            while let Some(event) = event_iter.peek() {
+                if matches!(event, Event::Truncate(_)) {
+                    break;
+                }
+
+                let event = event_iter.next().expect("peeked event must exist");
+                match event {
+                    Event::Insert(insert) => {
+                        push_pending_change(
+                            &mut table_changes,
+                            &mut table_order,
+                            PendingChange {
+                                table_id: insert.table_id,
+                                change: ChangeKind::Insert,
+                                row_image: RowImage::New,
+                                table_row: insert.table_row,
+                                commit_lsn: insert.commit_lsn,
+                                tx_ordinal: insert.tx_ordinal,
+                            },
+                        );
+                    }
+                    Event::Update(update) => {
+                        if let Some((key_only, old_table_row)) = update.old_table_row {
+                            push_pending_change(
+                                &mut table_changes,
+                                &mut table_order,
+                                PendingChange {
+                                    table_id: update.table_id,
+                                    change: ChangeKind::Update,
+                                    row_image: RowImage::Old { key_only },
+                                    table_row: old_table_row,
+                                    commit_lsn: update.commit_lsn,
+                                    tx_ordinal: update.tx_ordinal,
+                                },
+                            );
+                        }
+
+                        push_pending_change(
+                            &mut table_changes,
+                            &mut table_order,
+                            PendingChange {
+                                table_id: update.table_id,
+                                change: ChangeKind::Update,
+                                row_image: RowImage::New,
+                                table_row: update.table_row,
+                                commit_lsn: update.commit_lsn,
+                                tx_ordinal: update.tx_ordinal,
+                            },
+                        );
+                    }
+                    Event::Delete(delete) => {
+                        let Some((key_only, old_table_row)) = delete.old_table_row else {
+                            debug!("delete event has no old row, skipping");
+                            continue;
+                        };
+
+                        push_pending_change(
+                            &mut table_changes,
+                            &mut table_order,
+                            PendingChange {
+                                table_id: delete.table_id,
+                                change: ChangeKind::Delete,
+                                row_image: RowImage::Old { key_only },
+                                table_row: old_table_row,
+                                commit_lsn: delete.commit_lsn,
+                                tx_ordinal: delete.tx_ordinal,
+                            },
+                        );
+                    }
+                    Event::Begin(_)
+                    | Event::Commit(_)
+                    | Event::Relation(_)
+                    | Event::Unsupported => {}
+                    Event::Truncate(_) => unreachable!("truncate events are handled separately"),
+                }
+            }
+
+            for table_id in table_order {
+                let table_schema = match schema_cache.get(&table_id) {
+                    Some(table_schema) => Arc::clone(table_schema),
+                    None => {
+                        let table_schema = self
+                            .schema_store
+                            .get_table_schema(&table_id)
+                            .await?
+                            .ok_or_else(|| {
+                                etl_error!(
+                                    ErrorKind::MissingTableSchema,
+                                    "Table schema not found while normalizing event batch",
+                                    format!("No schema found for table {table_id}")
+                                )
+                            })?;
+                        schema_cache.insert(table_id, Arc::clone(&table_schema));
+                        table_schema
+                    }
+                };
+
+                let pending = table_changes
+                    .remove(&table_id)
+                    .expect("table order must only include known tables");
+                let mut groups = Vec::with_capacity(pending.groups.len());
+
+                for pending_group in pending.groups {
+                    let rows = table_rows_to_arrow_batch(
+                        Arc::clone(&table_schema),
+                        pending_group.table_rows.as_slice(),
+                    )?;
+                    groups.push(ChangeArrowBatch {
+                        rows,
+                        change: pending_group.change,
+                        row_image: pending_group.row_image,
+                        commit_lsns: UInt64Array::from(pending_group.commit_lsns),
+                        tx_ordinals: UInt64Array::from(pending_group.tx_ordinals),
+                    });
+                }
+
+                batches.push(StreamBatch::Changes(TableChangeSet { table_id, groups }));
+            }
+
+            while let Some(Event::Truncate(_)) = event_iter.peek() {
+                if let Some(Event::Truncate(truncate)) = event_iter.next() {
+                    batches.push(StreamBatch::Truncate(TruncateBatch {
+                        rel_ids: truncate.rel_ids.into_iter().map(TableId::new).collect(),
+                        commit_lsn: truncate.commit_lsn,
+                        tx_ordinal: truncate.tx_ordinal,
+                        options: truncate.options,
+                    }));
+                }
+            }
+        }
+
+        Ok(batches)
+    }
+
     /// Waits for the pending flush result, if any.
     async fn wait_for_flush_result(
-        pending_flush_result: Option<&mut PendingWriteEventsResult<()>>,
-    ) -> CompletedWriteEventsResult<()> {
+        pending_flush_result: Option<&mut PendingWriteStreamBatchesResult<()>>,
+    ) -> CompletedWriteStreamBatchesResult<()> {
         match pending_flush_result {
             Some(flush_result) => flush_result.await,
             None => std::future::pending().await,
@@ -1141,8 +1364,7 @@ where
     /// Handles a completed batch flush result.
     async fn handle_flush_result(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
-        flush_result: CompletedWriteEventsResult<()>,
+        flush_result: CompletedWriteStreamBatchesResult<()>,
     ) -> EtlResult<()> {
         // We clear the state up front because this flush is no longer in flight.
         let processing_paused = self.state.resume_processing();
@@ -1178,7 +1400,7 @@ where
         // case, we don't process syncing tables, meaning that progress it not tracked, since it's
         // not going to do anything because we can only track progress at commit boundaries.
         if let Some(commit_end_lsn) = metadata.commit_end_lsn {
-            self.process_syncing_tables_after_flush(events_stream.as_mut(), commit_end_lsn)
+            self.process_syncing_tables_after_flush(commit_end_lsn)
                 .await?;
         }
 
@@ -1332,9 +1554,10 @@ where
 
         // Create the flush result channel: the sender is handed to the destination and the
         // pending receiver is stored on the loop state until the destination signals completion.
-        let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
+        let stream_batches = self.normalize_events_batch(events_batch).await?;
+        let (flush_result, pending_flush_result) = WriteStreamBatchesResult::new(metadata);
         self.destination
-            .write_events(events_batch, flush_result)
+            .write_stream_batches(stream_batches, flush_result)
             .await?;
         self.state.pending_flush_result = Some(pending_flush_result);
 
@@ -1801,7 +2024,6 @@ where
     /// Dispatches to worker-specific implementation based on the worker context.
     async fn process_syncing_tables_after_flush(
         &mut self,
-        mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         last_commit_end_lsn: PgLsn,
     ) -> EtlResult<()> {
         // Update replication progress to notify PostgreSQL of durable flush. Only reports progress
@@ -1812,26 +2034,10 @@ where
             .update_last_flush_lsn(last_commit_end_lsn);
 
         let current_lsn = self.state.replication_progress.last_flush_lsn;
-        let last_received_lsn = self.state.last_received_lsn();
         info!(
             worker_type = %self.worker_context.worker_type(),
             %current_lsn,
             "processing syncing tables after batch flush"
-        );
-
-        self.send_status_update(
-            events_stream.as_mut(),
-            current_lsn,
-            true,
-            StatusUpdateType::BatchFlush,
-        )
-        .await?;
-
-        debug!(
-            worker_type = %self.worker_context.worker_type(),
-            %last_received_lsn,
-            %current_lsn,
-            "reported durable flush lsn to postgres after batch flush"
         );
 
         let exit_intent = match &mut self.worker_context {
@@ -2082,7 +2288,7 @@ mod apply_worker {
                     match result {
                         ShutdownResult::Ok(result) => {
                             let final_phase = result.replication_phase();
-                            if final_phase.as_type().is_errored() {
+                            if final_phase.is_errored() {
                                 info!(
                                     worker_type = %WorkerType::Apply,
                                     table_id = table_id.0,
@@ -2405,7 +2611,7 @@ mod apply_worker {
                     match result {
                         ShutdownResult::Ok(result) => {
                             let final_phase = result.replication_phase();
-                            if final_phase.as_type().is_errored() {
+                            if final_phase.is_errored() {
                                 info!(
                                     worker_type = %WorkerType::Apply,
                                     table_id = table_id.0,

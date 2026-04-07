@@ -10,6 +10,7 @@ homepage.workspace = true
 
 [features]
 ducklake = [
+    "dep:arrow",
     "dep:duckdb",
     "dep:metrics",
     "dep:parking_lot",
@@ -34,9 +35,9 @@ bigquery = [
 iceberg = [
     "dep:iceberg",
     "dep:iceberg-catalog-rest",
-    "dep:arrow",
+    "dep:arrow57",
     "dep:tracing",
-    "dep:parquet",
+    "dep:parquet57",
     "dep:uuid",
     "dep:tokio",
     "dep:reqwest",
@@ -53,16 +54,18 @@ test-utils = ["dep:uuid"]
 etl = { workspace = true }
 
 arrow = { workspace = true, optional = true }
+arrow57 = { package = "arrow", version = "=57.3.0", optional = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 chrono = { workspace = true }
-duckdb = { workspace = true, optional = true, features = ["bundled", "json", "parquet", "r2d2"] }
+duckdb = { workspace = true, optional = true, features = ["appender-arrow", "bundled", "json", "parquet", "r2d2"] }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
+parquet57 = { package = "parquet", version = "=57.3.0", optional = true, features = ["async", "arrow"] }
 pg_escape = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 r2d2 = { workspace = true, optional = true }
@@ -78,7 +81,7 @@ url = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true, features = ["v4"] }
 
 [dev-dependencies]
-duckdb = { workspace = true, features = ["bundled", "json", "parquet"] }
+duckdb = { workspace = true, features = ["appender-arrow", "bundled", "json", "parquet"] }
 etl = { workspace = true, features = ["test-utils"] }
 etl-telemetry = { workspace = true }
 tempfile = { workspace = true }
