@@ -259,8 +259,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     let table_copy_stream = transaction
         .get_table_copy_stream(table_id, &table_schema.column_schemas, publication_name)
         .await?;
-    let table_copy_stream =
-        TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas, pipeline_id);
+    let table_copy_stream = TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas);
     let connection_updates_rx = transaction.get_cloned_client().connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
@@ -605,8 +604,7 @@ where
         }
     };
 
-    let table_copy_stream =
-        TableCopyStream::wrap(copy_stream, &table_schema.column_schemas, pipeline_id);
+    let table_copy_stream = TableCopyStream::wrap(copy_stream, &table_schema.column_schemas);
     let connection_updates_rx = child_transaction
         .get_cloned_client()
         .connection_updates_rx();

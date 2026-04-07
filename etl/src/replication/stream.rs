@@ -19,7 +19,7 @@ use crate::metrics::{
     ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, ETL_STATUS_UPDATES_SKIPPED_TOTAL,
     ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, STATUS_UPDATE_TYPE_LABEL,
 };
-use crate::types::{PipelineId, TableRow};
+use crate::types::TableRow;
 use metrics::{counter, histogram};
 
 /// The amount of milliseconds between two consecutive status updates in case no forced update
@@ -44,11 +44,7 @@ impl<'a> TableCopyStream<'a> {
     /// Creates a new [`TableCopyStream`] from a [`CopyOutStream`] and column schemas.
     ///
     /// The column schemas are used to convert the raw Postgres data into [`TableRow`]s.
-    pub fn wrap(
-        stream: CopyOutStream,
-        column_schemas: &'a [ColumnSchema],
-        _pipeline_id: PipelineId,
-    ) -> Self {
+    pub fn wrap(stream: CopyOutStream, column_schemas: &'a [ColumnSchema]) -> Self {
         Self {
             stream,
             column_schemas,
@@ -136,7 +132,7 @@ pub struct EventsStream {
 
 impl EventsStream {
     /// Creates a new [`EventsStream`] from a [`LogicalReplicationStream`].
-    pub fn wrap(stream: LogicalReplicationStream, _pipeline_id: PipelineId) -> Self {
+    pub fn wrap(stream: LogicalReplicationStream) -> Self {
         Self {
             stream,
             last_update: None,

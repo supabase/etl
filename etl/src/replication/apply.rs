@@ -677,7 +677,7 @@ where
             .start_logical_replication(&self.config.publication_name, &slot_name, start_lsn)
             .await?;
 
-        let events_stream = EventsStream::wrap(logical_replication_stream, self.pipeline_id);
+        let events_stream = EventsStream::wrap(logical_replication_stream);
         let events_stream =
             BackpressureStream::wrap(events_stream, self.memory_monitor.subscribe());
         pin!(events_stream);
