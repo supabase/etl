@@ -17,6 +17,7 @@ use crate::ducklake::config::DuckLakeSetupPlan;
 use crate::ducklake::metrics::{
     ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS, ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS,
     ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS, ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
+    OPERATION_KIND_LABEL,
 };
 
 /// Monotonic identifier assigned to each DuckLake connection setup attempt.
@@ -28,6 +29,13 @@ pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(2 * 60
 pub(super) const MAINTENANCE_QUERY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Timeout applied to each background DuckLake metrics query.
 pub(super) const METRICS_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Minimal DuckDB profiling configuration used to read native statement latency.
+const DUCKDB_PROFILING_SETUP_SQL: &str = r#"
+SET enable_profiling = 'no_output';
+SET profiling_mode = 'standard';
+SET profiling_coverage = 'ALL';
+SET custom_profiling_settings = '{"LATENCY":"true"}';
+"#;
 
 /// Timeout class applied to one DuckDB blocking operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -212,6 +220,11 @@ impl LazyDuckLakePool {
 }
 
 impl DuckLakeConnectionManager {
+    /// Enables native DuckDB profiling so write-path metrics can read statement latency.
+    fn configure_duckdb_profiling(conn: &duckdb::Connection) -> Result<(), duckdb::Error> {
+        conn.execute_batch(DUCKDB_PROFILING_SETUP_SQL)
+    }
+
     /// Opens one fully initialized DuckDB connection and attaches the lake catalog.
     pub(super) fn open_duckdb_connection(&self) -> Result<duckdb::Connection, duckdb::Error> {
         let started = Instant::now();
@@ -245,6 +258,13 @@ impl DuckLakeConnectionManager {
                 phase = step.label,
                 elapsed_ms = phase_started.elapsed().as_millis() as u64,
                 "ducklake duckdb connection setup phase finished"
+            );
+        }
+        if let Err(error) = Self::configure_duckdb_profiling(&conn) {
+            warn!(
+                connection_init_id,
+                error = ?error,
+                "ducklake duckdb profiling setup failed"
             );
         }
         #[cfg(feature = "test-utils")]
@@ -411,8 +431,11 @@ where
                 "DuckLake blocking slot acquisition failed"
             )
         })?;
-    histogram!(ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS)
-        .record(slot_wait_started.elapsed().as_secs_f64());
+    histogram!(
+        ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS,
+        OPERATION_KIND_LABEL => operation_kind.as_str(),
+    )
+    .record(slot_wait_started.elapsed().as_secs_f64());
     info!(
         operation_kind = operation_kind.as_str(),
         wait_ms = slot_wait_started.elapsed().as_millis() as u64,
@@ -429,8 +452,11 @@ where
         // Please if you modify the code inside this blocking task do not add any
         // blocking operations that could delay other tasks waiting on this slot.
         let blocking_queue_wait = blocking_queue_started.elapsed();
-        histogram!(ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS)
-            .record(blocking_queue_wait.as_secs_f64());
+        histogram!(
+            ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS,
+            OPERATION_KIND_LABEL => operation_kind.as_str(),
+        )
+        .record(blocking_queue_wait.as_secs_f64());
         info!(
             operation_kind = operation_kind.as_str(),
             wait_ms = blocking_queue_wait.as_millis() as u64,
@@ -460,8 +486,11 @@ where
                 )
             }
         })?;
-        histogram!(ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS)
-            .record(checkout_started.elapsed().as_secs_f64());
+        histogram!(
+            ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
+            OPERATION_KIND_LABEL => operation_kind.as_str(),
+        )
+        .record(checkout_started.elapsed().as_secs_f64());
         info!(
             operation_kind = operation_kind.as_str(),
             wait_ms = checkout_started.elapsed().as_millis() as u64,
@@ -491,8 +520,11 @@ where
         let operation_started = Instant::now();
         let res = operation(&pooled_conn.conn);
         watchdog.finish();
-        histogram!(ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS)
-            .record(operation_started.elapsed().as_secs_f64());
+        histogram!(
+            ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS,
+            OPERATION_KIND_LABEL => operation_kind.as_str(),
+        )
+        .record(operation_started.elapsed().as_secs_f64());
         info!(
             operation_kind = operation_kind.as_str(),
             duration_ms = operation_started.elapsed().as_millis() as u64,
@@ -559,6 +591,7 @@ mod tests {
 
     use std::sync::{Arc, mpsc};
 
+    use etl_telemetry::metrics::init_metrics_handle;
     use tokio::sync::Semaphore;
 
     fn make_blocking_test_manager() -> DuckLakeConnectionManager {
@@ -568,6 +601,28 @@ mod tests {
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    fn blocking_metric_count(
+        rendered: &str,
+        metric_name: &str,
+        operation_kind: DuckDbBlockingOperationKind,
+    ) -> f64 {
+        let operation_kind_label =
+            format!(r#"{OPERATION_KIND_LABEL}="{}""#, operation_kind.as_str());
+
+        rendered
+            .lines()
+            .find_map(|line| {
+                if line.starts_with(&format!("{metric_name}_count"))
+                    && line.contains(&operation_kind_label)
+                {
+                    line.split_whitespace().last()?.parse::<f64>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.0)
     }
 
     #[test]
@@ -657,6 +712,94 @@ mod tests {
         .expect("expected follow-up query to succeed");
 
         assert_eq!(value, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_duckdb_blocking_records_histograms_by_operation_kind() {
+        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
+        crate::ducklake::metrics::register_metrics();
+
+        let pool = Arc::new(
+            build_warm_ducklake_pool(make_blocking_test_manager(), 1, "test")
+                .await
+                .expect("failed to build blocking test pool"),
+        );
+        let blocking_slots = Arc::new(Semaphore::new(1));
+
+        let rendered_before = handle.render();
+        let blocking_metrics = [
+            ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS,
+            ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS,
+            ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
+            ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS,
+        ];
+        let foreground_before = blocking_metrics.map(|metric_name| {
+            blocking_metric_count(
+                &rendered_before,
+                metric_name,
+                DuckDbBlockingOperationKind::Foreground,
+            )
+        });
+        let metrics_before = blocking_metrics.map(|metric_name| {
+            blocking_metric_count(
+                &rendered_before,
+                metric_name,
+                DuckDbBlockingOperationKind::Metrics,
+            )
+        });
+
+        for operation_kind in [
+            DuckDbBlockingOperationKind::Foreground,
+            DuckDbBlockingOperationKind::Metrics,
+        ] {
+            run_duckdb_blocking_with_timeout(
+                Arc::clone(&pool),
+                Arc::clone(&blocking_slots),
+                operation_kind,
+                Duration::from_secs(1),
+                |conn| -> EtlResult<i64> {
+                    conn.query_row("SELECT 1;", [], |row| row.get::<_, i64>(0))
+                        .map_err(|source| {
+                            etl_error!(
+                                ErrorKind::DestinationQueryFailed,
+                                "DuckLake metric label verification query failed",
+                                source: source
+                            )
+                        })
+                },
+            )
+            .await
+            .expect("expected blocking metric verification query to succeed");
+        }
+
+        let rendered_after = handle.render();
+        let foreground_after = blocking_metrics.map(|metric_name| {
+            blocking_metric_count(
+                &rendered_after,
+                metric_name,
+                DuckDbBlockingOperationKind::Foreground,
+            )
+        });
+        let metrics_after = blocking_metrics.map(|metric_name| {
+            blocking_metric_count(
+                &rendered_after,
+                metric_name,
+                DuckDbBlockingOperationKind::Metrics,
+            )
+        });
+
+        for (before, after) in foreground_before.iter().zip(foreground_after.iter()) {
+            assert!(
+                after > before,
+                "foreground blocking metric count did not increase"
+            );
+        }
+        for (before, after) in metrics_before.iter().zip(metrics_after.iter()) {
+            assert!(
+                after > before,
+                "metrics blocking metric count did not increase"
+            );
+        }
     }
 
     #[test]
