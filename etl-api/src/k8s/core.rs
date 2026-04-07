@@ -481,6 +481,14 @@ mod tests {
             Ok(())
         }
 
+        async fn create_or_update_clickhouse_secret(
+            &self,
+            _prefix: &str,
+            _password: Option<&str>,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
         async fn create_or_update_ducklake_secret(
             &self,
             prefix: &str,
@@ -502,6 +510,10 @@ mod tests {
         }
 
         async fn delete_iceberg_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_clickhouse_secret(&self, _prefix: &str) -> Result<(), K8sError> {
             Ok(())
         }
 

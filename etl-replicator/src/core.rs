@@ -4,7 +4,6 @@ use crate::error::{ReplicatorError, ReplicatorResult};
 use crate::error_notification::ErrorNotificationClient;
 use crate::error_reporting::ErrorReportingStateStore;
 use crate::metrics;
-use crate::migrations::migrate_state_store;
 use crate::sentry::set_destination_tag;
 use etl::concurrency::memory_monitor::MemorySnapshot;
 use etl::config::MemoryBackpressureConfig;
@@ -31,7 +30,7 @@ use etl_destinations::{
 use secrecy::ExposeSecret;
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Starts the replicator service with the provided configuration.
 ///
@@ -313,7 +312,11 @@ fn log_destination_config(config: &DestinationConfig) {
             database,
             password: _,
         } => debug!(url, user, database, "using clickhouse destination config"),
-        DestinationConfig::Ducklake { catalog_url, data_path, .. } => {
+        DestinationConfig::Ducklake {
+            catalog_url,
+            data_path,
+            ..
+        } => {
             debug!(catalog_url, data_path, "using ducklake destination config")
         }
     }

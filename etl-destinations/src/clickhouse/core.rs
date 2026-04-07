@@ -7,6 +7,9 @@ use crate::clickhouse::client::ClickHouseClient;
 use crate::clickhouse::encoding::{ClickHouseValue, cell_to_clickhouse_value};
 use crate::clickhouse::metrics::{ETL_CH_DDL_DURATION_SECONDS, register_metrics};
 use crate::clickhouse::schema::{build_create_table_sql, table_name_to_clickhouse_table_name};
+use etl::destination::async_result::{
+    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
 use etl::store::schema::SchemaStore;
@@ -378,20 +381,35 @@ where
         "clickhouse"
     }
 
-    async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table_inner(table_id).await
+    async fn truncate_table(
+        &self,
+        table_id: TableId,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
+        let result = self.truncate_table_inner(table_id).await;
+        async_result.send(result);
+        Ok(())
     }
 
     async fn write_table_rows(
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        self.write_table_rows_inner(table_id, table_rows).await
+        let result = self.write_table_rows_inner(table_id, table_rows).await;
+        async_result.send(result);
+        Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.write_events_inner(events).await
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
+        let result = self.write_events_inner(events).await;
+        async_result.send(result);
+        Ok(())
     }
 }
 
