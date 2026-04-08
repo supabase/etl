@@ -16,29 +16,6 @@ pub const CLICKHOUSE_USER_ENV: &str = "TESTS_CLICKHOUSE_USER";
 /// ClickHouse password (optional — omit or leave empty for passwordless access).
 pub const CLICKHOUSE_PASSWORD_ENV: &str = "TESTS_CLICKHOUSE_PASSWORD";
 
-/// Returns whether ClickHouse integration tests should be skipped.
-///
-/// Prints a warning and returns `true` when any required env var is missing.
-/// Required: [`CLICKHOUSE_URL_ENV`], [`CLICKHOUSE_USER_ENV`].
-/// Optional: [`CLICKHOUSE_PASSWORD_ENV`].
-pub fn skip_if_missing_clickhouse_env_vars() -> bool {
-    let missing: Vec<&str> = [CLICKHOUSE_URL_ENV, CLICKHOUSE_USER_ENV]
-        .iter()
-        .copied()
-        .filter(|var| std::env::var_os(var).is_none())
-        .collect();
-
-    if missing.is_empty() {
-        return false;
-    }
-
-    eprintln!(
-        "skipping clickhouse integration test: missing {}",
-        missing.join(", ")
-    );
-    true
-}
-
 /// Returns the ClickHouse HTTP URL from the environment.
 ///
 /// # Panics

@@ -5,9 +5,7 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::types::PipelineId;
-use etl_destinations::clickhouse::test_utils::{
-    ClickHouseTestDatabase, setup_clickhouse_database, skip_if_missing_clickhouse_env_vars,
-};
+use etl_destinations::clickhouse::test_utils::{ClickHouseTestDatabase, setup_clickhouse_database};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::sync::Once;
@@ -114,10 +112,6 @@ async fn wait_for_update_flow_rows(
 /// Row 2 has **non-empty** arrays (fails with the old code, passes with the fix).
 #[tokio::test(flavor = "multi_thread")]
 async fn all_types_table_copy() {
-    if skip_if_missing_clickhouse_env_vars() {
-        return;
-    }
-
     init_test_tracing();
     install_crypto_provider();
 
@@ -340,10 +334,6 @@ async fn all_types_table_copy() {
 /// a second row with `cdc_operation = "UPDATE"` and a positive LSN.
 #[tokio::test(flavor = "multi_thread")]
 async fn updates_are_streamed_to_clickhouse() {
-    if skip_if_missing_clickhouse_env_vars() {
-        return;
-    }
-
     init_test_tracing();
     install_crypto_provider();
 
