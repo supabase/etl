@@ -113,6 +113,12 @@ enum PreparedTableMutation {
         join_predicate: String,
         origin: &'static str,
     },
+    Update {
+        // For SET clause assignments used in UPDATE statements. Example: "value=1, id=3"
+        assignments: Vec<String>,
+        // For the WHERE clause predicate used in the UPDATE statement. Example: "id = 4 AND content = 'hello'"
+        predicate: String,
+    },
 }
 
 /// Low-cardinality mutation kinds recorded in the latency histogram.
@@ -120,6 +126,7 @@ enum PreparedTableMutation {
 enum DuckLakeMutationOperationKind {
     Insert,
     Delete,
+    Update,
 }
 
 impl DuckLakeMutationOperationKind {
@@ -128,6 +135,7 @@ impl DuckLakeMutationOperationKind {
         match self {
             Self::Insert => "insert",
             Self::Delete => "delete",
+            Self::Update => "update",
         }
     }
 }
@@ -1380,13 +1388,10 @@ fn prepare_table_mutations(
                     });
                 }
 
-                prepared_mutations.push(PreparedTableMutation::Delete {
-                    predicates: vec![delete_predicate_from_row(table_schema, &delete_row)?],
-                    origin: "update",
+                prepared_mutations.push(PreparedTableMutation::Update {
+                    assignments: update_assignments_from_row(table_schema, &upsert_row)?,
+                    predicate: delete_predicate_from_row(table_schema, &delete_row)?,
                 });
-                prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(vec![
-                    upsert_row,
-                ])));
             }
             TableMutation::Replace(row) => {
                 if !upsert_rows.is_empty() {
@@ -1577,6 +1582,38 @@ fn delete_join_predicate_from_schema(table_schema: &TableSchema) -> EtlResult<St
         })
         .collect::<Vec<_>>()
         .join(" AND "))
+}
+
+/// Builds one `SET` clause assignment per column from `row`.
+fn update_assignments_from_row(
+    table_schema: &TableSchema,
+    row: &TableRow,
+) -> EtlResult<Vec<String>> {
+    if row.values().len() != table_schema.column_schemas.len() {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "DuckLake row shape does not match schema",
+            format!(
+                "Expected {} values for table '{}', got {}",
+                table_schema.column_schemas.len(),
+                table_schema.name,
+                row.values().len()
+            )
+        ));
+    }
+
+    Ok(table_schema
+        .column_schemas
+        .iter()
+        .zip(row.values())
+        .map(|(column_schema, value)| {
+            format!(
+                "{} = {}",
+                quote_identifier(&column_schema.name),
+                cell_to_sql_literal_ref(value),
+            )
+        })
+        .collect())
 }
 
 /// Returns the ordered list of primary-key column names for a table schema.
@@ -2415,6 +2452,15 @@ fn apply_table_mutation(
                 origin,
             )
         }
+        PreparedTableMutation::Update {
+            assignments,
+            predicate,
+        } => apply_update_mutation(
+            conn,
+            &reusable_staging_table.table_name,
+            assignments.as_slice(),
+            predicate,
+        ),
     }
 }
 
@@ -2674,6 +2720,37 @@ fn apply_delete_keys_mutation(
     result
 }
 
+/// Applies one update statement inside an open DuckLake transaction.
+fn apply_update_mutation(
+    conn: &duckdb::Connection,
+    table_name: &str,
+    assignments: &[String],
+    predicate: &str,
+) -> EtlResult<()> {
+    if assignments.is_empty() {
+        return Ok(());
+    }
+
+    let set_clause = assignments.join(", ");
+    let sql_query =
+        format!(r#"UPDATE {LAKE_CATALOG}."{table_name}" SET {set_clause} WHERE {predicate};"#);
+    conn.execute_batch(&sql_query).map_err(|error| {
+        tracing::error!(?error, "error UPDATE");
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake UPDATE failed",
+            source: error
+        )
+    })?;
+    record_profiled_mutation_operation_duration(
+        conn,
+        DuckLakeMutationOperationKind::Update,
+        "update",
+    );
+
+    Ok(())
+}
+
 /// Returns the number of values carried by a prepared row payload.
 fn prepared_rows_count(prepared_rows: &PreparedRows) -> usize {
     match prepared_rows {
@@ -2698,12 +2775,15 @@ fn prepared_mutation_count(batch: &PreparedDuckLakeTableBatch) -> usize {
     }
 }
 
-/// Returns the total number of row and delete entries carried by one batch.
+/// Returns the total number of row, delete, and update entries carried by one
+/// batch.
 fn batch_item_count(batch: &PreparedDuckLakeTableBatch) -> usize {
     match &batch.action {
         PreparedDuckLakeTableBatchAction::Truncate => 1,
         PreparedDuckLakeTableBatchAction::Mutation(_) => {
-            batch_upsert_row_count(batch) + batch_delete_predicate_count(batch)
+            batch_upsert_row_count(batch)
+                + batch_delete_predicate_count(batch)
+                + batch_update_count(batch)
         }
     }
 }
@@ -2719,9 +2799,9 @@ fn batch_upsert_row_count(batch: &PreparedDuckLakeTableBatch) -> usize {
                 | PreparedTableMutation::Upsert(prepared_rows) => {
                     prepared_rows_count(prepared_rows)
                 }
-                PreparedTableMutation::Delete { .. } | PreparedTableMutation::DeleteKeys { .. } => {
-                    0
-                }
+                PreparedTableMutation::Delete { .. }
+                | PreparedTableMutation::DeleteKeys { .. }
+                | PreparedTableMutation::Update { .. } => 0,
             })
             .sum(),
     }
@@ -2737,6 +2817,24 @@ fn batch_delete_predicate_count(batch: &PreparedDuckLakeTableBatch) -> usize {
                 PreparedTableMutation::Copy(_) | PreparedTableMutation::Upsert(_) => 0,
                 PreparedTableMutation::Delete { predicates, .. } => predicates.len(),
                 PreparedTableMutation::DeleteKeys { keys, .. } => prepared_rows_count(keys),
+                PreparedTableMutation::Update { .. } => 0,
+            })
+            .sum(),
+    }
+}
+
+/// Returns the total number of update statements carried by one batch.
+fn batch_update_count(batch: &PreparedDuckLakeTableBatch) -> usize {
+    match &batch.action {
+        PreparedDuckLakeTableBatchAction::Truncate => 0,
+        PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => prepared_mutations
+            .iter()
+            .map(|prepared_mutation| match prepared_mutation {
+                PreparedTableMutation::Update { .. } => 1,
+                PreparedTableMutation::Copy(_)
+                | PreparedTableMutation::Upsert(_)
+                | PreparedTableMutation::Delete { .. }
+                | PreparedTableMutation::DeleteKeys { .. } => 0,
             })
             .sum(),
     }
@@ -2758,7 +2856,9 @@ fn apply_sub_batch_rows(batch: &PreparedDuckLakeTableBatch) -> Option<usize> {
             PreparedRows::Appender(values) => values.len(),
             PreparedRows::Arrow(batches) => batches.iter().map(|batch| batch.num_rows()).sum(),
         }),
-        PreparedTableMutation::Delete { .. } | PreparedTableMutation::DeleteKeys { .. } => None,
+        PreparedTableMutation::Delete { .. }
+        | PreparedTableMutation::DeleteKeys { .. }
+        | PreparedTableMutation::Update { .. } => None,
     }
 }
 
@@ -2772,6 +2872,7 @@ fn batch_log_kind(batch: &PreparedDuckLakeTableBatch) -> &'static str {
                 [PreparedTableMutation::Upsert(_)] => "insert",
                 [PreparedTableMutation::Delete { origin, .. }] => origin,
                 [PreparedTableMutation::DeleteKeys { origin, .. }] => origin,
+                [PreparedTableMutation::Update { .. }] => "update",
                 [
                     PreparedTableMutation::Delete { origin, .. },
                     PreparedTableMutation::Upsert(_),
@@ -3024,7 +3125,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_table_mutations_update_emits_delete_then_upsert() {
+    fn test_prepare_table_mutations_update_emits_update_statement() {
         let table_schema = make_schema();
         let prepared = prepare_table_mutations(
             &table_schema,
@@ -3035,19 +3136,19 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(prepared.len(), 2);
+        assert_eq!(prepared.len(), 1);
         match &prepared[0] {
-            PreparedTableMutation::Delete { predicates, origin } => {
-                assert_eq!(predicates, &vec!["id = 1".to_string()]);
-                assert_eq!(origin, &"update");
+            PreparedTableMutation::Update {
+                assignments,
+                predicate,
+            } => {
+                assert_eq!(
+                    assignments,
+                    &vec!["id = 1".to_string(), "name = 'after'".to_string()]
+                );
+                assert_eq!(predicate, "id = 1");
             }
-            _ => panic!("expected delete first"),
-        }
-        match &prepared[1] {
-            PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
-                assert_eq!(rows.len(), 1);
-            }
-            _ => panic!("expected upsert second"),
+            _ => panic!("expected update"),
         }
     }
 
@@ -3245,17 +3346,9 @@ mod tests {
         assert_eq!(batches.len(), 1);
         match &batches[0].action {
             PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
-                assert_eq!(prepared.len(), 4);
-                assert!(matches!(prepared[0], PreparedTableMutation::Delete { .. }));
-                assert!(matches!(
-                    prepared[1],
-                    PreparedTableMutation::Upsert(PreparedRows::Appender(_))
-                ));
-                assert!(matches!(prepared[2], PreparedTableMutation::Delete { .. }));
-                assert!(matches!(
-                    prepared[3],
-                    PreparedTableMutation::Upsert(PreparedRows::Appender(_))
-                ));
+                assert_eq!(prepared.len(), 2);
+                assert!(matches!(prepared[0], PreparedTableMutation::Update { .. }));
+                assert!(matches!(prepared[1], PreparedTableMutation::Update { .. }));
             }
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
         }
@@ -3305,7 +3398,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_mutation_table_batches_isolate_update_in_its_own_atomic_batch() {
+    fn test_prepare_mutation_table_batches_keep_update_separate_from_adjacent_inserts() {
         let table_schema = make_schema();
         let batches = prepare_mutation_table_batches(
             &table_schema,
@@ -3352,18 +3445,14 @@ mod tests {
 
         match &batches[0].action {
             PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
-                assert_eq!(prepared.len(), 4);
+                assert_eq!(prepared.len(), 3);
                 assert!(matches!(
                     prepared[0],
                     PreparedTableMutation::Upsert(PreparedRows::Appender(_))
                 ));
-                assert!(matches!(prepared[1], PreparedTableMutation::Delete { .. }));
+                assert!(matches!(prepared[1], PreparedTableMutation::Update { .. }));
                 assert!(matches!(
                     prepared[2],
-                    PreparedTableMutation::Upsert(PreparedRows::Appender(_))
-                ));
-                assert!(matches!(
-                    prepared[3],
                     PreparedTableMutation::Upsert(PreparedRows::Appender(_))
                 ));
             }
@@ -3691,9 +3780,9 @@ mod tests {
             DuckLakeMutationOperationKind::Insert,
             DELETE_ORIGIN_NONE,
         );
-        let delete_before = mutation_operation_duration_count(
+        let update_before = mutation_operation_duration_count(
             &rendered_before,
-            DuckLakeMutationOperationKind::Delete,
+            DuckLakeMutationOperationKind::Update,
             "update",
         );
 
@@ -3705,19 +3794,19 @@ mod tests {
             DuckLakeMutationOperationKind::Insert,
             DELETE_ORIGIN_NONE,
         );
-        let delete_after = mutation_operation_duration_count(
+        let update_after = mutation_operation_duration_count(
             &rendered_after,
-            DuckLakeMutationOperationKind::Delete,
+            DuckLakeMutationOperationKind::Update,
             "update",
         );
 
         assert!(
-            insert_after > insert_before,
-            "insert mutation duration count did not increase"
+            insert_after == insert_before,
+            "update mutation should not record insert duration samples"
         );
         assert!(
-            delete_after > delete_before,
-            "delete mutation duration count did not increase"
+            update_after > update_before,
+            "update mutation duration count did not increase"
         );
         assert_eq!(
             conn.query_row(
@@ -3884,12 +3973,12 @@ mod tests {
         );
 
         assert!(
-            staging_prepare_after > staging_prepare_before,
-            "staging prepare substage count did not increase"
+            staging_prepare_after == staging_prepare_before,
+            "update batches should not record staging prepare substage samples"
         );
         assert!(
-            staging_load_after > staging_load_before,
-            "staging load substage count did not increase"
+            staging_load_after == staging_load_before,
+            "update batches should not record staging load substage samples"
         );
         assert!(
             progress_update_after > progress_update_before,

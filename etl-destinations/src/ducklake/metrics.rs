@@ -186,7 +186,7 @@ pub(crate) fn register_metrics() {
         describe_histogram!(
             ETL_DUCKLAKE_MUTATION_OPERATION_DURATION_SECONDS,
             Unit::Seconds,
-            "DuckDB-profiled latency of one DuckLake target-table insert or delete operation, labeled by operation_kind and delete_origin. Insert samples use delete_origin=\"none\" and measure only the final target INSERT statement, excluding staging-table preparation."
+            "DuckDB-profiled latency of one DuckLake target-table insert, update, or delete operation, labeled by operation_kind and delete_origin. Insert samples use delete_origin=\"none\" and measure only the final target INSERT statement, excluding staging-table preparation. Update samples use delete_origin=\"update\" and measure only the final target UPDATE statement."
         );
         describe_histogram!(
             ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS,

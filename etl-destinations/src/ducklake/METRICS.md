@@ -65,19 +65,23 @@ Each histogram is labeled by `operation_kind` with one of:
 These explain the pressure your writer is putting on DuckLake:
 
 - `mutation_operation_duration_seconds` is the direct latency split between
-  DuckDB-profiled `insert` and `delete` work on the target table. It is labeled
+  DuckDB-profiled `insert`, `update`, and `delete` work on the target table. It is labeled
   by `operation_kind` and `delete_origin`.
 - `operation_kind="insert"` measures the final `INSERT ... SELECT` into the
   DuckLake table. It uses `delete_origin="none"` and does not include
   staging-table creation, clearing, or row-loading time before that statement
   runs.
+- `operation_kind="update"` records one sample per executed `UPDATE`
+  statement. It uses `delete_origin="update"` and measures only the final
+  target-table statement.
 - `operation_kind="delete"` records one sample per executed `DELETE`
   statement. `delete_origin` then tells you whether that delete came from a
-  source `delete`, `replace`, or `update`. If one prepared delete mutation is
+  source `delete` or `replace`. If one prepared delete mutation is
   split into multiple chunked statements, each statement contributes its own
   histogram sample.
 - `batch_substage_duration_seconds` records unprofiled write-path time that
-  sits outside the final target-table `INSERT` and `DELETE` statements. The
+  sits outside the final target-table `INSERT`, `UPDATE`, and `DELETE`
+  statements. The
   `substage` label currently uses `staging_prepare`, `staging_load`,
   `progress_update`, and `commit_only`, and records one sample per substage
   invocation.
@@ -86,6 +90,8 @@ These explain the pressure your writer is putting on DuckLake:
   for `rewrite_data_files`.
 - if `operation_kind="delete"` is consistently slower than `insert`, delete
   files and rewrite pressure are usually the next place to investigate.
+- if `operation_kind="update"` is high while `insert` and `delete` stay low,
+  look first at row width and primary-key filter selectivity.
 - if `operation_kind="insert"` is high while delete stays low, look first at
   batch shape, staging overhead, and the downstream object-store path.
 - growing retries usually points to transaction conflicts or file-visibility

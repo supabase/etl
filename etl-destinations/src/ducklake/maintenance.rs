@@ -560,7 +560,7 @@ pub(super) async fn send_maintenance_notification(
     }
 }
 
-/// Spawns the periodic DuckLake worker with lazy pool initialization.
+/// Starts warming the maintenance pool and spawns the periodic DuckLake worker.
 pub(super) fn spawn_ducklake_maintenance_worker(
     manager: DuckLakeConnectionManager,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
@@ -570,10 +570,12 @@ pub(super) fn spawn_ducklake_maintenance_worker(
         pool_size = MAINTENANCE_POOL_SIZE,
         "starting ducklake maintenance worker"
     );
+    let mut pool = LazyDuckLakePool::new(manager, MAINTENANCE_POOL_SIZE, "maintenance");
+    pool.warm_in_background();
     let (notification_tx, notification_rx) = mpsc::channel(1024);
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let handle = tokio::spawn(run_ducklake_maintenance_worker(
-        manager,
+        pool,
         table_write_slots,
         notification_rx,
         shutdown_rx,
@@ -593,12 +595,12 @@ pub(super) fn spawn_ducklake_maintenance_worker(
 
 /// Coalesces notifications and runs background DuckLake maintenance.
 async fn run_ducklake_maintenance_worker(
-    manager: DuckLakeConnectionManager,
+    mut pool: LazyDuckLakePool,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     mut notification_rx: mpsc::Receiver<TableMaintenanceNotification>,
     mut shutdown_rx: watch::Receiver<()>,
 ) {
-    let mut lazy_pool = LazyDuckLakePool::new(manager, MAINTENANCE_POOL_SIZE, "maintenance");
+    let blocking_slots = pool.blocking_slots();
     let mut flush_interval = tokio::time::interval(MAINTENANCE_FLUSH_POLL_INTERVAL);
     flush_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut checkpoint_interval = tokio::time::interval_at(
@@ -652,17 +654,16 @@ async fn run_ducklake_maintenance_worker(
                 for (table_name, table_state) in &mut table_states {
                     // If it needs to be flushed
                     if let Some(reason) = table_state.flush_reason(now) {
-                        let pool = match lazy_pool.get_or_init_pool().await {
+                        let pool = match pool.get_or_init_pool().await {
                             Ok(pool) => pool,
                             Err(error) => {
                                 warn!(error = ?error, "ducklake maintenance pool initialization failed");
                                 continue;
                             }
                         };
-                        let blocking_slots = lazy_pool.blocking_slots();
                         match flush_table_inlined_data_in_background(
                             pool,
-                            blocking_slots,
+                            Arc::clone(&blocking_slots),
                             Arc::clone(&table_write_slots),
                             table_name.clone(),
                             reason,
@@ -691,17 +692,16 @@ async fn run_ducklake_maintenance_worker(
                     {
                         table_state.last_emergency_assessment_at = Some(sampled_at);
                         if plan.has_work() {
-                            let pool = match lazy_pool.get_or_init_pool().await {
+                            let pool = match pool.get_or_init_pool().await {
                                 Ok(pool) => pool,
                                 Err(error) => {
                                     warn!(error = ?error, "ducklake maintenance pool initialization failed");
                                     continue;
                                 }
                             };
-                            let blocking_slots = lazy_pool.blocking_slots();
                             match run_targeted_table_maintenance(
                                 pool,
-                                blocking_slots,
+                                Arc::clone(&blocking_slots),
                                 Arc::clone(&table_write_slots),
                                 table_name.clone(),
                                 plan,
@@ -731,17 +731,16 @@ async fn run_ducklake_maintenance_worker(
                             continue;
                         }
 
-                        let pool = match lazy_pool.get_or_init_pool().await {
+                        let pool = match pool.get_or_init_pool().await {
                             Ok(pool) => pool,
                             Err(error) => {
                                 warn!(error = ?error, "ducklake maintenance pool initialization failed");
                                 continue;
                             }
                         };
-                        let blocking_slots = lazy_pool.blocking_slots();
                         match run_targeted_table_maintenance(
                             pool,
-                            blocking_slots,
+                            Arc::clone(&blocking_slots),
                             Arc::clone(&table_write_slots),
                             table_name.clone(),
                             plan,
@@ -775,17 +774,16 @@ async fn run_ducklake_maintenance_worker(
                     continue;
                 }
 
-                let pool = match lazy_pool.get_or_init_pool().await {
+                let pool = match pool.get_or_init_pool().await {
                     Ok(pool) => pool,
                     Err(error) => {
                         warn!(error = ?error, "ducklake maintenance pool initialization failed");
                         continue;
                     }
                 };
-                let blocking_slots = lazy_pool.blocking_slots();
                 if let Err(error) = run_background_checkpoint(
                     pool,
-                    blocking_slots,
+                    Arc::clone(&blocking_slots),
                     MaintenanceReason::CheckpointInterval,
                 )
                 .await
@@ -1979,7 +1977,7 @@ mod tests {
 
     #[cfg(feature = "test-utils")]
     #[tokio::test]
-    async fn test_spawn_ducklake_maintenance_worker_initializes_pool_lazily() {
+    async fn test_spawn_ducklake_maintenance_worker_warms_pool_in_background() {
         let open_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let worker = spawn_ducklake_maintenance_worker(
             DuckLakeConnectionManager {
@@ -1993,13 +1991,14 @@ mod tests {
         )
         .expect("failed to spawn maintenance worker");
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        assert_eq!(
-            open_count.load(AtomicOrdering::Relaxed),
-            0,
-            "maintenance worker should not warm its pool before background work exists"
-        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while open_count.load(AtomicOrdering::Relaxed) < MAINTENANCE_POOL_SIZE as usize {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "maintenance worker should warm its pool in background during startup"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
 
         worker
             .shutdown_tx
