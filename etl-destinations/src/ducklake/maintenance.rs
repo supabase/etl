@@ -9,7 +9,7 @@ use etl::etl_error;
 use metrics::{counter, histogram};
 use parking_lot::Mutex;
 use pg_escape::quote_literal;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{info, warn};
@@ -563,6 +563,7 @@ pub(super) async fn send_maintenance_notification(
 /// Starts warming the maintenance pool and spawns the periodic DuckLake worker.
 pub(super) fn spawn_ducklake_maintenance_worker(
     manager: DuckLakeConnectionManager,
+    checkpoint_gate: Arc<RwLock<()>>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
 ) -> EtlResult<DuckLakeMaintenanceWorker> {
     let started = Instant::now();
@@ -576,6 +577,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let handle = tokio::spawn(run_ducklake_maintenance_worker(
         pool,
+        checkpoint_gate,
         table_write_slots,
         notification_rx,
         shutdown_rx,
@@ -596,6 +598,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
 /// Coalesces notifications and runs background DuckLake maintenance.
 async fn run_ducklake_maintenance_worker(
     mut pool: LazyDuckLakePool,
+    checkpoint_gate: Arc<RwLock<()>>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     mut notification_rx: mpsc::Receiver<TableMaintenanceNotification>,
     mut shutdown_rx: watch::Receiver<()>,
@@ -663,6 +666,7 @@ async fn run_ducklake_maintenance_worker(
                         };
                         match flush_table_inlined_data_in_background(
                             pool,
+                            Arc::clone(&checkpoint_gate),
                             Arc::clone(&blocking_slots),
                             Arc::clone(&table_write_slots),
                             table_name.clone(),
@@ -701,6 +705,7 @@ async fn run_ducklake_maintenance_worker(
                             };
                             match run_targeted_table_maintenance(
                                 pool,
+                                Arc::clone(&checkpoint_gate),
                                 Arc::clone(&blocking_slots),
                                 Arc::clone(&table_write_slots),
                                 table_name.clone(),
@@ -740,6 +745,7 @@ async fn run_ducklake_maintenance_worker(
                         };
                         match run_targeted_table_maintenance(
                             pool,
+                            Arc::clone(&checkpoint_gate),
                             Arc::clone(&blocking_slots),
                             Arc::clone(&table_write_slots),
                             table_name.clone(),
@@ -783,6 +789,7 @@ async fn run_ducklake_maintenance_worker(
                 };
                 if let Err(error) = run_background_checkpoint(
                     pool,
+                    Arc::clone(&checkpoint_gate),
                     Arc::clone(&blocking_slots),
                     MaintenanceReason::CheckpointInterval,
                 )
@@ -824,6 +831,7 @@ fn try_acquire_table_write_slot(
 /// Materializes one table's pending inlined rows on the maintenance pool.
 async fn flush_table_inlined_data_in_background(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    checkpoint_gate: Arc<RwLock<()>>,
     blocking_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     table_name: DuckLakeTableName,
@@ -838,6 +846,7 @@ async fn flush_table_inlined_data_in_background(
         );
         return Ok(MaintenanceOutcome::SkippedBusy);
     };
+    let _checkpoint_guard = checkpoint_gate.read_owned().await;
 
     run_duckdb_blocking(
         pool,
@@ -854,6 +863,7 @@ async fn flush_table_inlined_data_in_background(
 /// Runs targeted rewrite and merge maintenance for one table.
 async fn run_targeted_table_maintenance(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    checkpoint_gate: Arc<RwLock<()>>,
     blocking_slots: Arc<Semaphore>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     table_name: DuckLakeTableName,
@@ -866,6 +876,7 @@ async fn run_targeted_table_maintenance(
     };
     let table_name_for_query = table_name.clone();
     let plan_for_query = plan;
+    let _checkpoint_guard = checkpoint_gate.read_owned().await;
 
     run_duckdb_blocking(
         pool,
@@ -889,9 +900,11 @@ async fn run_targeted_table_maintenance(
 /// Runs a coarse-grained checkpoint to keep catalog maintenance moving.
 async fn run_background_checkpoint(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    checkpoint_gate: Arc<RwLock<()>>,
     blocking_slots: Arc<Semaphore>,
     reason: MaintenanceReason,
 ) -> EtlResult<()> {
+    let _checkpoint_guard = checkpoint_gate.write_owned().await;
     run_duckdb_blocking(
         pool,
         blocking_slots,
@@ -1908,6 +1921,7 @@ mod tests {
                 .await
                 .expect("failed to build maintenance test pool"),
         );
+        let checkpoint_gate = std::sync::Arc::new(RwLock::new(()));
         let blocking_slots = std::sync::Arc::new(Semaphore::new(1));
         let table_write_slots = std::sync::Arc::new(Mutex::new(HashMap::new()));
         FAIL_REWRITE_SINGLE_OUTPUT_FILE_ONCE_FOR_TESTS.store(true, AtomicOrdering::Relaxed);
@@ -1923,6 +1937,7 @@ mod tests {
 
         let outcome = run_targeted_table_maintenance(
             std::sync::Arc::clone(&pool),
+            std::sync::Arc::clone(&checkpoint_gate),
             std::sync::Arc::clone(&blocking_slots),
             std::sync::Arc::clone(&table_write_slots),
             "public_users".to_string(),
@@ -1987,6 +2002,7 @@ mod tests {
                 disable_extension_autoload: cfg!(target_os = "linux"),
                 open_count: std::sync::Arc::clone(&open_count),
             },
+            std::sync::Arc::new(RwLock::new(())),
             std::sync::Arc::new(Mutex::new(HashMap::new())),
         )
         .expect("failed to spawn maintenance worker");
@@ -2012,6 +2028,44 @@ mod tests {
         handle
             .await
             .expect("maintenance worker should shut down cleanly");
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn test_background_checkpoint_waits_for_active_mutation_guard() {
+        let pool = Arc::new(
+            build_warm_ducklake_pool(
+                DuckLakeConnectionManager {
+                    setup_plan: Arc::new(crate::ducklake::config::DuckLakeSetupPlan::default()),
+                    disable_extension_autoload: cfg!(target_os = "linux"),
+                    open_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                },
+                1,
+                "test",
+            )
+            .await
+            .expect("failed to build checkpoint test pool"),
+        );
+        let checkpoint_gate = Arc::new(RwLock::new(()));
+        let mutation_guard = Arc::clone(&checkpoint_gate).read_owned().await;
+        let checkpoint_task = tokio::spawn(run_background_checkpoint(
+            Arc::clone(&pool),
+            Arc::clone(&checkpoint_gate),
+            Arc::new(Semaphore::new(1)),
+            MaintenanceReason::CheckpointInterval,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !checkpoint_task.is_finished(),
+            "checkpoint should wait for active mutation work"
+        );
+        drop(mutation_guard);
+
+        checkpoint_task
+            .await
+            .expect("checkpoint task should not panic")
+            .expect("checkpoint should succeed after active mutation work finishes");
     }
 
     #[tokio::test]
