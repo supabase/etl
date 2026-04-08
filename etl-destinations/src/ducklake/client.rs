@@ -173,17 +173,18 @@ pub(super) struct ManagedDuckLakeConnection {
     broken: bool,
 }
 
-/// Lazily builds one dedicated DuckLake pool when a background task first needs it.
+/// Manages one dedicated DuckLake pool for a background task.
 pub(super) struct LazyDuckLakePool {
     manager: DuckLakeConnectionManager,
     pool_size: u32,
     purpose: &'static str,
     pool: Option<Arc<r2d2::Pool<DuckLakeConnectionManager>>>,
+    init_task: Option<JoinHandle<EtlResult<Arc<r2d2::Pool<DuckLakeConnectionManager>>>>>,
     blocking_slots: Arc<Semaphore>,
 }
 
 impl LazyDuckLakePool {
-    /// Creates one lazy pool wrapper for a dedicated background task.
+    /// Creates one pool wrapper for a dedicated background task.
     pub(super) fn new(
         manager: DuckLakeConnectionManager,
         pool_size: u32,
@@ -194,11 +195,37 @@ impl LazyDuckLakePool {
             pool_size,
             purpose,
             pool: None,
+            init_task: None,
             blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
         }
     }
 
-    /// Returns the warmed pool, initializing it on first use.
+    /// Starts warming the pool on a detached Tokio task.
+    pub(super) fn warm_in_background(&mut self) {
+        if self.pool.is_some() || self.init_task.is_some() {
+            return;
+        }
+
+        let manager = self.manager.clone();
+        let pool_size = self.pool_size;
+        let purpose = self.purpose;
+        self.init_task = Some(tokio::spawn(async move {
+            let pool = build_warm_ducklake_pool(manager, pool_size, purpose)
+                .await
+                .map(Arc::new);
+            if let Err(error) = &pool {
+                warn!(
+                    purpose,
+                    error = ?error,
+                    "ducklake background pool warm-up failed"
+                );
+            }
+            pool
+        }));
+    }
+
+    /// Returns the warmed pool, awaiting any in-flight initialization or
+    /// initializing it on first use.
     pub(super) async fn get_or_init_pool(
         &mut self,
     ) -> EtlResult<Arc<r2d2::Pool<DuckLakeConnectionManager>>> {
@@ -206,9 +233,26 @@ impl LazyDuckLakePool {
             return Ok(Arc::clone(pool));
         }
 
-        let pool = Arc::new(
-            build_warm_ducklake_pool(self.manager.clone(), self.pool_size, self.purpose).await?,
-        );
+        if self.init_task.is_none() {
+            self.warm_in_background();
+        }
+
+        let pool = self
+            .init_task
+            .take()
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::DestinationError,
+                    "DuckLake connection pool initialization task was not created"
+                )
+            })?
+            .await
+            .map_err(|_| {
+                etl_error!(
+                    ErrorKind::ApplyWorkerPanic,
+                    "DuckLake connection pool initialization task panicked"
+                )
+            })??;
         self.pool = Some(Arc::clone(&pool));
         Ok(pool)
     }
@@ -216,6 +260,14 @@ impl LazyDuckLakePool {
     /// Returns the semaphore that bounds background DuckDB concurrency.
     pub(super) fn blocking_slots(&self) -> Arc<Semaphore> {
         Arc::clone(&self.blocking_slots)
+    }
+}
+
+impl Drop for LazyDuckLakePool {
+    fn drop(&mut self) {
+        if let Some(init_task) = &self.init_task {
+            init_task.abort();
+        }
     }
 }
 
