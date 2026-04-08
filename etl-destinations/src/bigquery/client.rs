@@ -16,9 +16,20 @@ use gcp_bigquery_client::{
 use prost::Message;
 use rand::random;
 use std::fmt;
+use std::sync::Arc;
 use tonic::Code;
 use tracing::{debug, error, info, warn};
 
+use crate::bigquery::arrow::{
+    PreparedBigQueryArrowBatch, append_arrow_requests, append_rows_response_bytes,
+    arrow_fallback_error, arrow_response_statuses_to_etl_errors, build_arrow_append_requests,
+    should_disable_arrow_write,
+};
+use crate::bigquery::auth::{
+    BigQueryAuthenticator, application_default_credentials_authenticator,
+    installed_flow_authenticator, service_account_key_authenticator,
+    service_account_key_file_authenticator,
+};
 use crate::bigquery::encoding::BigQueryTableRow;
 use crate::bigquery::metrics::{
     ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
@@ -360,6 +371,11 @@ enum BatchProcessResult {
     RequestError { error: BQError },
 }
 
+pub(super) enum ArrowAppendError {
+    Fallback(EtlError),
+    Fatal(EtlError),
+}
+
 /// Client for interacting with Google BigQuery.
 ///
 /// Provides methods for table management, data insertion, and query execution
@@ -368,6 +384,7 @@ enum BatchProcessResult {
 pub struct BigQueryClient {
     project_id: BigQueryProjectId,
     client: Client,
+    auth: BigQueryAuthenticator,
 }
 
 impl BigQueryClient {
@@ -380,19 +397,10 @@ impl BigQueryClient {
         sa_key_file: &str,
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
-        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        let storage_config = StorageApiConfig {
-            connection_pool_size,
-            max_inflight_requests,
-        };
-
-        let client = ClientBuilder::new()
-            .with_storage_config(storage_config)
-            .build_from_service_account_key_file(sa_key_file)
+        let auth = service_account_key_file_authenticator(sa_key_file)
             .await
             .map_err(bq_error_to_etl_error)?;
-
-        Ok(BigQueryClient { project_id, client })
+        Self::build_with_auth(project_id, auth, connection_pool_size).await
     }
 
     /// Creates a new [`BigQueryClient`] from a service account key JSON string.
@@ -404,22 +412,13 @@ impl BigQueryClient {
         sa_key: &str,
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
-        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        let storage_config = StorageApiConfig {
-            connection_pool_size,
-            max_inflight_requests,
-        };
-
         let sa_key = parse_service_account_key(sa_key)
             .map_err(BQError::from)
             .map_err(bq_error_to_etl_error)?;
-        let client = ClientBuilder::new()
-            .with_storage_config(storage_config)
-            .build_from_service_account_key(sa_key, false)
+        let auth = service_account_key_authenticator(sa_key)
             .await
             .map_err(bq_error_to_etl_error)?;
-
-        Ok(BigQueryClient { project_id, client })
+        Self::build_with_auth(project_id, auth, connection_pool_size).await
     }
 
     /// Creates a new [`BigQueryClient`] using Application Default Credentials.
@@ -431,19 +430,10 @@ impl BigQueryClient {
         project_id: BigQueryProjectId,
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
-        let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        let storage_config = StorageApiConfig {
-            connection_pool_size,
-            max_inflight_requests,
-        };
-
-        let client = ClientBuilder::new()
-            .with_storage_config(storage_config)
-            .build_from_application_default_credentials()
+        let auth = application_default_credentials_authenticator()
             .await
             .map_err(bq_error_to_etl_error)?;
-
-        Ok(BigQueryClient { project_id, client })
+        Self::build_with_auth(project_id, auth, connection_pool_size).await
     }
 
     /// Creates a new [`BigQueryClient`] using OAuth2 installed flow authentication.
@@ -456,6 +446,17 @@ impl BigQueryClient {
         persistent_file_path: P,
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
+        let auth = installed_flow_authenticator(secret, persistent_file_path)
+            .await
+            .map_err(bq_error_to_etl_error)?;
+        Self::build_with_auth(project_id, auth, connection_pool_size).await
+    }
+
+    async fn build_with_auth(
+        project_id: BigQueryProjectId,
+        auth: BigQueryAuthenticator,
+        connection_pool_size: usize,
+    ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
         let storage_config = StorageApiConfig {
             connection_pool_size,
@@ -464,11 +465,15 @@ impl BigQueryClient {
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
-            .build_from_installed_flow_authenticator(secret, persistent_file_path)
+            .build_from_authenticator(Arc::clone(&auth))
             .await
             .map_err(bq_error_to_etl_error)?;
 
-        Ok(BigQueryClient { project_id, client })
+        Ok(BigQueryClient {
+            project_id,
+            client,
+            auth,
+        })
     }
 
     /// Returns the fully qualified BigQuery table name.
@@ -779,6 +784,72 @@ impl BigQueryClient {
         }
 
         Ok((total_bytes_sent, total_bytes_received))
+    }
+
+    pub(super) async fn append_arrow_batches(
+        &self,
+        pipeline_id: PipelineId,
+        batch_index: usize,
+        dataset_id: &BigQueryDatasetId,
+        table_id: &BigQueryTableId,
+        batches: Vec<PreparedBigQueryArrowBatch>,
+    ) -> Result<(usize, usize), ArrowAppendError> {
+        if batches.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let stream_name = StreamName::new_default(
+            self.project_id.clone(),
+            dataset_id.to_string(),
+            table_id.to_string(),
+        )
+        .to_string();
+        let trace_id = create_append_trace_id(pipeline_id, table_id, batch_index);
+        let requests = build_arrow_append_requests(
+            &stream_name,
+            &trace_id,
+            &batches,
+            gcp_bigquery_client::storage::MAX_BATCH_SIZE_BYTES,
+        )
+        .map_err(ArrowAppendError::Fatal)?;
+
+        let bytes_sent = requests.iter().map(Message::encoded_len).sum();
+        let responses = append_arrow_requests(Arc::clone(&self.auth), requests)
+            .await
+            .map_err(|error| {
+                let status = match &error {
+                    BQError::TonicStatusError(status) => Some(status),
+                    _ => None,
+                };
+
+                if matches!(
+                    status.map(tonic::Status::code),
+                    Some(Code::InvalidArgument | Code::Unimplemented | Code::FailedPrecondition)
+                ) {
+                    return ArrowAppendError::Fallback(arrow_fallback_error(error.to_string()));
+                }
+
+                ArrowAppendError::Fatal(bq_error_to_etl_error(error))
+            })?;
+
+        if should_disable_arrow_write(&responses) {
+            return Err(ArrowAppendError::Fallback(arrow_fallback_error(
+                "server rejected arrow_rows append",
+            )));
+        }
+
+        let errors = arrow_response_statuses_to_etl_errors(responses.clone());
+        if !errors.is_empty() {
+            return Err(ArrowAppendError::Fatal(errors.into()));
+        }
+
+        let bytes_received = responses
+            .iter()
+            .filter_map(|response| response.as_ref().ok())
+            .map(append_rows_response_bytes)
+            .sum();
+
+        Ok((bytes_sent, bytes_received))
     }
 
     /// Creates a batch append request for a specific table with validated rows.

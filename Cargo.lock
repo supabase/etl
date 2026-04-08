@@ -433,6 +433,7 @@ dependencies = [
  "arrow-buffer 58.1.0",
  "arrow-cast 58.0.0",
  "arrow-data 58.1.0",
+ "arrow-ipc 58.1.0",
  "arrow-ord 58.0.0",
  "arrow-row 58.0.0",
  "arrow-schema 58.1.0",
@@ -1931,6 +1932,7 @@ dependencies = [
  "etl-telemetry",
  "futures",
  "gcp-bigquery-client",
+ "hyper-util",
  "iceberg",
  "iceberg-catalog-rest",
  "metrics",
@@ -1948,7 +1950,9 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-postgres",
+ "tokio-stream",
  "tonic",
+ "tonic-prost",
  "tracing",
  "url",
  "uuid",
@@ -6488,6 +6492,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots 1.0.6",
  "zstd",
 ]
 

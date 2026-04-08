@@ -7,8 +7,8 @@ use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
-    Cell, ChangeKind, Event, PipelineId, RowImage, StreamBatch, TableArrowBatch, TableId,
-    TableName, TableRow,
+    Cell, ChangeArrowBatch, ChangeKind, Event, PipelineId, RowImage, StreamBatch, TableArrowBatch,
+    TableId, TableName, TableRow,
 };
 use etl::{bail, etl_error, record_batch_to_table_rows};
 
@@ -21,12 +21,16 @@ use std::fmt::Display;
 use std::iter;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use crate::bigquery::arrow::{
+    PreparedBigQueryArrowBatch, prepare_snapshot_arrow_batch, prepare_stream_arrow_batch,
+};
 use crate::bigquery::encoding::BigQueryTableRow;
 
-use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
+use crate::bigquery::client::{ArrowAppendError, BigQueryClient, BigQueryOperationType};
 use crate::bigquery::metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 use crate::table_name::try_stringify_table_name;
@@ -163,6 +167,7 @@ pub struct BigQueryDestination<S> {
     pipeline_id: PipelineId,
     store: S,
     inner: Arc<Mutex<Inner>>,
+    arrow_writes_enabled: Arc<AtomicBool>,
     streaming_tasks: DestinationTaskSet,
 }
 
@@ -196,6 +201,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            arrow_writes_enabled: Arc::new(AtomicBool::new(true)),
             streaming_tasks: DestinationTaskSet::new(),
         }
     }
@@ -230,6 +236,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            arrow_writes_enabled: Arc::new(AtomicBool::new(true)),
             streaming_tasks: DestinationTaskSet::new(),
         })
     }
@@ -263,6 +270,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            arrow_writes_enabled: Arc::new(AtomicBool::new(true)),
             streaming_tasks: DestinationTaskSet::new(),
         })
     }
@@ -294,6 +302,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            arrow_writes_enabled: Arc::new(AtomicBool::new(true)),
             streaming_tasks: DestinationTaskSet::new(),
         })
     }
@@ -339,6 +348,7 @@ where
             pipeline_id,
             store,
             inner: Arc::new(Mutex::new(inner)),
+            arrow_writes_enabled: Arc::new(AtomicBool::new(true)),
             streaming_tasks: DestinationTaskSet::new(),
         })
     }
@@ -504,6 +514,138 @@ where
         Ok(true)
     }
 
+    /// Returns whether direct Arrow appends are still enabled for this destination.
+    fn arrow_writes_enabled(&self) -> bool {
+        self.arrow_writes_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Disables direct Arrow appends after a server-side rejection.
+    fn disable_arrow_writes(&self) {
+        self.arrow_writes_enabled.store(false, Ordering::Relaxed);
+    }
+
+    /// Converts snapshot rows into validated BigQuery upsert rows.
+    fn table_rows_to_bigquery_upserts(
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<Vec<BigQueryTableRow>> {
+        table_rows
+            .into_iter()
+            .map(|mut table_row| {
+                table_row
+                    .values_mut()
+                    .push(BigQueryOperationType::Upsert.into_cell());
+
+                BigQueryTableRow::try_from(table_row)
+            })
+            .collect()
+    }
+
+    /// Converts CDC change groups into validated BigQuery streaming rows.
+    fn change_groups_to_bigquery_rows(
+        groups: &[ChangeArrowBatch],
+    ) -> EtlResult<Vec<BigQueryTableRow>> {
+        let mut bigquery_rows = Vec::new();
+
+        for group in groups {
+            let sequence_keys = group
+                .commit_lsns
+                .values()
+                .iter()
+                .zip(group.tx_ordinals.values().iter())
+                .map(|(commit_lsn, tx_ordinal)| format!("{commit_lsn:016x}/{tx_ordinal:016x}"));
+            let table_rows = record_batch_to_table_rows(&group.rows.batch);
+
+            match (group.change, group.row_image) {
+                (ChangeKind::Insert, RowImage::New) | (ChangeKind::Update, RowImage::New) => {
+                    for (mut table_row, sequence_key) in table_rows.into_iter().zip(sequence_keys) {
+                        table_row
+                            .values_mut()
+                            .push(BigQueryOperationType::Upsert.into_cell());
+                        table_row.values_mut().push(Cell::String(sequence_key));
+                        bigquery_rows.push(BigQueryTableRow::try_from(table_row)?);
+                    }
+                }
+                (ChangeKind::Delete, RowImage::Old { .. }) => {
+                    for (mut table_row, sequence_key) in table_rows.into_iter().zip(sequence_keys) {
+                        table_row
+                            .values_mut()
+                            .push(BigQueryOperationType::Delete.into_cell());
+                        table_row.values_mut().push(Cell::String(sequence_key));
+                        bigquery_rows.push(BigQueryTableRow::try_from(table_row)?);
+                    }
+                }
+                (ChangeKind::Update, RowImage::Old { .. })
+                | (ChangeKind::Delete, RowImage::New)
+                | (ChangeKind::Insert, RowImage::Old { .. }) => {}
+            }
+        }
+
+        Ok(bigquery_rows)
+    }
+
+    /// Prepares writable CDC groups for direct Arrow appends.
+    fn prepare_stream_arrow_batches(
+        groups: &[ChangeArrowBatch],
+    ) -> EtlResult<Option<Vec<PreparedBigQueryArrowBatch>>> {
+        let mut prepared_batches = Vec::new();
+
+        for group in groups {
+            match (group.change, group.row_image) {
+                (ChangeKind::Insert, RowImage::New)
+                | (ChangeKind::Update, RowImage::New)
+                | (ChangeKind::Delete, RowImage::Old { .. }) => {
+                    let Some(prepared_batch) = prepare_stream_arrow_batch(group)? else {
+                        return Ok(None);
+                    };
+                    prepared_batches.push(prepared_batch);
+                }
+                (ChangeKind::Update, RowImage::Old { .. })
+                | (ChangeKind::Delete, RowImage::New)
+                | (ChangeKind::Insert, RowImage::Old { .. }) => {}
+            }
+        }
+
+        Ok(Some(prepared_batches))
+    }
+
+    /// Appends validated rows to an already prepared BigQuery table.
+    async fn append_validated_rows_to_prepared_table(
+        &self,
+        batch_index: usize,
+        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+        table_descriptor: TableDescriptor,
+        table_rows: Vec<BigQueryTableRow>,
+    ) -> EtlResult<(usize, usize)> {
+        let target_batches = calculate_target_batches_for_table_copy(&table_rows)?;
+        let table_rows_batches = split_table_rows(table_rows, target_batches);
+        let sequenced_bigquery_table_id_string = sequenced_bigquery_table_id.to_string();
+        let mut append_requests = Vec::with_capacity(table_rows_batches.len());
+
+        for (request_index, table_rows) in table_rows_batches.into_iter().enumerate() {
+            if table_rows.is_empty() {
+                continue;
+            }
+
+            histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
+
+            let append_request = self.client.create_batch_append_request(
+                self.pipeline_id,
+                batch_index + request_index,
+                &self.dataset_id,
+                &sequenced_bigquery_table_id_string,
+                table_descriptor.clone(),
+                table_rows,
+            )?;
+            append_requests.push(append_request);
+        }
+
+        if append_requests.is_empty() {
+            return Ok((0, 0));
+        }
+
+        self.client.append_table_batches(append_requests).await
+    }
+
     /// Writes table rows with CDC metadata for non-event streaming operations.
     ///
     /// Adds an `Upsert` operation type to each row, splits them into optimal batches based on
@@ -517,62 +659,79 @@ where
         let (sequenced_bigquery_table_id, table_descriptor) =
             self.prepare_table_for_streaming(&table_id, false).await?;
 
-        // Add CDC operation type to all rows (no lock needed).
-        let table_rows = table_rows
-            .into_iter()
-            .map(|mut table_row| {
-                table_row
-                    .values_mut()
-                    .push(BigQueryOperationType::Upsert.into_cell());
+        let table_rows = Self::table_rows_to_bigquery_upserts(table_rows)?;
+        #[allow(unused_variables)]
+        let (bytes_sent, bytes_received) = self
+            .append_validated_rows_to_prepared_table(
+                0,
+                &sequenced_bigquery_table_id,
+                table_descriptor,
+                table_rows,
+            )
+            .await?;
 
-                BigQueryTableRow::try_from(table_row)
-            })
-            .collect::<EtlResult<Vec<BigQueryTableRow>>>()?;
-
-        // Calculate optimal target batches based on estimated row size.
-        let target_batches = calculate_target_batches_for_table_copy(&table_rows)?;
-
-        // Split table rows into optimal batches for parallel execution.
-        let table_rows_batches = split_table_rows(table_rows, target_batches);
-        let sequenced_bigquery_table_id_string = sequenced_bigquery_table_id.to_string();
-
-        // Create table batches from the split rows.
-        let mut append_requests = Vec::with_capacity(table_rows_batches.len());
-        for (batch_index, table_rows) in table_rows_batches.into_iter().enumerate() {
-            if !table_rows.is_empty() {
-                histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
-
-                let append_request = self.client.create_batch_append_request(
-                    self.pipeline_id,
-                    batch_index,
-                    &self.dataset_id,
-                    &sequenced_bigquery_table_id_string,
-                    table_descriptor.clone(),
-                    table_rows,
-                )?;
-                append_requests.push(append_request);
-            }
-        }
-
-        if !append_requests.is_empty() {
-            #[allow(unused_variables)]
-            let (bytes_sent, bytes_received) =
-                self.client.append_table_batches(append_requests).await?;
-
-            #[cfg(feature = "egress")]
-            log_processed_bytes(
-                Self::name(),
-                PROCESSING_TYPE_TABLE_COPY,
-                bytes_sent as u64,
-                bytes_received as u64,
-            );
-        }
+        #[cfg(feature = "egress")]
+        log_processed_bytes(
+            Self::name(),
+            PROCESSING_TYPE_TABLE_COPY,
+            bytes_sent as u64,
+            bytes_received as u64,
+        );
 
         Ok(())
     }
 
     /// Writes one destination-facing snapshot batch.
     async fn write_snapshot_batch_inner(&self, batch: TableArrowBatch) -> EtlResult<()> {
+        if self.arrow_writes_enabled()
+            && let Some(prepared_batch) = prepare_snapshot_arrow_batch(&batch)?
+        {
+            let (sequenced_bigquery_table_id, _) = self
+                .prepare_table_for_streaming(&batch.table_id, false)
+                .await?;
+            let sequenced_bigquery_table_id_string = sequenced_bigquery_table_id.to_string();
+
+            if prepared_batch.batch.num_rows() == 0 {
+                return Ok(());
+            }
+
+            match self
+                .client
+                .append_arrow_batches(
+                    self.pipeline_id,
+                    0,
+                    &self.dataset_id,
+                    &sequenced_bigquery_table_id_string,
+                    vec![prepared_batch],
+                )
+                .await
+            {
+                Ok((bytes_sent, bytes_received)) => {
+                    #[cfg(not(feature = "egress"))]
+                    let _ = (bytes_sent, bytes_received);
+
+                    #[cfg(feature = "egress")]
+                    log_processed_bytes(
+                        Self::name(),
+                        PROCESSING_TYPE_TABLE_COPY,
+                        bytes_sent as u64,
+                        bytes_received as u64,
+                    );
+
+                    return Ok(());
+                }
+                Err(ArrowAppendError::Fallback(error)) => {
+                    warn!(
+                        table_id = batch.table_id.0,
+                        error = %error,
+                        "bigquery arrow append rejected, falling back to row writes"
+                    );
+                    self.disable_arrow_writes();
+                }
+                Err(ArrowAppendError::Fatal(error)) => return Err(error),
+            }
+        }
+
         let table_rows = record_batch_to_table_rows(&batch.batch);
         self.write_table_rows(batch.table_id, table_rows).await
     }
@@ -847,7 +1006,7 @@ where
         let mut batch_iter = batches.into_iter().peekable();
 
         while batch_iter.peek().is_some() {
-            let mut table_id_to_table_rows: HashMap<TableId, Vec<BigQueryTableRow>> =
+            let mut table_id_to_change_groups: HashMap<TableId, Vec<ChangeArrowBatch>> =
                 HashMap::new();
 
             while let Some(batch) = batch_iter.peek() {
@@ -860,61 +1019,101 @@ where
                     unreachable!("truncate batches are handled separately");
                 };
 
-                for group in change_set.groups {
-                    let sequence_keys = group
-                        .commit_lsns
-                        .values()
-                        .iter()
-                        .zip(group.tx_ordinals.values().iter())
-                        .map(|(commit_lsn, tx_ordinal)| {
-                            format!("{commit_lsn:016x}/{tx_ordinal:016x}")
-                        })
-                        .collect::<Vec<_>>();
-                    let table_rows = record_batch_to_table_rows(&group.rows.batch);
-
-                    match (group.change, group.row_image) {
-                        (ChangeKind::Insert, RowImage::New)
-                        | (ChangeKind::Update, RowImage::New) => {
-                            let target_rows: &mut Vec<BigQueryTableRow> = table_id_to_table_rows
-                                .entry(change_set.table_id)
-                                .or_default();
-                            for (mut table_row, sequence_key) in
-                                table_rows.into_iter().zip(sequence_keys.into_iter())
-                            {
-                                table_row
-                                    .values_mut()
-                                    .push(BigQueryOperationType::Upsert.into_cell());
-                                table_row.values_mut().push(Cell::String(sequence_key));
-                                target_rows.push(BigQueryTableRow::try_from(table_row)?);
-                            }
-                        }
-                        (ChangeKind::Delete, RowImage::Old { .. }) => {
-                            let target_rows: &mut Vec<BigQueryTableRow> = table_id_to_table_rows
-                                .entry(change_set.table_id)
-                                .or_default();
-                            for (mut table_row, sequence_key) in
-                                table_rows.into_iter().zip(sequence_keys.into_iter())
-                            {
-                                table_row
-                                    .values_mut()
-                                    .push(BigQueryOperationType::Delete.into_cell());
-                                table_row.values_mut().push(Cell::String(sequence_key));
-                                target_rows.push(BigQueryTableRow::try_from(table_row)?);
-                            }
-                        }
-                        (ChangeKind::Update, RowImage::Old { .. }) => {}
-                        (ChangeKind::Delete, RowImage::New)
-                        | (ChangeKind::Insert, RowImage::Old { .. }) => {}
-                    }
-                }
+                table_id_to_change_groups
+                    .entry(change_set.table_id)
+                    .or_default()
+                    .extend(change_set.groups);
             }
 
-            if !table_id_to_table_rows.is_empty() {
-                let mut append_requests = Vec::with_capacity(table_id_to_table_rows.len());
+            if !table_id_to_change_groups.is_empty() {
+                let mut append_requests = Vec::new();
+                #[cfg(feature = "egress")]
+                let mut total_bytes_sent = 0;
+                #[cfg(feature = "egress")]
+                let mut total_bytes_received = 0;
 
-                for (batch_index, (table_id, table_rows)) in
-                    table_id_to_table_rows.into_iter().enumerate()
+                for (batch_index, (table_id, groups)) in
+                    table_id_to_change_groups.into_iter().enumerate()
                 {
+                    let mut table_rows = None;
+
+                    if self.arrow_writes_enabled()
+                        && let Some(prepared_batches) = Self::prepare_stream_arrow_batches(&groups)?
+                    {
+                        if prepared_batches.is_empty() {
+                            continue;
+                        }
+
+                        let (sequenced_bigquery_table_id, table_descriptor) =
+                            self.prepare_table_for_streaming(&table_id, true).await?;
+                        let sequenced_bigquery_table_id_string =
+                            sequenced_bigquery_table_id.to_string();
+
+                        match self
+                            .client
+                            .append_arrow_batches(
+                                self.pipeline_id,
+                                batch_index,
+                                &self.dataset_id,
+                                &sequenced_bigquery_table_id_string,
+                                prepared_batches,
+                            )
+                            .await
+                        {
+                            Ok((bytes_sent, bytes_received)) => {
+                                #[cfg(not(feature = "egress"))]
+                                let _ = (bytes_sent, bytes_received);
+
+                                #[cfg(feature = "egress")]
+                                {
+                                    total_bytes_sent += bytes_sent;
+                                    total_bytes_received += bytes_received;
+                                }
+                                continue;
+                            }
+                            Err(ArrowAppendError::Fallback(error)) => {
+                                warn!(
+                                    table_id = table_id.0,
+                                    error = %error,
+                                    "bigquery arrow append rejected, falling back to row writes"
+                                );
+                                self.disable_arrow_writes();
+                                table_rows = Some(Self::change_groups_to_bigquery_rows(&groups)?);
+
+                                let Some(table_rows) = table_rows.take() else {
+                                    continue;
+                                };
+                                if table_rows.is_empty() {
+                                    continue;
+                                }
+
+                                histogram!(
+                                    ETL_BQ_APPEND_BATCHES_BATCH_SIZE,
+                                    "pipeline_id" => self.pipeline_id.to_string()
+                                )
+                                .record(table_rows.len() as f64);
+
+                                let append_request = self.client.create_batch_append_request(
+                                    self.pipeline_id,
+                                    batch_index,
+                                    &self.dataset_id,
+                                    &sequenced_bigquery_table_id_string,
+                                    table_descriptor,
+                                    table_rows,
+                                )?;
+                                append_requests.push(append_request);
+                                continue;
+                            }
+                            Err(ArrowAppendError::Fatal(error)) => return Err(error),
+                        }
+                    }
+
+                    let table_rows =
+                        table_rows.unwrap_or(Self::change_groups_to_bigquery_rows(&groups)?);
+                    if table_rows.is_empty() {
+                        continue;
+                    }
+
                     let (sequenced_bigquery_table_id, table_descriptor) =
                         self.prepare_table_for_streaming(&table_id, true).await?;
                     let sequenced_bigquery_table_id_string =
@@ -931,23 +1130,32 @@ where
                         batch_index,
                         &self.dataset_id,
                         &sequenced_bigquery_table_id_string,
-                        table_descriptor.clone(),
+                        table_descriptor,
                         table_rows,
                     )?;
                     append_requests.push(append_request);
                 }
 
                 if !append_requests.is_empty() {
-                    #[allow(unused_variables)]
                     let (bytes_sent, bytes_received) =
                         self.client.append_table_batches(append_requests).await?;
+                    #[cfg(not(feature = "egress"))]
+                    let _ = (bytes_sent, bytes_received);
 
                     #[cfg(feature = "egress")]
+                    {
+                        total_bytes_sent += bytes_sent;
+                        total_bytes_received += bytes_received;
+                    }
+                }
+
+                #[cfg(feature = "egress")]
+                if total_bytes_sent > 0 || total_bytes_received > 0 {
                     log_processed_bytes(
                         Self::name(),
                         PROCESSING_TYPE_STREAMING,
-                        bytes_sent as u64,
-                        bytes_received as u64,
+                        total_bytes_sent as u64,
+                        total_bytes_received as u64,
                     );
                 }
             }

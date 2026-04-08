@@ -1,3 +1,5 @@
+mod arrow;
+mod auth;
 mod client;
 mod core;
 mod encoding;

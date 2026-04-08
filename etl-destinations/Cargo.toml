@@ -23,14 +23,22 @@ ducklake = [
     "dep:url",
 ]
 bigquery = [
+    "dep:arrow",
+    "dep:async-trait",
     "dep:gcp-bigquery-client",
+    "dep:hyper-util",
     "dep:prost",
     "dep:rand",
+    "dep:serde",
+    "dep:serde_json",
     "dep:tonic",
+    "dep:tonic-prost",
+    "dep:tokio-stream",
     "dep:tracing",
     "dep:tokio",
     "dep:base64",
     "dep:metrics",
+    "dep:uuid",
 ]
 iceberg = [
     "dep:iceberg",
@@ -53,13 +61,14 @@ test-utils = ["dep:uuid"]
 [dependencies]
 etl = { workspace = true }
 
-arrow = { workspace = true, optional = true }
+arrow = { workspace = true, optional = true, features = ["ipc"] }
 arrow57 = { package = "arrow", version = "=57.3.0", optional = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 chrono = { workspace = true }
 duckdb = { workspace = true, optional = true, features = ["appender-arrow", "bundled", "json", "parquet", "r2d2"] }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
+hyper-util = { version = "0.1.20", optional = true }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
@@ -75,7 +84,9 @@ serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "sync", "time"] }
 tokio-postgres = { workspace = true, optional = true }
-tonic = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true, features = ["channel", "gzip", "tls-aws-lc", "tls-webpki-roots"] }
+tonic-prost = { version = "0.14.2", optional = true }
 tracing = { workspace = true, optional = true, default-features = true }
 url = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true, features = ["v4"] }
