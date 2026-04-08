@@ -23,7 +23,7 @@ use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
@@ -102,6 +102,9 @@ pub struct DuckLakeDestination<S> {
     manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
+    /// Shared gate that keeps the global checkpoint from overlapping active
+    /// foreground or table-scoped maintenance mutations.
+    checkpoint_gate: Arc<RwLock<()>>,
     streaming_tasks: DestinationTaskSet,
     maintenance_worker: Arc<Option<DuckLakeMaintenanceWorker>>,
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
@@ -292,11 +295,13 @@ where
             pool_size, "ducklake write pool ready"
         );
         let created_tables = Arc::default();
+        let checkpoint_gate = Arc::new(RwLock::new(()));
         let mut destination = Self {
             #[cfg(feature = "test-utils")]
             manager,
             pool: Arc::new(pool),
             blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
+            checkpoint_gate: Arc::clone(&checkpoint_gate),
             streaming_tasks: DestinationTaskSet::new(),
             maintenance_worker: Arc::new(None),
             metrics_sampler: Arc::new(None),
@@ -329,6 +334,7 @@ where
                     #[cfg(feature = "test-utils")]
                     open_count: Arc::new(AtomicUsize::new(0)),
                 },
+                Arc::clone(&checkpoint_gate),
                 Arc::clone(&destination.table_write_slots),
             )?
             .into(),
@@ -381,6 +387,7 @@ where
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.ensure_applied_batches_table_exists().await?;
         self.ensure_streaming_progress_table_exists().await?;
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
         self.run_duckdb_blocking(
             DuckDbBlockingOperationKind::Foreground,
             move |conn| -> EtlResult<()> {
@@ -520,6 +527,7 @@ where
         // Here we can have concurrent table writers because it's INSERTs only and CDC (write_events) won't start before the copy phase is complete
         self.ensure_applied_batches_table_exists().await?;
         let table_schema = self.get_table_schema(table_id).await?;
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
         let prepared_batch = prepare_copy_table_batch(&table_schema, table_name, table_rows)?;
         let table_name = prepared_batch.table_name().to_owned();
         apply_table_batch_with_retry(
@@ -634,6 +642,7 @@ where
                     let table_name = self.ensure_table_exists(table_id).await?;
                     let table_schema = self.get_table_schema(table_id).await?;
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+                    let checkpoint_gate = Arc::clone(&self.checkpoint_gate);
                     let pool = Arc::clone(&self.pool);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     let destination_table_name = table_name.clone();
@@ -641,6 +650,7 @@ where
 
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
+                        let _checkpoint_guard = checkpoint_gate.read_owned().await;
                         let last_sequence_key =
                             read_table_streaming_progress_sequence_key_blocking(
                                 Arc::clone(&pool),
@@ -718,10 +728,12 @@ where
                 for (table_id, truncates) in truncate_table_ids {
                     let table_name = self.ensure_table_exists(table_id).await?;
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+                    let checkpoint_gate = Arc::clone(&self.checkpoint_gate);
                     let pool = Arc::clone(&self.pool);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
+                        let _checkpoint_guard = checkpoint_gate.read_owned().await;
                         let last_sequence_key =
                             read_table_streaming_progress_sequence_key_blocking(
                                 Arc::clone(&pool),
@@ -816,6 +828,7 @@ where
 
         let created_tables = Arc::clone(&self.created_tables);
         let table_name_clone = table_name.clone();
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
 
         run_duckdb_blocking(
             Arc::clone(&self.pool),
@@ -848,6 +861,7 @@ where
 
     /// Ensures the ETL-managed replay marker table exists.
     async fn ensure_applied_batches_table_exists(&self) -> EtlResult<()> {
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
         ensure_applied_batches_table_exists(
             Arc::clone(&self.pool),
             Arc::clone(&self.blocking_slots),
@@ -859,6 +873,7 @@ where
 
     /// Ensures the ETL-managed streaming progress table exists.
     async fn ensure_streaming_progress_table_exists(&self) -> EtlResult<()> {
+        let _checkpoint_guard = self.acquire_mutation_guard().await;
         ensure_streaming_progress_table_exists(
             Arc::clone(&self.pool),
             Arc::clone(&self.blocking_slots),
@@ -910,6 +925,12 @@ where
                 "DuckLake table write semaphore closed"
             )
         })
+    }
+
+    /// Acquires shared mutation access so the global checkpoint cannot start in
+    /// the middle of a foreground write sequence.
+    async fn acquire_mutation_guard(&self) -> OwnedRwLockReadGuard<()> {
+        Arc::clone(&self.checkpoint_gate).read_owned().await
     }
 
     /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a
