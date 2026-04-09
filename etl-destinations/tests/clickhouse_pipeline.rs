@@ -12,7 +12,7 @@ use std::sync::Once;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use crate::support::clickhouse::AllTypesRow;
+use crate::support::clickhouse::{AllTypesRow, BoundaryValuesRow};
 
 mod support;
 
@@ -406,5 +406,197 @@ async fn updates_are_streamed_to_clickhouse() {
     assert!(
         update_row.cdc_lsn > insert_row.cdc_lsn,
         "streamed update should have a positive LSN"
+    );
+}
+
+// ── Boundary-values test ─────────────────────────────────────────────────────
+
+const BOUNDARY_VALUES_SELECT: &str = concat!(
+    "SELECT id, nullable_text, nullable_int, ",
+    "int_array_col, text_array_col, ",
+    "cdc_operation ",
+    "FROM \"test_boundary__values\" ",
+    "ORDER BY id",
+);
+
+/// Tests that edge-case values survive the Postgres → ClickHouse pipeline
+/// without data loss or corruption.
+///
+/// # GIVEN
+///
+/// A Postgres table with nullable scalar columns and nullable array columns,
+/// populated with four rows that exercise encoding boundary conditions:
+///
+/// 1. **All NULLs** — nullable scalars are NULL, arrays are empty.
+/// 2. **NULL elements inside arrays** — `{1, NULL, 3}`, `{'a', NULL, 'c'}`.
+/// 3. **Empty strings** — a present-but-empty text value next to a NULL integer,
+///    plus single-element arrays (varint length = 1).
+/// 4. **Multi-byte UTF-8** — emoji and CJK characters, verifying that the
+///    RowBinary varint encodes byte length (not character count) correctly.
+///
+/// # WHEN
+///
+/// The pipeline runs initial table copy from Postgres to ClickHouse.
+///
+/// # THEN
+///
+/// Every row in ClickHouse exactly matches what was inserted into Postgres:
+/// - SQL NULLs remain NULL (not empty string, not zero).
+/// - Empty strings remain empty strings (not NULL).
+/// - Array elements preserve their position, including interior NULLs.
+/// - Multi-byte text round-trips byte-for-byte.
+#[tokio::test(flavor = "multi_thread")]
+async fn boundary_values_table_copy() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // ── GIVEN: Postgres source with boundary-value rows ──────────────────────
+
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("boundary_values");
+
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("nullable_text", "text"),      // nullable
+                ("nullable_int", "integer"),    // nullable
+                ("int_array_col", "integer[]"), // Array(Nullable(Int32))
+                ("text_array_col", "text[]"),   // Array(Nullable(String))
+            ],
+        )
+        .await
+        .expect("Failed to create boundary_values table");
+
+    let publication_name = "test_pub_ch_boundary";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create publication");
+
+    // Row 1: all nullable columns are NULL, arrays are empty.
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (nullable_text, nullable_int, int_array_col, text_array_col) \
+             VALUES (NULL, NULL, ARRAY[]::integer[], ARRAY[]::text[])",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert row 1 (all NULLs)");
+
+    // Row 2: arrays with interior NULL elements — the element at index 1 is NULL
+    // while surrounding elements are present.
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (nullable_text, nullable_int, int_array_col, text_array_col) \
+             VALUES ('present', 42, ARRAY[1, NULL, 3]::integer[], ARRAY['a', NULL, 'c']::text[])",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert row 2 (NULL array elements)");
+
+    // Row 3: empty string (not NULL) for text, NULL for integer, and
+    // single-element arrays (varint length byte = 0x01).
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (nullable_text, nullable_int, int_array_col, text_array_col) \
+             VALUES ('', NULL, ARRAY[99]::integer[], ARRAY['only']::text[])",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert row 3 (empty string + single-element arrays)");
+
+    // Row 4: multi-byte UTF-8 — emoji (4 bytes per char) and CJK (3 bytes per char).
+    // The RowBinary varint encodes byte length, not character count.
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (nullable_text, nullable_int, int_array_col, text_array_col) \
+             VALUES ('hello 🌍🚀', 0, ARRAY[1, 2], ARRAY['日本語', '中文'])",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert row 4 (multi-byte UTF-8)");
+
+    // ── WHEN: pipeline copies data to ClickHouse ─────────────────────────────
+
+    let ch_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = ch_db.build_destination(pipeline_id, store.clone());
+
+    let table_ready = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // ── THEN: ClickHouse data matches Postgres exactly ───────────────────────
+
+    let rows: Vec<BoundaryValuesRow> = ch_db.query(BOUNDARY_VALUES_SELECT).await;
+    assert_eq!(rows.len(), 4, "expected 4 rows in ClickHouse");
+
+    // Row 1: NULL scalars stay NULL, empty arrays stay empty.
+    let r = &rows[0];
+    assert_eq!(
+        r.nullable_text, None,
+        "NULL text must not become empty string"
+    );
+    assert_eq!(r.nullable_int, None, "NULL int must not become zero");
+    assert!(r.int_array_col.is_empty());
+    assert!(r.text_array_col.is_empty());
+
+    // Row 2: interior NULLs preserved in position.
+    let r = &rows[1];
+    assert_eq!(r.nullable_text.as_deref(), Some("present"));
+    assert_eq!(r.nullable_int, Some(42));
+    assert_eq!(
+        r.int_array_col,
+        vec![Some(1), None, Some(3)],
+        "interior NULL in integer array must be preserved"
+    );
+    assert_eq!(
+        r.text_array_col,
+        vec![Some("a".to_string()), None, Some("c".to_string())],
+        "interior NULL in text array must be preserved"
+    );
+
+    // Row 3: empty string is distinct from NULL.
+    let r = &rows[2];
+    assert_eq!(
+        r.nullable_text.as_deref(),
+        Some(""),
+        "empty string must round-trip as empty string, not NULL"
+    );
+    assert_eq!(r.nullable_int, None);
+    assert_eq!(r.int_array_col, vec![Some(99)], "single-element array");
+    assert_eq!(
+        r.text_array_col,
+        vec![Some("only".to_string())],
+        "single-element array"
+    );
+
+    // Row 4: multi-byte UTF-8 preserved byte-for-byte.
+    let r = &rows[3];
+    assert_eq!(
+        r.nullable_text.as_deref(),
+        Some("hello 🌍🚀"),
+        "multi-byte UTF-8 must round-trip exactly"
+    );
+    assert_eq!(r.nullable_int, Some(0), "zero must not become NULL");
+    assert_eq!(
+        r.text_array_col,
+        vec![Some("日本語".to_string()), Some("中文".to_string())],
+        "multi-byte UTF-8 in arrays must round-trip exactly"
     );
 }

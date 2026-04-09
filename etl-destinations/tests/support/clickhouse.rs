@@ -76,3 +76,17 @@ impl PartialEq for AllTypesRow {
 }
 
 impl Eq for AllTypesRow {}
+
+/// A row read back from the ClickHouse `boundary_values` test table.
+///
+/// Covers edge cases that the `all_types` test does not: nullable scalars,
+/// NULL array elements, empty strings, and multi-byte UTF-8.
+#[derive(clickhouse::Row, serde::Deserialize, Debug)]
+pub struct BoundaryValuesRow {
+    pub id: i64,
+    pub nullable_text: Option<String>,
+    pub nullable_int: Option<i32>,
+    pub int_array_col: Vec<Option<i32>>,
+    pub text_array_col: Vec<Option<String>>,
+    pub cdc_operation: String,
+}
