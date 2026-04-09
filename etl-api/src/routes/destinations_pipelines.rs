@@ -23,7 +23,7 @@ use crate::db::pipelines::{
     MAX_PIPELINES_PER_TENANT, PipelinesDbError, count_pipelines_for_tenant, read_pipeline,
 };
 use crate::db::sources::SourcesDbError;
-use crate::feature_flags::get_max_pipelines_per_tenant;
+use crate::feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant};
 use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
 use crate::validation::ValidationError;
 
@@ -207,7 +207,7 @@ pub async fn create_destination_and_pipeline(
     pool: Data<PgPool>,
     destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
-    feature_flags_client: Option<Data<configcat::Client>>,
+    feature_flags_client: Option<Data<FeatureFlagsClient>>,
 ) -> Result<impl Responder, DestinationPipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let destination_and_pipeline = destination_and_pipeline.into_inner();

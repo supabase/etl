@@ -19,6 +19,9 @@ pub struct ApiConfig {
     pub database: PgConnectionConfig,
     /// Application server settings.
     pub application: ApplicationSettings,
+    /// Kubernetes-specific API configuration.
+    #[serde(default)]
+    pub k8s: K8sConfig,
     /// Source database configuration and validation settings.
     #[serde(default)]
     pub source: SourceConfig,
@@ -41,6 +44,27 @@ pub struct ApiConfig {
     /// If provided, enables ConfigCat feature flag evaluation.
     /// If `None`, the API operates without feature flag support.
     pub configcat_sdk_key: Option<String>,
+}
+
+/// Kubernetes-specific API configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct K8sConfig {
+    /// Optional request sizing overrides for replicator workloads.
+    #[serde(default)]
+    pub replicator_resources: ReplicatorResourcesConfig,
+}
+
+/// Optional request sizing overrides for replicator workloads.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ReplicatorResourcesConfig {
+    /// Override for the replicator memory request, in Mi.
+    pub replicator_memory_request_mib: Option<i32>,
+    /// Override for the replicator CPU request, in millicores.
+    pub replicator_cpu_request_millicores: Option<i32>,
+    /// Override for the Vector sidecar memory request, in Mi.
+    pub vector_memory_request_mib: Option<i32>,
+    /// Override for the Vector sidecar CPU request, in millicores.
+    pub vector_cpu_request_millicores: Option<i32>,
 }
 
 /// Configuration for source database connections and behavior.

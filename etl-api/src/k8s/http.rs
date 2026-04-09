@@ -1,3 +1,4 @@
+use crate::config::K8sConfig;
 use crate::configs::log::LogLevel;
 use crate::k8s::{DestinationType, PodStatus, ReplicatorConfigMapFile};
 use crate::k8s::{K8sClient, K8sError, PodPhase};
@@ -74,25 +75,22 @@ pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
 /// Label used to identify replicator pods.
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 
-/// Replicator memory request tuned for `c8gn.4xlarge` instances in prod.
-const REPLICATOR_MEMORY_REQUEST_PROD: i32 = 2000;
-/// Replicator CPU request tuned for `c8gn.4xlarge` instances in prod.
-const REPLICATOR_CPU_REQUEST_PROD: i32 = 500;
-
-/// Replicator memory request tuned for `c8gn.medium` instances in staging.
-const REPLICATOR_MEMORY_REQUEST_STAGING: i32 = 250;
-/// Replicator CPU request tuned for `c8gn.medium` instances in staging.
-const REPLICATOR_CPU_REQUEST_STAGING: i32 = 125;
-
-/// Vector memory request tuned for staging environments.
-const VECTOR_MEMORY_REQUEST_STAGING: i32 = 192;
-/// Vector CPU request tuned for staging environments.
-const VECTOR_CPU_REQUEST_STAGING: i32 = 75;
-
-/// Vector memory request tuned for production environments.
-const VECTOR_MEMORY_REQUEST_PROD: i32 = 256;
-/// Vector CPU request tuned for production environments.
-const VECTOR_CPU_REQUEST_PROD: i32 = 100;
+/// Default replicator memory request in prod, in Mi.
+const REPLICATOR_MEMORY_REQUEST_PROD_DEFAULT: i32 = 500;
+/// Default replicator CPU request in prod, in millicores.
+const REPLICATOR_CPU_REQUEST_PROD_DEFAULT: i32 = 500;
+/// Default replicator memory request outside prod, in Mi.
+const REPLICATOR_MEMORY_REQUEST_NON_PROD_DEFAULT: i32 = 250;
+/// Default replicator CPU request outside prod, in millicores.
+const REPLICATOR_CPU_REQUEST_NON_PROD_DEFAULT: i32 = 125;
+/// Default Vector memory request in prod, in Mi.
+const VECTOR_MEMORY_REQUEST_PROD_DEFAULT: i32 = 256;
+/// Default Vector CPU request in prod, in millicores.
+const VECTOR_CPU_REQUEST_PROD_DEFAULT: i32 = 100;
+/// Default Vector memory request outside prod, in Mi.
+const VECTOR_MEMORY_REQUEST_NON_PROD_DEFAULT: i32 = 192;
+/// Default Vector CPU request outside prod, in millicores.
+const VECTOR_CPU_REQUEST_NON_PROD_DEFAULT: i32 = 75;
 
 /// Memory limit multiplier (request × 1.2 = limit).
 ///
@@ -116,24 +114,54 @@ struct ReplicatorResourceConfig {
 }
 
 impl ReplicatorResourceConfig {
-    /// Loads the runtime limits for the current environment.
-    ///
-    /// Limits are computed from requests using multipliers:
-    /// - Memory: request × 1.2 = limit
-    /// - CPU: request × 2.0 = limit
+    /// Builds runtime limits using default config-backed sizing for the environment.
+    #[cfg(test)]
     fn load(environment: &Environment) -> Result<Self, K8sError> {
-        let (replicator_memory_request, replicator_cpu_request) = match environment {
-            Environment::Prod => (REPLICATOR_MEMORY_REQUEST_PROD, REPLICATOR_CPU_REQUEST_PROD),
+        Self::load_with_overrides(environment, &K8sConfig::default())
+    }
+
+    /// Builds runtime limits from environment defaults with optional config overrides.
+    fn load_with_overrides(
+        environment: &Environment,
+        k8s_config: &K8sConfig,
+    ) -> Result<Self, K8sError> {
+        let (default_replicator_memory_request, default_replicator_cpu_request) = match environment
+        {
+            Environment::Prod => (
+                REPLICATOR_MEMORY_REQUEST_PROD_DEFAULT,
+                REPLICATOR_CPU_REQUEST_PROD_DEFAULT,
+            ),
             _ => (
-                REPLICATOR_MEMORY_REQUEST_STAGING,
-                REPLICATOR_CPU_REQUEST_STAGING,
+                REPLICATOR_MEMORY_REQUEST_NON_PROD_DEFAULT,
+                REPLICATOR_CPU_REQUEST_NON_PROD_DEFAULT,
             ),
         };
-
-        let (vector_memory_request, vector_cpu_request) = match environment {
-            Environment::Prod => (VECTOR_MEMORY_REQUEST_PROD, VECTOR_CPU_REQUEST_PROD),
-            _ => (VECTOR_MEMORY_REQUEST_STAGING, VECTOR_CPU_REQUEST_STAGING),
+        let (default_vector_memory_request, default_vector_cpu_request) = match environment {
+            Environment::Prod => (
+                VECTOR_MEMORY_REQUEST_PROD_DEFAULT,
+                VECTOR_CPU_REQUEST_PROD_DEFAULT,
+            ),
+            _ => (
+                VECTOR_MEMORY_REQUEST_NON_PROD_DEFAULT,
+                VECTOR_CPU_REQUEST_NON_PROD_DEFAULT,
+            ),
         };
+        let replicator_memory_request = k8s_config
+            .replicator_resources
+            .replicator_memory_request_mib
+            .unwrap_or(default_replicator_memory_request);
+        let replicator_cpu_request = k8s_config
+            .replicator_resources
+            .replicator_cpu_request_millicores
+            .unwrap_or(default_replicator_cpu_request);
+        let vector_memory_request = k8s_config
+            .replicator_resources
+            .vector_memory_request_mib
+            .unwrap_or(default_vector_memory_request);
+        let vector_cpu_request = k8s_config
+            .replicator_resources
+            .vector_cpu_request_millicores
+            .unwrap_or(default_vector_cpu_request);
 
         let replicator_memory_limit =
             ((replicator_memory_request as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
@@ -166,6 +194,7 @@ pub struct HttpK8sClient {
     config_maps_api: Api<ConfigMap>,
     stateful_sets_api: Api<StatefulSet>,
     pods_api: Api<Pod>,
+    k8s_config: K8sConfig,
 }
 
 impl HttpK8sClient {
@@ -173,7 +202,7 @@ impl HttpK8sClient {
     ///
     /// Prefers in-cluster configuration and falls back to the local kubeconfig
     /// when running outside the cluster.
-    pub fn new(client: Client) -> Result<HttpK8sClient, K8sError> {
+    pub fn new(client: Client, k8s_config: K8sConfig) -> Result<HttpK8sClient, K8sError> {
         let secrets_api: Api<Secret> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let config_maps_api: Api<ConfigMap> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let stateful_sets_api: Api<StatefulSet> =
@@ -185,6 +214,7 @@ impl HttpK8sClient {
             config_maps_api,
             stateful_sets_api,
             pods_api,
+            k8s_config,
         })
     }
 
@@ -489,7 +519,7 @@ impl K8sClient for HttpK8sClient {
     ) -> Result<(), K8sError> {
         debug!("patching stateful set");
 
-        let config = ReplicatorResourceConfig::load(&environment)?;
+        let config = ReplicatorResourceConfig::load_with_overrides(&environment, &self.k8s_config)?;
 
         let stateful_set_name = create_stateful_set_name(prefix);
 

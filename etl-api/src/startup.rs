@@ -15,7 +15,7 @@ use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::feature_flags::init_feature_flags;
+use crate::feature_flags::{FeatureFlagsClient, init_feature_flags};
 use crate::k8s::http::HttpK8sClient;
 use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache};
 use crate::{
@@ -126,8 +126,10 @@ impl Application {
             Err(_) => None,
         };
 
+        let feature_flags_client = init_feature_flags(config.configcat_sdk_key.as_deref())?;
+
         let k8s_client = match kube_client_result {
-            Some(client) => match HttpK8sClient::new(client) {
+            Some(client) => match HttpK8sClient::new(client, config.k8s.clone()) {
                 Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
                 Err(e) => {
                     warn!(
@@ -142,8 +144,6 @@ impl Application {
                 None
             }
         };
-
-        let feature_flags_client = init_feature_flags(config.configcat_sdk_key.as_deref())?;
 
         let trusted_root_certs_cache = k8s_client.clone().map(TrustedRootCertsCache::new);
 
@@ -220,7 +220,7 @@ pub fn run(
     encryption_key: encryption::EncryptionKey,
     k8s_client: Option<Arc<dyn K8sClient>>,
     trusted_root_certs_cache: Option<TrustedRootCertsCache>,
-    feature_flags_client: Option<configcat::Client>,
+    feature_flags_client: Option<FeatureFlagsClient>,
 ) -> Result<Server, anyhow::Error> {
     let prometheus_handle = web::ThinData(init_metrics_handle()?);
     let config = web::Data::new(config);
