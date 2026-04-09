@@ -8,8 +8,6 @@ use reqwest::StatusCode;
 use crate::support::mocks::tenants::create_tenant_with_id_and_name;
 use crate::support::test_app::spawn_test_app;
 
-mod support;
-
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_can_be_created() {
     init_test_tracing();

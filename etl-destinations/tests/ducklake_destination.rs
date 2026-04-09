@@ -1,5 +1,3 @@
-#![cfg(feature = "ducklake")]
-
 //! Integration tests for the DuckLake destination.
 //!
 //! These tests use a local DuckDB-backed DuckLake catalog (a `.ducklake`
@@ -50,8 +48,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::Url;
 
 use crate::support::ducklake::{ducklake_load_sql, open_verification_connection};
-
-mod support;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 

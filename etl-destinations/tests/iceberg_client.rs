@@ -1,5 +1,3 @@
-#![cfg(all(feature = "iceberg", feature = "test-utils"))]
-
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::test_utils::test_schema::assert_table_rows_equal_ignoring_size;
 use etl::types::{ArrayCell, Cell, ColumnSchema, TableRow, Type};
@@ -10,8 +8,6 @@ use etl_telemetry::tracing::init_test_tracing;
 use uuid::Uuid;
 
 use crate::support::iceberg::read_all_rows;
-
-mod support;
 
 #[tokio::test]
 async fn create_namespace() {

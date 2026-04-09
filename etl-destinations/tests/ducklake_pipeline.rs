@@ -1,5 +1,3 @@
-#![cfg(feature = "ducklake")]
-
 //! End-to-end integration tests for DuckLake using a real ETL [`Pipeline`].
 //!
 //! These tests use a local DuckDB-backed DuckLake catalog and verify the final
@@ -21,8 +19,6 @@ use std::path::{Path, PathBuf};
 use url::Url;
 
 use crate::support::ducklake::{ducklake_load_sql, open_verification_connection};
-
-mod support;
 
 /// Creates a persistent temp directory named after the test and prints its path.
 /// Returns the directory path kept on disk after the test completes.
