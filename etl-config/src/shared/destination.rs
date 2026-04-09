@@ -9,6 +9,10 @@ const fn default_ducklake_pool_size() -> u32 {
     DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Configuration for supported ETL data destinations.
 ///
 /// Specifies the destination type and its associated configuration parameters.
@@ -72,6 +76,9 @@ pub enum DestinationConfig {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
+        /// Enables DuckLake background maintenances.
+        #[serde(default)]
+        enable_maintenances: bool,
     },
 }
 
@@ -246,6 +253,9 @@ pub enum DestinationConfigWithoutSecrets {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
+        /// Enables DuckLake background maintenances.
+        #[serde(default, skip_serializing_if = "is_false")]
+        enable_maintenances: bool,
     },
 }
 
@@ -278,6 +288,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                enable_maintenances,
             } => DestinationConfigWithoutSecrets::Ducklake {
                 catalog_url,
                 data_path,
@@ -287,6 +298,7 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                enable_maintenances,
             },
         }
     }

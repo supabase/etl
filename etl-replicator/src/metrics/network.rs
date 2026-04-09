@@ -672,6 +672,7 @@ mod tests {
             s3_url_style: Some("path".to_string()),
             s3_use_ssl: Some(false),
             metadata_schema: None,
+            enable_maintenances: false,
         });
 
         let targets = build_network_probe_targets(&config);

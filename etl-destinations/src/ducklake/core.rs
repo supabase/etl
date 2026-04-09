@@ -83,6 +83,16 @@ pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) 
         && message.contains(&format!(r#"attempting to create table "{table_name}""#))
 }
 
+/// Optional runtime behavior for a [`DuckLakeDestination`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DuckLakeDestinationOptions {
+    /// Enables background DuckLake maintenances and the background metrics sampler.
+    ///
+    /// Defaults to `false` so small writes stay inlined until shutdown or an
+    /// explicit flush.
+    pub enable_maintenances: bool,
+}
+
 // ── destination ───────────────────────────────────────────────────────────────
 
 /// A DuckLake destination that implements the ETL [`Destination`] trait.
@@ -95,7 +105,7 @@ pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) 
 ///
 /// All writes are wrapped in explicit transactions so that each batch of rows
 /// is committed atomically in DuckLake while file materialization can be
-/// deferred to background maintenance.
+/// deferred until shutdown or background maintenance.
 #[derive(Clone)]
 pub struct DuckLakeDestination<S> {
     #[cfg(feature = "test-utils")]
@@ -246,6 +256,28 @@ where
         metadata_schema: Option<String>,
         store: S,
     ) -> EtlResult<Self> {
+        Self::new_with_options(
+            catalog_url,
+            data_path,
+            pool_size,
+            s3,
+            metadata_schema,
+            store,
+            DuckLakeDestinationOptions::default(),
+        )
+        .await
+    }
+
+    /// Creates a new DuckLake destination with explicit runtime options.
+    pub async fn new_with_options(
+        catalog_url: Url,
+        data_path: Url,
+        pool_size: u32,
+        s3: Option<S3Config>,
+        metadata_schema: Option<String>,
+        store: S,
+        options: DuckLakeDestinationOptions,
+    ) -> EtlResult<Self> {
         let initialization_started = Instant::now();
         register_metrics();
 
@@ -264,6 +296,7 @@ where
             catalog_scheme = catalog_url.scheme(),
             data_path_scheme = data_path.scheme(),
             metadata_schema = metadata_schema.as_deref().unwrap_or("default"),
+            enable_maintenances = options.enable_maintenances,
             s3_configured = s3.is_some(),
             extension_strategy = ?extension_strategy,
             "starting ducklake destination"
@@ -279,7 +312,6 @@ where
             s3.as_ref(),
             metadata_schema.as_deref(),
         )?);
-        let maintenance_setup_plan = Arc::new(build_maintenance_setup_plan(setup_plan.as_ref()));
 
         let manager = Arc::new(DuckLakeConnectionManager {
             setup_plan: Arc::clone(&setup_plan),
@@ -325,54 +357,60 @@ where
             elapsed_ms = progress_table_started.elapsed().as_millis() as u64,
             "ducklake streaming progress table ready"
         );
-        let maintenance_started = Instant::now();
-        destination.maintenance_worker = Arc::new(
-            spawn_ducklake_maintenance_worker(
-                DuckLakeConnectionManager {
-                    setup_plan: Arc::clone(&maintenance_setup_plan),
-                    disable_extension_autoload,
-                    #[cfg(feature = "test-utils")]
-                    open_count: Arc::new(AtomicUsize::new(0)),
-                },
-                Arc::clone(&checkpoint_gate),
-                Arc::clone(&destination.table_write_slots),
-            )?
-            .into(),
-        );
-        info!(
-            elapsed_ms = maintenance_started.elapsed().as_millis() as u64,
-            "ducklake maintenance worker ready"
-        );
-        let metrics_started = Instant::now();
-        destination.metrics_sampler = Arc::new(
-            spawn_ducklake_metrics_sampler(
-                DuckLakeConnectionManager {
-                    setup_plan: Arc::clone(&setup_plan),
-                    disable_extension_autoload,
-                    #[cfg(feature = "test-utils")]
-                    open_count: Arc::new(AtomicUsize::new(0)),
-                },
-                Arc::clone(&created_tables),
-                destination
-                    .maintenance_worker
-                    .as_ref()
-                    .as_ref()
-                    .ok_or_else(|| {
-                        etl_error!(
-                            ErrorKind::DestinationError,
-                            "Ducklake initialization failed",
-                            "maintenance worker should exist before metrics sampler"
-                        )
-                    })?
-                    .notification_tx
-                    .clone(),
-            )?
-            .into(),
-        );
-        info!(
-            elapsed_ms = metrics_started.elapsed().as_millis() as u64,
-            "ducklake metrics sampler ready"
-        );
+        if options.enable_maintenances {
+            let maintenance_setup_plan =
+                Arc::new(build_maintenance_setup_plan(setup_plan.as_ref()));
+            let maintenance_started = Instant::now();
+            destination.maintenance_worker = Arc::new(
+                spawn_ducklake_maintenance_worker(
+                    DuckLakeConnectionManager {
+                        setup_plan: Arc::clone(&maintenance_setup_plan),
+                        disable_extension_autoload,
+                        #[cfg(feature = "test-utils")]
+                        open_count: Arc::new(AtomicUsize::new(0)),
+                    },
+                    Arc::clone(&checkpoint_gate),
+                    Arc::clone(&destination.table_write_slots),
+                )?
+                .into(),
+            );
+            info!(
+                elapsed_ms = maintenance_started.elapsed().as_millis() as u64,
+                "ducklake maintenance worker ready"
+            );
+            let metrics_started = Instant::now();
+            destination.metrics_sampler = Arc::new(
+                spawn_ducklake_metrics_sampler(
+                    DuckLakeConnectionManager {
+                        setup_plan: Arc::clone(&setup_plan),
+                        disable_extension_autoload,
+                        #[cfg(feature = "test-utils")]
+                        open_count: Arc::new(AtomicUsize::new(0)),
+                    },
+                    Arc::clone(&created_tables),
+                    destination
+                        .maintenance_worker
+                        .as_ref()
+                        .as_ref()
+                        .ok_or_else(|| {
+                            etl_error!(
+                                ErrorKind::DestinationError,
+                                "Ducklake initialization failed",
+                                "maintenance worker should exist before metrics sampler"
+                            )
+                        })?
+                        .notification_tx
+                        .clone(),
+                )?
+                .into(),
+            );
+            info!(
+                elapsed_ms = metrics_started.elapsed().as_millis() as u64,
+                "ducklake metrics sampler ready"
+            );
+        } else {
+            info!("ducklake background maintenances disabled");
+        }
         info!(
             elapsed_ms = initialization_started.elapsed().as_millis() as u64,
             pool_size, "ducklake destination started"
@@ -505,8 +543,8 @@ where
     /// Copy batches are recorded in the replay marker table so a retry after an
     /// ambiguous post-commit failure can detect already applied rows.
     ///
-    /// Small copy batches may stay inlined until the background maintenance
-    /// worker materializes them after we emit the maintenance notification.
+    /// Small copy batches may stay inlined until shutdown unless background
+    /// maintenances are enabled.
     async fn write_table_rows_inner(
         &self,
         table_id: TableId,
@@ -1592,5 +1630,64 @@ mod tests {
         assert!(metrics.files_scheduled_for_deletion_total >= 0);
         assert!(metrics.files_scheduled_for_deletion_bytes >= 0);
         assert!(metrics.oldest_scheduled_deletion_age_seconds >= 0);
+    }
+
+    #[tokio::test]
+    async fn test_new_disables_background_maintenances_by_default() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
+        let data = path_to_file_url(&dir.path().join("data"));
+        let destination =
+            DuckLakeDestination::new(catalog, data, 1, None, None, MemoryStore::new())
+                .await
+                .expect("failed to create destination");
+
+        assert!(
+            destination.maintenance_worker.as_ref().is_none(),
+            "maintenances should be disabled by default"
+        );
+        assert!(
+            destination.metrics_sampler.as_ref().is_none(),
+            "metrics sampler should stay disabled with maintenances"
+        );
+
+        destination
+            .shutdown()
+            .await
+            .expect("failed to shutdown destination");
+    }
+
+    #[tokio::test]
+    async fn test_new_with_options_enables_background_maintenances() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
+        let data = path_to_file_url(&dir.path().join("data"));
+        let destination = DuckLakeDestination::new_with_options(
+            catalog,
+            data,
+            1,
+            None,
+            None,
+            MemoryStore::new(),
+            DuckLakeDestinationOptions {
+                enable_maintenances: true,
+            },
+        )
+        .await
+        .expect("failed to create destination");
+
+        assert!(
+            destination.maintenance_worker.as_ref().is_some(),
+            "maintenances should be enabled when requested"
+        );
+        assert!(
+            destination.metrics_sampler.as_ref().is_some(),
+            "metrics sampler should start with maintenances"
+        );
+
+        destination
+            .shutdown()
+            .await
+            .expect("failed to shutdown destination");
     }
 }

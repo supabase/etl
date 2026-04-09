@@ -14,6 +14,7 @@ expression: full_config
     "s3_endpoint": "127.0.0.1:5000/s3",
     "s3_url_style": "path",
     "s3_use_ssl": false,
-    "metadata_schema": "ducklake"
+    "metadata_schema": "ducklake",
+    "enable_maintenances": true
   }
 }
