@@ -24,7 +24,7 @@ use crate::db::images::ImagesDbError;
 use crate::db::pipelines::{MAX_PIPELINES_PER_TENANT, PipelinesDbError, read_pipeline_components};
 use crate::db::replicators::ReplicatorsDbError;
 use crate::db::sources::SourcesDbError;
-use crate::feature_flags::get_max_pipelines_per_tenant;
+use crate::feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant};
 use crate::k8s::core::{
     create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
     delete_pipeline_resources_in_k8s, is_replicator_pod_stopped,
@@ -526,7 +526,7 @@ pub async fn create_pipeline(
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
     pipeline: Json<CreatePipelineRequest>,
-    feature_flags_client: Option<Data<configcat::Client>>,
+    feature_flags_client: Option<Data<FeatureFlagsClient>>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline = pipeline.into_inner();
