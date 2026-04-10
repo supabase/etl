@@ -1,5 +1,3 @@
-#![cfg(all(feature = "iceberg", feature = "test-utils"))]
-
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::spawn_source_database;
 use etl::test_utils::notifying_store::NotifyingStore;
@@ -20,8 +18,6 @@ use rand::random;
 
 use crate::support::iceberg::read_all_rows;
 use etl_destinations::iceberg::test_utils::{LAKEKEEPER_URL, create_minio_props, get_catalog_url};
-
-mod support;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy() {

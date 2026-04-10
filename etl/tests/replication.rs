@@ -1,5 +1,3 @@
-#![cfg(feature = "test-utils")]
-
 use std::collections::HashSet;
 use std::time::Duration;
 

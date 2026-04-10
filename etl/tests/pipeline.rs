@@ -1,5 +1,3 @@
-#![cfg(feature = "test-utils")]
-
 use etl::error::ErrorKind;
 use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use etl::store::state::StateStore;
