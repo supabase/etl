@@ -346,8 +346,13 @@ where
                 }
 
                 while let Some(result) = join_set.join_next().await {
-                    result
-                        .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
+                    result.map_err(|e| {
+                        etl_error!(
+                            ErrorKind::ApplyWorkerPanic,
+                            "insert task failed",
+                            e.to_string()
+                        )
+                    })??;
                 }
             }
 
