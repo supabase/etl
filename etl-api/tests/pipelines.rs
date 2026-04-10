@@ -29,8 +29,6 @@ use crate::{
     support::test_app::{TestApp, spawn_test_app, spawn_test_app_with_k8s_state},
 };
 
-mod support;
-
 /// Creates a basic pipeline setup for tests that don't need source databases.
 async fn setup_basic_pipeline() -> (TestApp, String, i64, i64, i64) {
     let app = spawn_test_app().await;
