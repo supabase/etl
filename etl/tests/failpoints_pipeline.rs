@@ -1,5 +1,3 @@
-#![cfg(all(feature = "test-utils", feature = "failpoints"))]
-
 use etl::failpoints::{
     START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, START_TABLE_SYNC_DURING_DATA_SYNC,
 };

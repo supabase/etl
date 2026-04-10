@@ -1,0 +1,14 @@
+[profile.default]
+fail-fast = false
+test-threads = 16
+
+# All tests that share the source Postgres cluster must run serially. Separate
+# nextest test groups do not serialize against each other, so cluster-wide
+# setting tests, etl replication tests, and PG-backed destination pipeline
+# tests all share one group. Local-only destination tests stay parallel.
+[test-groups.shared-pg]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = "test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & test(/^(bigquery_pipeline|ducklake_pipeline|iceberg_destination)::/))"
+test-group = "shared-pg"

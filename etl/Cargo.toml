@@ -53,9 +53,5 @@ rand = { workspace = true, features = ["thread_rng"] }
 name = "main"
 path = "tests/main.rs"
 
-[[test]]
-name = "failpoints_pipeline"
-path = "tests/failpoints_pipeline.rs"
-
 [lints]
 workspace = true
