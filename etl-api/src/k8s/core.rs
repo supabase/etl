@@ -391,13 +391,12 @@ async fn delete_dynamic_replicator_secrets(
 ) -> Result<(), PipelineError> {
     k8s_client.delete_postgres_secret(prefix).await?;
 
-    // Although it won't happen that there are both bq and iceberg secrets at the same time
-    // we delete them both here because the state in the db might not be the same as that
-    // running in the k8s cluster. E.g. if a pipeline is updated from bq to iceberg or vice-versa
-    // then there's a risk of wrong secret type being attempted for deletion which might leave
-    // the actual secret behind. So for simplicty we just delete both kinds of secrets. The
-    // one which doesn't exist will be safely ignored.
+    // Delete all destination-specific secret types unconditionally. Only one will
+    // exist at a time, but if a pipeline's destination was changed (e.g. BigQuery →
+    // ClickHouse) the old secret type might still be present. Deleting a
+    // non-existent secret is a safe no-op.
     k8s_client.delete_bigquery_secret(prefix).await?;
+    k8s_client.delete_clickhouse_secret(prefix).await?;
     k8s_client.delete_iceberg_secret(prefix).await?;
     k8s_client.delete_ducklake_secret(prefix).await?;
 
