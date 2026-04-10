@@ -266,6 +266,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     let stream_id = table_sync_worker_copy_stream_id(table_id);
     let table_copy_stream = TryBatchBackpressureStream::wrap(
         table_copy_stream,
+        stream_id,
         batch_config,
         memory_monitor.subscribe(),
         cached_batch_budget,
