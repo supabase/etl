@@ -228,9 +228,13 @@ pub(crate) fn rb_encode_nullable(val: ClickHouseValue, buf: &mut Vec<u8>) -> Etl
 pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlResult<()> {
     match val {
         ClickHouseValue::Null => {
-            // A non-nullable column unexpectedly received NULL (data quality issue from
-            // Postgres). Write a zero-length string as the least-harmful fallback.
-            buf.push(0); // varint 0 = empty string
+            // The Postgres schema says this column is NOT NULL, but a NULL arrived.
+            // If this proves too strict (e.g. transient schema mismatches), we could
+            // downgrade to writing a zero-length string as a silent fallback.
+            return Err(etl_error!(
+                ErrorKind::ConversionError,
+                "NULL value for non-nullable ClickHouse column"
+            ));
         }
         ClickHouseValue::Bool(b) => buf.push(b as u8),
         ClickHouseValue::Int16(v) => buf.extend_from_slice(&v.to_le_bytes()),
