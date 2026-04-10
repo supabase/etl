@@ -15,7 +15,7 @@ use tracing::info;
 use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::stream::TryBatchBackpressureStream;
+use crate::concurrency::stream::{TryBatchBackpressureStream, table_sync_worker_copy_stream_id};
 use crate::destination::Destination;
 use crate::destination::async_result::WriteTableRowsResult;
 use crate::error::{ErrorKind, EtlResult};
@@ -263,8 +263,10 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     let connection_updates_rx = transaction.get_cloned_client().connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
+    let stream_id = table_sync_worker_copy_stream_id(table_id);
     let table_copy_stream = TryBatchBackpressureStream::wrap(
         table_copy_stream,
+        stream_id,
         batch_config,
         memory_monitor.subscribe(),
         cached_batch_budget,
@@ -610,8 +612,10 @@ where
         .connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
+    let stream_id = table_sync_worker_copy_stream_id(table_id);
     let table_copy_stream = TryBatchBackpressureStream::wrap(
         table_copy_stream,
+        stream_id,
         batch_config,
         memory_monitor.subscribe(),
         cached_batch_budget,
