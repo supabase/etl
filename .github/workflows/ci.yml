@@ -130,10 +130,16 @@ jobs:
 
   test-full:
     name: Tests (Full)
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.author_association == 'MEMBER'
+      || github.event.pull_request.author_association == 'COLLABORATOR'
+      || github.event.pull_request.author_association == 'OWNER'
+      || contains(github.event.pull_request.labels.*.name, 'ci-approved')
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
-      id-token: write
+      id-token: none
     strategy:
       matrix:
         postgres_version: [18, 17, 16, 15, 14]

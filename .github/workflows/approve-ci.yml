@@ -1,0 +1,24 @@
+name: Auto-approve CI for repo collaborators
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  auto-label-collaborator-prs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check repo collaborator status and add label
+        run: |
+          STATUS=$(gh api repos/${{ github.repository }}/collaborators/${{ github.actor }} --silent -i 2>&1 | head -1 | awk '{print $2}')
+          echo "Collaborator check for ${{ github.actor }}: HTTP $STATUS"
+          if [ "$STATUS" = "204" ]; then
+            gh pr edit ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --add-label ci-approved
+          else
+            echo "Not a collaborator, skipping auto-label"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
