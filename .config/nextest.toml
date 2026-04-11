@@ -1,6 +1,6 @@
 [profile.default]
 fail-fast = false
-test-threads = 16
+test-threads = "num-cpus"
 
 # All tests that share the source Postgres cluster must run serially. Separate
 # nextest test groups do not serialize against each other, so cluster-wide
