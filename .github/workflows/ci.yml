@@ -145,6 +145,7 @@ jobs:
       POSTGRES_HOST: localhost
       TESTS_DATABASE_HOST: localhost
       TESTS_DATABASE_PORT: 5430
+      TESTS_DATABASE_START_PORT: 5430
       NUM_LOCAL_DATABASES: 4
       TESTS_DATABASE_USERNAME: postgres
       TESTS_DATABASE_PASSWORD: postgres
@@ -163,37 +164,8 @@ jobs:
 
       - name: Start Docker Compose (Postgres ${{ matrix.postgres_version }})
         run: |
-          set -euo pipefail
-
-          base_port="${TESTS_DATABASE_PORT}"
-          db_count="${NUM_LOCAL_DATABASES}"
-
-          if ! [[ "${base_port}" =~ ^[0-9]+$ ]]; then
-            echo "expected TESTS_DATABASE_PORT to be a numeric port, got: ${base_port}" >&2
-            exit 1
-          fi
-
-          if ! [[ "${db_count}" =~ ^[1-9][0-9]*$ ]]; then
-            echo "expected NUM_LOCAL_DATABASES to be a positive integer, got: ${db_count}" >&2
-            exit 1
-          fi
-
-          POSTGRES_VERSION=${{ matrix.postgres_version }} docker compose -f ./scripts/docker-compose.yaml up -d
-
-          for ((shard = 2; shard <= db_count; shard++)); do
-            port=$((base_port + shard - 1))
-            POSTGRES_VERSION=${{ matrix.postgres_version }} POSTGRES_PORT="${port}" docker compose \
-              -p etl-stack-pg-${{ matrix.postgres_version }}-shard-${shard} \
-              -f ./scripts/docker-compose.yaml \
-              up -d source-postgres
-          done
-
-          for ((offset = 0; offset < db_count; offset++)); do
-            port=$((base_port + offset))
-            until pg_isready -h localhost -p "${port}" -U "${POSTGRES_USER}"; do
-              sleep 1
-            done
-          done
+          POSTGRES_VERSION=${{ matrix.postgres_version }} \
+            bash ./scripts/start_test_postgres_shards.sh
 
       - name: Vendor DuckDB Extensions
         run: |

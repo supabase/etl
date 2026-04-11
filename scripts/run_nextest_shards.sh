@@ -11,8 +11,9 @@ set -euo pipefail
 # Environment:
 #   NUM_LOCAL_DATABASES: number of local Postgres clusters to shard across.
 #     Defaults to 3.
-#   TESTS_DATABASE_PORT: base port for the first local Postgres cluster.
+#   TESTS_DATABASE_START_PORT: base port for the first local Postgres cluster.
 #     Additional cluster ports are allocated contiguously from this base.
+#     Defaults to TESTS_DATABASE_PORT, POSTGRES_PORT, or 5430.
 #
 # Usage:
 #   scripts/run_nextest_shards.sh run
@@ -51,9 +52,9 @@ if ! [[ "$db_count" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-base_port="${TESTS_DATABASE_PORT:-${POSTGRES_PORT:-5430}}"
+base_port="${TESTS_DATABASE_START_PORT:-${TESTS_DATABASE_PORT:-${POSTGRES_PORT:-5430}}}"
 if ! [[ "$base_port" =~ ^[0-9]+$ ]]; then
-  echo "expected TESTS_DATABASE_PORT to be a numeric port, got: $base_port" >&2
+  echo "expected TESTS_DATABASE_START_PORT to be a numeric port, got: $base_port" >&2
   exit 1
 fi
 
