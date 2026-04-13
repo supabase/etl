@@ -39,44 +39,6 @@ pub struct AllTypesRow {
     pub cdc_operation: String,
 }
 
-impl PartialEq for AllTypesRow {
-    fn eq(&self, other: &Self) -> bool {
-        fn f32_eq(a: f32, b: f32) -> bool {
-            (a - b).abs() < 1e-3
-        }
-        fn f64_eq(a: f64, b: f64) -> bool {
-            (a - b).abs() < 1e-6
-        }
-
-        self.id == other.id
-            && self.smallint_col == other.smallint_col
-            && self.integer_col == other.integer_col
-            && self.bigint_col == other.bigint_col
-            && f32_eq(self.real_col, other.real_col)
-            && f64_eq(self.double_col, other.double_col)
-            && self.numeric_col == other.numeric_col
-            && self.boolean_col == other.boolean_col
-            && self.text_col == other.text_col
-            && self.varchar_col == other.varchar_col
-            && self.date_col == other.date_col
-            && self.timestamp_col == other.timestamp_col
-            && self.timestamptz_col == other.timestamptz_col
-            && self.time_col == other.time_col
-            && self.jsonb_col == other.jsonb_col
-            && self.json_col == other.json_col
-            && self.integer_array_col == other.integer_array_col
-            && self.text_array_col == other.text_array_col
-            && self.bytea_col == other.bytea_col
-            && self.inet_col == other.inet_col
-            && self.cidr_col == other.cidr_col
-            && self.macaddr_col == other.macaddr_col
-            && self.uuid_col.to_lowercase() == other.uuid_col.to_lowercase()
-            && self.cdc_operation == other.cdc_operation
-    }
-}
-
-impl Eq for AllTypesRow {}
-
 /// A row read back from the ClickHouse `boundary_values` test table.
 ///
 /// Covers edge cases that the `all_types` test does not: nullable scalars,
