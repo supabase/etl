@@ -1546,7 +1546,10 @@ async fn table_processing_with_schema_change_errors_table() {
     let schema_versions = table_schemas
         .get(&database_schema.orders_schema().id)
         .unwrap();
-    assert_eq!(schema_versions.last().unwrap().1, database_schema.orders_schema());
+    assert_eq!(
+        schema_versions.last().unwrap().1,
+        database_schema.orders_schema()
+    );
 
     // We check that we got the insert events after the first data of the table has been copied.
     let events = destination.get_events().await;

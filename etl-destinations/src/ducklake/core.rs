@@ -446,14 +446,13 @@ where
                     Event::Insert(insert) => {
                         let approx_bytes = insert.table_row.size_hint() as u64;
                         let table_id = insert.replicated_table_schema.id();
-                        table_id_to_mutations
-                            .entry(table_id)
-                            .or_default()
-                            .push(TrackedTableMutation::new(
+                        table_id_to_mutations.entry(table_id).or_default().push(
+                            TrackedTableMutation::new(
                                 insert.start_lsn,
                                 insert.commit_lsn,
                                 TableMutation::Insert(insert.table_row),
-                            ));
+                            ),
+                        );
                         let stats = table_id_to_stats.entry(table_id).or_default();
                         stats.approx_bytes = stats.approx_bytes.saturating_add(approx_bytes);
                         stats.inserted_rows = stats.inserted_rows.saturating_add(1);
@@ -714,11 +713,7 @@ where
         table_id: TableId,
         table_schema: &TableSchema,
     ) -> EtlResult<DuckLakeTableName> {
-        if let Some(existing) = self
-            .store
-            .get_destination_table_metadata(table_id)
-            .await?
-        {
+        if let Some(existing) = self.store.get_destination_table_metadata(table_id).await? {
             return existing
                 .destination_table_id
                 .parse::<DuckLakeTableName>()
