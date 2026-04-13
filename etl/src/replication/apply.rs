@@ -26,7 +26,9 @@ use tracing::{debug, error, info, warn};
 use crate::concurrency::batch_budget::{BatchBudgetController, CachedBatchBudget};
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::stream::BackpressureStream;
+use crate::concurrency::stream::{
+    BackpressureStream, apply_worker_apply_stream_id, table_sync_worker_apply_stream_id,
+};
 use crate::conversions::event::{
     parse_event_from_begin_message, parse_event_from_commit_message,
     parse_event_from_delete_message, parse_event_from_insert_message,
@@ -242,6 +244,14 @@ impl<S, D> WorkerContext<S, D> {
             Self::TableSync(ctx) => WorkerType::TableSync {
                 table_id: ctx.table_id,
             },
+        }
+    }
+
+    /// Builds the logical apply-stream id for this worker context.
+    pub fn apply_stream_id(&self) -> String {
+        match self {
+            Self::Apply(_) => apply_worker_apply_stream_id(),
+            Self::TableSync(ctx) => table_sync_worker_apply_stream_id(ctx.table_id),
         }
     }
 }
@@ -678,8 +688,11 @@ where
             .await?;
 
         let events_stream = EventsStream::wrap(logical_replication_stream);
-        let events_stream =
-            BackpressureStream::wrap(events_stream, self.memory_monitor.subscribe());
+        let events_stream = BackpressureStream::wrap(
+            events_stream,
+            self.worker_context.apply_stream_id(),
+            self.memory_monitor.subscribe(),
+        );
         pin!(events_stream);
 
         let mut connection_updates_rx = replication_client.connection_updates_rx();
