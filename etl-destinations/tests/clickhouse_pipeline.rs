@@ -82,15 +82,20 @@ async fn wait_for_update_flow_rows(
     ch_db: &ClickHouseTestDatabase,
     expected_rows: usize,
 ) -> Vec<UpdateFlowRow> {
+    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(expected_rows);
     for _ in 0..50 {
-        let rows: Vec<UpdateFlowRow> = ch_db.query(UPDATE_FLOW_SELECT).await;
+        rows = ch_db.query(UPDATE_FLOW_SELECT).await;
         if rows.len() >= expected_rows {
             return rows;
         }
         sleep(Duration::from_millis(100)).await;
     }
 
-    panic!("timed out waiting for clickhouse update_flow rows");
+    panic!(
+        "timed out waiting for clickhouse update_flow rows: got {} of {}",
+        rows.len(),
+        expected_rows,
+    );
 }
 
 /// Tests that all Postgres column types (including nullable arrays) round-trip
