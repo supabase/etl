@@ -43,7 +43,7 @@ esac
 
 extra_args=("$@")
 
-shared_pg_filter='binary_id(etl::main) | (binary_id(etl-destinations::main) & test(/^(bigquery_pipeline|ducklake_pipeline|iceberg_destination)::/))'
+shared_pg_filter='test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & test(/^(bigquery_pipeline|ducklake_pipeline|iceberg_destination)::/))'
 non_pg_filter="not (${shared_pg_filter})"
 
 db_count="${NUM_LOCAL_DATABASES:-3}"
