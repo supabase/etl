@@ -1,4 +1,4 @@
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, ErrorScope, EtlError, EtlResult};
 use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
 use etl_config::shared::{ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig};
@@ -51,9 +51,9 @@ where
 
         match result {
             Err(err) => {
-                let error_message = err.to_string();
-                let _ = updates_tx.send(PostgresConnectionUpdate::errored(error_message.clone()));
-                error!(error = %error_message, "postgres connection error");
+                let etl_error = EtlError::from(err);
+                let _ = updates_tx.send(PostgresConnectionUpdate::errored(etl_error.clone()));
+                error!(error = %etl_error, "postgres connection error");
             }
             Ok(()) => {
                 let _ = updates_tx.send(PostgresConnectionUpdate::Terminated);
@@ -71,22 +71,20 @@ where
 }
 
 /// Updates emitted by the background task driving the PostgreSQL connection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PostgresConnectionUpdate {
     /// The connection task is running.
     Running,
     /// The connection task terminated cleanly.
     Terminated,
     /// The connection task exited due to an error.
-    Errored { error: Arc<str> },
+    Errored { error: EtlError },
 }
 
 impl PostgresConnectionUpdate {
-    /// Creates an error update from an error message.
-    pub fn errored(error: impl Into<Arc<str>>) -> Self {
-        Self::Errored {
-            error: error.into(),
-        }
+    /// Creates an error update from a classified ETL error.
+    pub fn errored(error: EtlError) -> Self {
+        Self::Errored { error }
     }
 
     /// Returns `true` when this update indicates that the connection has been closed.
@@ -578,7 +576,8 @@ impl PgReplicationClient {
                     "d" => Duration::from_secs(setting.saturating_mul(60 * 60 * 24)),
                     unsupported_unit => {
                         return Err(etl_error!(
-                            ErrorKind::ConversionError,
+                            source,
+                            ErrorClass::ConversionError,
                             "Unsupported wal sender timeout unit",
                             format!(
                                 "Unsupported wal_sender_timeout unit '{}' returned by pg_settings",
@@ -593,7 +592,8 @@ impl PgReplicationClient {
         }
 
         bail!(
-            ErrorKind::SourceConnectionFailed,
+            source,
+            ErrorClass::ConnectionFailed,
             "Wal sender timeout not found",
             "The table pg_settings did not return wal_sender_timeout".to_string()
         )
@@ -660,7 +660,8 @@ impl PgReplicationClient {
         }
 
         bail!(
-            ErrorKind::ReplicationSlotNotFound,
+            source,
+            ErrorClass::ReplicationSlotNotFound,
             "Replication slot not found",
             format!("Replication slot '{}' not found in database", slot_name)
         );
@@ -692,7 +693,8 @@ impl PgReplicationClient {
         }
 
         bail!(
-            ErrorKind::ReplicationSlotNotFound,
+            source,
+            ErrorClass::ReplicationSlotNotFound,
             "Replication slot not found",
             format!("Replication slot '{}' not found in database", slot_name)
         );
@@ -711,7 +713,10 @@ impl PgReplicationClient {
 
                 Ok(GetOrCreateSlotResult::GetSlot(slot))
             }
-            Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
+            Err(err)
+                if err.scope() == ErrorScope::Source
+                    && err.class() == ErrorClass::ReplicationSlotNotFound =>
+            {
                 info!(slot_name, "creating new replication slot");
 
                 let create_result = self.create_slot(slot_name).await?;
@@ -752,7 +757,8 @@ impl PgReplicationClient {
             {
                 Ok(result) => result,
                 Err(_) => bail!(
-                    ErrorKind::ReplicationSlotDeletionTimeout,
+                    source,
+                    ErrorClass::ReplicationSlotDeletionTimeout,
                     "Replication slot deletion timed out",
                     format!(
                         "Timed out after {:?} while deleting replication slot '{}'",
@@ -776,7 +782,8 @@ impl PgReplicationClient {
                         );
 
                         bail!(
-                            ErrorKind::ReplicationSlotNotFound,
+                            source,
+                            ErrorClass::ReplicationSlotNotFound,
                             "Replication slot not found",
                             format!(
                                 "Replication slot '{}' not found in database while attempting its deletion",
@@ -829,7 +836,8 @@ impl PgReplicationClient {
         }
 
         bail!(
-            ErrorKind::ConfigError,
+            source,
+            ErrorClass::ConfigError,
             "Publication not found",
             format!("Publication '{}' not found in database", publication_name)
         );
@@ -1070,7 +1078,8 @@ impl PgReplicationClient {
                     && *code == SqlState::DUPLICATE_OBJECT
                 {
                     bail!(
-                        ErrorKind::ReplicationSlotAlreadyExists,
+                        source,
+                        ErrorClass::ReplicationSlotAlreadyExists,
                         "Replication slot already exists",
                         format!(
                             "Replication slot '{}' already exists in database",
@@ -1084,7 +1093,8 @@ impl PgReplicationClient {
         }
 
         Err(etl_error!(
-            ErrorKind::ReplicationSlotNotCreated,
+            source,
+            ErrorClass::ReplicationSlotNotCreated,
             "Replication slot creation failed"
         ))
     }
@@ -1133,7 +1143,8 @@ impl PgReplicationClient {
         }
 
         bail!(
-            ErrorKind::SourceSchemaError,
+            source,
+            ErrorClass::SchemaError,
             "Table not found in source database",
             format!("Table with ID {} not found in database", table_id)
         );
@@ -1508,7 +1519,11 @@ impl PgReplicationClient {
                 let snapshot_id = row
                     .try_get(0)?
                     .ok_or_else(|| {
-                        etl_error!(ErrorKind::InvalidState, "pg_export_snapshot returned NULL")
+                        etl_error!(
+                            internal,
+                            ErrorClass::InvalidState,
+                            "pg_export_snapshot returned NULL"
+                        )
                     })?
                     .to_string();
                 return Ok(snapshot_id);
@@ -1516,7 +1531,8 @@ impl PgReplicationClient {
         }
 
         Err(etl_error!(
-            ErrorKind::InvalidState,
+            internal,
+            ErrorClass::InvalidState,
             "pg_export_snapshot returned no rows"
         ))
     }
@@ -1544,7 +1560,8 @@ impl PgReplicationClient {
     ) -> EtlResult<Vec<CtidPartition>> {
         if num_partitions == 0 {
             return Err(etl_error!(
-                ErrorKind::ConfigError,
+                internal,
+                ErrorClass::ConfigError,
                 "Number of ctid partitions must be greater than zero"
             ));
         }
@@ -1567,7 +1584,8 @@ impl PgReplicationClient {
             })
             .ok_or_else(|| {
                 etl_error!(
-                    ErrorKind::SourceSchemaError,
+                    source,
+                    ErrorClass::SchemaError,
                     "Could not retrieve table block count for partition planning",
                     format!("table_id: {table_id}")
                 )
@@ -1626,7 +1644,8 @@ impl PgReplicationClient {
         T::Err: fmt::Debug,
     {
         let value = row.try_get(column_name)?.ok_or(etl_error!(
-            ErrorKind::SourceSchemaError,
+            source,
+            ErrorClass::SchemaError,
             "Column not found in source table",
             format!(
                 "Column '{}' not found in table '{}'",
@@ -1636,7 +1655,8 @@ impl PgReplicationClient {
 
         value.parse().map_err(|e: T::Err| {
             etl_error!(
-                ErrorKind::ConversionError,
+                source,
+                ErrorClass::ConversionError,
                 "Column parsing failed",
                 format!(
                     "Failed to parse value from column '{}' in table '{}': {:?}",

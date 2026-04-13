@@ -4,7 +4,7 @@ use tracing::error;
 
 use crate::bail;
 use crate::conversions::text::parse_cell_from_postgres_text;
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 use crate::types::{Cell, TableRow};
 
 /// Converts raw Postgres COPY format data into a typed table row.
@@ -85,7 +85,8 @@ pub fn parse_table_row_from_postgres_copy_bytes(
                     // Validate that row was properly terminated with newline
                     if !row_terminated {
                         bail!(
-                            ErrorKind::ConversionError,
+                            source,
+                            ErrorClass::ConversionError,
                             "Row data not properly terminated"
                         );
                     }
@@ -101,7 +102,8 @@ pub fn parse_table_row_from_postgres_copy_bytes(
             // Get the next column schema - error if we have more fields than expected
             let Some(column_schema) = column_schemas_iter.next() else {
                 bail!(
-                    ErrorKind::ConversionError,
+                    source,
+                    ErrorClass::ConversionError,
                     "Column count mismatch between schema and row",
                     format!(
                         "Schema has {} columns but row has {} columns",
@@ -145,7 +147,8 @@ pub fn parse_table_row_from_postgres_copy_bytes(
     // had fewer fields than expected, which is an error
     if column_schemas_iter.next().is_some() {
         bail!(
-            ErrorKind::ConversionError,
+            source,
+            ErrorClass::ConversionError,
             "Column count mismatch between schema and row",
             format!(
                 "Schema has {} columns but row has {} columns",
@@ -161,7 +164,7 @@ pub fn parse_table_row_from_postgres_copy_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ErrorKind;
+    use crate::error::{ErrorClass, ErrorScope};
     use etl_postgres::types::ColumnSchema;
     use tokio_postgres::types::Type;
 
@@ -256,7 +259,8 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::ConversionError);
         assert!(err.to_string().contains("Row data not properly terminated"));
     }
 

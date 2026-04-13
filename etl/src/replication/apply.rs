@@ -38,7 +38,7 @@ use crate::destination::async_result::{
     ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
     PendingWriteEventsResult, WriteEventsResult,
 };
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorClass, EtlError, EtlResult};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
     ETL_EVENTS_PROCESSED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_TRANSACTION_DURATION_SECONDS,
@@ -904,7 +904,8 @@ where
     ) -> EtlResult<()> {
         if changed.is_err() {
             return Err(etl_error!(
-                ErrorKind::SourceConnectionFailed,
+                source,
+                ErrorClass::ConnectionFailed,
                 "postgresql connection updates ended during the apply loop"
             ));
         }
@@ -913,14 +914,11 @@ where
         match update {
             PostgresConnectionUpdate::Running => Ok(()),
             PostgresConnectionUpdate::Terminated => Err(etl_error!(
-                ErrorKind::SourceConnectionFailed,
+                source,
+                ErrorClass::ConnectionFailed,
                 "postgresql connection terminated during the apply loop"
             )),
-            PostgresConnectionUpdate::Errored { error } => Err(etl_error!(
-                ErrorKind::SourceConnectionFailed,
-                "postgresql connection errored during the apply loop",
-                error.to_string()
-            )),
+            PostgresConnectionUpdate::Errored { error } => Err(error),
         }
     }
 
@@ -968,7 +966,8 @@ where
             );
 
             bail!(
-                ErrorKind::SourceConnectionFailed,
+                source,
+                ErrorClass::ConnectionFailed,
                 "Replication stream ended while waiting for keep alive acknowledgement"
             )
         };
@@ -1221,7 +1220,8 @@ where
             );
 
             etl_error!(
-                ErrorKind::SourceConnectionFailed,
+                source,
+                ErrorClass::ConnectionFailed,
                 "PostgreSQL connection has been closed during the apply loop"
             )
         } else {
@@ -1231,7 +1231,8 @@ where
             );
 
             etl_error!(
-                ErrorKind::SourceConnectionFailed,
+                source,
+                ErrorClass::ConnectionFailed,
                 "Replication stream ended unexpectedly during the apply loop"
             )
         }
@@ -1479,7 +1480,8 @@ where
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn.take() else {
             bail!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "Invalid transaction state",
                 "Transaction must be active before processing COMMIT message"
             );
@@ -1488,7 +1490,8 @@ where
         let commit_lsn = PgLsn::from(message.commit_lsn());
         if commit_lsn != remote_final_lsn {
             bail!(
-                ErrorKind::ValidationError,
+                internal,
+                ErrorClass::InvalidState,
                 "Invalid commit LSN",
                 format!(
                     "Incorrect commit LSN {} in COMMIT message (expected {})",
@@ -1543,7 +1546,8 @@ where
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "Invalid transaction state",
                 "Transaction must be active before processing RELATION message"
             );
@@ -1565,7 +1569,8 @@ where
             .await?
             .ok_or_else(|| {
                 etl_error!(
-                    ErrorKind::MissingTableSchema,
+                    source,
+                    ErrorClass::MissingTableSchema,
                     "Table schema not found in cache",
                     format!("Table schema for table {} not found in cache", table_id)
                 )
@@ -1582,7 +1587,8 @@ where
                     .into(),
                 RetryPolicy::ManualRetry,
                 etl_error!(
-                    ErrorKind::SourceSchemaError,
+                    source,
+                    ErrorClass::SchemaError,
                     "table schema changed during streaming",
                     format!("table schema for table {table_id} changed during streaming")
                 ),
@@ -1602,7 +1608,8 @@ where
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "Invalid transaction state",
                 "Transaction must be active before processing INSERT message"
             );
@@ -1638,7 +1645,8 @@ where
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "Invalid transaction state",
                 "Transaction must be active before processing UPDATE message"
             );
@@ -1674,7 +1682,8 @@ where
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "Invalid transaction state",
                 "Transaction must be active before processing DELETE message"
             );
@@ -1710,7 +1719,8 @@ where
     ) -> EtlResult<HandleMessageResult> {
         let Some(remote_final_lsn) = self.state.remote_final_lsn else {
             bail!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "Invalid transaction state",
                 "Transaction must be active before processing TRUNCATE message"
             );

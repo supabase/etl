@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 
 use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 use crate::metrics::{ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL};
 use crate::store::schema::SchemaStore;
 use crate::types::{
@@ -291,7 +291,8 @@ where
         .await?
         .ok_or_else(|| {
             etl_error!(
-                ErrorKind::MissingTableSchema,
+                source,
+                ErrorClass::MissingTableSchema,
                 "Table schema not found in cache",
                 format!("Table schema for table {} not found in cache", table_id)
             )
@@ -336,7 +337,8 @@ pub fn convert_tuple_to_row(
         // values.
         let Some(tuple_data) = &tuple_data.get(i) else {
             bail!(
-                ErrorKind::ConversionError,
+                source,
+                ErrorClass::ConversionError,
                 "Tuple data missing value at index"
             );
         };
@@ -349,7 +351,8 @@ pub fn convert_tuple_to_row(
                     default_value_for_type(&column_schema.typ)?
                 } else {
                     bail!(
-                        ErrorKind::ConversionError,
+                        source,
+                        ErrorClass::ConversionError,
                         "Required column received NULL in replication tuple",
                         format!(
                             "Column '{}' is non-nullable but the replication tuple contained NULL",
@@ -376,7 +379,8 @@ pub fn convert_tuple_to_row(
             }
             protocol::TupleData::Binary(_) => {
                 bail!(
-                    ErrorKind::ConversionError,
+                    source,
+                    ErrorClass::ConversionError,
                     "Binary format not supported in tuple data"
                 );
             }
@@ -390,4 +394,37 @@ pub fn convert_tuple_to_row(
     }
 
     Ok(TableRow::new(values))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::{ErrorClass, ErrorScope};
+    use tokio_postgres::types::Type;
+
+    #[test]
+    fn convert_tuple_to_row_non_nullable_null_returns_error() {
+        let column_schemas = vec![ColumnSchema::new(
+            "id".to_string(),
+            Type::INT4,
+            -1,
+            false,
+            true,
+        )];
+        let tuple_data = vec![protocol::TupleData::Null];
+
+        let err = convert_tuple_to_row(&column_schemas, &tuple_data, &mut None, false).unwrap_err();
+
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::ConversionError);
+        assert_eq!(
+            err.description(),
+            Some("Required column received NULL in replication tuple")
+        );
+        assert!(
+            err.detail()
+                .expect("conversion error should include the offending column")
+                .contains("id")
+        );
+    }
 }

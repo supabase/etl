@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Once, OnceLock};
 
 use chrono::Utc;
-use etl::error::{ErrorKind, EtlResult};
+use etl::error::{ErrorClass, EtlResult};
 use etl::etl_error;
 use metrics::{Unit, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use parking_lot::Mutex;
@@ -501,7 +501,8 @@ pub(super) fn query_table_storage_metrics_blocking(
     })
     .map_err(|e| {
         etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake table storage metrics query failed",
             format_query_error_detail(&sql, &e),
             source: e
@@ -578,7 +579,8 @@ pub(super) fn query_catalog_maintenance_metrics_blocking(
     })
     .map_err(|e| {
         etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake catalog maintenance metrics query failed",
             format_query_error_detail(&sql, &e),
             source: e
@@ -626,7 +628,8 @@ fn resolve_ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<S
         .query_row(&sql, [], |row| row.get::<_, String>(0))
         .map_err(|e| {
             etl_error!(
-                ErrorKind::DestinationQueryFailed,
+                destination,
+                ErrorClass::QueryFailed,
                 "DuckLake metadata namespace query failed",
                 format_query_error_detail(&sql, &e),
                 source: e

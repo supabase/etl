@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::Duration;
 
-use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::error::{ErrorClass, EtlError, EtlResult};
 use etl::etl_error;
 use metrics::{counter, histogram};
 use parking_lot::Mutex;
@@ -978,7 +978,8 @@ fn run_background_checkpoint_blocking(
             checkpoint_started.elapsed().as_secs_f64(),
         );
         return Err(etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake checkpoint failed"
         ));
     }
@@ -992,7 +993,8 @@ fn run_background_checkpoint_blocking(
             checkpoint_started.elapsed().as_secs_f64(),
         );
         etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake checkpoint failed",
             source: error
         )
@@ -1023,7 +1025,8 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
             Some("INTERNAL Error: DuckLakeCompaction - expected a single output file".to_string()),
         );
         return Err(etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake rewrite data files failed",
             format_query_error_detail(&sql, &source),
             source: source
@@ -1034,7 +1037,8 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
         .query_row(&sql, [], |row| row.get(0))
         .map_err(|error| {
             etl_error!(
-                ErrorKind::DestinationQueryFailed,
+                destination,
+                ErrorClass::QueryFailed,
                 "DuckLake rewrite data files failed",
                 format_query_error_detail(&sql, &error),
                 source: error
@@ -1057,7 +1061,8 @@ fn merge_adjacent_table_files(conn: &duckdb::Connection, table_name: &str) -> Et
         .query_row(&sql, [], |row| row.get(0))
         .map_err(|error| {
             etl_error!(
-                ErrorKind::DestinationQueryFailed,
+                destination,
+                ErrorClass::QueryFailed,
                 "DuckLake merge adjacent files failed",
                 format_query_error_detail(&sql, &error),
                 source: error
@@ -1070,6 +1075,7 @@ fn merge_adjacent_table_files(conn: &duckdb::Connection, table_name: &str) -> Et
 #[cfg(test)]
 mod tests {
     use super::*;
+    use etl::error::ErrorScope;
 
     use std::sync::{Arc, LazyLock};
 
@@ -1700,9 +1706,10 @@ mod tests {
         .expect_err("flush should fail without ducklake functions");
 
         assert!(
-            matches!(error.kind(), ErrorKind::DestinationQueryFailed),
-            "unexpected error kind: {:?}",
-            error.kind()
+            error.scope() == ErrorScope::Destination && error.class() == ErrorClass::QueryFailed,
+            "unexpected error classification: {:?}/{:?}",
+            error.scope(),
+            error.class()
         );
 
         let rendered_after = handle.render();
@@ -1753,9 +1760,10 @@ mod tests {
         .expect_err("targeted maintenance should fail without ducklake functions");
 
         assert!(
-            matches!(error.kind(), ErrorKind::DestinationQueryFailed),
-            "unexpected error kind: {:?}",
-            error.kind()
+            error.scope() == ErrorScope::Destination && error.class() == ErrorClass::QueryFailed,
+            "unexpected error classification: {:?}/{:?}",
+            error.scope(),
+            error.class()
         );
 
         let rendered_after = handle.render();
@@ -1836,7 +1844,8 @@ mod tests {
                 conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
                     .map_err(|source| {
                         etl_error!(
-                            ErrorKind::DestinationQueryFailed,
+                            destination,
+                            ErrorClass::QueryFailed,
                             "DuckLake connection recycling verification query failed",
                             source: source
                         )

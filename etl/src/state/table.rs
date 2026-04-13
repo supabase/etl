@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use tokio_postgres::types::PgLsn;
 
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorClass, EtlError, EtlResult};
 use crate::workers::policy::ErrorHandlingPolicy;
 use crate::{bail, etl_error};
 
@@ -188,7 +188,8 @@ pub enum TableReplicationPhase {
 
 fn default_source_err() -> EtlError {
     etl_error!(
-        ErrorKind::Unknown,
+        internal,
+        ErrorClass::Unknown,
         "table replication error restored from state store"
     )
 }
@@ -213,7 +214,8 @@ impl TableReplicationPhase {
     ) -> EtlResult<(state::TableReplicationStateType, serde_json::Value)> {
         if !self.as_type().should_store() {
             bail!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "In-memory replication phase cannot be persisted",
                 "In-memory table replication phases (SyncWait, Catchup) cannot be saved to state store"
             );
@@ -236,7 +238,8 @@ impl TableReplicationPhase {
 
         let metadata = serde_json::to_value(self).map_err(|err| {
             etl_error!(
-                ErrorKind::SerializationError,
+                internal,
+                ErrorClass::SerializationError,
                 "Table replication phase serialization failed",
                 format!("Failed to serialize table replication phase to JSON: {err}")
             )
@@ -249,7 +252,8 @@ impl TableReplicationPhase {
     pub fn from_state_row(row: state::TableReplicationStateRow) -> EtlResult<Self> {
         let Some(metadata) = row.metadata else {
             bail!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "Table replication state not found",
                 "Table replication state does not exist in metadata column in PostgreSQL"
             );
@@ -257,7 +261,8 @@ impl TableReplicationPhase {
 
         serde_json::from_value(metadata).map_err(|err| {
             etl_error!(
-                ErrorKind::DeserializationError,
+                internal,
+                ErrorClass::DeserializationError,
                 "Table replication state deserialization failed",
                 format!(
                     "Failed to deserialize table replication state from metadata column in PostgreSQL: {err}"
@@ -467,7 +472,7 @@ mod tests {
             reason: "Test error".to_string(),
             solution: Some("Test solution".to_string()),
             retry_policy: RetryPolicy::NoRetry,
-            source_err: etl_error!(ErrorKind::Unknown, "test"),
+            source_err: etl_error!(internal, ErrorClass::Unknown, "test"),
         };
         let json = serde_json::to_value(&errored).unwrap();
         assert_eq!(
@@ -553,7 +558,7 @@ mod tests {
                 reason: "broken".to_string(),
                 solution: Some("fix it".to_string()),
                 retry_policy: RetryPolicy::ManualRetry,
-                source_err: etl_error!(ErrorKind::Unknown, "test"),
+                source_err: etl_error!(internal, ErrorClass::Unknown, "test"),
             },
         ];
 

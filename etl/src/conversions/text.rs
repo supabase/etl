@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::bail;
 use crate::conversions::numeric::PgNumeric;
 use crate::conversions::{bool::parse_bool, hex};
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 use crate::types::{ArrayCell, Cell};
 
 /// Creates a default [`Cell`] value for the given Postgres type.
@@ -231,11 +231,15 @@ where
     M: FnOnce(Vec<Option<T>>) -> ArrayCell,
 {
     if str.len() < 2 {
-        bail!(ErrorKind::ConversionError, "Array input too short");
+        bail!(source, ErrorClass::ConversionError, "Array input too short");
     }
 
     if !str.starts_with('{') || !str.ends_with('}') {
-        bail!(ErrorKind::ConversionError, "Array input missing braces");
+        bail!(
+            source,
+            ErrorClass::ConversionError,
+            "Array input missing braces"
+        );
     }
 
     let mut res = vec![];

@@ -6,7 +6,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 use crate::etl_error;
 use crate::workers::table_sync::{
     TableSyncWorkerHandle, TableSyncWorkerResult, TableSyncWorkerState,
@@ -199,7 +199,8 @@ impl TableSyncWorkerPool {
                         debug!("table sync worker task was cancelled");
                     } else {
                         errors.push(etl_error!(
-                            ErrorKind::TableSyncWorkerPanic,
+                            internal,
+                            ErrorClass::TableSyncWorkerPanic,
                             "Table sync worker panicked",
                             err
                         ));

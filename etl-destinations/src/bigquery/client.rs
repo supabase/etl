@@ -1,4 +1,4 @@
-use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::error::{ErrorClass, ErrorScope, EtlError, EtlResult};
 use etl::etl_error;
 use etl::types::{Cell, ColumnSchema, PipelineId, Type, is_array_type};
 use gcp_bigquery_client::client_builder::ClientBuilder;
@@ -139,186 +139,274 @@ fn error_code_label(error: &BQError) -> &'static str {
 ///
 /// Maps BigQuery error types to ETL error kinds for consistent error handling.
 fn bq_error_to_etl_error(err: BQError) -> EtlError {
-    let (kind, description) = match &err {
+    let (scope, class, description) = match &err {
         // Authentication related errors
         BQError::InvalidServiceAccountKey(_) => (
-            ErrorKind::DestinationAuthenticationError,
+            ErrorScope::Destination,
+            ErrorClass::AuthenticationError,
             "Invalid BigQuery service account key",
         ),
         BQError::InvalidServiceAccountAuthenticator(_) => (
-            ErrorKind::DestinationAuthenticationError,
+            ErrorScope::Destination,
+            ErrorClass::AuthenticationError,
             "Invalid BigQuery service account authenticator",
         ),
         BQError::InvalidInstalledFlowAuthenticator(_) => (
-            ErrorKind::DestinationAuthenticationError,
+            ErrorScope::Destination,
+            ErrorClass::AuthenticationError,
             "Invalid BigQuery installed flow authenticator",
         ),
         BQError::InvalidApplicationDefaultCredentialsAuthenticator(_) => (
-            ErrorKind::DestinationAuthenticationError,
+            ErrorScope::Destination,
+            ErrorClass::AuthenticationError,
             "Invalid BigQuery application default credentials",
         ),
         BQError::InvalidAuthorizedUserAuthenticator(_) => (
-            ErrorKind::DestinationAuthenticationError,
+            ErrorScope::Destination,
+            ErrorClass::AuthenticationError,
             "Invalid BigQuery authorized user authenticator",
         ),
         BQError::AuthError(_) => (
-            ErrorKind::DestinationAuthenticationError,
+            ErrorScope::Destination,
+            ErrorClass::AuthenticationError,
             "BigQuery authentication error",
         ),
         BQError::YupAuthError(_) => (
-            ErrorKind::DestinationAuthenticationError,
+            ErrorScope::Destination,
+            ErrorClass::AuthenticationError,
             "BigQuery OAuth authentication error",
         ),
         BQError::NoToken => (
-            ErrorKind::DestinationAuthenticationError,
+            ErrorScope::Destination,
+            ErrorClass::AuthenticationError,
             "BigQuery authentication token missing",
         ),
 
         // Network and transport errors
-        BQError::RequestError(_) => (ErrorKind::DestinationIoError, "BigQuery request failed"),
-        BQError::TonicTransportError(_) => {
-            (ErrorKind::DestinationIoError, "BigQuery transport error")
-        }
+        BQError::RequestError(_) => (
+            ErrorScope::Destination,
+            ErrorClass::ConnectionFailed,
+            "BigQuery request failed",
+        ),
+        BQError::TonicTransportError(_) => (
+            ErrorScope::Destination,
+            ErrorClass::ConnectionFailed,
+            "BigQuery transport error",
+        ),
 
         // Query and data errors
-        BQError::ResponseError { .. } => {
-            (ErrorKind::DestinationQueryFailed, "BigQuery response error")
-        }
+        BQError::ResponseError { .. } => (
+            ErrorScope::Destination,
+            ErrorClass::QueryFailed,
+            "BigQuery response error",
+        ),
         BQError::NoDataAvailable => (
-            ErrorKind::InvalidState,
+            ErrorScope::Internal,
+            ErrorClass::InvalidState,
             "BigQuery result set positioning error",
         ),
-        BQError::InvalidColumnIndex { .. } => {
-            (ErrorKind::InvalidData, "BigQuery invalid column index")
-        }
-        BQError::InvalidColumnName { .. } => {
-            (ErrorKind::InvalidData, "BigQuery invalid column name")
-        }
-        BQError::InvalidColumnType { .. } => {
-            (ErrorKind::ConversionError, "BigQuery column type mismatch")
-        }
+        BQError::InvalidColumnIndex { .. } => (
+            ErrorScope::Destination,
+            ErrorClass::InvalidData,
+            "BigQuery invalid column index",
+        ),
+        BQError::InvalidColumnName { .. } => (
+            ErrorScope::Destination,
+            ErrorClass::InvalidData,
+            "BigQuery invalid column name",
+        ),
+        BQError::InvalidColumnType { .. } => (
+            ErrorScope::Destination,
+            ErrorClass::ConversionError,
+            "BigQuery column type mismatch",
+        ),
 
         // Serialization errors
         BQError::SerializationError(_) => (
-            ErrorKind::SerializationError,
+            ErrorScope::Destination,
+            ErrorClass::SerializationError,
             "BigQuery JSON serialization error",
         ),
 
         // gRPC errors
-        BQError::TonicInvalidMetadataValueError(_) => {
-            (ErrorKind::InvalidData, "BigQuery invalid metadata value")
-        }
+        BQError::TonicInvalidMetadataValueError(_) => (
+            ErrorScope::Destination,
+            ErrorClass::InvalidData,
+            "BigQuery invalid metadata value",
+        ),
         BQError::TonicStatusError(status) => match status.code() {
             // Code::Unavailable (14) - Canonical "service unavailable" code.
             // Indicates transient conditions like network issues, server overload, or intentional
             // throttling. BigQuery returns this with messages like "Task is overloaded".
             // Retriable per Google's Storage Write API guidance.
-            Code::Unavailable => (ErrorKind::DestinationError, "BigQuery unavailable"),
+            Code::Unavailable => (
+                ErrorScope::Destination,
+                ErrorClass::ConnectionFailed,
+                "BigQuery unavailable",
+            ),
 
             // Code::Internal (13) - Internal server errors.
             // In BigQuery context, often manifests as transient backend issues, GOAWAY frames,
             // or temporary processing failures. Retriable per BigQuery backend team guidance.
-            Code::Internal => (ErrorKind::DestinationError, "BigQuery internal error"),
+            Code::Internal => (
+                ErrorScope::Destination,
+                ErrorClass::ConnectionFailed,
+                "BigQuery internal error",
+            ),
 
             // Code::Aborted (10) - Concurrency conflicts or server-initiated aborts.
             // For Storage Write API, includes sequencer failures and stream aborts due to
             // transient conditions. Retriable per BigQuery backend team guidance.
-            Code::Aborted => (ErrorKind::DestinationError, "BigQuery operation aborted"),
+            Code::Aborted => (
+                ErrorScope::Destination,
+                ErrorClass::ConnectionFailed,
+                "BigQuery operation aborted",
+            ),
 
             // Code::Cancelled (1) - Server-cancelled operations.
             // In streaming context, server may cancel in-flight appends due to internal
             // reshuffling. Retriable per BigQuery backend team guidance.
-            Code::Cancelled => (ErrorKind::DestinationError, "BigQuery operation cancelled"),
+            Code::Cancelled => (
+                ErrorScope::Destination,
+                ErrorClass::ConnectionFailed,
+                "BigQuery operation cancelled",
+            ),
 
             // Code::DeadlineExceeded (4) - Operation timeout.
             // Request may or may not have completed server-side. Safe to retry with offset-based
             // deduplication in Storage Write API. Retriable per Google's guidance.
-            Code::DeadlineExceeded => (ErrorKind::DestinationError, "BigQuery deadline exceeded"),
+            Code::DeadlineExceeded => (
+                ErrorScope::Destination,
+                ErrorClass::ConnectionFailed,
+                "BigQuery deadline exceeded",
+            ),
 
             // Code::ResourceExhausted (8) - Quota or rate limit exhaustion.
             // Requires exponential backoff to allow server capacity recovery. Retriable per
             // Google's Storage Write API guidance, though may need longer backoff periods.
-            Code::ResourceExhausted => (ErrorKind::DestinationError, "BigQuery resource exhausted"),
+            Code::ResourceExhausted => (
+                ErrorScope::Destination,
+                ErrorClass::ConnectionFailed,
+                "BigQuery resource exhausted",
+            ),
 
             // Code::FailedPrecondition (9) - Precondition failures.
             // Indicates issues like STREAM_FINALIZED, INVALID_STREAM_STATE, or SCHEMA_MISMATCH.
             // Requires fixing the underlying issue before retrying. Never retry automatically.
-            Code::FailedPrecondition => {
-                (ErrorKind::DestinationError, "BigQuery precondition failed")
-            }
+            Code::FailedPrecondition => (
+                ErrorScope::Destination,
+                ErrorClass::InvalidState,
+                "BigQuery precondition failed",
+            ),
 
             // Code::Unknown (2) - Transport-level errors.
             // When message contains "transport" or "connection", indicates errors that never
             // reached the server (TCP resets, HTTP/2 GOAWAY). Retriable as per transport error
             // guidance.
-            Code::Unknown => (ErrorKind::DestinationError, "BigQuery unknown error"),
+            Code::Unknown => (
+                ErrorScope::Destination,
+                ErrorClass::ConnectionFailed,
+                "BigQuery unknown error",
+            ),
 
             // Code::PermissionDenied (7) - Authorization failure.
             // Requires IAM permission changes. Never retry.
-            Code::PermissionDenied => (ErrorKind::DestinationError, "BigQuery permission denied"),
+            Code::PermissionDenied => (
+                ErrorScope::Destination,
+                ErrorClass::PermissionDenied,
+                "BigQuery permission denied",
+            ),
 
             // Code::Unauthenticated (16) - Authentication failure.
             // Requires credential refresh or configuration fix. Never retry.
             Code::Unauthenticated => (
-                ErrorKind::DestinationError,
+                ErrorScope::Destination,
+                ErrorClass::AuthenticationError,
                 "BigQuery authentication failed",
             ),
 
             // Code::InvalidArgument (3) - Malformed request or invalid data.
             // Client bug that requires code changes. Never retry.
-            Code::InvalidArgument => (ErrorKind::DestinationError, "BigQuery invalid argument"),
+            Code::InvalidArgument => (
+                ErrorScope::Destination,
+                ErrorClass::InvalidData,
+                "BigQuery invalid argument",
+            ),
 
             // Code::NotFound (5) - Resource doesn't exist.
             // Requires creating the resource (table, dataset, stream) first. Never retry.
-            Code::NotFound => (ErrorKind::DestinationError, "BigQuery entity not found"),
+            Code::NotFound => (
+                ErrorScope::Destination,
+                ErrorClass::QueryFailed,
+                "BigQuery entity not found",
+            ),
 
             // Code::AlreadyExists (6) - Entity conflict during creation.
             // For streaming with offsets, may indicate row was already written. Never retry.
             Code::AlreadyExists => (
-                ErrorKind::DestinationError,
+                ErrorScope::Destination,
+                ErrorClass::InvalidState,
                 "BigQuery entity already exists",
             ),
 
             // Code::OutOfRange (11) - Invalid offset for streaming.
             // Offset beyond current stream end. Requires application-level recovery. Never retry.
-            Code::OutOfRange => (ErrorKind::DestinationError, "BigQuery offset out of range"),
+            Code::OutOfRange => (
+                ErrorScope::Destination,
+                ErrorClass::InvalidState,
+                "BigQuery offset out of range",
+            ),
 
             // Code::Unimplemented (12) - Operation not available.
             // Feature not supported by BigQuery. Never retry.
             Code::Unimplemented => (
-                ErrorKind::DestinationError,
+                ErrorScope::Destination,
+                ErrorClass::Unknown,
                 "BigQuery operation not supported",
             ),
 
             // Code::DataLoss (15) - Unrecoverable data corruption.
             // Severe error requiring manual intervention. Never retry.
-            Code::DataLoss => (ErrorKind::DestinationError, "BigQuery data loss"),
+            Code::DataLoss => (
+                ErrorScope::Destination,
+                ErrorClass::Unknown,
+                "BigQuery data loss",
+            ),
 
             // Code::Ok (0) - Should never be an error
-            Code::Ok => (ErrorKind::DestinationError, "BigQuery unexpected ok status"),
+            Code::Ok => (
+                ErrorScope::Destination,
+                ErrorClass::Unknown,
+                "BigQuery unexpected ok status",
+            ),
         },
 
         // Concurrency and task errors
         BQError::SemaphorePermitError(_) => (
-            ErrorKind::DestinationError,
+            ErrorScope::Destination,
+            ErrorClass::Unknown,
             "BigQuery semaphore permit error",
         ),
-        BQError::TokioTaskError(_) => {
-            (ErrorKind::DestinationError, "BigQuery task execution error")
-        }
+        BQError::TokioTaskError(_) => (
+            ErrorScope::Destination,
+            ErrorClass::Unknown,
+            "BigQuery task execution error",
+        ),
         BQError::ConnectionPoolError(_) => (
-            ErrorKind::DestinationError,
+            ErrorScope::Destination,
+            ErrorClass::ConnectionFailed,
             "BigQuery connection pool error",
         ),
     };
 
-    etl_error!(kind, description, err.to_string())
+    etl_error!(scope: scope, class, description, err.to_string())
 }
 
 /// Converts BigQuery row errors to ETL destination errors.
 fn row_error_to_etl_error(err: RowError) -> EtlError {
     etl_error!(
-        ErrorKind::DestinationError,
+        destination,
+        ErrorClass::Unknown,
         "BigQuery row error",
         format!("{err:?}")
     )
@@ -830,7 +918,8 @@ impl BigQueryClient {
     fn sanitize_identifier(identifier: &str, context: &str) -> EtlResult<String> {
         if identifier.is_empty() {
             return Err(etl_error!(
-                ErrorKind::DestinationTableNameInvalid,
+                destination,
+                ErrorClass::TableNameInvalid,
                 "Invalid BigQuery identifier",
                 format!("{context} cannot be empty")
             ));
@@ -838,7 +927,8 @@ impl BigQueryClient {
 
         if identifier.chars().any(char::is_control) {
             return Err(etl_error!(
-                ErrorKind::DestinationTableNameInvalid,
+                destination,
+                ErrorClass::TableNameInvalid,
                 "Invalid BigQuery identifier",
                 format!("{context} contains control characters")
             ));
@@ -1158,7 +1248,9 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(err) if err.kind() == ErrorKind::DestinationTableNameInvalid
+            Err(err)
+                if err.scope() == ErrorScope::Destination
+                    && err.class() == ErrorClass::TableNameInvalid
         ));
     }
 

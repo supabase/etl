@@ -1,4 +1,4 @@
-use etl::error::{ErrorKind, EtlResult};
+use etl::error::{ErrorClass, EtlResult};
 use etl::types::TableName;
 use etl::{bail, etl_error};
 
@@ -29,7 +29,8 @@ pub fn validate_table_name_component_for_underscore_encoding(
 ) -> EtlResult<()> {
     if value.starts_with('_') || value.ends_with('_') {
         bail!(
-            ErrorKind::ValidationError,
+            destination,
+            ErrorClass::TableNameInvalid,
             "destination table name cannot use leading or trailing underscores",
             format!(
                 "{component_name} '{value}' cannot start or end with '_' because underscore-based destination table naming would be ambiguous"
@@ -39,7 +40,8 @@ pub fn validate_table_name_component_for_underscore_encoding(
 
     if value.is_empty() {
         return Err(etl_error!(
-            ErrorKind::ValidationError,
+            destination,
+            ErrorClass::TableNameInvalid,
             "destination table name component cannot be empty",
             format!(
                 "{component_name} cannot be empty when building an underscore-escaped destination table name"
@@ -67,7 +69,8 @@ mod tests {
         let table_name = TableName::new("_schema".to_string(), "users".to_string());
         let err = try_stringify_table_name(&table_name).unwrap_err();
 
-        assert_eq!(err.kind(), ErrorKind::ValidationError);
+        assert_eq!(err.scope(), etl::error::ErrorScope::Destination);
+        assert_eq!(err.class(), ErrorClass::TableNameInvalid);
         assert_eq!(
             err.description(),
             Some("destination table name cannot use leading or trailing underscores")
@@ -79,7 +82,8 @@ mod tests {
         let table_name = TableName::new("public".to_string(), "users_".to_string());
         let err = try_stringify_table_name(&table_name).unwrap_err();
 
-        assert_eq!(err.kind(), ErrorKind::ValidationError);
+        assert_eq!(err.scope(), etl::error::ErrorScope::Destination);
+        assert_eq!(err.class(), ErrorClass::TableNameInvalid);
         assert_eq!(
             err.description(),
             Some("destination table name cannot use leading or trailing underscores")

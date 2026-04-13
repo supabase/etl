@@ -12,7 +12,7 @@ use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
 use crate::destination::async_result::{TruncateTableResult, WriteTableRowsResult};
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION, etl_fail_point};
 use crate::metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL};
@@ -96,7 +96,8 @@ where
             warn!(table_id = table_id.0, %phase_type, "invalid replication phase for table sync");
 
             bail!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "Invalid replication phase",
                 format!(
                     "Invalid replication phase '{:?}': expected 'Init', 'DataSync', or 'FinishedCopy'",
@@ -210,7 +211,8 @@ where
 
             if !table_schema.has_primary_keys() {
                 bail!(
-                    ErrorKind::SourceSchemaError,
+                    source,
+                    ErrorClass::SchemaError,
                     "Primary key not found",
                     format!("Table '{}' has no primary key", table_schema.name)
                 );

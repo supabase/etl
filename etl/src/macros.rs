@@ -3,24 +3,149 @@
 //! Provides convenience macros for creating and returning [`crate::error::EtlError`] instances with
 //! reduced boilerplate for common error handling patterns.
 
-/// Creates an [`crate::error::EtlError`] from error kind and description.
-///
-/// This macro provides a concise way to create [`crate::error::EtlError`] instances with
-/// static descriptions, optional dynamic detail (use `detail =` to move an owned [`String`]),
-/// and optional source errors.
+/// Maps macro scope identifiers to [`crate::error::ErrorScope`].
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __etl_error_scope {
+    (source) => {
+        $crate::error::ErrorScope::Source
+    };
+    (destination) => {
+        $crate::error::ErrorScope::Destination
+    };
+    (internal) => {
+        $crate::error::ErrorScope::Internal
+    };
+}
+
+/// Creates an [`crate::error::EtlError`] from error scope, class, and description.
 #[macro_export]
 macro_rules! etl_error {
-    ($kind:expr, $desc:expr) => {
-        $crate::error::EtlError::from(($kind, $desc))
+    (source, $class:expr, $desc:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $crate::__etl_error_scope!(source),
+            $class,
+            $desc,
+            None,
+        )
     };
-    ($kind:expr, $desc:expr, source: $source:expr) => {
-        $crate::error::EtlError::from(($kind, $desc)).with_source($source)
+    (source, $class:expr, $desc:expr, source: $source:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $crate::__etl_error_scope!(source),
+            $class,
+            $desc,
+            None,
+        )
+        .with_source($source)
     };
-    ($kind:expr, $desc:expr, $detail:expr) => {
-        $crate::error::EtlError::from(($kind, $desc, $detail.to_string()))
+    (source, $class:expr, $desc:expr, $detail:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $crate::__etl_error_scope!(source),
+            $class,
+            $desc,
+            Some(($detail).to_string().into()),
+        )
     };
-    ($kind:expr, $desc:expr, $detail:expr, source: $source:expr) => {
-        $crate::error::EtlError::from(($kind, $desc, $detail.to_string())).with_source($source)
+    (source, $class:expr, $desc:expr, $detail:expr, source: $source:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $crate::__etl_error_scope!(source),
+            $class,
+            $desc,
+            Some(($detail).to_string().into()),
+        )
+        .with_source($source)
+    };
+    (destination, $class:expr, $desc:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $crate::__etl_error_scope!(destination),
+            $class,
+            $desc,
+            None,
+        )
+    };
+    (destination, $class:expr, $desc:expr, source: $source:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $crate::__etl_error_scope!(destination),
+            $class,
+            $desc,
+            None,
+        )
+        .with_source($source)
+    };
+    (destination, $class:expr, $desc:expr, $detail:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $crate::__etl_error_scope!(destination),
+            $class,
+            $desc,
+            Some(($detail).to_string().into()),
+        )
+    };
+    (destination, $class:expr, $desc:expr, $detail:expr, source: $source:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $crate::__etl_error_scope!(destination),
+            $class,
+            $desc,
+            Some(($detail).to_string().into()),
+        )
+        .with_source($source)
+    };
+    (internal, $class:expr, $desc:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $crate::__etl_error_scope!(internal),
+            $class,
+            $desc,
+            None,
+        )
+    };
+    (internal, $class:expr, $desc:expr, source: $source:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $crate::__etl_error_scope!(internal),
+            $class,
+            $desc,
+            None,
+        )
+        .with_source($source)
+    };
+    (internal, $class:expr, $desc:expr, $detail:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $crate::__etl_error_scope!(internal),
+            $class,
+            $desc,
+            Some(($detail).to_string().into()),
+        )
+    };
+    (internal, $class:expr, $desc:expr, $detail:expr, source: $source:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $crate::__etl_error_scope!(internal),
+            $class,
+            $desc,
+            Some(($detail).to_string().into()),
+        )
+        .with_source($source)
+    };
+    (scope: $scope:expr, $class:expr, $desc:expr) => {
+        $crate::error::EtlError::from_scope_class_parts($scope, $class, $desc, None)
+    };
+    (scope: $scope:expr, $class:expr, $desc:expr, source: $source:expr) => {
+        $crate::error::EtlError::from_scope_class_parts($scope, $class, $desc, None)
+            .with_source($source)
+    };
+    (scope: $scope:expr, $class:expr, $desc:expr, $detail:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $scope,
+            $class,
+            $desc,
+            Some(($detail).to_string().into()),
+        )
+    };
+    (scope: $scope:expr, $class:expr, $desc:expr, $detail:expr, source: $source:expr) => {
+        $crate::error::EtlError::from_scope_class_parts(
+            $scope,
+            $class,
+            $desc,
+            Some(($detail).to_string().into()),
+        )
+        .with_source($source)
     };
 }
 
@@ -31,18 +156,103 @@ macro_rules! etl_error {
 /// Supports the same optional detail and source arguments as [`etl_error!`].
 #[macro_export]
 macro_rules! bail {
-    ($kind:expr, $desc:expr) => {
-        return ::core::result::Result::Err($crate::etl_error!($kind, $desc))
+    (source, $class:expr, $desc:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(source, $class, $desc))
     };
-    ($kind:expr, $desc:expr, source: $source:expr) => {
-        return ::core::result::Result::Err($crate::etl_error!($kind, $desc, source: $source))
-    };
-    ($kind:expr, $desc:expr, $detail:expr) => {
-        return ::core::result::Result::Err($crate::etl_error!($kind, $desc, $detail))
-    };
-    ($kind:expr, $desc:expr, $detail:expr, source: $source:expr) => {
+    (source, $class:expr, $desc:expr, source: $source:expr) => {
         return ::core::result::Result::Err($crate::etl_error!(
-            $kind,
+            source,
+            $class,
+            $desc,
+            source: $source
+        ))
+    };
+    (source, $class:expr, $desc:expr, $detail:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(source, $class, $desc, $detail))
+    };
+    (source, $class:expr, $desc:expr, $detail:expr, source: $source:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(
+            source,
+            $class,
+            $desc,
+            $detail,
+            source: $source
+        ))
+    };
+    (destination, $class:expr, $desc:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(destination, $class, $desc))
+    };
+    (destination, $class:expr, $desc:expr, source: $source:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(
+            destination,
+            $class,
+            $desc,
+            source: $source
+        ))
+    };
+    (destination, $class:expr, $desc:expr, $detail:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(
+            destination,
+            $class,
+            $desc,
+            $detail
+        ))
+    };
+    (destination, $class:expr, $desc:expr, $detail:expr, source: $source:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(
+            destination,
+            $class,
+            $desc,
+            $detail,
+            source: $source
+        ))
+    };
+    (internal, $class:expr, $desc:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(internal, $class, $desc))
+    };
+    (internal, $class:expr, $desc:expr, source: $source:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(
+            internal,
+            $class,
+            $desc,
+            source: $source
+        ))
+    };
+    (internal, $class:expr, $desc:expr, $detail:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(
+            internal,
+            $class,
+            $desc,
+            $detail
+        ))
+    };
+    (internal, $class:expr, $desc:expr, $detail:expr, source: $source:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(
+            internal,
+            $class,
+            $desc,
+            $detail,
+            source: $source
+        ))
+    };
+    (scope: $scope:expr, $class:expr, $desc:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(scope: $scope, $class, $desc))
+    };
+    (scope: $scope:expr, $class:expr, $desc:expr, source: $source:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(
+            scope: $scope,
+            $class,
+            $desc,
+            source: $source
+        ))
+    };
+    (scope: $scope:expr, $class:expr, $desc:expr, $detail:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(scope: $scope, $class, $desc, $detail))
+    };
+    (scope: $scope:expr, $class:expr, $desc:expr, $detail:expr, source: $source:expr) => {
+        return ::core::result::Result::Err($crate::etl_error!(
+            scope: $scope,
+            $class,
             $desc,
             $detail,
             source: $source

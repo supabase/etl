@@ -1,6 +1,6 @@
 #![cfg(feature = "test-utils")]
 
-use etl::error::ErrorKind;
+use etl::error::{ErrorClass, ErrorScope};
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
@@ -1448,7 +1448,8 @@ async fn partitioned_table_with_publish_via_partition_root_false_and_partitioned
 
     // The pipeline should fail to start due to invalid configuration.
     let err = pipeline.start().await.err().unwrap();
-    assert_eq!(err.kind(), ErrorKind::ConfigError);
+    assert_eq!(err.scope(), ErrorScope::Internal);
+    assert_eq!(err.class(), ErrorClass::ConfigError);
 }
 
 /// Tests that the pipeline doesn't throw an error when `publish_via_partition_root=false` and there

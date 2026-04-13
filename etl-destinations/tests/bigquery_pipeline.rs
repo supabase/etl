@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
-use etl::error::ErrorKind;
+use etl::error::{ErrorClass, ErrorScope};
 use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use etl::store::state::StateStore;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
@@ -1633,10 +1633,11 @@ async fn table_array_with_null_values() {
 
     // Wait for the pipeline expecting an error to be returned.
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
-    assert_eq!(err.kinds().len(), 1);
+    assert_eq!(err.classes().len(), 1);
+    assert_eq!(err.scope(), ErrorScope::Destination);
     assert_eq!(
-        err.kinds()[0],
-        ErrorKind::NullValuesNotSupportedInArrayInDestination
+        err.classes()[0],
+        ErrorClass::NullValuesNotSupportedInArrayInDestination
     );
 
     // Reset and try with valid array (no nulls)

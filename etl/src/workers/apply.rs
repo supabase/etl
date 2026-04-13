@@ -13,7 +13,7 @@ use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorClass, EtlError, EtlResult};
 use crate::etl_error;
 use crate::metrics::{
     ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL,
@@ -51,12 +51,18 @@ impl ApplyWorkerHandle {
         handle.await.map_err(|err| {
             if err.is_cancelled() {
                 etl_error!(
-                    ErrorKind::ApplyWorkerCancelled,
+                    internal,
+                    ErrorClass::ApplyWorkerCancelled,
                     "Apply worker was cancelled",
                     err
                 )
             } else {
-                etl_error!(ErrorKind::ApplyWorkerPanic, "Apply worker panicked", err)
+                etl_error!(
+                    internal,
+                    ErrorClass::ApplyWorkerPanic,
+                    "Apply worker panicked",
+                    err
+                )
             }
         })??;
 
@@ -423,7 +429,8 @@ async fn handle_invalidated_slot<S: StateStore>(
     match behavior {
         InvalidatedSlotBehavior::Error => {
             bail!(
-                ErrorKind::ReplicationSlotInvalidated,
+                source,
+                ErrorClass::ReplicationSlotInvalidated,
                 "Replication slot has been invalidated",
                 format!(
                     "The replication slot '{}' for pipeline {} has been invalidated. \
@@ -499,7 +506,8 @@ async fn validate_tables_in_init_state<S: StateStore>(store: &S) -> EtlResult<()
         .collect();
 
     bail!(
-        ErrorKind::InvalidState,
+        internal,
+        ErrorClass::InvalidState,
         "Cannot create apply worker slot when tables are not in Init state",
         format!(
             "Creating a new apply worker replication slot requires all tables to be in Init state, \

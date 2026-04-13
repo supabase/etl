@@ -1,5 +1,5 @@
 use crate::bail;
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 
 /// Converts a Postgres bytea hex string to a byte array.
 ///
@@ -9,7 +9,8 @@ use crate::error::{ErrorKind, EtlResult};
 pub fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
     if value.len() < 2 || &value[..2] != "\\x" {
         bail!(
-            ErrorKind::ConversionError,
+            source,
+            ErrorClass::ConversionError,
             "Bytea hex string conversion failed",
             "Missing '\\x' prefix"
         );
@@ -20,7 +21,8 @@ pub fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
     let value = &value[2..];
     if !value.len().is_multiple_of(2) {
         bail!(
-            ErrorKind::ConversionError,
+            source,
+            ErrorClass::ConversionError,
             "Bytea hex string conversion failed",
             "Odd number of hexadecimal digits"
         );
@@ -37,7 +39,7 @@ pub fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ErrorKind;
+    use crate::error::{ErrorClass, ErrorScope};
 
     #[test]
     fn parse_bytea_hex_empty() {
@@ -86,7 +88,8 @@ mod tests {
         let result = parse_bytea_hex_string("41");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::ConversionError);
         assert!(err.to_string().contains("Missing '\\x' prefix"));
     }
 
@@ -95,7 +98,8 @@ mod tests {
         let result = parse_bytea_hex_string("0x41");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::ConversionError);
         assert!(err.to_string().contains("Missing '\\x' prefix"));
     }
 
@@ -104,7 +108,8 @@ mod tests {
         let result = parse_bytea_hex_string("");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::ConversionError);
         assert!(err.to_string().contains("Missing '\\x' prefix"));
     }
 
@@ -113,7 +118,8 @@ mod tests {
         let result = parse_bytea_hex_string("\\");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::ConversionError);
         assert!(err.to_string().contains("Missing '\\x' prefix"));
     }
 
@@ -122,7 +128,8 @@ mod tests {
         let result = parse_bytea_hex_string("\\x4");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::ConversionError);
         assert!(err.to_string().contains("Odd number of hexadecimal digits"));
     }
 
@@ -131,7 +138,8 @@ mod tests {
         let result = parse_bytea_hex_string("\\x41424");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::ConversionError));
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::ConversionError);
         assert!(err.to_string().contains("Odd number of hexadecimal digits"));
     }
 

@@ -13,7 +13,7 @@ use tokio_postgres::types::PgLsn;
 use tracing::debug;
 
 use crate::conversions::table_row::parse_table_row_from_postgres_copy_bytes;
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 use crate::etl_error;
 use crate::metrics::{
     ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, ETL_STATUS_UPDATES_SKIPPED_TOTAL,
@@ -213,7 +213,8 @@ impl EventsStream {
             .elapsed()
             .map_err(|err| {
                 etl_error!(
-                    ErrorKind::InvalidState,
+                    internal,
+                    ErrorClass::InvalidState,
                     "Invalid PostgreSQL epoch",
                     err.to_string()
                 )

@@ -3,13 +3,14 @@ use uuid::Uuid;
 
 use crate::bail;
 use crate::conversions::numeric::PgNumeric;
-use crate::error::{ErrorKind, EtlError};
+use crate::error::{ErrorClass, EtlError};
 
 macro_rules! convert_array_variant {
     ($variant:ident, $vec:expr) => {
         if $vec.iter().any(|v| v.is_none()) {
             bail!(
-                ErrorKind::NullValuesNotSupportedInArrayInDestination,
+                destination,
+                ErrorClass::NullValuesNotSupportedInArrayInDestination,
                 "NULL values in arrays not supported in this destination",
                 format!(
                     "Array {:?} contains NULL values which are not supported in this destination",
@@ -263,7 +264,7 @@ impl CellNonOptional {
 ///
 /// [`ArrayCellNonOptional`] is the non-nullable counterpart to [`ArrayCell`]. It is used
 /// for destinations that do not support NULL values within arrays. The conversion from
-/// [`ArrayCell`] will fail with [`ErrorKind::NullValuesNotSupportedInArrayInDestination`]
+/// [`ArrayCell`] will fail with [`crate::error::ErrorClass::NullValuesNotSupportedInArrayInDestination`]
 /// if any element is NULL.
 ///
 /// Each variant corresponds to a Postgres array type with guaranteed non-null elements.

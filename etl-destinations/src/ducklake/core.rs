@@ -10,7 +10,7 @@ use etl::destination::Destination;
 use etl::destination::async_result::{
     TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
 };
-use etl::error::{ErrorKind, EtlResult};
+use etl::error::{ErrorClass, EtlResult};
 use etl::etl_error;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
@@ -225,7 +225,8 @@ where
 
         if pool_size == 0 {
             return Err(etl_error!(
-                ErrorKind::ConfigError,
+                destination,
+                ErrorClass::ConfigError,
                 "DuckLake pool size must be greater than zero",
                 "pool_size must be at least 1"
             ));
@@ -297,7 +298,8 @@ where
                     .as_ref()
                     .ok_or_else(|| {
                         etl_error!(
-                            ErrorKind::DestinationError,
+                            internal,
+                            ErrorClass::InvalidState,
                             "Ducklake initialization failed",
                             "maintenance worker should exist before metrics sampler"
                         )
@@ -320,7 +322,8 @@ where
         self.run_duckdb_blocking(DuckDbBlockingOperationKind::Foreground, move |conn| -> EtlResult<()> {
             conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
                 etl_error!(
-                    ErrorKind::DestinationQueryFailed,
+                    destination,
+                    ErrorClass::QueryFailed,
                     "DuckLake BEGIN TRANSACTION failed",
                     source: e
                 )
@@ -330,7 +333,8 @@ where
                 let delete_table_sql = format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}";"#);
                 conn.execute_batch(&delete_table_sql).map_err(|e| {
                     etl_error!(
-                        ErrorKind::DestinationQueryFailed,
+                        destination,
+                        ErrorClass::QueryFailed,
                         "DuckLake DELETE failed",
                         format_query_error_detail(&delete_table_sql, &e),
                         source: e
@@ -347,7 +351,7 @@ where
 
             match result {
                 Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
-                    etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", source: e)
+                    etl_error!(destination, ErrorClass::QueryFailed, "DuckLake COMMIT failed", source: e)
                 }),
                 Err(error) => {
                     let err = conn.execute_batch("ROLLBACK");
@@ -535,7 +539,11 @@ where
 
                 while let Some(result) = join_set.join_next().await {
                     result.map_err(|_| {
-                        etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake write task panicked")
+                        etl_error!(
+                            internal,
+                            ErrorClass::ApplyWorkerPanic,
+                            "DuckLake write task panicked"
+                        )
                     })??;
                 }
             }
@@ -577,7 +585,8 @@ where
                 while let Some(result) = join_set.join_next().await {
                     result.map_err(|_| {
                         etl_error!(
-                            ErrorKind::ApplyWorkerPanic,
+                            internal,
+                            ErrorClass::ApplyWorkerPanic,
                             "DuckLake truncate task panicked"
                         )
                     })??;
@@ -596,7 +605,8 @@ where
             .await?
             .ok_or_else(|| {
                 etl_error!(
-                    ErrorKind::MissingTableSchema,
+                    internal,
+                    ErrorClass::MissingTableSchema,
                     "Table schema not found",
                     format!("No schema found for table {table_id}")
                 )
@@ -621,7 +631,8 @@ where
             .await
             .map_err(|_| {
                 etl_error!(
-                    ErrorKind::InvalidState,
+                    internal,
+                    ErrorClass::InvalidState,
                     "DuckLake table creation semaphore closed"
                 )
             })?;
@@ -660,7 +671,8 @@ where
                     }
                     Err(e) => {
                         return Err(etl_error!(
-                            ErrorKind::DestinationQueryFailed,
+                            destination,
+                            ErrorClass::QueryFailed,
                             "DuckLake CREATE TABLE failed",
                             format_query_error_detail(&qualified_ddl, &e),
                             source: e
@@ -693,7 +705,8 @@ where
             .await?
             .ok_or_else(|| {
                 etl_error!(
-                    ErrorKind::MissingTableSchema,
+                    internal,
+                    ErrorClass::MissingTableSchema,
                     "Table schema not found",
                     format!("No schema found for table {table_id}")
                 )
@@ -724,7 +737,8 @@ where
 
         table_slot.acquire_owned().await.map_err(|_| {
             etl_error!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "DuckLake table write semaphore closed"
             )
         })
@@ -778,7 +792,8 @@ where
                         .await
                         .map_err(|_| {
                             etl_error!(
-                                ErrorKind::InvalidState,
+                                internal,
+                                ErrorClass::InvalidState,
                                 "DuckLake table write semaphore closed"
                             )
                         })?;
@@ -851,7 +866,8 @@ where
             if let Some(handle) = handle {
                 handle.await.map_err(|_| {
                     etl_error!(
-                        ErrorKind::ApplyWorkerPanic,
+                        internal,
+                        ErrorClass::ApplyWorkerPanic,
                         "DuckLake maintenance worker task panicked"
                     )
                 })?;
@@ -869,7 +885,8 @@ where
             if let Some(handle) = handle {
                 handle.await.map_err(|_| {
                     etl_error!(
-                        ErrorKind::ApplyWorkerPanic,
+                        internal,
+                        ErrorClass::ApplyWorkerPanic,
                         "DuckLake metrics sampler task panicked"
                     )
                 })?;
@@ -923,7 +940,8 @@ pub(super) fn flush_table_inlined_data(
     );
     let rows_flushed: i64 = conn.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
         etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake inlined data flush failed",
             format_query_error_detail(&sql, &e),
             source: e

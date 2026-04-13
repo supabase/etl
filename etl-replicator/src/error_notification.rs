@@ -161,18 +161,22 @@ pub fn compute_error_hash<H: Hash>(error_hash: H) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use etl::error::{ErrorKind, EtlError};
+    use etl::error::{ErrorClass, ErrorScope, EtlError};
 
     #[test]
     fn test_compute_error_hash_stability() {
-        let err1 = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
+        let err1 = EtlError::from_scope_class_parts(
+            ErrorScope::Source,
+            ErrorClass::ConnectionFailed,
             "Database connection failed",
-        ));
-        let err2 = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
+            None,
+        );
+        let err2 = EtlError::from_scope_class_parts(
+            ErrorScope::Source,
+            ErrorClass::ConnectionFailed,
             "Database connection failed",
-        ));
+            None,
+        );
 
         let hash1 = compute_error_hash(&err1);
         let hash2 = compute_error_hash(&err2);
@@ -183,16 +187,18 @@ mod tests {
 
     #[test]
     fn test_compute_error_hash_with_detail() {
-        let err1 = EtlError::from((
-            ErrorKind::SourceQueryFailed,
+        let err1 = EtlError::from_scope_class_parts(
+            ErrorScope::Source,
+            ErrorClass::QueryFailed,
             "Query execution failed",
-            "Table 'users' not found".to_string(),
-        ));
-        let err2 = EtlError::from((
-            ErrorKind::SourceQueryFailed,
+            Some("Table 'users' not found".to_string().into()),
+        );
+        let err2 = EtlError::from_scope_class_parts(
+            ErrorScope::Source,
+            ErrorClass::QueryFailed,
             "Query execution failed",
-            "Table 'users' not found".to_string(),
-        ));
+            Some("Table 'users' not found".to_string().into()),
+        );
 
         let hash1 = compute_error_hash(&err1);
         let hash2 = compute_error_hash(&err2);
@@ -202,11 +208,18 @@ mod tests {
 
     #[test]
     fn test_compute_error_hash_different_errors() {
-        let err1 = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
+        let err1 = EtlError::from_scope_class_parts(
+            ErrorScope::Source,
+            ErrorClass::ConnectionFailed,
             "Database connection failed",
-        ));
-        let err2 = EtlError::from((ErrorKind::SourceQueryFailed, "Query execution failed"));
+            None,
+        );
+        let err2 = EtlError::from_scope_class_parts(
+            ErrorScope::Source,
+            ErrorClass::QueryFailed,
+            "Query execution failed",
+            None,
+        );
 
         let hash1 = compute_error_hash(&err1);
         let hash2 = compute_error_hash(&err2);

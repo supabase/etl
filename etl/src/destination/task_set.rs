@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{error, warn};
 
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 use crate::etl_error;
 
 /// Reap completed destination tasks once the tracked set grows past this threshold.
@@ -109,7 +109,8 @@ impl DestinationTaskSet {
                 );
 
                 Err(etl_error!(
-                    ErrorKind::DestinationError,
+                    destination,
+                    ErrorClass::Unknown,
                     "Destination background task panicked",
                     err.to_string()
                 ))

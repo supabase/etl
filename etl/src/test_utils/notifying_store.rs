@@ -4,7 +4,7 @@ use std::{fmt, sync::Arc};
 use etl_postgres::types::{TableId, TableSchema};
 use tokio::sync::{Notify, RwLock};
 
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 use crate::etl_error;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::cleanup::CleanupStore;
@@ -267,7 +267,8 @@ impl StateStore for NotifyingStore {
             .and_then(|history| history.pop())
             .ok_or_else(|| {
                 etl_error!(
-                    ErrorKind::StateRollbackError,
+                    internal,
+                    ErrorClass::StateRollbackError,
                     "No previous state available to roll back to"
                 )
             })?;

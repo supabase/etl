@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlError, EtlResult};
 use crate::etl_error;
 use crate::metrics::{ETL_TABLES_TOTAL, PHASE_LABEL};
 use crate::state::table::TableReplicationPhase;
@@ -30,6 +30,18 @@ const MAX_POOL_CONNECTIONS: u32 = 2;
 
 /// Duration after which idle connections are closed.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Wraps a SQLx state store failure while preserving its classified scope and class.
+fn wrap_state_store_error(description: &'static str, detail: String, err: sqlx::Error) -> EtlError {
+    let classified: EtlError = err.into();
+    etl_error!(
+        scope: classified.scope(),
+        classified.class(),
+        description,
+        detail,
+        source: classified
+    )
+}
 
 /// Creates a lazily connected pool with automatic idle connection cleanup.
 ///
@@ -189,10 +201,10 @@ impl PostgresStore {
         source_config: PgConnectionConfig,
     ) -> EtlResult<Self> {
         apply_migrations(&source_config).await.map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceError,
+            wrap_state_store_error(
                 "Failed to run Postgres state store migrations",
-                err
+                format!("Failed to run Postgres state store migrations: {err}"),
+                err,
             )
         })?;
 
@@ -328,7 +340,8 @@ impl StateStore for PostgresStore {
                 .await?
                 .ok_or_else(|| {
                     etl_error!(
-                        ErrorKind::StateRollbackError,
+                        internal,
+                        ErrorClass::StateRollbackError,
                         "Previous table state not found",
                         "No previous state available to roll back to for this table"
                     )
@@ -378,10 +391,10 @@ impl StateStore for PostgresStore {
             table_mappings::load_table_mappings(&self.pool, self.pipeline_id as i64)
                 .await
                 .map_err(|err| {
-                    etl_error!(
-                        ErrorKind::SourceQueryFailed,
+                    wrap_state_store_error(
                         "Table mappings loading failed",
-                        format!("Failed to load table mappings from PostgreSQL: {}", err)
+                        format!("Failed to load table mappings from PostgreSQL: {err}"),
+                        err,
                     )
                 })?;
 
@@ -418,10 +431,10 @@ impl StateStore for PostgresStore {
         )
         .await
         .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
+            wrap_state_store_error(
                 "Table mapping storage failed",
-                format!("Failed to store table mapping in PostgreSQL: {}", err)
+                format!("Failed to store table mapping in PostgreSQL: {err}"),
+                err,
             )
         })?;
 
@@ -469,10 +482,10 @@ impl SchemaStore for PostgresStore {
         let table_schemas = schema::load_table_schemas(&self.pool, self.pipeline_id as i64)
             .await
             .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
+                wrap_state_store_error(
                     "Table schemas loading failed",
-                    format!("Failed to load table schemas from PostgreSQL: {}", err)
+                    format!("Failed to load table schemas from PostgreSQL: {err}"),
+                    err,
                 )
             })?;
         let table_schemas_len = table_schemas.len();
@@ -500,10 +513,10 @@ impl SchemaStore for PostgresStore {
         schema::store_table_schema(&self.pool, self.pipeline_id as i64, &table_schema)
             .await
             .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
+                wrap_state_store_error(
                     "Table schema storage failed",
-                    format!("Failed to store table schema in PostgreSQL: {}", err)
+                    format!("Failed to store table schema in PostgreSQL: {err}"),
+                    err,
                 )
             })?;
 
@@ -529,20 +542,20 @@ impl CleanupStore for PostgresStore {
         )
         .await
         .map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceQueryFailed,
+            wrap_state_store_error(
                 "Table mapping deletion failed",
-                format!("Failed to delete table mapping in PostgreSQL: {}", err)
+                format!("Failed to delete table mapping in PostgreSQL: {err}"),
+                err,
             )
         })?;
 
         schema::delete_table_schema_for_table(&mut *tx, self.pipeline_id as i64, table_id)
             .await
             .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
+                wrap_state_store_error(
                     "Table schema deletion failed",
-                    format!("Failed to delete table schema in PostgreSQL: {}", err)
+                    format!("Failed to delete table schema in PostgreSQL: {err}"),
+                    err,
                 )
             })?;
 

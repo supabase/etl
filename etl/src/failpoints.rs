@@ -6,7 +6,7 @@
 use fail::fail_point;
 
 use crate::bail;
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 
 pub const START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION: &str =
     "start_table_sync.before_data_sync_slot_creation";
@@ -26,18 +26,19 @@ pub const START_TABLE_SYNC_DURING_DATA_SYNC: &str = "start_table_sync.during_dat
 /// Returns `Ok(())` when the failpoint is inactive, allowing normal execution.
 pub fn etl_fail_point(name: &str) -> EtlResult<()> {
     fail_point!(name, |parameter| {
-        let mut error_kind = ErrorKind::WithNoRetry;
+        let mut error_class = ErrorClass::WithNoRetry;
         if let Some(parameter) = parameter {
-            error_kind = match parameter.as_str() {
-                "no_retry" => ErrorKind::WithNoRetry,
-                "manual_retry" => ErrorKind::WithManualRetry,
-                "timed_retry" => ErrorKind::WithTimedRetry,
-                _ => ErrorKind::WithNoRetry,
+            error_class = match parameter.as_str() {
+                "no_retry" => ErrorClass::WithNoRetry,
+                "manual_retry" => ErrorClass::WithManualRetry,
+                "timed_retry" => ErrorClass::WithTimedRetry,
+                _ => ErrorClass::WithNoRetry,
             }
         }
 
         bail!(
-            error_kind,
+            internal,
+            error_class,
             "Failpoint triggered an error",
             format!("Failpoint '{}' returned an error", name)
         );

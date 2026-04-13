@@ -14,7 +14,7 @@ use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
+use crate::error::{ErrorClass, EtlError, EtlResult};
 use crate::metrics::{ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL};
 use crate::replication::apply::{
     ApplyLoop, ApplyLoopResult, TableSyncWorkerContext, WorkerContext,
@@ -563,7 +563,8 @@ where
             .await?
         else {
             bail!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "Table replication state not found",
                 format!("Replication state missing for table {}", self.table_id)
             );
@@ -690,7 +691,8 @@ where
         }
         .map_err(|err| {
             etl_error!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "table sync worker semaphore closed while acquiring run permit",
                 err
             )

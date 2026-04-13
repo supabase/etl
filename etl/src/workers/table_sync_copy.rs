@@ -18,7 +18,7 @@ use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
 use crate::concurrency::stream::TryBatchBackpressureStream;
 use crate::destination::Destination;
 use crate::destination::async_result::WriteTableRowsResult;
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 use crate::etl_error;
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC, etl_fail_point};
@@ -108,7 +108,8 @@ where
             changed = connection_updates_rx.changed() => {
                 if changed.is_err() {
                     return Err(etl_error!(
-                        ErrorKind::SourceConnectionFailed,
+                        source,
+                        ErrorClass::ConnectionFailed,
                         "postgresql connection updates ended during table copy"
                     ));
                 }
@@ -118,16 +119,13 @@ where
                     PostgresConnectionUpdate::Running => {}
                     PostgresConnectionUpdate::Terminated => {
                         return Err(etl_error!(
-                            ErrorKind::SourceConnectionFailed,
+                            source,
+                            ErrorClass::ConnectionFailed,
                             "postgresql connection terminated during table copy"
                         ));
                     }
                     PostgresConnectionUpdate::Errored { error } => {
-                        return Err(etl_error!(
-                            ErrorKind::SourceConnectionFailed,
-                            "postgresql connection errored during table copy",
-                            error.to_string()
-                        ));
+                        return Err(error);
                     }
                 }
             }
@@ -400,7 +398,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         // Acquire a concurrency slot to make sure we are always using at most `max_copy_connections`.
         let permit = semaphore.clone().acquire_owned().await.map_err(|err| {
             etl_error!(
-                ErrorKind::InvalidState,
+                internal,
+                ErrorClass::InvalidState,
                 "Could not acquire semaphore while copying a table in parallel",
                 err.to_string()
             )
@@ -477,7 +476,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             }
             Err(join_err) => {
                 return Err(etl_error!(
-                    ErrorKind::TableSyncWorkerPanic,
+                    internal,
+                    ErrorClass::TableSyncWorkerPanic,
                     "One or more parallel copy partition tasks panicked, aborting all",
                     join_err.to_string()
                 ));

@@ -1,6 +1,6 @@
 #![cfg(feature = "test-utils")]
 
-use etl::error::ErrorKind;
+use etl::error::ErrorClass;
 use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use etl::store::state::StateStore;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
@@ -147,7 +147,7 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     let wait_result = pipeline.shutdown_and_wait().await;
     assert!(wait_result.is_err());
     let err = wait_result.unwrap_err();
-    assert!(err.kinds().contains(&ErrorKind::InvalidState));
+    assert!(err.classes().contains(&ErrorClass::InvalidState));
 
     // Verify that the slot was cleaned up (deleted) after the validation failure.
     let slot_state = database
@@ -223,7 +223,10 @@ async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
     let wait_result = pipeline.shutdown_and_wait().await;
     assert!(wait_result.is_err());
     let err = wait_result.unwrap_err();
-    assert!(err.kinds().contains(&ErrorKind::ReplicationSlotInvalidated));
+    assert!(
+        err.classes()
+            .contains(&ErrorClass::ReplicationSlotInvalidated)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

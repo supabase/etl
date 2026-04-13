@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use etl::error::{ErrorKind, EtlResult};
+use etl::error::{ErrorClass, EtlResult};
 use etl::etl_error;
 use etl::types::{Cell, TableRow, TableSchema};
 use metrics::{counter, histogram};
@@ -223,7 +223,8 @@ pub(super) async fn ensure_applied_batches_table_exists(
 
     let _table_creation_permit = table_creation_slots.acquire_owned().await.map_err(|_| {
         etl_error!(
-            ErrorKind::InvalidState,
+            internal,
+            ErrorClass::InvalidState,
             "DuckLake table creation semaphore closed"
         )
     })?;
@@ -255,7 +256,8 @@ pub(super) async fn ensure_applied_batches_table_exists(
                 Err(error) if is_create_table_conflict(&error, &table_name) => {}
                 Err(error) => {
                     return Err(etl_error!(
-                        ErrorKind::DestinationQueryFailed,
+                        destination,
+                        ErrorClass::QueryFailed,
                         "DuckLake CREATE TABLE failed",
                         format_query_error_detail(&ddl, &error),
                         source: error
@@ -270,7 +272,8 @@ pub(super) async fn ensure_applied_batches_table_exists(
             );
             conn.execute_batch(&set_option_sql).map_err(|error| {
                 etl_error!(
-                    ErrorKind::DestinationQueryFailed,
+                    destination,
+                    ErrorClass::QueryFailed,
                     "DuckLake set_option failed",
                     format_query_error_detail(&set_option_sql, &error),
                     source: error
@@ -350,7 +353,8 @@ pub(super) async fn apply_table_batches_with_retry(
         )
         .increment(1);
         etl_error!(
-            ErrorKind::DestinationAtomicBatchRetryable,
+            destination,
+            ErrorClass::AtomicBatchRetryable,
             "DuckLake atomic table batch sequence failed after retries",
             format!("table={table_name}, batch_count={batch_count}"),
             source: failure.last_error
@@ -439,7 +443,8 @@ pub(super) async fn apply_table_batch_with_retry(
         )
         .increment(1);
         etl_error!(
-            ErrorKind::DestinationAtomicBatchRetryable,
+            destination,
+            ErrorClass::AtomicBatchRetryable,
             "DuckLake atomic table batch failed after retries",
             format!(
                 "table={table_name}, batch_id={batch_id}, batch_kind={}",
@@ -534,7 +539,8 @@ pub(super) fn clear_applied_batch_markers_for_kind(
     );
     conn.execute_batch(&sql).map_err(|error| {
         etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake batch marker delete failed",
             format_query_error_detail(&sql, &error),
             source: error
@@ -574,7 +580,8 @@ fn apply_table_batches(
 
         apply_table_batch(conn, batch).map_err(|error| {
             etl_error!(
-                ErrorKind::DestinationQueryFailed,
+                destination,
+                ErrorClass::QueryFailed,
                 "DuckLake atomic table batch failed",
                 format!(
                     "table={}, batch_id={}, batch_kind={}",
@@ -713,7 +720,8 @@ fn prepare_table_mutations(
 fn delete_predicate_from_row(table_schema: &TableSchema, row: &TableRow) -> EtlResult<String> {
     if !table_schema.has_primary_keys() {
         return Err(etl_error!(
-            ErrorKind::InvalidState,
+            internal,
+            ErrorClass::InvalidState,
             "DuckLake delete requires a primary key",
             format!("Table '{}' has no primary key columns", table_schema.name)
         ));
@@ -721,7 +729,8 @@ fn delete_predicate_from_row(table_schema: &TableSchema, row: &TableRow) -> EtlR
 
     if row.values().len() != table_schema.column_schemas.len() {
         return Err(etl_error!(
-            ErrorKind::InvalidState,
+            internal,
+            ErrorClass::InvalidState,
             "DuckLake row shape does not match schema",
             format!(
                 "Expected {} values for table '{}', got {}",
@@ -890,7 +899,8 @@ fn applied_batch_marker_exists(
     );
     let mut statement = conn.prepare(&sql).map_err(|error| {
         etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake marker query prepare failed",
             format_query_error_detail(&sql, &error),
             source: error
@@ -898,7 +908,8 @@ fn applied_batch_marker_exists(
     })?;
     let mut rows = statement.query([]).map_err(|error| {
         etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake marker query failed",
             format_query_error_detail(&sql, &error),
             source: error
@@ -907,7 +918,8 @@ fn applied_batch_marker_exists(
 
     rows.next().map(|row| row.is_some()).map_err(|error| {
         etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake marker query row fetch failed",
             format_query_error_detail(&sql, &error),
             source: error
@@ -931,7 +943,8 @@ fn insert_applied_batch_marker(
     );
     conn.execute_batch(&sql).map_err(|error| {
         etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake batch marker insert failed",
             format_query_error_detail(&sql, &error),
             source: error
@@ -950,7 +963,8 @@ fn apply_table_batch(
     conn.execute_batch("BEGIN TRANSACTION").map_err(|error| {
         tracing::error!(?error, "error transaction");
         etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake BEGIN TRANSACTION failed",
             source: error
         )
@@ -981,7 +995,7 @@ fn apply_table_batch(
         Ok(()) => {
             conn.execute_batch("COMMIT").map_err(|error| {
                 tracing::error!(?error, "error commit");
-                etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", source: error)
+                etl_error!(destination, ErrorClass::QueryFailed, "DuckLake COMMIT failed", source: error)
             })?;
             histogram!(
                 ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS,
@@ -1027,7 +1041,8 @@ fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> E
     conn.execute_batch(&sql).map_err(|error| {
         tracing::error!(?error, "error DELETE");
         etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake DELETE failed",
             format_query_error_detail(&sql, &error),
             source: error
@@ -1100,7 +1115,8 @@ fn apply_upsert_mutation(
         tracing::error!(?error, "error CREATE TEMP TABLE");
 
         etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "DuckLake staging table creation failed",
             source: error
         )
@@ -1111,7 +1127,8 @@ fn apply_upsert_mutation(
             let mut appender = conn.appender(&staging).map_err(|error| {
                 tracing::error!(?error, "error appender");
                 etl_error!(
-                    ErrorKind::DestinationQueryFailed,
+                    destination,
+                    ErrorClass::QueryFailed,
                     "DuckLake staging appender creation failed",
                     source: error
                 )
@@ -1122,7 +1139,8 @@ fn apply_upsert_mutation(
                     .map_err(|error| {
                         tracing::error!(?error, "error append row");
                         etl_error!(
-                            ErrorKind::DestinationQueryFailed,
+                            destination,
+                            ErrorClass::QueryFailed,
                             "DuckLake staging append_row failed",
                             source: error
                         )
@@ -1131,7 +1149,8 @@ fn apply_upsert_mutation(
             appender.flush().map_err(|error| {
                 tracing::error!(?error, "error flush");
                 etl_error!(
-                    ErrorKind::DestinationQueryFailed,
+                    destination,
+                    ErrorClass::QueryFailed,
                     "DuckLake staging appender flush failed",
                     source: error
                 )
@@ -1160,7 +1179,8 @@ fn apply_upsert_mutation(
         .map_err(|error| {
             tracing::error!(?error, "error INSERT INTO");
             etl_error!(
-                ErrorKind::DestinationQueryFailed,
+                destination,
+                ErrorClass::QueryFailed,
                 "DuckLake INSERT SELECT failed",
                 source: error
             )
@@ -1199,7 +1219,8 @@ fn apply_delete_mutation(
         conn.execute_batch(&sql_query).map_err(|error| {
             tracing::error!(?error, "error DELETE FROM");
             etl_error!(
-                ErrorKind::DestinationQueryFailed,
+                destination,
+                ErrorClass::QueryFailed,
                 "DuckLake DELETE failed",
                 source: error
             )
@@ -1284,7 +1305,8 @@ fn insert_rows_into_staging_with_sql(
         .map_err(|error| {
             tracing::error!(?error, "error insert_rows_into_staging_with_sql");
             etl_error!(
-                ErrorKind::DestinationQueryFailed,
+                destination,
+                ErrorClass::QueryFailed,
                 "DuckLake staging row insert failed",
                 source: error
             )
@@ -1341,7 +1363,8 @@ fn maybe_fail_after_atomic_batch_commit_for_tests(table_name: &str) -> EtlResult
     if fail_table.as_deref() == Some(table_name) {
         *fail_table = None;
         return Err(etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "ducklake test hook injected post-commit failure"
         ));
     }
@@ -1356,7 +1379,8 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<(
     if fail_table.as_deref() == Some(table_name) {
         *fail_table = None;
         return Err(etl_error!(
-            ErrorKind::DestinationQueryFailed,
+            destination,
+            ErrorClass::QueryFailed,
             "ducklake test hook injected copy post-commit failure"
         ));
     }

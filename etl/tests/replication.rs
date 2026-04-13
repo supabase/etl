@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use etl::error::ErrorKind;
+use etl::error::{ErrorClass, ErrorScope};
 use etl::replication::client::{
     CtidPartition, PgReplicationChildTransaction, PgReplicationClient, SlotState,
 };
@@ -131,7 +131,12 @@ async fn test_create_and_delete_slot() {
 
     // Verify the slot no longer exists
     let result = client.get_slot(&slot_name).await;
-    assert!(matches!(result, Err(ref err) if err.kind() == ErrorKind::ReplicationSlotNotFound));
+    assert!(matches!(
+        result,
+        Err(ref err)
+            if err.scope() == ErrorScope::Source
+                && err.class() == ErrorClass::ReplicationSlotNotFound
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -147,7 +152,12 @@ async fn test_delete_nonexistent_slot() {
 
     // Attempt to delete a slot that doesn't exist
     let result = client.delete_slot(&slot_name).await;
-    assert!(matches!(result, Err(ref err) if err.kind() == ErrorKind::ReplicationSlotNotFound));
+    assert!(matches!(
+        result,
+        Err(ref err)
+            if err.scope() == ErrorScope::Source
+                && err.class() == ErrorClass::ReplicationSlotNotFound
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -165,7 +175,12 @@ async fn test_delete_slot_if_exists_deletes_existing_slot() {
     client.delete_slot_if_exists(&slot_name).await.unwrap();
 
     let result = client.get_slot(&slot_name).await;
-    assert!(matches!(result, Err(ref err) if err.kind() == ErrorKind::ReplicationSlotNotFound));
+    assert!(matches!(
+        result,
+        Err(ref err)
+            if err.scope() == ErrorScope::Source
+                && err.class() == ErrorClass::ReplicationSlotNotFound
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -194,7 +209,9 @@ async fn test_replication_client_doesnt_recreate_slot() {
     assert!(client.create_slot(&slot_name).await.is_ok());
     assert!(matches!(
         client.create_slot(&slot_name).await,
-        Err(ref err) if err.kind() == ErrorKind::ReplicationSlotAlreadyExists
+        Err(ref err)
+            if err.scope() == ErrorScope::Source
+                && err.class() == ErrorClass::ReplicationSlotAlreadyExists
     ));
 }
 
@@ -854,8 +871,8 @@ async fn test_get_slot_state_returns_error_for_nonexistent_slot() {
 
     assert!(result.is_err());
     assert_eq!(
-        result.unwrap_err().kind(),
-        ErrorKind::ReplicationSlotNotFound
+        result.unwrap_err().class(),
+        ErrorClass::ReplicationSlotNotFound
     );
 }
 

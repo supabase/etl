@@ -93,7 +93,7 @@ fn event_from_etl_error(err: &EtlError) -> Event<'static> {
 /// Collects a single ETL error and its source chain into sentry exceptions.
 fn collect_single_etl_exception_chain(error: &EtlError, exceptions: &mut Vec<Exception>) {
     exceptions.push(Exception {
-        ty: format!("{:?}", error.kind()),
+        ty: format!("{:?}/{:?}", error.scope(), error.class()),
         value: Some(format_etl_sentry_value(error)),
         ..Default::default()
     });
@@ -164,7 +164,8 @@ fn etl_error_tree_to_serde_value(error: &EtlError) -> Value {
         })
     } else {
         json!({
-            "type": format!("{:?}", error.kind()),
+            "scope": format!("{:?}", error.scope()),
+            "class": format!("{:?}", error.class()),
             "description": error.description(),
             "detail": error.detail(),
         })

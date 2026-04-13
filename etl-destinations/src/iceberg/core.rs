@@ -14,7 +14,7 @@ use etl::destination::async_result::{
     TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
 };
 use etl::destination::task_set::DestinationTaskSet;
-use etl::error::{ErrorKind, EtlResult};
+use etl::error::{ErrorClass, EtlResult};
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::{
@@ -190,7 +190,8 @@ where
 
         let Some(table_schema) = self.store.get_table_schema(&table_id).await? else {
             bail!(
-                ErrorKind::MissingTableSchema,
+                internal,
+                ErrorClass::MissingTableSchema,
                 "Table not found in the schema store",
                 format!(
                     "The table schema for table {table_id} was not found in the schema store while processing truncate events for Iceberg"
@@ -200,7 +201,8 @@ where
 
         let Some(iceberg_table_name) = self.store.get_table_mapping(&table_id).await? else {
             bail!(
-                ErrorKind::MissingTableMapping,
+                internal,
+                ErrorClass::MissingTableMapping,
                 "Table mapping not found",
                 format!(
                     "The table mapping for table id {table_id} was not found while processing truncate events for Iceberg"
@@ -362,8 +364,9 @@ where
                 let mut bytes_sent = 0;
                 #[cfg_attr(not(feature = "egress"), allow(unused_assignments))]
                 while let Some(insert_result) = join_set.join_next().await {
-                    bytes_sent += insert_result
-                        .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
+                    bytes_sent += insert_result.map_err(|_| {
+                        etl_error!(internal, ErrorClass::Unknown, "Failed to join future")
+                    })??;
                 }
 
                 #[cfg(feature = "egress")]
@@ -436,7 +439,8 @@ where
             .await?
             .ok_or_else(|| {
                 etl_error!(
-                    ErrorKind::MissingTableSchema,
+                    internal,
+                    ErrorClass::MissingTableSchema,
                     "Table schema not found",
                     format!("No schema found for table {table_id}")
                 )

@@ -7,7 +7,7 @@ use crate::bail;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 use crate::metrics::register_metrics;
 use crate::replication::client::PgReplicationClient;
 use crate::state::table::TableReplicationPhase;
@@ -218,7 +218,7 @@ where
         let table_sync_workers_result = pool.wait_all().await;
         if let Err(err) = table_sync_workers_result {
             // We naively use the `kinds` as number of errors.
-            let errors_number = err.kinds().len();
+            let errors_number = err.classes().len();
             warn!(
                 error_count = errors_number,
                 "table sync workers failed, collecting errors"
@@ -293,7 +293,8 @@ where
             .await?
         {
             bail!(
-                ErrorKind::ConfigError,
+                source,
+                ErrorClass::ConfigError,
                 "Missing publication",
                 format!(
                     "The publication '{}' does not exist in the database",
@@ -335,7 +336,8 @@ where
 
             if has_partitioned_tables {
                 bail!(
-                    ErrorKind::ConfigError,
+                    source,
+                    ErrorClass::ConfigError,
                     "Invalid publication configuration for partitioned tables",
                     format!(
                         "The publication '{}' contains partitioned tables but has publish_via_partition_root=false. \

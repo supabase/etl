@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 use crate::etl_error;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
@@ -127,7 +127,8 @@ impl StateStore for MemoryStore {
             .and_then(|history| history.pop())
             .ok_or_else(|| {
                 etl_error!(
-                    ErrorKind::StateRollbackError,
+                    internal,
+                    ErrorClass::StateRollbackError,
                     "No previous state available to roll back to"
                 )
             })?;

@@ -1,4 +1,4 @@
-use crate::error::{ErrorKind, EtlError};
+use crate::error::{ErrorClass, ErrorScope, EtlError};
 
 /// Retry behavior for a classified error.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -46,65 +46,68 @@ impl ErrorHandlingPolicy {
 /// Builds an [`ErrorHandlingPolicy`] from an [`EtlError`] to determine in a unified way how errors
 /// should be handled.
 pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
-    match error.kind() {
+    match (error.scope(), error.class()) {
         // Automatically retriable errors. Keep this list narrow and limited to transient source or destination
         // connectivity/capacity failures that are expected to recover without operator intervention.
-        ErrorKind::SourceConnectionFailed
-        | ErrorKind::DestinationConnectionFailed
-        | ErrorKind::DestinationAtomicBatchRetryable
-        | ErrorKind::SourceDatabaseShutdown
-        | ErrorKind::SourceDatabaseInRecovery => {
+        (_, ErrorClass::ConnectionFailed)
+        | (ErrorScope::Destination, ErrorClass::AtomicBatchRetryable)
+        | (ErrorScope::Source, ErrorClass::DatabaseShutdown)
+        | (ErrorScope::Source, ErrorClass::DatabaseInRecovery) => {
             ErrorHandlingPolicy::new(RetryDirective::Timed, None)
         }
 
         // Manual retry errors with explicit operator guidance.
-        ErrorKind::SourceAuthenticationError => ErrorHandlingPolicy::new(
+        (ErrorScope::Source, ErrorClass::AuthenticationError) => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some("Verify source database credentials and authentication token validity."),
         ),
-        ErrorKind::DestinationAuthenticationError => ErrorHandlingPolicy::new(
+        (ErrorScope::Destination, ErrorClass::AuthenticationError) => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some("Verify destination credentials and authentication token validity."),
         ),
-        ErrorKind::SourceSchemaError => ErrorHandlingPolicy::new(
+        (_, ErrorClass::PermissionDenied) => ErrorHandlingPolicy::new(
+            RetryDirective::Manual,
+            Some("Grant the required source or destination permissions before retrying."),
+        ),
+        (ErrorScope::Source, ErrorClass::SchemaError) => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some("Update the Postgres database schema to resolve compatibility issues."),
         ),
-        ErrorKind::NullValuesNotSupportedInArrayInDestination => ErrorHandlingPolicy::new(
+        (_, ErrorClass::NullValuesNotSupportedInArrayInDestination) => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some("Remove NULL values from array columns in the Postgres tables."),
         ),
-        ErrorKind::UnsupportedValueInDestination => ErrorHandlingPolicy::new(
+        (_, ErrorClass::UnsupportedValueInDestination) => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some("Update the value in the Postgres table to make sure it's compatible."),
         ),
-        ErrorKind::SourceConfigurationLimitExceeded => ErrorHandlingPolicy::new(
+        (ErrorScope::Source, ErrorClass::ConfigurationLimitExceeded) => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some(
                 "Verify the configured limits for Postgres, for example, the maximum number of replication slots.",
             ),
         ),
-        ErrorKind::ReplicationSlotNotCreated => ErrorHandlingPolicy::new(
+        (ErrorScope::Source, ErrorClass::ReplicationSlotNotCreated) => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some("Verify the Postgres database allows creation of new replication slots."),
         ),
-        ErrorKind::SourceSnapshotTooOld => ErrorHandlingPolicy::new(
+        (ErrorScope::Source, ErrorClass::SnapshotTooOld) => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some("Check replication slot status and database configuration."),
         ),
 
         // Special handling for fault injection tests.
         #[cfg(feature = "failpoints")]
-        ErrorKind::WithNoRetry => {
+        (_, ErrorClass::WithNoRetry) => {
             ErrorHandlingPolicy::new(RetryDirective::NoRetry, Some("Cannot retry this error."))
         }
         #[cfg(feature = "failpoints")]
-        ErrorKind::WithManualRetry => ErrorHandlingPolicy::new(
+        (_, ErrorClass::WithManualRetry) => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some("Manually trigger retry after resolving the issue."),
         ),
         #[cfg(feature = "failpoints")]
-        ErrorKind::WithTimedRetry => ErrorHandlingPolicy::new(
+        (_, ErrorClass::WithTimedRetry) => ErrorHandlingPolicy::new(
             RetryDirective::Timed,
             Some("Will automatically retry after the configured delay."),
         ),

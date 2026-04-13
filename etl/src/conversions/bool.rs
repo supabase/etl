@@ -1,6 +1,5 @@
 use crate::bail;
-use crate::error::ErrorKind;
-use crate::error::EtlResult;
+use crate::error::{ErrorClass, EtlResult};
 
 /// Parses a Postgres boolean value from its text format representation.
 ///
@@ -14,7 +13,8 @@ pub fn parse_bool(s: &str) -> EtlResult<bool> {
         Ok(false)
     } else {
         bail!(
-            ErrorKind::InvalidData,
+            source,
+            ErrorClass::InvalidData,
             "Invalid boolean value",
             format!("Boolean value must be 't' or 'f' (received: {s})")
         );
@@ -24,7 +24,7 @@ pub fn parse_bool(s: &str) -> EtlResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ErrorKind;
+    use crate::error::{ErrorClass, ErrorScope};
 
     #[test]
     fn parse_bool_true() {
@@ -41,7 +41,8 @@ mod tests {
         let result = parse_bool("");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::InvalidData));
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::InvalidData);
         assert!(err.to_string().contains("Boolean value must be 't' or 'f'"));
         assert!(err.to_string().contains("received: "));
     }
@@ -51,7 +52,8 @@ mod tests {
         let result = parse_bool("true");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::InvalidData));
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::InvalidData);
         assert!(err.to_string().contains("received: true"));
     }
 
@@ -60,7 +62,8 @@ mod tests {
         let result = parse_bool("false");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err.kind(), ErrorKind::InvalidData));
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::InvalidData);
         assert!(err.to_string().contains("received: false"));
     }
 

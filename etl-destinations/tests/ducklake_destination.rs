@@ -26,7 +26,7 @@
 use chrono::NaiveDate;
 use duckdb::Connection;
 use etl::destination::Destination;
-use etl::error::ErrorKind;
+use etl::error::{ErrorClass, ErrorScope};
 use etl::store::both::memory::MemoryStore;
 use etl::store::schema::SchemaStore;
 use etl::types::{
@@ -373,7 +373,8 @@ async fn test_ducklake_rejects_zero_pool_size() {
     .err()
     .expect("pool_size = 0 should fail");
 
-    assert_eq!(err.kind(), ErrorKind::ConfigError);
+    assert_eq!(err.scope(), ErrorScope::Destination);
+    assert_eq!(err.class(), ErrorClass::ConfigError);
 }
 
 /// Repeated writes should reuse the warm pooled DuckDB connection.

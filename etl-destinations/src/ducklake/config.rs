@@ -4,7 +4,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use etl::error::{ErrorKind, EtlResult};
+use etl::error::{ErrorClass, EtlResult};
 use etl::etl_error;
 use pg_escape::{quote_identifier, quote_literal};
 use tokio_postgres::Config as PgConfig;
@@ -59,7 +59,8 @@ fn duckdb_extension_strategy(
                 "aarch64" | "arm64" => "linux_arm64",
                 _ => {
                     return Err(etl_error!(
-                        ErrorKind::ConfigError,
+                        destination,
+                        ErrorClass::ConfigError,
                         "Unsupported DuckDB extension platform",
                         format!(
                             "linux architecture `{arch}` is not supported for vendored DuckDB extensions"
@@ -82,7 +83,8 @@ fn duckdb_extension_strategy(
                 "aarch64" | "arm64" => "osx_arm64",
                 _ => {
                     return Err(etl_error!(
-                        ErrorKind::ConfigError,
+                        destination,
+                        ErrorClass::ConfigError,
                         "Unsupported DuckDB extension platform",
                         format!(
                             "macos architecture `{arch}` is not supported for vendored DuckDB extensions"
@@ -101,7 +103,8 @@ fn duckdb_extension_strategy(
         }
         "windows" => Ok(DuckDbExtensionStrategy::InstallFromRepository),
         _ => Err(etl_error!(
-            ErrorKind::ConfigError,
+            destination,
+            ErrorClass::ConfigError,
             "Unsupported DuckDB extension platform",
             format!("operating system `{os}` is not supported for DuckDB extensions")
         )),
@@ -148,7 +151,8 @@ fn require_vendored_extension_dir(
     vendored_extension_dir(platform_dir, env_override, container_root, repo_root)?.ok_or_else(
         || {
             etl_error!(
-                ErrorKind::ConfigError,
+                destination,
+                ErrorClass::ConfigError,
                 "Vendored DuckDB extensions not found",
                 format!(
                     "expected vendored DuckDB extensions in one of: {}, {}",
@@ -182,7 +186,8 @@ fn ensure_vendored_extension_dir(directory: &Path) -> EtlResult<()> {
         Ok(())
     } else {
         Err(etl_error!(
-            ErrorKind::ConfigError,
+            destination,
+            ErrorClass::ConfigError,
             "Vendored DuckDB extensions not found",
             format!(
                 "missing {} in `{}`",
@@ -200,7 +205,8 @@ fn vendored_extension_path(extension_dir: &Path, filename: &str) -> EtlResult<St
         .map(std::string::ToString::to_string)
         .ok_or_else(|| {
             etl_error!(
-                ErrorKind::ConfigError,
+                destination,
+                ErrorClass::ConfigError,
                 "Vendored DuckDB extension path contains non-utf8 characters",
                 extension_dir.display().to_string()
             )
@@ -234,7 +240,8 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
         "postgres" | "postgresql" => {}
         scheme => {
             return Err(etl_error!(
-                ErrorKind::ConfigError,
+                destination,
+                ErrorClass::ConfigError,
                 "Unsupported DuckLake catalog URL scheme",
                 format!("catalog URL scheme `{scheme}` is not supported")
             ));
@@ -243,7 +250,8 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
 
     let config = PgConfig::from_str(catalog_url.as_str()).map_err(|e| {
         etl_error!(
-            ErrorKind::ConfigError,
+            destination,
+            ErrorClass::ConfigError,
             "Invalid DuckLake PostgreSQL catalog URL",
             source: e
         )
@@ -287,7 +295,8 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
     if let Some(password) = config.get_password() {
         let password = std::str::from_utf8(password).map_err(|e| {
             etl_error!(
-                ErrorKind::ConfigError,
+                destination,
+                ErrorClass::ConfigError,
                 "DuckLake PostgreSQL catalog URL contains non-utf8 password",
                 source: e
             )
@@ -303,7 +312,8 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
     if let Some(ssl_cert) = config.get_ssl_cert() {
         let ssl_cert = std::str::from_utf8(ssl_cert).map_err(|e| {
             etl_error!(
-                ErrorKind::ConfigError,
+                destination,
+                ErrorClass::ConfigError,
                 "DuckLake PostgreSQL catalog URL contains non-utf8 sslcert",
                 source: e
             )
@@ -313,7 +323,8 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
     if let Some(ssl_key) = config.get_ssl_key() {
         let ssl_key = std::str::from_utf8(ssl_key).map_err(|e| {
             etl_error!(
-                ErrorKind::ConfigError,
+                destination,
+                ErrorClass::ConfigError,
                 "DuckLake PostgreSQL catalog URL contains non-utf8 sslkey",
                 source: e
             )
@@ -323,7 +334,8 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
     if let Some(ssl_root_cert) = config.get_ssl_root_cert() {
         let ssl_root_cert = std::str::from_utf8(ssl_root_cert).map_err(|e| {
             etl_error!(
-                ErrorKind::ConfigError,
+                destination,
+                ErrorClass::ConfigError,
                 "DuckLake PostgreSQL catalog URL contains non-utf8 sslrootcert",
                 source: e
             )
@@ -400,7 +412,8 @@ fn reject_unsupported_query_options(explicit_query_options: &BTreeSet<String>) -
         Ok(())
     } else {
         Err(etl_error!(
-            ErrorKind::ConfigError,
+            destination,
+            ErrorClass::ConfigError,
             "DuckLake PostgreSQL catalog URL uses unsupported query parameters",
             format!("unsupported parameters: {}", unsupported.join(", "))
         ))
@@ -414,7 +427,8 @@ pub(super) fn catalog_attach_target(catalog_url: &Url) -> EtlResult<String> {
         "file" => Ok(catalog_url.as_str().to_owned()),
         "postgres" | "postgresql" => catalog_conninfo_from_url(catalog_url),
         scheme => Err(etl_error!(
-            ErrorKind::ConfigError,
+            destination,
+            ErrorClass::ConfigError,
             "Unsupported DuckLake catalog URL scheme",
             format!("catalog URL scheme `{scheme}` is not supported")
         )),
@@ -431,7 +445,8 @@ pub(super) fn serialize_hosts(hosts: &[Host]) -> EtlResult<String> {
             Host::Unix(path) => {
                 let path = path.to_str().ok_or_else(|| {
                     etl_error!(
-                        ErrorKind::ConfigError,
+                        destination,
+                        ErrorClass::ConfigError,
                         "DuckLake PostgreSQL catalog URL contains non-utf8 unix socket path"
                     )
                 })?;
@@ -472,7 +487,8 @@ pub(super) fn ssl_mode_to_str(ssl_mode: SslMode) -> EtlResult<&'static str> {
         SslMode::VerifyCa => Ok("verify-ca"),
         SslMode::VerifyFull => Ok("verify-full"),
         _ => Err(etl_error!(
-            ErrorKind::ConfigError,
+            destination,
+            ErrorClass::ConfigError,
             "DuckLake PostgreSQL catalog URL uses an unsupported sslmode"
         )),
     }
@@ -483,7 +499,8 @@ pub(super) fn validate_data_path(data_path: &Url) -> EtlResult<&str> {
     match data_path.scheme() {
         "file" | "s3" | "gs" => Ok(data_path.as_str()),
         scheme => Err(etl_error!(
-            ErrorKind::ConfigError,
+            destination,
+            ErrorClass::ConfigError,
             "Unsupported DuckLake data URL scheme",
             format!("data URL scheme `{scheme}` is not supported")
         )),
@@ -562,7 +579,8 @@ fn build_setup_sql_with_strategy(
         DuckDbExtensionStrategy::VendoredLocal { .. } => {
             let extension_root = vendored_root.ok_or_else(|| {
                 etl_error!(
-                    ErrorKind::ConfigError,
+                    destination,
+                    ErrorClass::ConfigError,
                     "Vendored DuckDB extensions not found",
                     "missing vendored DuckDB extension root"
                 )
@@ -638,6 +656,7 @@ fn build_setup_sql_with_strategy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use etl::error::ErrorScope;
     use std::fs;
 
     use tempfile::TempDir;
@@ -733,7 +752,8 @@ mod tests {
             let url = Url::parse(&format!("postgres://user@localhost/mydb?{parameter}")).unwrap();
             let err = catalog_conninfo_from_url(&url).unwrap_err();
 
-            assert_eq!(err.kind(), ErrorKind::ConfigError);
+            assert_eq!(err.scope(), ErrorScope::Destination);
+            assert_eq!(err.class(), ErrorClass::ConfigError);
             assert!(
                 err.to_string()
                     .contains(parameter.split('=').next().unwrap())
@@ -745,7 +765,8 @@ mod tests {
     fn test_catalog_conninfo_rejects_unsupported_catalog_scheme() {
         let err =
             catalog_attach_target(&Url::parse("https://example.com/catalog").unwrap()).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConfigError);
+        assert_eq!(err.scope(), ErrorScope::Destination);
+        assert_eq!(err.class(), ErrorClass::ConfigError);
     }
 
     #[test]
@@ -757,7 +778,8 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConfigError);
+        assert_eq!(err.scope(), ErrorScope::Destination);
+        assert_eq!(err.class(), ErrorClass::ConfigError);
 
         let err = build_setup_sql(
             &Url::from_file_path("/tmp/catalog.ducklake").unwrap(),
@@ -766,7 +788,8 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConfigError);
+        assert_eq!(err.scope(), ErrorScope::Destination);
+        assert_eq!(err.class(), ErrorClass::ConfigError);
     }
 
     #[test]
@@ -848,7 +871,8 @@ mod tests {
         let err =
             duckdb_extension_strategy("linux", "riscv64", None, tempdir.path(), tempdir.path())
                 .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConfigError);
+        assert_eq!(err.scope(), ErrorScope::Destination);
+        assert_eq!(err.class(), ErrorClass::ConfigError);
     }
 
     #[test]
@@ -919,7 +943,8 @@ mod tests {
             tempdir.path(),
         )
         .unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConfigError);
+        assert_eq!(err.scope(), ErrorScope::Destination);
+        assert_eq!(err.class(), ErrorClass::ConfigError);
     }
 
     #[test]

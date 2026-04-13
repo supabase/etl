@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 use tokio_postgres::types::PgLsn;
 use tracing::warn;
 
-use crate::error::{ErrorKind, EtlResult};
+use crate::error::{ErrorClass, EtlResult};
 use crate::etl_error;
 
 /// Async completion handle used for [`crate::destination::Destination::write_table_rows`].
@@ -107,7 +107,8 @@ impl<T> Drop for AsyncResult<T> {
         };
 
         let _ = tx.send(Err(etl_error!(
-            ErrorKind::DestinationError,
+            destination,
+            ErrorClass::Unknown,
             "Async result dropped without sending"
         )));
     }
@@ -153,7 +154,8 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
                     .take()
                     .expect("pending async result metadata must be present on completion"),
                 result: Err(etl_error!(
-                    ErrorKind::DestinationError,
+                    destination,
+                    ErrorClass::Unknown,
                     "Async result channel closed before sending"
                 )),
             }),
@@ -189,6 +191,7 @@ impl<T, M> CompletedAsyncResult<T, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::{ErrorClass, ErrorScope};
 
     #[tokio::test]
     async fn async_result_round_trips_success() {
@@ -216,7 +219,8 @@ mod tests {
         drop(result_tx);
 
         let err = pending_result.await.into_result().unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationError);
+        assert_eq!(err.scope(), ErrorScope::Destination);
+        assert_eq!(err.class(), ErrorClass::Unknown);
         assert_eq!(
             err.description(),
             Some("Async result dropped without sending")

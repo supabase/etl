@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use duckdb::Config;
-use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::error::{ErrorClass, EtlError, EtlResult};
 use etl::etl_error;
 use metrics::histogram;
 use tokio::sync::{Semaphore, oneshot};
@@ -131,7 +131,8 @@ impl DuckDbQueryWatchdog {
     fn async_task_handle(&mut self) -> EtlResult<JoinHandle<()>> {
         self.task.take().ok_or_else(|| {
             etl_error!(
-                ErrorKind::DestinationError,
+                internal,
+                ErrorClass::InvalidState,
                 "Cannot get async task handle from watchdog: task is None"
             )
         })
@@ -228,7 +229,8 @@ pub(super) async fn build_warm_ducklake_pool(
             .build(manager)
             .map_err(|e| {
                 etl_error!(
-                    ErrorKind::DestinationConnectionFailed,
+                    destination,
+                    ErrorClass::ConnectionFailed,
                     "Failed to build DuckLake connection pool",
                     source: e
                 )
@@ -238,7 +240,8 @@ pub(super) async fn build_warm_ducklake_pool(
         for _ in 0..pool_size {
             let conn = pool.get().map_err(|e| {
                 etl_error!(
-                    ErrorKind::DestinationConnectionFailed,
+                    destination,
+                    ErrorClass::ConnectionFailed,
                     "Failed to warm DuckLake connection pool",
                     source: e
                 )
@@ -259,7 +262,8 @@ pub(super) async fn build_warm_ducklake_pool(
     .await
     .map_err(|_| {
         etl_error!(
-            ErrorKind::ApplyWorkerPanic,
+            internal,
+            ErrorClass::ApplyWorkerPanic,
             "DuckLake connection pool initialization task panicked"
         )
     })?
@@ -273,7 +277,8 @@ pub(super) fn duckdb_blocking_timeout_error(
     stage: &'static str,
 ) -> EtlError {
     etl_error!(
-        ErrorKind::DestinationQueryFailed,
+        destination,
+        ErrorClass::QueryFailed,
         "DuckLake blocking operation timed out",
         format!(
             "operation_kind={}, stage={stage}, timeout_ms={}",
@@ -325,7 +330,8 @@ where
         .map_err(|_| duckdb_blocking_timeout_error(operation_kind, timeout, "slot_wait"))?
         .map_err(|_| {
             etl_error!(
-                ErrorKind::ApplyWorkerPanic,
+                internal,
+                ErrorClass::ApplyWorkerPanic,
                 "DuckLake blocking slot acquisition failed"
             )
         })?;
@@ -360,7 +366,8 @@ where
                 duckdb_blocking_timeout_error(operation_kind, timeout, "pool_checkout")
             } else {
                 etl_error!(
-                    ErrorKind::DestinationConnectionFailed,
+                    destination,
+                    ErrorClass::ConnectionFailed,
                     "Failed to check out DuckLake connection",
                     source: e
                 )
@@ -421,14 +428,16 @@ where
     // accidentally interrupt a later operation that reuses the connection.
     watchdog_task.await.map_err(|_| {
         etl_error!(
-            ErrorKind::ApplyWorkerPanic,
+            internal,
+            ErrorClass::ApplyWorkerPanic,
             "DuckLake query watchdog task panicked"
         )
     })?;
 
     blocking_result.map_err(|_| {
         etl_error!(
-            ErrorKind::ApplyWorkerPanic,
+            internal,
+            ErrorClass::ApplyWorkerPanic,
             "DuckLake blocking operation task panicked"
         )
     })?
@@ -437,6 +446,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use etl::error::ErrorScope;
 
     use std::sync::Arc;
 
@@ -489,7 +499,8 @@ mod tests {
                 )
                 .map_err(|source| {
                     etl_error!(
-                        ErrorKind::DestinationQueryFailed,
+                        destination,
+                        ErrorClass::QueryFailed,
                         "DuckLake timeout test query failed",
                         source: source
                     )
@@ -500,7 +511,8 @@ mod tests {
         .await
         .expect_err("expected blocking timeout");
 
-        assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+        assert_eq!(error.scope(), ErrorScope::Destination);
+        assert_eq!(error.class(), ErrorClass::QueryFailed);
         assert_eq!(
             error.description(),
             Some("DuckLake blocking operation timed out")
@@ -525,7 +537,8 @@ mod tests {
                 conn.query_row("SELECT 1;", [], |row| row.get::<_, i64>(0))
                     .map_err(|source| {
                         etl_error!(
-                            ErrorKind::DestinationQueryFailed,
+                            destination,
+                            ErrorClass::QueryFailed,
                             "DuckLake timeout verification query failed",
                             source: source
                         )

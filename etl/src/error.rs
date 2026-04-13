@@ -22,7 +22,8 @@ pub type EtlResult<T> = Result<T, EtlError>;
 /// Detailed payload stored for single [`EtlError`] instances.
 #[derive(Debug, Clone)]
 struct ErrorPayload {
-    kind: ErrorKind,
+    scope: ErrorScope,
+    class: ErrorClass,
     description: Cow<'static, str>,
     detail: Option<Cow<'static, str>>,
     source: Option<Arc<dyn error::Error + Send + Sync>>,
@@ -32,14 +33,16 @@ struct ErrorPayload {
 impl ErrorPayload {
     /// Creates a new payload with optional dynamic detail.
     fn new(
-        kind: ErrorKind,
+        scope: ErrorScope,
+        class: ErrorClass,
         description: Cow<'static, str>,
         detail: Option<Cow<'static, str>>,
         source: Option<Arc<dyn error::Error + Send + Sync>>,
         backtrace: Arc<Backtrace>,
     ) -> Self {
         Self {
-            kind,
+            scope,
+            class,
             description,
             detail,
             source,
@@ -77,79 +80,59 @@ enum ErrorRepr {
 /// This enum provides granular error classification to enable appropriate error handling
 /// strategies. Error kinds are organized by functional area and failure mode.
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
+pub enum ErrorScope {
+    /// The error originates from interactions with the source system.
+    Source,
+    /// The error originates from interactions with the destination system.
+    Destination,
+    /// The error originates inside ETL itself.
+    Internal,
+}
+
+/// Shared failure classes used for retry policy and high-level handling.
+#[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
 #[non_exhaustive]
-pub enum ErrorKind {
-    // Connection Errors
-    SourceConnectionFailed,
-    DestinationConnectionFailed,
-
-    // Query & Execution Errors
-    SourceQueryFailed,
-    DestinationQueryFailed,
-    DestinationAtomicBatchRetryable,
-    SourceLockTimeout,
-    SourceOperationCanceled,
-
-    // Schema & Mapping Errors
-    SourceSchemaError,
+pub enum ErrorClass {
+    ConnectionFailed,
+    QueryFailed,
+    AtomicBatchRetryable,
+    LockTimeout,
+    OperationCanceled,
+    SchemaError,
     MissingTableSchema,
     MissingTableMapping,
-    DestinationTableNameInvalid,
-    DestinationNamespaceAlreadyExists,
-    DestinationTableAlreadyExists,
-    DestinationNamespaceMissing,
-    DestinationTableMissing,
-
-    // Data & Transformation Errors
+    TableNameInvalid,
+    NamespaceAlreadyExists,
+    TableAlreadyExists,
+    NamespaceMissing,
+    TableMissing,
     ConversionError,
     InvalidData,
     ValidationError,
     NullValuesNotSupportedInArrayInDestination,
     UnsupportedValueInDestination,
-
-    // Configuration & Limit Errors
     ConfigError,
-    SourceConfigurationLimitExceeded,
-
-    // IO & Serialization Errors
+    ConfigurationLimitExceeded,
     IoError,
-    SourceIoError,
-    DestinationIoError,
     SerializationError,
     DeserializationError,
-
-    // Security & Authentication Errors
     EncryptionError,
-    SourceAuthenticationError,
-    DestinationAuthenticationError,
+    AuthenticationError,
     PermissionDenied,
-
-    // State & Workflow Errors
     InvalidState,
     ApplyWorkerPanic,
     ApplyWorkerCancelled,
     TableSyncWorkerPanic,
-    TableSyncWorkerCancelled,
     StateRollbackError,
-
-    // Replication Errors
     ReplicationSlotNotFound,
     ReplicationSlotAlreadyExists,
     ReplicationSlotNotCreated,
     ReplicationSlotInvalidated,
     ReplicationSlotDeletionTimeout,
-    SourceSnapshotTooOld,
-    SourceDatabaseInRecovery,
-    SourceDatabaseShutdown,
-
-    // General Errors
-    SourceError,
-    DestinationError,
-
-    // Unknown / Uncategorized
+    SnapshotTooOld,
+    DatabaseInRecovery,
+    DatabaseShutdown,
     Unknown,
-
-    // Special error kinds used for tests that trigger specific retry behaviors via fault injection.
     #[cfg(feature = "failpoints")]
     WithNoRetry,
     #[cfg(feature = "failpoints")]
@@ -159,30 +142,52 @@ pub enum ErrorKind {
 }
 
 impl EtlError {
-    /// Returns the [`ErrorKind`] of this error.
+    /// Returns the [`ErrorScope`] of this error.
     ///
-    /// For multiple errors, returns the kind of the first error or [`ErrorKind::Unknown`]
+    /// For multiple errors, returns the scope of the first error or [`ErrorScope::Internal`]
     /// if the error list is empty.
-    pub fn kind(&self) -> ErrorKind {
+    pub fn scope(&self) -> ErrorScope {
         match self.repr {
-            ErrorRepr::Single(ref payload) => payload.kind,
+            ErrorRepr::Single(ref payload) => payload.scope,
             ErrorRepr::Many { ref errors, .. } => errors
                 .first()
-                .map(|err| err.kind())
-                .unwrap_or(ErrorKind::Unknown),
+                .map(|err| err.scope())
+                .unwrap_or(ErrorScope::Internal),
         }
     }
 
-    /// Returns all [`ErrorKind`]s present in this error.
+    /// Returns the [`ErrorClass`] of this error.
     ///
-    /// For single errors, returns a vector with one element. For multiple errors,
-    /// returns a flattened vector of all error kinds.
-    pub fn kinds(&self) -> Vec<ErrorKind> {
+    /// For multiple errors, returns the class of the first error or [`ErrorClass::Unknown`]
+    /// if the error list is empty.
+    pub fn class(&self) -> ErrorClass {
         match self.repr {
-            ErrorRepr::Single(ref payload) => vec![payload.kind],
+            ErrorRepr::Single(ref payload) => payload.class,
+            ErrorRepr::Many { ref errors, .. } => errors
+                .first()
+                .map(|err| err.class())
+                .unwrap_or(ErrorClass::Unknown),
+        }
+    }
+
+    /// Returns all [`ErrorScope`] values present in this error.
+    pub fn scopes(&self) -> Vec<ErrorScope> {
+        match self.repr {
+            ErrorRepr::Single(ref payload) => vec![payload.scope],
             ErrorRepr::Many { ref errors, .. } => errors
                 .iter()
-                .flat_map(|err| err.kinds())
+                .flat_map(|err| err.scopes())
+                .collect::<Vec<_>>(),
+        }
+    }
+
+    /// Returns all [`ErrorClass`] values present in this error.
+    pub fn classes(&self) -> Vec<ErrorClass> {
+        match self.repr {
+            ErrorRepr::Single(ref payload) => vec![payload.class],
+            ErrorRepr::Many { ref errors, .. } => errors
+                .iter()
+                .flat_map(|err| err.classes())
                 .collect::<Vec<_>>(),
         }
     }
@@ -246,9 +251,9 @@ impl EtlError {
         self
     }
 
-    /// Creates an [`EtlError`] from its components.
-    fn from_components(
-        kind: ErrorKind,
+    fn from_scoped_components(
+        scope: ErrorScope,
+        class: ErrorClass,
         description: Cow<'static, str>,
         detail: Option<Cow<'static, str>>,
         source: Option<Arc<dyn error::Error + Send + Sync>>,
@@ -257,13 +262,25 @@ impl EtlError {
 
         EtlError {
             repr: ErrorRepr::Single(ErrorPayload::new(
-                kind,
+                scope,
+                class,
                 description,
                 detail,
                 source,
                 backtrace,
             )),
         }
+    }
+
+    /// Creates a scoped [`EtlError`] from an [`ErrorClass`].
+    #[doc(hidden)]
+    pub fn from_scope_class_parts(
+        scope: ErrorScope,
+        class: ErrorClass,
+        description: &'static str,
+        detail: Option<Cow<'static, str>>,
+    ) -> Self {
+        Self::from_scoped_components(scope, class, Cow::Borrowed(description), detail, None)
     }
 
     /// Sets the source for this [`EtlError`].
@@ -277,7 +294,9 @@ impl EtlError {
 impl PartialEq for EtlError {
     fn eq(&self, other: &EtlError) -> bool {
         match (&self.repr, &other.repr) {
-            (ErrorRepr::Single(a), ErrorRepr::Single(b)) => a.kind == b.kind,
+            (ErrorRepr::Single(a), ErrorRepr::Single(b)) => {
+                a.scope == b.scope && a.class == b.class
+            }
             (
                 ErrorRepr::Many {
                     errors: errors_a, ..
@@ -311,7 +330,8 @@ impl Hash for EtlError {
                 // Hash the discriminant to distinguish from Many variant.
                 std::mem::discriminant(&self.repr).hash(state);
                 // Hash only the stable components.
-                payload.kind.hash(state);
+                payload.scope.hash(state);
+                payload.class.hash(state);
                 payload.description.hash(state);
             }
             ErrorRepr::Many { errors, .. } => {
@@ -349,7 +369,11 @@ fn write_error_tree(
 
     match &error.repr {
         ErrorRepr::Single(payload) => {
-            write!(f, "[{:?}] {}", payload.kind, payload.description)?;
+            write!(
+                f,
+                "[{:?}/{:?}] {}",
+                payload.scope, payload.class, payload.description
+            )?;
 
             if let Some(detail) = &payload.detail
                 && !detail.trim().is_empty()
@@ -397,23 +421,6 @@ impl error::Error for EtlError {
     }
 }
 
-/// Creates an [`EtlError`] from an error kind and static description.
-impl From<(ErrorKind, &'static str)> for EtlError {
-    fn from((kind, desc): (ErrorKind, &'static str)) -> EtlError {
-        EtlError::from_components(kind, Cow::Borrowed(desc), None, None)
-    }
-}
-
-/// Creates an [`EtlError`] from an error kind, static description, and dynamic detail.
-impl<D> From<(ErrorKind, &'static str, D)> for EtlError
-where
-    D: Into<Cow<'static, str>>,
-{
-    fn from((kind, desc, detail): (ErrorKind, &'static str, D)) -> EtlError {
-        EtlError::from_components(kind, Cow::Borrowed(desc), Some(detail.into()), None)
-    }
-}
-
 /// Creates an [`EtlError`] from a vector of errors for aggregation.
 ///
 /// If the vector contains exactly one error, returns that error directly without wrapping
@@ -435,13 +442,14 @@ where
     }
 }
 
-/// Converts [`std::io::Error`] to [`EtlError`] with [`ErrorKind::IoError`].
+/// Converts [`std::io::Error`] to [`EtlError`] with [`ErrorClass::IoError`].
 impl From<std::io::Error> for EtlError {
     fn from(err: std::io::Error) -> EtlError {
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::IoError,
+        EtlError::from_scoped_components(
+            ErrorScope::Internal,
+            ErrorClass::IoError,
             Cow::Borrowed("I/O operation failed"),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -451,26 +459,27 @@ impl From<std::io::Error> for EtlError {
 
 /// Converts [`serde_json::Error`] to [`EtlError`] with the appropriate error kind.
 ///
-/// Maps to [`ErrorKind::SerializationError`] for serialization failures and
-/// [`ErrorKind::DeserializationError`] for deserialization failures based on error classification.
+/// Maps to [`ErrorClass::SerializationError`] for serialization failures and
+/// [`ErrorClass::DeserializationError`] for deserialization failures based on error classification.
 impl From<serde_json::Error> for EtlError {
     fn from(err: serde_json::Error) -> EtlError {
-        let (kind, description) = match err.classify() {
-            serde_json::error::Category::Io => (ErrorKind::IoError, "JSON I/O operation failed"),
+        let (class, description) = match err.classify() {
+            serde_json::error::Category::Io => (ErrorClass::IoError, "JSON I/O operation failed"),
             serde_json::error::Category::Syntax | serde_json::error::Category::Data => (
-                ErrorKind::DeserializationError,
+                ErrorClass::DeserializationError,
                 "JSON deserialization failed",
             ),
             serde_json::error::Category::Eof => (
-                ErrorKind::DeserializationError,
+                ErrorClass::DeserializationError,
                 "JSON deserialization failed",
             ),
         };
 
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            kind,
+        EtlError::from_scoped_components(
+            ErrorScope::Internal,
+            class,
             Cow::Borrowed(description),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -478,13 +487,14 @@ impl From<serde_json::Error> for EtlError {
     }
 }
 
-/// Converts [`std::str::Utf8Error`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+/// Converts [`std::str::Utf8Error`] to [`EtlError`] with [`ErrorClass::ConversionError`].
 impl From<std::str::Utf8Error> for EtlError {
     fn from(err: std::str::Utf8Error) -> EtlError {
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
+        EtlError::from_scoped_components(
+            ErrorScope::Internal,
+            ErrorClass::ConversionError,
             Cow::Borrowed("UTF-8 conversion failed"),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -492,13 +502,14 @@ impl From<std::str::Utf8Error> for EtlError {
     }
 }
 
-/// Converts [`std::string::FromUtf8Error`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+/// Converts [`std::string::FromUtf8Error`] to [`EtlError`] with [`ErrorClass::ConversionError`].
 impl From<std::string::FromUtf8Error> for EtlError {
     fn from(err: std::string::FromUtf8Error) -> EtlError {
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
+        EtlError::from_scoped_components(
+            ErrorScope::Internal,
+            ErrorClass::ConversionError,
             Cow::Borrowed("UTF-8 string conversion failed"),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -506,13 +517,14 @@ impl From<std::string::FromUtf8Error> for EtlError {
     }
 }
 
-/// Converts [`std::num::ParseIntError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+/// Converts [`std::num::ParseIntError`] to [`EtlError`] with [`ErrorClass::ConversionError`].
 impl From<std::num::ParseIntError> for EtlError {
     fn from(err: std::num::ParseIntError) -> EtlError {
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
+        EtlError::from_scoped_components(
+            ErrorScope::Internal,
+            ErrorClass::ConversionError,
             Cow::Borrowed("Integer parsing failed"),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -520,13 +532,14 @@ impl From<std::num::ParseIntError> for EtlError {
     }
 }
 
-/// Converts [`std::num::ParseFloatError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+/// Converts [`std::num::ParseFloatError`] to [`EtlError`] with [`ErrorClass::ConversionError`].
 impl From<std::num::ParseFloatError> for EtlError {
     fn from(err: std::num::ParseFloatError) -> EtlError {
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
+        EtlError::from_scoped_components(
+            ErrorScope::Internal,
+            ErrorClass::ConversionError,
             Cow::Borrowed("Float parsing failed"),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -540,7 +553,7 @@ impl From<std::num::ParseFloatError> for EtlError {
 /// for better error handling in ETL operations.
 impl From<tokio_postgres::Error> for EtlError {
     fn from(err: tokio_postgres::Error) -> EtlError {
-        let (kind, description) = match err.code() {
+        let (class, description) = match err.code() {
             Some(sqlstate) => {
                 use tokio_postgres::error::SqlState;
 
@@ -550,14 +563,13 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::CONNECTION_DOES_NOT_EXIST
                     | SqlState::CONNECTION_FAILURE
                     | SqlState::SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION
-                    | SqlState::SQLSERVER_REJECTED_ESTABLISHMENT_OF_SQLCONNECTION => (
-                        ErrorKind::SourceConnectionFailed,
-                        "PostgreSQL connection failed",
-                    ),
+                    | SqlState::SQLSERVER_REJECTED_ESTABLISHMENT_OF_SQLCONNECTION => {
+                        (ErrorClass::ConnectionFailed, "PostgreSQL connection failed")
+                    }
 
                     // Authentication errors (28xxx)
                     SqlState::INVALID_AUTHORIZATION_SPECIFICATION | SqlState::INVALID_PASSWORD => (
-                        ErrorKind::SourceAuthenticationError,
+                        ErrorClass::AuthenticationError,
                         "PostgreSQL authentication failed",
                     ),
 
@@ -566,10 +578,9 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::NOT_NULL_VIOLATION
                     | SqlState::FOREIGN_KEY_VIOLATION
                     | SqlState::UNIQUE_VIOLATION
-                    | SqlState::CHECK_VIOLATION => (
-                        ErrorKind::ValidationError,
-                        "PostgreSQL constraint violation",
-                    ),
+                    | SqlState::CHECK_VIOLATION => {
+                        (ErrorClass::InvalidData, "PostgreSQL constraint violation")
+                    }
 
                     // Data conversion errors (22xxx)
                     SqlState::DATA_EXCEPTION
@@ -577,7 +588,7 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::INVALID_DATETIME_FORMAT
                     | SqlState::NUMERIC_VALUE_OUT_OF_RANGE
                     | SqlState::DIVISION_BY_ZERO => (
-                        ErrorKind::ConversionError,
+                        ErrorClass::ConversionError,
                         "PostgreSQL data conversion failed",
                     ),
 
@@ -586,23 +597,23 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::UNDEFINED_COLUMN
                     | SqlState::UNDEFINED_FUNCTION
                     | SqlState::UNDEFINED_SCHEMA => (
-                        ErrorKind::SourceSchemaError,
+                        ErrorClass::SchemaError,
                         "PostgreSQL schema object not found",
                     ),
 
                     // Syntax and access errors (42xxx)
-                    SqlState::SYNTAX_ERROR
-                    | SqlState::SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION
-                    | SqlState::INSUFFICIENT_PRIVILEGE => (
-                        ErrorKind::SourceQueryFailed,
-                        "PostgreSQL syntax or access error",
-                    ),
+                    SqlState::SYNTAX_ERROR | SqlState::SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION => {
+                        (ErrorClass::QueryFailed, "PostgreSQL syntax error")
+                    }
+                    SqlState::INSUFFICIENT_PRIVILEGE => {
+                        (ErrorClass::PermissionDenied, "PostgreSQL permission denied")
+                    }
 
                     // Resource errors (53xxx)
                     SqlState::INSUFFICIENT_RESOURCES
                     | SqlState::OUT_OF_MEMORY
                     | SqlState::TOO_MANY_CONNECTIONS => (
-                        ErrorKind::SourceConnectionFailed,
+                        ErrorClass::ConnectionFailed,
                         "PostgreSQL resource limitation",
                     ),
 
@@ -611,70 +622,66 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::T_R_SERIALIZATION_FAILURE
                     | SqlState::T_R_DEADLOCK_DETECTED
                     | SqlState::INVALID_TRANSACTION_STATE => {
-                        (ErrorKind::InvalidState, "PostgreSQL transaction failed")
+                        (ErrorClass::InvalidState, "PostgreSQL transaction failed")
                     }
 
                     // System errors (58xxx, XX xxx)
                     SqlState::SYSTEM_ERROR | SqlState::INTERNAL_ERROR => {
-                        (ErrorKind::SourceQueryFailed, "PostgreSQL system error")
+                        (ErrorClass::QueryFailed, "PostgreSQL system error")
                     }
-                    SqlState::IO_ERROR => (ErrorKind::SourceIoError, "PostgreSQL I/O error"),
+                    SqlState::IO_ERROR => (ErrorClass::IoError, "PostgreSQL I/O error"),
 
                     // Operator intervention errors (57xxx)
                     SqlState::OPERATOR_INTERVENTION => (
-                        ErrorKind::SourceOperationCanceled,
+                        ErrorClass::OperationCanceled,
                         "PostgreSQL operation canceled",
                     ),
-                    SqlState::QUERY_CANCELED => (
-                        ErrorKind::SourceOperationCanceled,
-                        "PostgreSQL query canceled",
-                    ),
+                    SqlState::QUERY_CANCELED => {
+                        (ErrorClass::OperationCanceled, "PostgreSQL query canceled")
+                    }
                     SqlState::ADMIN_SHUTDOWN => (
-                        ErrorKind::SourceDatabaseShutdown,
+                        ErrorClass::DatabaseShutdown,
                         "PostgreSQL administrative shutdown",
                     ),
-                    SqlState::CRASH_SHUTDOWN => (
-                        ErrorKind::SourceDatabaseShutdown,
-                        "PostgreSQL crash shutdown",
-                    ),
+                    SqlState::CRASH_SHUTDOWN => {
+                        (ErrorClass::DatabaseShutdown, "PostgreSQL crash shutdown")
+                    }
                     SqlState::CANNOT_CONNECT_NOW => (
-                        ErrorKind::SourceDatabaseInRecovery,
+                        ErrorClass::DatabaseInRecovery,
                         "PostgreSQL database in recovery",
                     ),
                     SqlState::DATABASE_DROPPED => {
-                        (ErrorKind::SourceSchemaError, "PostgreSQL database dropped")
+                        (ErrorClass::SchemaError, "PostgreSQL database dropped")
                     }
                     SqlState::IDLE_SESSION_TIMEOUT => (
-                        ErrorKind::SourceConnectionFailed,
+                        ErrorClass::ConnectionFailed,
                         "PostgreSQL idle session timeout",
                     ),
 
                     // Object state errors (55xxx)
                     SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE => (
-                        ErrorKind::InvalidState,
+                        ErrorClass::InvalidState,
                         "PostgreSQL object not in prerequisite state",
                     ),
                     SqlState::OBJECT_IN_USE => {
-                        (ErrorKind::InvalidState, "PostgreSQL object in use")
+                        (ErrorClass::InvalidState, "PostgreSQL object in use")
                     }
-                    SqlState::LOCK_NOT_AVAILABLE => (
-                        ErrorKind::SourceLockTimeout,
-                        "PostgreSQL lock not available",
-                    ),
+                    SqlState::LOCK_NOT_AVAILABLE => {
+                        (ErrorClass::LockTimeout, "PostgreSQL lock not available")
+                    }
 
                     // Program limit errors (54xxx)
                     SqlState::PROGRAM_LIMIT_EXCEEDED
                     | SqlState::STATEMENT_TOO_COMPLEX
                     | SqlState::TOO_MANY_COLUMNS
-                    | SqlState::TOO_MANY_ARGUMENTS => (
-                        ErrorKind::SourceQueryFailed,
-                        "PostgreSQL program limit exceeded",
-                    ),
+                    | SqlState::TOO_MANY_ARGUMENTS => {
+                        (ErrorClass::QueryFailed, "PostgreSQL program limit exceeded")
+                    }
 
                     // Configuration errors (53xxx)
-                    SqlState::DISK_FULL => (ErrorKind::SourceIoError, "PostgreSQL disk full"),
+                    SqlState::DISK_FULL => (ErrorClass::IoError, "PostgreSQL disk full"),
                     SqlState::CONFIGURATION_LIMIT_EXCEEDED => (
-                        ErrorKind::SourceConfigurationLimitExceeded,
+                        ErrorClass::ConfigurationLimitExceeded,
                         "PostgreSQL configuration limit exceeded",
                     ),
 
@@ -683,41 +690,40 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::NO_ACTIVE_SQL_TRANSACTION
                     | SqlState::IN_FAILED_SQL_TRANSACTION
                     | SqlState::IDLE_IN_TRANSACTION_SESSION_TIMEOUT => (
-                        ErrorKind::InvalidState,
+                        ErrorClass::InvalidState,
                         "PostgreSQL transaction state error",
                     ),
 
                     // Cursor errors (24xxx, 34xxx)
                     SqlState::INVALID_CURSOR_STATE | SqlState::INVALID_CURSOR_NAME => {
-                        (ErrorKind::InvalidState, "PostgreSQL cursor error")
+                        (ErrorClass::InvalidState, "PostgreSQL cursor error")
                     }
 
                     // Data corruption errors (XX xxx)
                     SqlState::DATA_CORRUPTED | SqlState::INDEX_CORRUPTED => {
-                        (ErrorKind::SourceIoError, "PostgreSQL data corruption")
+                        (ErrorClass::IoError, "PostgreSQL data corruption")
                     }
 
                     // Configuration file errors (F0xxx)
                     SqlState::CONFIG_FILE_ERROR | SqlState::LOCK_FILE_EXISTS => {
-                        (ErrorKind::ConfigError, "PostgreSQL configuration error")
+                        (ErrorClass::ConfigError, "PostgreSQL configuration error")
                     }
 
                     // Feature not supported (0Axxx)
-                    SqlState::FEATURE_NOT_SUPPORTED => (
-                        ErrorKind::SourceSchemaError,
-                        "PostgreSQL feature not supported",
-                    ),
+                    SqlState::FEATURE_NOT_SUPPORTED => {
+                        (ErrorClass::SchemaError, "PostgreSQL feature not supported")
+                    }
 
                     // Invalid transaction initiation (0Bxxx)
                     SqlState::INVALID_TRANSACTION_INITIATION => (
-                        ErrorKind::InvalidState,
+                        ErrorClass::InvalidState,
                         "PostgreSQL invalid transaction initiation",
                     ),
 
                     // Dependent objects errors (2Bxxx)
                     SqlState::DEPENDENT_PRIVILEGE_DESCRIPTORS_STILL_EXIST
                     | SqlState::DEPENDENT_OBJECTS_STILL_EXIST => (
-                        ErrorKind::InvalidState,
+                        ErrorClass::InvalidState,
                         "PostgreSQL dependent objects exist",
                     ),
 
@@ -727,7 +733,7 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::S_R_E_MODIFYING_SQL_DATA_NOT_PERMITTED
                     | SqlState::S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED
                     | SqlState::S_R_E_READING_SQL_DATA_NOT_PERMITTED => {
-                        (ErrorKind::SourceQueryFailed, "PostgreSQL routine exception")
+                        (ErrorClass::QueryFailed, "PostgreSQL routine exception")
                     }
 
                     // External routine errors (38xxx, 39xxx)
@@ -741,10 +747,9 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::E_R_I_E_NULL_VALUE_NOT_ALLOWED
                     | SqlState::E_R_I_E_TRIGGER_PROTOCOL_VIOLATED
                     | SqlState::E_R_I_E_SRF_PROTOCOL_VIOLATED
-                    | SqlState::E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED => (
-                        ErrorKind::SourceQueryFailed,
-                        "PostgreSQL external routine error",
-                    ),
+                    | SqlState::E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED => {
+                        (ErrorClass::QueryFailed, "PostgreSQL external routine error")
+                    }
 
                     // PL/pgSQL errors (P0xxx)
                     SqlState::PLPGSQL_ERROR
@@ -752,12 +757,12 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::NO_DATA_FOUND
                     | SqlState::TOO_MANY_ROWS
                     | SqlState::ASSERT_FAILURE => {
-                        (ErrorKind::SourceQueryFailed, "PostgreSQL PL/pgSQL error")
+                        (ErrorClass::QueryFailed, "PostgreSQL PL/pgSQL error")
                     }
 
                     // Foreign Data Wrapper errors (HVxxx) - connection/schema related
                     SqlState::FDW_ERROR | SqlState::FDW_UNABLE_TO_ESTABLISH_CONNECTION => (
-                        ErrorKind::SourceConnectionFailed,
+                        ErrorClass::ConnectionFailed,
                         "PostgreSQL FDW connection failed",
                     ),
                     SqlState::FDW_SCHEMA_NOT_FOUND
@@ -765,17 +770,17 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::FDW_COLUMN_NAME_NOT_FOUND
                     | SqlState::FDW_INVALID_COLUMN_NAME
                     | SqlState::FDW_NO_SCHEMAS => {
-                        (ErrorKind::SourceSchemaError, "PostgreSQL FDW schema error")
+                        (ErrorClass::SchemaError, "PostgreSQL FDW schema error")
                     }
                     SqlState::FDW_INVALID_DATA_TYPE
                     | SqlState::FDW_INVALID_DATA_TYPE_DESCRIPTORS
-                    | SqlState::FDW_INVALID_STRING_FORMAT => {
-                        (ErrorKind::ConversionError, "PostgreSQL FDW data type error")
-                    }
-                    SqlState::FDW_OUT_OF_MEMORY => (
-                        ErrorKind::SourceConnectionFailed,
-                        "PostgreSQL FDW out of memory",
+                    | SqlState::FDW_INVALID_STRING_FORMAT => (
+                        ErrorClass::ConversionError,
+                        "PostgreSQL FDW data type error",
                     ),
+                    SqlState::FDW_OUT_OF_MEMORY => {
+                        (ErrorClass::ConnectionFailed, "PostgreSQL FDW out of memory")
+                    }
                     SqlState::FDW_DYNAMIC_PARAMETER_VALUE_NEEDED
                     | SqlState::FDW_FUNCTION_SEQUENCE_ERROR
                     | SqlState::FDW_INCONSISTENT_DESCRIPTOR_INFORMATION
@@ -791,20 +796,18 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::FDW_OPTION_NAME_NOT_FOUND
                     | SqlState::FDW_REPLY_HANDLE
                     | SqlState::FDW_UNABLE_TO_CREATE_EXECUTION
-                    | SqlState::FDW_UNABLE_TO_CREATE_REPLY => (
-                        ErrorKind::SourceQueryFailed,
-                        "PostgreSQL FDW operation error",
-                    ),
+                    | SqlState::FDW_UNABLE_TO_CREATE_REPLY => {
+                        (ErrorClass::QueryFailed, "PostgreSQL FDW operation error")
+                    }
 
                     // Snapshot errors (72xxx) - important for replication consistency
-                    SqlState::SNAPSHOT_TOO_OLD => (
-                        ErrorKind::SourceSnapshotTooOld,
-                        "PostgreSQL snapshot too old",
-                    ),
+                    SqlState::SNAPSHOT_TOO_OLD => {
+                        (ErrorClass::SnapshotTooOld, "PostgreSQL snapshot too old")
+                    }
 
                     // Array errors - relevant for replication data handling
                     SqlState::ARRAY_ELEMENT_ERROR => {
-                        (ErrorKind::ConversionError, "PostgreSQL array error")
+                        (ErrorClass::ConversionError, "PostgreSQL array error")
                     }
 
                     // XML/JSON errors that could occur during replication
@@ -830,24 +833,22 @@ impl From<tokio_postgres::Error> for EtlError {
                     | SqlState::TOO_MANY_JSON_OBJECT_MEMBERS
                     | SqlState::SQL_JSON_SCALAR_REQUIRED
                     | SqlState::SQL_JSON_ITEM_CANNOT_BE_CAST_TO_TARGET_TYPE => {
-                        (ErrorKind::ConversionError, "PostgreSQL XML/JSON error")
+                        (ErrorClass::ConversionError, "PostgreSQL XML/JSON error")
                     }
 
                     // Default for other SQL states
-                    _ => (ErrorKind::SourceError, "PostgreSQL error"),
+                    _ => (ErrorClass::Unknown, "PostgreSQL error"),
                 }
             }
             // No SQL state means connection issue
-            None => (
-                ErrorKind::SourceConnectionFailed,
-                "PostgreSQL connection failed",
-            ),
+            None => (ErrorClass::ConnectionFailed, "PostgreSQL connection failed"),
         };
 
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            kind,
+        EtlError::from_scoped_components(
+            ErrorScope::Source,
+            class,
             Cow::Borrowed(description),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -855,13 +856,14 @@ impl From<tokio_postgres::Error> for EtlError {
     }
 }
 
-/// Converts [`rustls::Error`] to [`EtlError`] with [`ErrorKind::EncryptionError`].
+/// Converts [`rustls::Error`] to [`EtlError`] with [`ErrorClass::EncryptionError`].
 impl From<rustls::Error> for EtlError {
     fn from(err: rustls::Error) -> EtlError {
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::EncryptionError,
+        EtlError::from_scoped_components(
+            ErrorScope::Internal,
+            ErrorClass::EncryptionError,
             Cow::Borrowed("TLS configuration failed"),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -869,13 +871,14 @@ impl From<rustls::Error> for EtlError {
     }
 }
 
-/// Converts [`rustls::pki_types::pem::Error`] to [`EtlError`] with [`ErrorKind::ConfigError`].
+/// Converts [`rustls::pki_types::pem::Error`] to [`EtlError`] with [`ErrorClass::ConfigError`].
 impl From<rustls::pki_types::pem::Error> for EtlError {
     fn from(err: rustls::pki_types::pem::Error) -> EtlError {
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConfigError,
+        EtlError::from_scoped_components(
+            ErrorScope::Internal,
+            ErrorClass::ConfigError,
             Cow::Borrowed("PEM parsing failed"),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -883,13 +886,14 @@ impl From<rustls::pki_types::pem::Error> for EtlError {
     }
 }
 
-/// Converts [`uuid::Error`] to [`EtlError`] with [`ErrorKind::InvalidData`].
+/// Converts [`uuid::Error`] to [`EtlError`] with [`ErrorClass::InvalidData`].
 impl From<uuid::Error> for EtlError {
     fn from(err: uuid::Error) -> EtlError {
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::InvalidData,
+        EtlError::from_scoped_components(
+            ErrorScope::Internal,
+            ErrorClass::InvalidData,
             Cow::Borrowed("UUID parsing failed"),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -897,13 +901,14 @@ impl From<uuid::Error> for EtlError {
     }
 }
 
-/// Converts [`chrono::ParseError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+/// Converts [`chrono::ParseError`] to [`EtlError`] with [`ErrorClass::ConversionError`].
 impl From<chrono::ParseError> for EtlError {
     fn from(err: chrono::ParseError) -> EtlError {
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
+        EtlError::from_scoped_components(
+            ErrorScope::Internal,
+            ErrorClass::ConversionError,
             Cow::Borrowed("Datetime parsing failed"),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -911,13 +916,14 @@ impl From<chrono::ParseError> for EtlError {
     }
 }
 
-/// Converts [`ParseNumericError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+/// Converts [`ParseNumericError`] to [`EtlError`] with [`ErrorClass::ConversionError`].
 impl From<ParseNumericError> for EtlError {
     fn from(err: ParseNumericError) -> EtlError {
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            ErrorKind::ConversionError,
+        EtlError::from_scoped_components(
+            ErrorScope::Internal,
+            ErrorClass::ConversionError,
             Cow::Borrowed("Numeric parsing failed"),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -925,25 +931,24 @@ impl From<ParseNumericError> for EtlError {
     }
 }
 
-/// Converts [`sqlx::Error`] to [`EtlError`] with the appropriate error kind.
+/// Converts [`sqlx::Error`] to [`EtlError`] with the appropriate error class.
 ///
-/// Maps database errors to [`ErrorKind::SourceQueryFailed`], I/O errors to [`ErrorKind::IoError`],
-/// and connection pool errors to [`ErrorKind::SourceConnectionFailed`].
+/// Maps database errors to [`ErrorClass::QueryFailed`], SQLx I/O and pool failures to
+/// [`ErrorClass::ConnectionFailed`], and defaults to [`ErrorClass::QueryFailed`].
 impl From<sqlx::Error> for EtlError {
     fn from(err: sqlx::Error) -> EtlError {
-        let kind = match &err {
-            sqlx::Error::Database(_) => ErrorKind::SourceQueryFailed,
-            sqlx::Error::Io(_) => ErrorKind::IoError,
-            sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut => {
-                ErrorKind::SourceConnectionFailed
-            }
-            _ => ErrorKind::SourceQueryFailed,
+        let class = match &err {
+            sqlx::Error::Database(_) => ErrorClass::QueryFailed,
+            sqlx::Error::Io(_) => ErrorClass::ConnectionFailed,
+            sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut => ErrorClass::ConnectionFailed,
+            _ => ErrorClass::QueryFailed,
         };
 
         let detail = err.to_string();
         let source = Arc::new(err);
-        EtlError::from_components(
-            kind,
+        EtlError::from_scoped_components(
+            ErrorScope::Source,
+            class,
             Cow::Borrowed("Database operation failed"),
             Some(Cow::Owned(detail)),
             Some(source),
@@ -957,16 +962,18 @@ impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlErro
         match err {
             etl_postgres::replication::slots::EtlReplicationSlotError::InvalidSlotNameLength(
                 slot_name,
-            ) => EtlError::from_components(
-                ErrorKind::ValidationError,
+            ) => EtlError::from_scoped_components(
+                ErrorScope::Source,
+                ErrorClass::ConfigError,
                 Cow::Borrowed("Replication slot name exceeds maximum length"),
                 Some(Cow::Owned(slot_name)),
                 None,
             ),
             etl_postgres::replication::slots::EtlReplicationSlotError::InvalidSlotName(
                 slot_name,
-            ) => EtlError::from_components(
-                ErrorKind::ValidationError,
+            ) => EtlError::from_scoped_components(
+                ErrorScope::Source,
+                ErrorClass::ConfigError,
                 Cow::Borrowed("Replication slot name is invalid"),
                 Some(Cow::Owned(slot_name)),
                 None,
@@ -981,45 +988,75 @@ mod tests {
     use crate::{bail, etl_error};
     use std::error::Error as _;
 
+    fn single_error(scope: ErrorScope, class: ErrorClass, description: &'static str) -> EtlError {
+        EtlError::from_scope_class_parts(scope, class, description, None)
+    }
+
+    fn error_with_detail(
+        scope: ErrorScope,
+        class: ErrorClass,
+        description: &'static str,
+        detail: impl Into<Cow<'static, str>>,
+    ) -> EtlError {
+        EtlError::from_scope_class_parts(scope, class, description, Some(detail.into()))
+    }
+
     #[test]
     fn test_simple_error_creation() {
-        let err = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
+        let err = single_error(
+            ErrorScope::Source,
+            ErrorClass::ConnectionFailed,
             "Database connection failed",
-        ));
-        assert_eq!(err.kind(), ErrorKind::SourceConnectionFailed);
+        );
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::ConnectionFailed);
         assert_eq!(err.detail(), None);
-        assert_eq!(err.kinds(), vec![ErrorKind::SourceConnectionFailed]);
+        assert_eq!(err.classes(), vec![ErrorClass::ConnectionFailed]);
     }
 
     #[test]
     fn test_error_with_detail() {
-        let err = EtlError::from((
-            ErrorKind::SourceQueryFailed,
+        let err = error_with_detail(
+            ErrorScope::Source,
+            ErrorClass::QueryFailed,
             "SQL query execution failed",
             "Table 'users' doesn't exist".to_string(),
-        ));
-        assert_eq!(err.kind(), ErrorKind::SourceQueryFailed);
+        );
+        assert_eq!(err.scope(), ErrorScope::Source);
+        assert_eq!(err.class(), ErrorClass::QueryFailed);
         assert_eq!(err.detail(), Some("Table 'users' doesn't exist"));
-        assert_eq!(err.kinds(), vec![ErrorKind::SourceQueryFailed]);
+        assert_eq!(err.classes(), vec![ErrorClass::QueryFailed]);
     }
 
     #[test]
     fn test_multiple_errors() {
         let errors = vec![
-            EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
-            EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
-            EtlError::from((ErrorKind::IoError, "Connection timeout")),
+            single_error(
+                ErrorScope::Internal,
+                ErrorClass::ValidationError,
+                "Invalid schema",
+            ),
+            single_error(
+                ErrorScope::Internal,
+                ErrorClass::ConversionError,
+                "Type mismatch",
+            ),
+            single_error(
+                ErrorScope::Internal,
+                ErrorClass::IoError,
+                "Connection timeout",
+            ),
         ];
         let multi_err: EtlError = errors.into();
 
-        assert_eq!(multi_err.kind(), ErrorKind::ValidationError);
+        assert_eq!(multi_err.scope(), ErrorScope::Internal);
+        assert_eq!(multi_err.class(), ErrorClass::ValidationError);
         assert_eq!(
-            multi_err.kinds(),
+            multi_err.classes(),
             vec![
-                ErrorKind::ValidationError,
-                ErrorKind::ConversionError,
-                ErrorKind::IoError
+                ErrorClass::ValidationError,
+                ErrorClass::ConversionError,
+                ErrorClass::IoError
             ]
         );
         assert_eq!(multi_err.detail(), None);
@@ -1028,12 +1065,17 @@ mod tests {
     #[test]
     fn test_multiple_errors_with_detail() {
         let errors = vec![
-            EtlError::from((
-                ErrorKind::ValidationError,
+            error_with_detail(
+                ErrorScope::Internal,
+                ErrorClass::ValidationError,
                 "Invalid schema",
                 "Missing required field".to_string(),
-            )),
-            EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
+            ),
+            single_error(
+                ErrorScope::Internal,
+                ErrorClass::ConversionError,
+                "Type mismatch",
+            ),
         ];
         let multi_err: EtlError = errors.into();
 
@@ -1043,29 +1085,42 @@ mod tests {
     #[test]
     fn test_from_vector() {
         let errors = vec![
-            EtlError::from((ErrorKind::ValidationError, "Error 1")),
-            EtlError::from((ErrorKind::ConversionError, "Error 2")),
+            single_error(ErrorScope::Internal, ErrorClass::ValidationError, "Error 1"),
+            single_error(ErrorScope::Internal, ErrorClass::ConversionError, "Error 2"),
         ];
         let multi_err = EtlError::from(errors);
-        assert_eq!(multi_err.kinds().len(), 2);
+        assert_eq!(multi_err.classes().len(), 2);
     }
 
     #[test]
     fn test_from_vector_single_error_not_wrapped() {
-        let error = EtlError::from((ErrorKind::ValidationError, "Single error"));
+        let error = single_error(
+            ErrorScope::Internal,
+            ErrorClass::ValidationError,
+            "Single error",
+        );
         let errors = vec![error];
         let result = EtlError::from(errors);
 
         // Single error should not be wrapped in Many variant.
-        assert_eq!(result.kinds().len(), 1);
-        assert_eq!(result.kind(), ErrorKind::ValidationError);
+        assert_eq!(result.classes().len(), 1);
+        assert_eq!(result.scope(), ErrorScope::Internal);
+        assert_eq!(result.class(), ErrorClass::ValidationError);
     }
 
     #[test]
     fn test_error_equality() {
-        let err1 = EtlError::from((ErrorKind::SourceConnectionFailed, "Connection failed"));
-        let err2 = EtlError::from((ErrorKind::SourceConnectionFailed, "Connection failed"));
-        let err3 = EtlError::from((ErrorKind::SourceQueryFailed, "Query failed"));
+        let err1 = single_error(
+            ErrorScope::Source,
+            ErrorClass::ConnectionFailed,
+            "Connection failed",
+        );
+        let err2 = single_error(
+            ErrorScope::Source,
+            ErrorClass::ConnectionFailed,
+            "Connection failed",
+        );
+        let err3 = single_error(ErrorScope::Source, ErrorClass::QueryFailed, "Query failed");
 
         assert_eq!(err1, err2);
         assert_ne!(err1, err3);
@@ -1082,28 +1137,36 @@ mod tests {
     #[test]
     fn test_many_forwards_source() {
         let inner = EtlError::from(std::io::Error::other("inner failure"));
-        let outer: EtlError = vec![inner.clone(), EtlError::from((ErrorKind::Unknown, "x"))].into();
+        let outer: EtlError = vec![
+            inner.clone(),
+            single_error(ErrorScope::Internal, ErrorClass::Unknown, "x"),
+        ]
+        .into();
         let source = outer.source().expect("missing aggregate source");
         assert_eq!(source.to_string(), inner.to_string());
     }
 
     #[test]
     fn test_macro_usage() {
-        let err = etl_error!(ErrorKind::ValidationError, "Invalid data format");
-        assert_eq!(err.kind(), ErrorKind::ValidationError);
+        let err = etl_error!(internal, ErrorClass::ValidationError, "Invalid data format");
+        assert_eq!(err.scope(), ErrorScope::Internal);
+        assert_eq!(err.class(), ErrorClass::ValidationError);
         assert_eq!(err.detail(), None);
 
         let err_with_detail = etl_error!(
-            ErrorKind::ConversionError,
+            internal,
+            ErrorClass::ConversionError,
             "Type conversion failed",
             "Cannot convert string to integer: 'abc'"
         );
-        assert_eq!(err_with_detail.kind(), ErrorKind::ConversionError);
+        assert_eq!(err_with_detail.scope(), ErrorScope::Internal);
+        assert_eq!(err_with_detail.class(), ErrorClass::ConversionError);
         assert!(err_with_detail.detail().unwrap().contains("Cannot convert"));
 
         let owned_detail = String::from("Owned detail");
         let err_with_owned = etl_error!(
-            ErrorKind::InvalidData,
+            internal,
+            ErrorClass::InvalidData,
             "Owned detail preserved",
             owned_detail
         );
@@ -1113,7 +1176,8 @@ mod tests {
     #[test]
     fn test_macro_with_source() {
         let err = etl_error!(
-            ErrorKind::IoError,
+            internal,
+            ErrorClass::IoError,
             "I/O failure",
             "disk unavailable",
             source: std::io::Error::other("disk unavailable")
@@ -1125,12 +1189,13 @@ mod tests {
     #[test]
     fn test_bail_macro() {
         fn test_function() -> EtlResult<i32> {
-            bail!(ErrorKind::ValidationError, "Test error");
+            bail!(internal, ErrorClass::ValidationError, "Test error");
         }
 
         fn test_function_with_detail() -> EtlResult<i32> {
             bail!(
-                ErrorKind::ConversionError,
+                internal,
+                ErrorClass::ConversionError,
                 "Test error",
                 "Additional detail"
             );
@@ -1139,7 +1204,8 @@ mod tests {
         fn test_function_with_owned_detail() -> EtlResult<i32> {
             let detail = String::from("Owned bail detail");
             bail!(
-                ErrorKind::DestinationError,
+                destination,
+                ErrorClass::Unknown,
                 "Test error with owned detail",
                 detail
             );
@@ -1147,7 +1213,8 @@ mod tests {
 
         fn test_function_with_source() -> EtlResult<i32> {
             bail!(
-                ErrorKind::IoError,
+                internal,
+                ErrorClass::IoError,
                 "Test error with source",
                 source: std::io::Error::other("socket closed")
             );
@@ -1156,24 +1223,28 @@ mod tests {
         let result = test_function();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ValidationError);
+        assert_eq!(err.scope(), ErrorScope::Internal);
+        assert_eq!(err.class(), ErrorClass::ValidationError);
 
         let result = test_function_with_detail();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConversionError);
+        assert_eq!(err.scope(), ErrorScope::Internal);
+        assert_eq!(err.class(), ErrorClass::ConversionError);
         assert!(err.detail().unwrap().contains("Additional detail"));
 
         let result = test_function_with_owned_detail();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DestinationError);
+        assert_eq!(err.scope(), ErrorScope::Destination);
+        assert_eq!(err.class(), ErrorClass::Unknown);
         assert_eq!(err.detail(), Some("Owned bail detail"));
 
         let result = test_function_with_source();
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::IoError);
+        assert_eq!(err.scope(), ErrorScope::Internal);
+        assert_eq!(err.class(), ErrorClass::IoError);
         assert_eq!(
             err.source().expect("missing bail source").to_string(),
             "socket closed"
@@ -1183,22 +1254,30 @@ mod tests {
     #[test]
     fn test_nested_multiple_errors() {
         let inner_errors = vec![
-            EtlError::from((ErrorKind::ConversionError, "Inner error 1")),
-            EtlError::from((ErrorKind::ValidationError, "Inner error 2")),
+            single_error(
+                ErrorScope::Internal,
+                ErrorClass::ConversionError,
+                "Inner error 1",
+            ),
+            single_error(
+                ErrorScope::Internal,
+                ErrorClass::ValidationError,
+                "Inner error 2",
+            ),
         ];
         let inner_multi: EtlError = inner_errors.into();
 
         let outer_errors = vec![
             inner_multi,
-            EtlError::from((ErrorKind::IoError, "Outer error")),
+            single_error(ErrorScope::Internal, ErrorClass::IoError, "Outer error"),
         ];
         let outer_multi: EtlError = outer_errors.into();
 
-        let kinds = outer_multi.kinds();
-        assert_eq!(kinds.len(), 3);
-        assert!(kinds.contains(&ErrorKind::ConversionError));
-        assert!(kinds.contains(&ErrorKind::ValidationError));
-        assert!(kinds.contains(&ErrorKind::IoError));
+        let classes = outer_multi.classes();
+        assert_eq!(classes.len(), 3);
+        assert!(classes.contains(&ErrorClass::ConversionError));
+        assert!(classes.contains(&ErrorClass::ValidationError));
+        assert!(classes.contains(&ErrorClass::IoError));
     }
 
     #[test]
@@ -1206,13 +1285,15 @@ mod tests {
         // Test syntax error during deserialization
         let json_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
         let etl_err = EtlError::from(json_err);
-        assert_eq!(etl_err.kind(), ErrorKind::DeserializationError);
+        assert_eq!(etl_err.scope(), ErrorScope::Internal);
+        assert_eq!(etl_err.class(), ErrorClass::DeserializationError);
         assert!(etl_err.detail().unwrap().contains("expected"));
 
         // Test data error during deserialization
         let json_err = serde_json::from_str::<bool>("\"not_a_bool\"").unwrap_err();
         let etl_err = EtlError::from(json_err);
-        assert_eq!(etl_err.kind(), ErrorKind::DeserializationError);
+        assert_eq!(etl_err.scope(), ErrorScope::Internal);
+        assert_eq!(etl_err.class(), ErrorClass::DeserializationError);
         assert!(etl_err.detail().is_some());
     }
 
@@ -1222,14 +1303,16 @@ mod tests {
         use std::hash::{Hash, Hasher};
 
         // Same error kind and description should produce same hash.
-        let err1 = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
+        let err1 = single_error(
+            ErrorScope::Source,
+            ErrorClass::ConnectionFailed,
             "Database connection failed",
-        ));
-        let err2 = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
+        );
+        let err2 = single_error(
+            ErrorScope::Source,
+            ErrorClass::ConnectionFailed,
             "Database connection failed",
-        ));
+        );
 
         let mut hasher1 = DefaultHasher::new();
         err1.hash(&mut hasher1);
@@ -1248,16 +1331,18 @@ mod tests {
         use std::hash::{Hash, Hasher};
 
         // Same kind and description with different details should produce same hash.
-        let err1 = EtlError::from((
-            ErrorKind::SourceQueryFailed,
+        let err1 = error_with_detail(
+            ErrorScope::Source,
+            ErrorClass::QueryFailed,
             "Query failed",
             "Table 'users' not found".to_string(),
-        ));
-        let err2 = EtlError::from((
-            ErrorKind::SourceQueryFailed,
+        );
+        let err2 = error_with_detail(
+            ErrorScope::Source,
+            ErrorClass::QueryFailed,
             "Query failed",
             "Table 'orders' not found".to_string(),
-        ));
+        );
 
         let mut hasher1 = DefaultHasher::new();
         err1.hash(&mut hasher1);
@@ -1276,8 +1361,12 @@ mod tests {
         use std::hash::{Hash, Hasher};
 
         // Different error kinds should produce different hashes.
-        let err1 = EtlError::from((ErrorKind::SourceConnectionFailed, "Connection failed"));
-        let err2 = EtlError::from((ErrorKind::SourceQueryFailed, "Query failed"));
+        let err1 = single_error(
+            ErrorScope::Source,
+            ErrorClass::ConnectionFailed,
+            "Connection failed",
+        );
+        let err2 = single_error(ErrorScope::Source, ErrorClass::QueryFailed, "Query failed");
 
         let mut hasher1 = DefaultHasher::new();
         err1.hash(&mut hasher1);
@@ -1300,14 +1389,30 @@ mod tests {
 
         // Aggregated errors should hash all contained errors.
         let errors1 = vec![
-            EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
-            EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
+            single_error(
+                ErrorScope::Internal,
+                ErrorClass::ValidationError,
+                "Invalid schema",
+            ),
+            single_error(
+                ErrorScope::Internal,
+                ErrorClass::ConversionError,
+                "Type mismatch",
+            ),
         ];
         let multi_err1: EtlError = errors1.into();
 
         let errors2 = vec![
-            EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
-            EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
+            single_error(
+                ErrorScope::Internal,
+                ErrorClass::ValidationError,
+                "Invalid schema",
+            ),
+            single_error(
+                ErrorScope::Internal,
+                ErrorClass::ConversionError,
+                "Type mismatch",
+            ),
         ];
         let multi_err2: EtlError = errors2.into();
 
@@ -1323,8 +1428,16 @@ mod tests {
 
         // Different order or different errors should produce different hash.
         let errors3 = vec![
-            EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
-            EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
+            single_error(
+                ErrorScope::Internal,
+                ErrorClass::ConversionError,
+                "Type mismatch",
+            ),
+            single_error(
+                ErrorScope::Internal,
+                ErrorClass::ValidationError,
+                "Invalid schema",
+            ),
         ];
         let multi_err3: EtlError = errors3.into();
 
