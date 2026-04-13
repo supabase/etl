@@ -15,7 +15,7 @@ use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::feature_flags::init_feature_flags;
+use crate::feature_flags::{FeatureFlagsClient, init_feature_flags};
 use crate::k8s::http::HttpK8sClient;
 use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache};
 use crate::{
@@ -54,14 +54,15 @@ use crate::{
         },
         sources::{
             CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
-            UpdateSourceRequest, create_source, delete_source,
+            UpdateSourceRequest, ValidateSourceRequest, ValidateSourceResponse, create_source,
+            delete_source,
             publications::{
                 CreatePublicationRequest, UpdatePublicationRequest, create_publication,
                 delete_publication, read_all_publications, read_publication, update_publication,
             },
             read_all_sources, read_source,
             tables::read_table_names,
-            update_source,
+            update_source, validate_source,
         },
         tenants::{
             CreateOrUpdateTenantRequest, CreateOrUpdateTenantResponse, CreateTenantRequest,
@@ -125,8 +126,10 @@ impl Application {
             Err(_) => None,
         };
 
+        let feature_flags_client = init_feature_flags(config.configcat_sdk_key.as_deref())?;
+
         let k8s_client = match kube_client_result {
-            Some(client) => match HttpK8sClient::new(client).await {
+            Some(client) => match HttpK8sClient::new(client, config.k8s.clone()) {
                 Ok(client) => Some(Arc::new(client) as Arc<dyn K8sClient>),
                 Err(e) => {
                     warn!(
@@ -142,8 +145,6 @@ impl Application {
             }
         };
 
-        let feature_flags_client = init_feature_flags(config.configcat_sdk_key.as_deref())?;
-
         let trusted_root_certs_cache = k8s_client.clone().map(TrustedRootCertsCache::new);
 
         let server = run(
@@ -154,8 +155,7 @@ impl Application {
             k8s_client,
             trusted_root_certs_cache,
             feature_flags_client,
-        )
-        .await?;
+        )?;
 
         Ok(Self { port, server })
     }
@@ -213,14 +213,14 @@ pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
 ///
 /// Sets up authentication, tracing, Swagger UI, and all API endpoints.
 /// The Kubernetes client and trusted root certs cache are optional to support testing scenarios.
-pub async fn run(
+pub fn run(
     config: ApiConfig,
     listener: TcpListener,
     connection_pool: PgPool,
     encryption_key: encryption::EncryptionKey,
     k8s_client: Option<Arc<dyn K8sClient>>,
     trusted_root_certs_cache: Option<TrustedRootCertsCache>,
-    feature_flags_client: Option<configcat::Client>,
+    feature_flags_client: Option<FeatureFlagsClient>,
 ) -> Result<Server, anyhow::Error> {
     let prometheus_handle = web::ThinData(init_metrics_handle()?);
     let config = web::Data::new(config);
@@ -265,6 +265,8 @@ pub async fn run(
             UpdateSourceRequest,
             ReadSourceResponse,
             ReadSourcesResponse,
+            ValidateSourceRequest,
+            ValidateSourceResponse,
             CreatePublicationRequest,
             UpdatePublicationRequest,
             Publication,
@@ -316,6 +318,7 @@ pub async fn run(
         crate::routes::sources::update_source,
         crate::routes::sources::delete_source,
         crate::routes::sources::read_all_sources,
+        crate::routes::sources::validate_source,
         crate::routes::sources::publications::create_publication,
         crate::routes::sources::publications::read_publication,
         crate::routes::sources::publications::update_publication,
@@ -368,6 +371,7 @@ pub async fn run(
                     .service(read_all_tenants)
                     // sources
                     .service(create_source)
+                    .service(validate_source)
                     .service(read_source)
                     .service(update_source)
                     .service(delete_source)

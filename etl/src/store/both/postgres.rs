@@ -13,15 +13,15 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::metrics::{ETL_TABLES_TOTAL, PHASE_LABEL, PIPELINE_ID_LABEL};
+use crate::error::{ErrorKind, EtlResult};
+use crate::etl_error;
+use crate::metrics::{ETL_TABLES_TOTAL, PHASE_LABEL};
 use crate::state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus};
-use crate::state::table::{RetryPolicy, TableReplicationPhase};
+use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
-use crate::{bail, etl_error};
 
 /// Maximum number of connections in the pool.
 ///
@@ -92,62 +92,9 @@ async fn apply_migrations(connection_config: &PgConnectionConfig) -> Result<(), 
 }
 
 /// Emits table-related metrics which quantify the total number of tables in each phase.
-fn emit_table_metrics(pipeline_id: PipelineId, counts_by_phase: &HashMap<&'static str, u64>) {
+fn emit_table_metrics(counts_by_phase: &HashMap<&'static str, u64>) {
     for (phase, count) in counts_by_phase {
-        gauge!(
-            ETL_TABLES_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
-            PHASE_LABEL => *phase
-        )
-        .set(*count as f64);
-    }
-}
-
-/// Converts ETL table replication phases to Postgres database state format.
-///
-/// This conversion transforms internal ETL replication states into the format
-/// used by the Postgres state store for persistence. It handles all phase
-/// types except in-memory phases that cannot be persisted.
-impl TryFrom<TableReplicationPhase> for state::TableReplicationState {
-    type Error = EtlError;
-
-    fn try_from(value: TableReplicationPhase) -> Result<Self, Self::Error> {
-        match value {
-            TableReplicationPhase::Init => Ok(state::TableReplicationState::Init),
-            TableReplicationPhase::DataSync => Ok(state::TableReplicationState::DataSync),
-            TableReplicationPhase::FinishedCopy => Ok(state::TableReplicationState::FinishedCopy),
-            TableReplicationPhase::SyncDone { lsn } => {
-                Ok(state::TableReplicationState::SyncDone { lsn })
-            }
-            TableReplicationPhase::Ready => Ok(state::TableReplicationState::Ready),
-            TableReplicationPhase::Errored {
-                reason,
-                solution,
-                retry_policy,
-            } => {
-                // Convert ETL RetryPolicy to postgres RetryPolicy
-                let db_retry_policy = match retry_policy {
-                    RetryPolicy::NoRetry => state::RetryPolicy::NoRetry,
-                    RetryPolicy::ManualRetry => state::RetryPolicy::ManualRetry,
-                    RetryPolicy::TimedRetry { next_retry } => {
-                        state::RetryPolicy::TimedRetry { next_retry }
-                    }
-                };
-
-                Ok(state::TableReplicationState::Errored {
-                    reason,
-                    solution,
-                    retry_policy: db_retry_policy,
-                })
-            }
-            TableReplicationPhase::SyncWait { .. } | TableReplicationPhase::Catchup { .. } => {
-                bail!(
-                    ErrorKind::InvalidState,
-                    "In-memory replication phase cannot be persisted",
-                    "In-memory table replication phases (SyncWait, Catchup) cannot be saved to state store"
-                );
-            }
-        }
+        gauge!(ETL_TABLES_TOTAL, PHASE_LABEL => *phase).set(*count as f64);
     }
 }
 
@@ -355,7 +302,7 @@ impl StateStore for PostgresStore {
         let mut table_states: BTreeMap<TableId, TableReplicationPhase> = BTreeMap::new();
         for row in replication_state_rows {
             let table_id = TableId::new(row.table_id.0);
-            let phase: TableReplicationPhase = row.try_into()?;
+            let phase = TableReplicationPhase::from_state_row(row)?;
             table_states.insert(table_id, phase);
         }
 
@@ -366,8 +313,7 @@ impl StateStore for PostgresStore {
         let mut inner = self.inner.lock().await;
         inner.init_phase_counts(&table_states);
         inner.table_states = table_states;
-
-        emit_table_metrics(self.pipeline_id, &inner.phase_counts);
+        emit_table_metrics(&inner.phase_counts);
 
         info!(
             count = table_states_len,
@@ -383,22 +329,24 @@ impl StateStore for PostgresStore {
         updates: Vec<(TableId, TableReplicationPhase)>,
     ) -> EtlResult<()> {
         // Convert all states upfront to catch any conversion errors before starting the transaction
-        let db_updates: Vec<(TableId, state::TableReplicationState)> = updates
-            .iter()
-            .map(|(table_id, state)| {
-                let db_state: state::TableReplicationState = state.clone().try_into()?;
-                Ok((*table_id, db_state))
-            })
-            .collect::<EtlResult<Vec<_>>>()?;
+        let db_updates: Vec<(TableId, state::TableReplicationStateType, serde_json::Value)> =
+            updates
+                .iter()
+                .map(|(table_id, phase)| {
+                    let (state_type, metadata) = phase.to_storage_format()?;
+                    Ok((*table_id, state_type, metadata))
+                })
+                .collect::<EtlResult<Vec<_>>>()?;
 
         // Perform all database updates in a single transaction
         let mut tx = self.pool.begin().await?;
-        for (table_id, db_state) in &db_updates {
-            state::update_replication_state(
+        for (table_id, state_type, metadata) in db_updates {
+            state::update_replication_state_raw(
                 &mut *tx,
                 self.pipeline_id as i64,
-                *table_id,
-                db_state.clone(),
+                table_id,
+                state_type,
+                metadata,
             )
             .await?;
         }
@@ -409,7 +357,7 @@ impl StateStore for PostgresStore {
         for (table_id, state) in updates {
             inner.set_table_state(table_id, state);
         }
-        emit_table_metrics(self.pipeline_id, &inner.phase_counts);
+        emit_table_metrics(&inner.phase_counts);
 
         Ok(())
     }
@@ -434,13 +382,12 @@ impl StateStore for PostgresStore {
                     )
                 })?;
 
+        let restored_phase = TableReplicationPhase::from_state_row(restored_row)?;
         tx.commit().await?;
-
-        let restored_phase: TableReplicationPhase = restored_row.try_into()?;
 
         let mut inner = self.inner.lock().await;
         inner.set_table_state(table_id, restored_phase.clone());
-        emit_table_metrics(self.pipeline_id, &inner.phase_counts);
+        emit_table_metrics(&inner.phase_counts);
 
         Ok(restored_phase)
     }
@@ -734,66 +681,9 @@ impl CleanupStore for PostgresStore {
         inner.remove_table_state(table_id);
         inner.table_schemas.retain(|(tid, _), _| *tid != table_id);
         inner.destination_tables_metadata.remove(&table_id);
-
-        emit_table_metrics(self.pipeline_id, &inner.phase_counts);
+        emit_table_metrics(&inner.phase_counts);
 
         Ok(())
-    }
-}
-
-impl TryFrom<state::TableReplicationStateRow> for TableReplicationPhase {
-    type Error = EtlError;
-
-    fn try_from(value: state::TableReplicationStateRow) -> Result<Self, Self::Error> {
-        // Parse the metadata field from the row, which contains all the data we need to build the
-        // replication phase
-        let Some(table_replication_state) = value.deserialize_metadata().map_err(|err| {
-            etl_error!(
-                ErrorKind::DeserializationError,
-                "Table replication state deserialization failed",
-                format!(
-                    "Failed to deserialize table replication state from metadata column in PostgreSQL: {}", err
-                )
-            )
-        })?
-        else {
-            bail!(
-                ErrorKind::InvalidState,
-                "Table replication state not found",
-                "Table replication state does not exist in metadata column in PostgreSQL"
-            );
-        };
-
-        // Convert postgres state to phase (they are the same structs but one is meant to represent
-        // only the state which can be saved in the db).
-        match table_replication_state {
-            state::TableReplicationState::Init => Ok(TableReplicationPhase::Init),
-            state::TableReplicationState::DataSync => Ok(TableReplicationPhase::DataSync),
-            state::TableReplicationState::FinishedCopy => Ok(TableReplicationPhase::FinishedCopy),
-            state::TableReplicationState::SyncDone { lsn } => {
-                Ok(TableReplicationPhase::SyncDone { lsn })
-            }
-            state::TableReplicationState::Ready => Ok(TableReplicationPhase::Ready),
-            state::TableReplicationState::Errored {
-                reason,
-                solution,
-                retry_policy,
-            } => {
-                let etl_retry_policy = match retry_policy {
-                    state::RetryPolicy::NoRetry => RetryPolicy::NoRetry,
-                    state::RetryPolicy::ManualRetry => RetryPolicy::ManualRetry,
-                    state::RetryPolicy::TimedRetry { next_retry } => {
-                        RetryPolicy::TimedRetry { next_retry }
-                    }
-                };
-
-                Ok(TableReplicationPhase::Errored {
-                    reason,
-                    solution,
-                    retry_policy: etl_retry_policy,
-                })
-            }
-        }
     }
 }
 

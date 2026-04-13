@@ -31,6 +31,8 @@ use tracing::{Instrument, error, info, warn};
 /// Slot deletion uses `WAIT`, which can block until the slot is no longer in use.
 /// This timeout ensures calls are bounded and cannot wait forever.
 const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default duration unit used when `pg_settings.unit` is empty.
+const PG_SETTINGS_DEFAULT_DURATION_UNIT: &str = "ms";
 
 /// Spawns a background task to monitor a Postgres connection until it terminates.
 fn spawn_postgres_connection<T>(
@@ -560,6 +562,50 @@ impl PgReplicationClient {
         Ok(self.client.simple_query(query).await?)
     }
 
+    /// Returns the configured `wal_sender_timeout`, if PostgreSQL has it enabled.
+    pub async fn get_wal_sender_timeout(&self) -> EtlResult<Option<Duration>> {
+        let query = "select setting, unit from pg_settings where name = 'wal_sender_timeout';";
+
+        for result in self.client.simple_query(query).await? {
+            if let SimpleQueryMessage::Row(row) = result {
+                let setting = Self::get_row_value::<u64>(&row, "setting", "pg_settings")?;
+                if setting == 0 {
+                    return Ok(None);
+                }
+
+                let unit = row
+                    .try_get("unit")?
+                    .unwrap_or(PG_SETTINGS_DEFAULT_DURATION_UNIT);
+
+                let duration = match unit {
+                    "ms" => Duration::from_millis(setting),
+                    "s" => Duration::from_secs(setting),
+                    "min" => Duration::from_secs(setting.saturating_mul(60)),
+                    "h" => Duration::from_secs(setting.saturating_mul(60 * 60)),
+                    "d" => Duration::from_secs(setting.saturating_mul(60 * 60 * 24)),
+                    unsupported_unit => {
+                        return Err(etl_error!(
+                            ErrorKind::ConversionError,
+                            "Unsupported wal sender timeout unit",
+                            format!(
+                                "Unsupported wal_sender_timeout unit '{}' returned by pg_settings",
+                                unsupported_unit
+                            )
+                        ));
+                    }
+                };
+
+                return Ok(Some(duration));
+            }
+        }
+
+        bail!(
+            ErrorKind::SourceConnectionFailed,
+            "Wal sender timeout not found",
+            "The table pg_settings did not return wal_sender_timeout".to_string()
+        )
+    }
+
     /// Creates a new logical replication slot with the specified name and a transaction pinned
     /// to the slot's snapshot.
     ///
@@ -757,10 +803,10 @@ impl PgReplicationClient {
     }
 
     /// Checks if a publication with the given name exists.
-    pub async fn publication_exists(&self, publication: &str) -> EtlResult<bool> {
+    pub async fn publication_exists(&self, publication_name: &str) -> EtlResult<bool> {
         let publication_exists_query = format!(
             "select 1 as exists from pg_publication where pubname = {};",
-            quote_literal(publication)
+            quote_literal(publication_name)
         );
         for msg in self.client.simple_query(&publication_exists_query).await? {
             if let SimpleQueryMessage::Row(_) = msg {
@@ -775,10 +821,10 @@ impl PgReplicationClient {
     ///
     /// Returns `true` if the publication is configured to send replication messages using
     /// the parent table OID, or `false` if it sends them using child partition OIDs.
-    pub async fn get_publish_via_partition_root(&self, publication: &str) -> EtlResult<bool> {
+    pub async fn get_publish_via_partition_root(&self, publication_name: &str) -> EtlResult<bool> {
         let query = format!(
             "select pubviaroot from pg_publication where pubname = {};",
-            quote_literal(publication)
+            quote_literal(publication_name)
         );
 
         for msg in self.client.simple_query(&query).await? {
@@ -792,7 +838,7 @@ impl PgReplicationClient {
         bail!(
             ErrorKind::ConfigError,
             "Publication not found",
-            format!("Publication '{}' not found in database", publication)
+            format!("Publication '{}' not found in database", publication_name)
         );
     }
 
@@ -1171,10 +1217,10 @@ impl PgReplicationClient {
     async fn get_table_schema(
         &self,
         table_id: TableId,
-        publication: Option<&str>,
+        publication_name: Option<&str>,
     ) -> EtlResult<TableSchema> {
         let table_name = self.get_table_name(table_id).await?;
-        let column_schemas = self.get_column_schemas(table_id, publication).await?;
+        let column_schemas = self.get_column_schemas(table_id, publication_name).await?;
 
         Ok(TableSchema::new(table_id, table_name, column_schemas))
     }
@@ -1295,10 +1341,10 @@ impl PgReplicationClient {
     async fn get_column_schemas(
         &self,
         table_id: TableId,
-        publication: Option<&str>,
+        publication_name: Option<&str>,
     ) -> EtlResult<Vec<ColumnSchema>> {
         // Build publication filter CTEs and predicates based on Postgres version.
-        let publication_filter = self.build_publication_filter_sql(table_id, publication);
+        let publication_filter = self.build_publication_filter_sql(table_id, publication_name);
 
         let column_info_query = format!(
             r#"
@@ -1434,10 +1480,10 @@ impl PgReplicationClient {
         if below_version!(self.server_version, POSTGRES_15) {
             return Ok(None);
         }
+
         // If we don't have a publication the row filter is implicitly non-existent
-        let publication = match publication_name {
-            Some(publication) => publication,
-            _ => return Ok(None),
+        let Some(publication_name) = publication_name else {
+            return Ok(None);
         };
 
         // This uses the same query as the `pg_publication_tables`, but with some minor tweaks (COALESCE, only return the rowfilter,
@@ -1448,7 +1494,7 @@ impl PgReplicationClient {
                 join pg_namespace n on n.nspname = pt.schemaname
                 join pg_class c on c.relnamespace = n.oid AND c.relname = pt.tablename
                 where pt.pubname = {} and c.oid = {};",
-            quote_literal(publication),
+            quote_literal(publication_name),
             table_id,
         );
 
@@ -1474,7 +1520,7 @@ impl PgReplicationClient {
         &self,
         table_id: TableId,
         column_schemas: &[ColumnSchema],
-        publication: Option<&str>,
+        publication_name: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
         let column_list = column_schemas
             .iter()
@@ -1483,7 +1529,7 @@ impl PgReplicationClient {
             .join(", ");
 
         let table_name = self.get_table_name(table_id).await?;
-        let row_filter = self.get_row_filter(table_id, publication).await?;
+        let row_filter = self.get_row_filter(table_id, publication_name).await?;
 
         let copy_query = if let Some(row_filter) = row_filter {
             // Use select-form so we can add where.
@@ -1547,6 +1593,7 @@ impl PgReplicationClient {
         row_filter: Option<&str>,
         partition: &CtidPartition,
     ) -> String {
+        let quoted_table_name = table_name.as_quoted_identifier();
         let ctid_predicate = match partition {
             CtidPartition::OpenStart { end_tid } => {
                 format!("ctid < {}::tid", quote_literal(end_tid))
@@ -1565,11 +1612,11 @@ impl PgReplicationClient {
 
         if let Some(row_filter) = row_filter {
             format!(
-                "copy (select {column_list} from {table_name} where {ctid_predicate} and ({row_filter})) to stdout with (format text);",
+                "copy (select {column_list} from {quoted_table_name} where {ctid_predicate} and ({row_filter})) to stdout with (format text);",
             )
         } else {
             format!(
-                "copy (select {column_list} from {table_name} where {ctid_predicate}) to stdout with (format text);",
+                "copy (select {column_list} from {quoted_table_name} where {ctid_predicate}) to stdout with (format text);",
             )
         }
     }
@@ -1725,5 +1772,42 @@ impl PgReplicationClient {
                 )
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CtidPartition, PgReplicationClient};
+    use etl_postgres::types::TableName;
+
+    #[test]
+    fn build_ctid_copy_query_quotes_mixed_case_table_names() {
+        let query = PgReplicationClient::build_ctid_copy_query(
+            &TableName::new("public".to_string(), "User".to_string()),
+            "\"id\", \"email\"",
+            None,
+            &CtidPartition::OpenEnd {
+                start_tid: "(0,1)".to_string(),
+            },
+        );
+
+        assert!(query.contains("from public.\"User\""));
+        assert!(!query.contains("from public.User"));
+    }
+
+    #[test]
+    fn build_ctid_copy_query_quotes_mixed_case_table_names_with_row_filter() {
+        let query = PgReplicationClient::build_ctid_copy_query(
+            &TableName::new("public".to_string(), "CommentReadStatus".to_string()),
+            "\"id\"",
+            Some("\"tenantId\" is not null"),
+            &CtidPartition::OpenStart {
+                end_tid: "(10,1)".to_string(),
+            },
+        );
+
+        assert!(query.contains("from public.\"CommentReadStatus\""));
+        assert!(query.contains("and (\"tenantId\" is not null)"));
+        assert!(!query.contains("from public.CommentReadStatus"));
     }
 }

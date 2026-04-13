@@ -15,8 +15,9 @@ use tracing::info;
 use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::stream::TryBatchBackpressureStream;
+use crate::concurrency::stream::{TryBatchBackpressureStream, table_sync_worker_copy_stream_id};
 use crate::destination::Destination;
+use crate::destination::async_result::WriteTableRowsResult;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 #[cfg(feature = "failpoints")]
@@ -25,7 +26,7 @@ use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
     ETL_EVENTS_PROCESSED_TOTAL, ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
     ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE, ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL,
-    PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
+    WORKER_TYPE_LABEL,
 };
 use crate::replication::client::{
     CtidPartition, PgReplicationChildTransaction, PgReplicationTransaction,
@@ -82,7 +83,7 @@ async fn copy_table_rows_from_stream<D, S>(
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     replicated_table_schema: ReplicatedTableSchema,
-    pipeline_id: PipelineId,
+    _pipeline_id: PipelineId,
     partitioning: &'static str,
     destination: D,
 ) -> EtlResult<ShutdownResult<u64, u64>>
@@ -143,16 +144,17 @@ where
                 total_rows += batch_size;
 
                 let before_sending = Instant::now();
+                let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
 
                 destination
-                    .write_table_rows(&replicated_table_schema, table_rows)
+                    .write_table_rows(&replicated_table_schema, table_rows, flush_result)
                     .await?;
+                pending_flush_result.await.into_result()?;
 
                 counter!(
                     ETL_EVENTS_PROCESSED_TOTAL,
                     WORKER_TYPE_LABEL => "table_sync",
                     ACTION_LABEL => "table_copy",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
                     DESTINATION_LABEL => D::name(),
                 )
                 .increment(batch_size);
@@ -162,7 +164,6 @@ where
                     ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
                     WORKER_TYPE_LABEL => "table_sync",
                     ACTION_LABEL => "table_copy",
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
                     DESTINATION_LABEL => D::name(),
                     PARTITIONING_LABEL => partitioning,
                 )
@@ -262,16 +263,15 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     let table_copy_stream = transaction
         .get_table_copy_stream(table_id, &replicated_column_schemas, publication_name)
         .await?;
-    let table_copy_stream = TableCopyStream::wrap(
-        table_copy_stream,
-        replicated_column_schemas.iter(),
-        pipeline_id,
-    );
+    let table_copy_stream =
+        TableCopyStream::wrap(table_copy_stream, replicated_column_schemas.iter());
     let connection_updates_rx = transaction.get_cloned_client().connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
+    let stream_id = table_sync_worker_copy_stream_id(table_id);
     let table_copy_stream = TryBatchBackpressureStream::wrap(
         table_copy_stream,
+        stream_id,
         batch_config,
         memory_monitor.subscribe(),
         cached_batch_budget,
@@ -304,7 +304,6 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 
     histogram!(
         ETL_TABLE_COPY_ROWS,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
         DESTINATION_LABEL => D::name(),
         PARTITIONING_LABEL => "false",
     )
@@ -507,14 +506,12 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     // Record imbalance metrics.
     histogram!(
         ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
         DESTINATION_LABEL => D::name(),
     )
     .record(time_lif);
 
     histogram!(
         ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
         DESTINATION_LABEL => D::name(),
     )
     .record(rows_lif);
@@ -618,15 +615,16 @@ where
         }
     };
 
-    let table_copy_stream =
-        TableCopyStream::wrap(copy_stream, replicated_column_schemas.iter(), pipeline_id);
+    let table_copy_stream = TableCopyStream::wrap(copy_stream, replicated_column_schemas.iter());
     let connection_updates_rx = child_transaction
         .get_cloned_client()
         .connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
+    let stream_id = table_sync_worker_copy_stream_id(table_id);
     let table_copy_stream = TryBatchBackpressureStream::wrap(
         table_copy_stream,
+        stream_id,
         batch_config,
         memory_monitor.subscribe(),
         cached_batch_budget,
@@ -661,7 +659,6 @@ where
 
     histogram!(
         ETL_TABLE_COPY_ROWS,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
         DESTINATION_LABEL => D::name(),
         PARTITIONING_LABEL => "true",
     )

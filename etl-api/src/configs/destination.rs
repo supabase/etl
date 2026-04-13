@@ -15,6 +15,11 @@ pub const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
 }
 
+/// Returns the default connection pool size for DuckLake destinations.
+pub const fn default_ducklake_pool_size() -> u32 {
+    DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FullApiDestinationConfig {
@@ -37,6 +42,62 @@ pub enum FullApiDestinationConfig {
     Iceberg {
         #[serde(flatten)]
         config: FullApiIcebergConfig,
+    },
+    Ducklake {
+        #[schema(example = "postgres://user:pass@localhost:5432/ducklake_catalog")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        catalog_url: String,
+        #[schema(example = "file:///absolute/path/to/lake_data")]
+        #[serde(deserialize_with = "crate::utils::trim_string")]
+        data_path: String,
+        #[schema(example = 4)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pool_size: Option<u32>,
+        #[schema(example = "my-access-key")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_secret_string"
+        )]
+        s3_access_key_id: Option<SerializableSecretString>,
+        #[schema(example = "my-secret-key")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_secret_string"
+        )]
+        s3_secret_access_key: Option<SerializableSecretString>,
+        #[schema(example = "us-east-1")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        s3_region: Option<String>,
+        #[schema(example = "127.0.0.1:5000/s3")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        s3_endpoint: Option<String>,
+        #[schema(example = "path")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        s3_url_style: Option<String>,
+        #[schema(example = false)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        s3_use_ssl: Option<bool>,
+        #[schema(example = "ducklake")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        metadata_schema: Option<String>,
     },
 }
 
@@ -94,6 +155,29 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                     },
                 },
             },
+            StoredDestinationConfig::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+            } => Self::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size: Some(pool_size),
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+            },
         }
     }
 }
@@ -109,6 +193,18 @@ pub enum StoredDestinationConfig {
     },
     Iceberg {
         config: StoredIcebergConfig,
+    },
+    Ducklake {
+        catalog_url: String,
+        data_path: String,
+        pool_size: u32,
+        s3_access_key_id: Option<SerializableSecretString>,
+        s3_secret_access_key: Option<SerializableSecretString>,
+        s3_region: Option<String>,
+        s3_endpoint: Option<String>,
+        s3_url_style: Option<String>,
+        s3_use_ssl: Option<bool>,
+        metadata_schema: Option<String>,
     },
 }
 
@@ -165,6 +261,29 @@ impl StoredDestinationConfig {
                         s3_endpoint,
                     },
                 },
+            },
+            Self::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+            } => DestinationConfig::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_access_key_id: s3_access_key_id.map(Into::into),
+                s3_secret_access_key: s3_secret_access_key.map(Into::into),
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
             },
         }
     }
@@ -224,6 +343,29 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                         s3_endpoint,
                     },
                 },
+            },
+            FullApiDestinationConfig::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+            } => Self::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size: pool_size.unwrap_or(DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE),
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
             },
         }
     }
@@ -311,6 +453,38 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     })
                 }
             },
+            Self::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+            } => {
+                let s3_access_key_id = s3_access_key_id
+                    .map(|value| encrypt_text(value.expose_secret().to_owned(), encryption_key))
+                    .transpose()?;
+                let s3_secret_access_key = s3_secret_access_key
+                    .map(|value| encrypt_text(value.expose_secret().to_owned(), encryption_key))
+                    .transpose()?;
+
+                Ok(EncryptedStoredDestinationConfig::Ducklake {
+                    catalog_url,
+                    data_path,
+                    pool_size,
+                    s3_access_key_id,
+                    s3_secret_access_key,
+                    s3_region,
+                    s3_endpoint,
+                    s3_url_style,
+                    s3_use_ssl,
+                    metadata_schema,
+                })
+            }
         }
     }
 }
@@ -329,6 +503,19 @@ pub enum EncryptedStoredDestinationConfig {
     Iceberg {
         #[serde(flatten)]
         config: EncryptedStoredIcebergConfig,
+    },
+    Ducklake {
+        catalog_url: String,
+        data_path: String,
+        #[serde(default = "default_ducklake_pool_size")]
+        pool_size: u32,
+        s3_access_key_id: Option<EncryptedValue>,
+        s3_secret_access_key: Option<EncryptedValue>,
+        s3_region: Option<String>,
+        s3_endpoint: Option<String>,
+        s3_url_style: Option<String>,
+        s3_use_ssl: Option<bool>,
+        metadata_schema: Option<String>,
     },
 }
 
@@ -427,6 +614,37 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     })
                 }
             },
+            Self::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_access_key_id,
+                s3_secret_access_key,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+            } => Ok(StoredDestinationConfig::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_access_key_id: s3_access_key_id
+                    .map(|value| {
+                        decrypt_text(value, encryption_key).map(SerializableSecretString::from)
+                    })
+                    .transpose()?,
+                s3_secret_access_key: s3_secret_access_key
+                    .map(|value| {
+                        decrypt_text(value, encryption_key).map(SerializableSecretString::from)
+                    })
+                    .transpose()?,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+            }),
         }
     }
 }
@@ -879,6 +1097,189 @@ mod tests {
                 assert_eq!(p1_s3_endpoint, p2_s3_endpoint);
             }
             _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn test_stored_destination_config_encryption_decryption_ducklake() {
+        let config = StoredDestinationConfig::Ducklake {
+            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_string(),
+            data_path: "s3://bucket/path".to_string(),
+            pool_size: 8,
+            s3_access_key_id: Some(SerializableSecretString::from("access".to_string())),
+            s3_secret_access_key: Some(SerializableSecretString::from("secret".to_string())),
+            s3_region: Some("us-east-1".to_string()),
+            s3_endpoint: Some("127.0.0.1:5000/s3".to_string()),
+            s3_url_style: Some("path".to_string()),
+            s3_use_ssl: Some(false),
+            metadata_schema: Some("ducklake".to_string()),
+        };
+
+        let key = EncryptionKey {
+            id: 1,
+            key: generate_random_key::<32>().unwrap(),
+        };
+
+        let encrypted = config.clone().encrypt(&key).unwrap();
+        let decrypted = encrypted.decrypt(&key).unwrap();
+
+        match (config, decrypted) {
+            (
+                StoredDestinationConfig::Ducklake {
+                    catalog_url: c1,
+                    data_path: d1,
+                    pool_size: p1,
+                    s3_access_key_id: a1,
+                    s3_secret_access_key: s1,
+                    s3_region: r1,
+                    s3_endpoint: e1,
+                    s3_url_style: u1,
+                    s3_use_ssl: ssl1,
+                    metadata_schema: m1,
+                },
+                StoredDestinationConfig::Ducklake {
+                    catalog_url: c2,
+                    data_path: d2,
+                    pool_size: p2,
+                    s3_access_key_id: a2,
+                    s3_secret_access_key: s2,
+                    s3_region: r2,
+                    s3_endpoint: e2,
+                    s3_url_style: u2,
+                    s3_use_ssl: ssl2,
+                    metadata_schema: m2,
+                },
+            ) => {
+                assert_eq!(c1, c2);
+                assert_eq!(d1, d2);
+                assert_eq!(p1, p2);
+                assert_eq!(
+                    a1.as_ref().map(|value| value.expose_secret()),
+                    a2.as_ref().map(|value| value.expose_secret())
+                );
+                assert_eq!(
+                    s1.as_ref().map(|value| value.expose_secret()),
+                    s2.as_ref().map(|value| value.expose_secret())
+                );
+                assert_eq!(r1, r2);
+                assert_eq!(e1, e2);
+                assert_eq!(u1, u2);
+                assert_eq!(ssl1, ssl2);
+                assert_eq!(m1, m2);
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn test_full_api_destination_config_conversion_ducklake() {
+        let full_config = FullApiDestinationConfig::Ducklake {
+            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_string(),
+            data_path: "file:///absolute/path/to/lake_data".to_string(),
+            pool_size: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_region: None,
+            s3_endpoint: None,
+            s3_url_style: None,
+            s3_use_ssl: None,
+            metadata_schema: Some("ducklake".to_string()),
+        };
+
+        let stored: StoredDestinationConfig = full_config.clone().into();
+        let back_to_full: FullApiDestinationConfig = stored.into();
+
+        match (full_config, back_to_full) {
+            (
+                FullApiDestinationConfig::Ducklake {
+                    catalog_url: c1,
+                    data_path: d1,
+                    pool_size: p1,
+                    metadata_schema: m1,
+                    ..
+                },
+                FullApiDestinationConfig::Ducklake {
+                    catalog_url: c2,
+                    data_path: d2,
+                    pool_size: p2,
+                    metadata_schema: m2,
+                    ..
+                },
+            ) => {
+                assert_eq!(c1, c2);
+                assert_eq!(d1, d2);
+                assert_eq!(p1, None);
+                assert_eq!(p2, Some(DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE));
+                assert_eq!(m1, m2);
+            }
+            _ => panic!("Config types don't match"),
+        }
+    }
+
+    #[test]
+    fn test_full_api_destination_config_serialization_ducklake() {
+        let full_config = FullApiDestinationConfig::Ducklake {
+            catalog_url: "postgres://user:pass@localhost:5432/ducklake_catalog".to_string(),
+            data_path: "s3://bucket/path".to_string(),
+            pool_size: Some(4),
+            s3_access_key_id: Some(SerializableSecretString::from("access".to_string())),
+            s3_secret_access_key: Some(SerializableSecretString::from("secret".to_string())),
+            s3_region: Some("us-east-1".to_string()),
+            s3_endpoint: Some("127.0.0.1:5000/s3".to_string()),
+            s3_url_style: Some("path".to_string()),
+            s3_use_ssl: Some(false),
+            metadata_schema: Some("ducklake".to_string()),
+        };
+
+        assert_json_snapshot!(full_config);
+
+        let json = serde_json::to_string_pretty(&full_config).unwrap();
+        let deserialized: FullApiDestinationConfig = serde_json::from_str(&json).unwrap();
+        match (&full_config, deserialized) {
+            (
+                FullApiDestinationConfig::Ducklake {
+                    catalog_url: c1,
+                    data_path: d1,
+                    pool_size: p1,
+                    s3_access_key_id: a1,
+                    s3_secret_access_key: s1,
+                    s3_region: r1,
+                    s3_endpoint: e1,
+                    s3_url_style: u1,
+                    s3_use_ssl: ssl1,
+                    metadata_schema: m1,
+                },
+                FullApiDestinationConfig::Ducklake {
+                    catalog_url: c2,
+                    data_path: d2,
+                    pool_size: p2,
+                    s3_access_key_id: a2,
+                    s3_secret_access_key: s2,
+                    s3_region: r2,
+                    s3_endpoint: e2,
+                    s3_url_style: u2,
+                    s3_use_ssl: ssl2,
+                    metadata_schema: m2,
+                },
+            ) => {
+                assert_eq!(c1, &c2);
+                assert_eq!(d1, &d2);
+                assert_eq!(p1, &p2);
+                assert_eq!(
+                    a1.as_ref().map(|value| value.expose_secret()),
+                    a2.as_ref().map(|value| value.expose_secret())
+                );
+                assert_eq!(
+                    s1.as_ref().map(|value| value.expose_secret()),
+                    s2.as_ref().map(|value| value.expose_secret())
+                );
+                assert_eq!(r1, &r2);
+                assert_eq!(e1, &e2);
+                assert_eq!(u1, &u2);
+                assert_eq!(ssl1, &ssl2);
+                assert_eq!(m1, &m2);
+            }
+            _ => panic!("Deserialization failed or variant mismatch"),
         }
     }
 

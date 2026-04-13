@@ -10,6 +10,10 @@ use crate::iceberg::IcebergClient;
 use crate::iceberg::error::iceberg_error_to_etl_error;
 use crate::table_name::try_stringify_table_name;
 use etl::destination::Destination;
+use etl::destination::async_result::{
+    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
+use etl::destination::task_set::DestinationTaskSet;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
 use etl::state::destination_metadata::DestinationTableMetadata;
@@ -20,7 +24,7 @@ use etl::types::{
 };
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// CDC operation types for Iceberg changelog tables.
 ///
@@ -99,6 +103,7 @@ pub struct IcebergDestination<S> {
     client: IcebergClient,
     store: S,
     inner: Arc<Mutex<Inner>>,
+    streaming_tasks: DestinationTaskSet,
 }
 
 /// Namespace in the destination where the tables will be copied
@@ -173,6 +178,7 @@ where
                 created_namespaces: HashSet::new(),
                 namespace,
             })),
+            streaming_tasks: DestinationTaskSet::new(),
         }
     }
 
@@ -251,7 +257,7 @@ where
                 .await?;
 
             #[cfg(feature = "egress")]
-            log_processed_bytes(Self::name(), PROCESSING_TYPE_TABLE_COPY, bytes_sent, 0);
+            log_processed_bytes("iceberg", PROCESSING_TYPE_TABLE_COPY, bytes_sent, 0);
         }
 
         Ok(())
@@ -317,7 +323,7 @@ where
                     Event::Delete(delete) => {
                         let sequence_key = delete.event_sequence_key().to_string();
                         let Some((_, mut old_table_row)) = delete.old_table_row else {
-                            info!("delete event has no row, skipping");
+                            debug!("delete event has no row, skipping");
                             continue;
                         };
                         old_table_row
@@ -394,7 +400,7 @@ where
                 }
 
                 #[cfg(feature = "egress")]
-                log_processed_bytes(Self::name(), PROCESSING_TYPE_STREAMING, bytes_sent, 0);
+                log_processed_bytes("iceberg", PROCESSING_TYPE_STREAMING, bytes_sent, 0);
             }
 
             // Collect and deduplicate schemas from all truncate events.
@@ -559,11 +565,15 @@ where
 
 impl<S> Destination for IcebergDestination<S>
 where
-    S: StateStore + Send + Sync,
+    S: StateStore + Clone + Send + Sync + 'static,
 {
     /// Returns the identifier name for this destination type.
     fn name() -> &'static str {
         "iceberg"
+    }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.streaming_tasks.shutdown().await
     }
 
     /// Truncates the specified table by dropping and recreating it.
@@ -573,8 +583,10 @@ where
     async fn truncate_table(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
+        async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
-        self.truncate_table(replicated_table_schema).await?;
+        let result = IcebergDestination::truncate_table(self, replicated_table_schema).await;
+        async_result.send(result);
 
         Ok(())
     }
@@ -588,9 +600,11 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        self.write_table_rows(replicated_table_schema, table_rows)
-            .await?;
+        let result =
+            IcebergDestination::write_table_rows(self, replicated_table_schema, table_rows).await;
+        async_result.send(result);
 
         Ok(())
     }
@@ -600,8 +614,20 @@ where
     /// Handles insert, update, delete, and truncate events by converting
     /// them to appropriate Iceberg operations. Events are batched by table
     /// and processed concurrently for optimal performance.
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.write_events(events).await?;
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
+        self.streaming_tasks.try_reap().await?;
+
+        let destination = self.clone();
+        self.streaming_tasks
+            .spawn(async move {
+                let result = destination.write_events(events).await;
+                async_result.send(result);
+            })
+            .await;
 
         Ok(())
     }

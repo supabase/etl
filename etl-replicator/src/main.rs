@@ -45,6 +45,7 @@ use tracing::info;
 mod core;
 mod error;
 mod error_notification;
+mod error_reporting;
 mod init;
 mod metrics;
 mod sentry;

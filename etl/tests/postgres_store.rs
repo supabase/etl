@@ -1,6 +1,8 @@
 #![cfg(feature = "test-utils")]
 
 use etl::state::destination_metadata::DestinationTableMetadata;
+use etl::error::ErrorKind;
+use etl::etl_error;
 use etl::state::table::{RetryPolicy, TableReplicationPhase};
 use etl::store::both::postgres::PostgresStore;
 use etl::store::cleanup::CleanupStore;
@@ -115,6 +117,7 @@ async fn test_state_store_operations() {
         reason: "Test error".to_string(),
         solution: Some("Test solution".to_string()),
         retry_policy: RetryPolicy::ManualRetry,
+        source_err: etl_error!(ErrorKind::Unknown, "test error"),
     };
     store
         .update_table_replication_state(table_id, errored_phase.clone())
@@ -721,6 +724,7 @@ async fn test_errored_state_with_different_retry_policies() {
         reason: "Fatal error".to_string(),
         solution: None,
         retry_policy: RetryPolicy::NoRetry,
+        source_err: etl_error!(ErrorKind::Unknown, "test error"),
     };
     store
         .update_table_replication_state(table_id, errored_no_retry.clone())
@@ -736,6 +740,7 @@ async fn test_errored_state_with_different_retry_policies() {
         reason: "Temporary error".to_string(),
         solution: Some("Wait and retry".to_string()),
         retry_policy: RetryPolicy::TimedRetry { next_retry },
+        source_err: etl_error!(ErrorKind::Unknown, "test error"),
     };
     store
         .update_table_replication_state(table_id, errored_timed_retry.clone())

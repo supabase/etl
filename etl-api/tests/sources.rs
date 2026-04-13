@@ -2,11 +2,11 @@ use etl_api::configs::source::FullApiSourceConfig;
 use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_api::routes::sources::{
     CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
-    UpdateSourceRequest,
+    UpdateSourceRequest, ValidateSourceRequest, ValidateSourceResponse,
 };
 use etl_config::SerializableSecretString;
 use etl_config::shared::PgConnectionConfig;
-use etl_postgres::sqlx::test_utils::create_pg_database;
+use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 use secrecy::ExposeSecret;
@@ -24,8 +24,6 @@ use crate::support::mocks::sources::{
 };
 use crate::support::mocks::tenants::create_tenant;
 use crate::support::test_app::{spawn_test_app, spawn_test_app_with_trusted_username};
-
-mod support;
 
 fn source_config_from_db_config(source_db_config: &PgConnectionConfig) -> FullApiSourceConfig {
     FullApiSourceConfig {
@@ -310,6 +308,30 @@ async fn source_creation_with_matching_trusted_username_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn source_validation_with_matching_trusted_username_succeeds() {
+    init_test_tracing();
+
+    let trusted_source = create_trusted_source_database().await;
+    let app =
+        spawn_test_app_with_trusted_username(Some(trusted_source.trusted_username.clone())).await;
+    let tenant_id = &create_tenant(&app).await;
+    let request = ValidateSourceRequest {
+        config: source_config_from_db_config(&trusted_source.trusted_config),
+    };
+
+    let response = app.validate_source(tenant_id, &request).await;
+
+    assert!(response.status().is_success());
+    let response: ValidateSourceResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    assert!(response.validation_failures.is_empty());
+
+    drop_trusted_source_database(trusted_source).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn source_creation_with_non_matching_trusted_username_fails() {
     init_test_tracing();
 
@@ -341,6 +363,40 @@ async fn source_creation_with_non_matching_trusted_username_fails() {
         StatusCode::FORBIDDEN,
         "Expected FORBIDDEN status for non-matching trusted username"
     );
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_validation_with_non_matching_trusted_username_returns_failure() {
+    init_test_tracing();
+
+    let mut source_db_config = get_test_db_config();
+    source_db_config.name = format!("test_source_db_{}", Uuid::new_v4());
+
+    let different_username = "different_user".to_string();
+    let app = spawn_test_app_with_trusted_username(Some(different_username)).await;
+    let tenant_id = &create_tenant(&app).await;
+
+    let _source_pool = create_pg_database(&source_db_config).await;
+
+    let request = ValidateSourceRequest {
+        config: source_config_from_db_config(&source_db_config),
+    };
+
+    let response = app.validate_source(tenant_id, &request).await;
+
+    assert!(response.status().is_success());
+    let response: ValidateSourceResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    assert!(
+        !response.validation_failures.is_empty(),
+        "Expected validation failures for non-matching trusted username"
+    );
+
+    drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -410,4 +466,6 @@ async fn source_creation_with_matching_trusted_username_but_invalid_role_profile
 
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(body.contains("ETL needs to work properly"));
+
+    drop_pg_database(&source_db_config).await;
 }

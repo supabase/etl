@@ -1,5 +1,3 @@
-#![cfg(all(feature = "bigquery", feature = "test-utils"))]
-
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::config::BatchConfig;
 use etl::error::ErrorKind;
@@ -38,8 +36,6 @@ use crate::support::bigquery::{
     BigQueryOrder, BigQueryUser, NonNullableColsScalar, NullableColsArray, NullableColsScalar,
     parse_bigquery_table_rows,
 };
-
-mod support;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_streaming_with_restart() {
@@ -129,8 +125,15 @@ async fn table_copy_and_streaming_with_restart() {
         ]
     );
 
-    // We restart the pipeline and check that we can process events since we have load the table
-    // schema from the destination.
+    // Rebuild the destination for the restart so the test exercises state/schema
+    // recovery instead of relying on a reused, previously shut-down wrapper.
+    let raw_destination = bigquery_database
+        .build_destination(pipeline_id, store.clone())
+        .await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+
+    // We restart the pipeline and check that we can process events since we have
+    // loaded the table schema from persisted state.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1623,7 +1626,7 @@ async fn table_array_with_null_values() {
     // We sleep to wait for the event to be processed. This is not ideal, but if we wanted to do
     // this better, we would have to also implement error handling within the apply worker to write
     // in the state store.
-    sleep(Duration::from_secs(1)).await;
+    sleep(Duration::from_secs(5)).await;
 
     // Wait for the pipeline expecting an error to be returned.
     let err = pipeline.shutdown_and_wait().await.err().unwrap();

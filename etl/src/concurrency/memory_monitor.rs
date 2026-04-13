@@ -16,7 +16,7 @@ use tracing::{debug, info};
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::metrics::{
     DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
-    ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL, PIPELINE_ID_LABEL,
+    ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
 };
 use crate::types::PipelineId;
 
@@ -82,7 +82,7 @@ pub struct MemoryMonitor {
 impl MemoryMonitor {
     /// Creates a new memory backpressure controller and starts the refresh task.
     pub fn new(
-        pipeline_id: PipelineId,
+        _pipeline_id: PipelineId,
         mut shutdown_rx: ShutdownRx,
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
         memory_refresh_interval_ms: u64,
@@ -99,7 +99,7 @@ impl MemoryMonitor {
                 config.activate_threshold,
                 config.resume_threshold,
             );
-            emit_backpressure_active_metric(pipeline_id, startup_backpressure_active);
+            emit_backpressure_active_metric(startup_backpressure_active);
 
             BackpressureMonitorInner {
                 active_tx: watch::channel(startup_backpressure_active).0,
@@ -169,22 +169,13 @@ impl MemoryMonitor {
                                     "memory monitor state changed"
                                 );
 
-                                emit_backpressure_active_metric(
-                                    pipeline_id,
-                                    next_backpressure_active,
-                                );
-                                emit_transition_metric(
-                                    pipeline_id,
-                                    next_backpressure_active,
-                                );
+                                emit_backpressure_active_metric(next_backpressure_active);
+                                emit_transition_metric(next_backpressure_active);
 
                                 if next_backpressure_active {
                                     activation_started_at = Some(Instant::now());
                                 } else if let Some(started_at) = activation_started_at.take() {
-                                    emit_activation_duration_metric(
-                                        pipeline_id,
-                                        started_at.elapsed(),
-                                    );
+                                    emit_activation_duration_metric(started_at.elapsed());
                                 }
                             }
 
@@ -269,29 +260,20 @@ fn compute_next_backpressure_active(
     used_percent >= activate_threshold
 }
 
-fn emit_backpressure_active_metric(pipeline_id: PipelineId, backpressure_active: bool) {
-    gauge!(
-        ETL_MEMORY_BACKPRESSURE_ACTIVE,
-        PIPELINE_ID_LABEL => pipeline_id.to_string()
-    )
-    .set(if backpressure_active { 1.0 } else { 0.0 });
+fn emit_backpressure_active_metric(backpressure_active: bool) {
+    gauge!(ETL_MEMORY_BACKPRESSURE_ACTIVE).set(if backpressure_active { 1.0 } else { 0.0 });
 }
 
-fn emit_transition_metric(pipeline_id: PipelineId, backpressure_active: bool) {
+fn emit_transition_metric(backpressure_active: bool) {
     counter!(
         ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
         DIRECTION_LABEL => if backpressure_active { "activate" } else { "resume" }
     )
     .increment(1);
 }
 
-fn emit_activation_duration_metric(pipeline_id: PipelineId, duration: Duration) {
-    histogram!(
-        ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
-        PIPELINE_ID_LABEL => pipeline_id.to_string()
-    )
-    .record(duration.as_secs_f64());
+fn emit_activation_duration_metric(duration: Duration) {
+    histogram!(ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS).record(duration.as_secs_f64());
 }
 
 #[cfg(test)]

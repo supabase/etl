@@ -5,6 +5,10 @@ const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
 }
 
+const fn default_ducklake_pool_size() -> u32 {
+    DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE
+}
+
 /// Configuration for supported ETL data destinations.
 ///
 /// Specifies the destination type and its associated configuration parameters.
@@ -46,11 +50,36 @@ pub enum DestinationConfig {
         #[serde(flatten)]
         config: IcebergConfig,
     },
+    Ducklake {
+        /// DuckLake catalog URL.
+        catalog_url: String,
+        /// DuckLake data path.
+        data_path: String,
+        /// Size of the DuckDB connection pool.
+        #[serde(default = "default_ducklake_pool_size")]
+        pool_size: u32,
+        /// Optional S3-compatible storage access key ID.
+        s3_access_key_id: Option<SecretString>,
+        /// Optional S3-compatible storage secret access key.
+        s3_secret_access_key: Option<SecretString>,
+        /// Optional S3-compatible storage region.
+        s3_region: Option<String>,
+        /// Optional S3-compatible storage endpoint.
+        s3_endpoint: Option<String>,
+        /// Optional S3 URL style.
+        s3_url_style: Option<String>,
+        /// Optional S3 SSL toggle.
+        s3_use_ssl: Option<bool>,
+        /// Optional metadata schema for DuckLake metadata tables.
+        metadata_schema: Option<String>,
+    },
 }
 
 impl DestinationConfig {
     /// Default connection pool size for BigQuery destinations.
     pub const DEFAULT_CONNECTION_POOL_SIZE: usize = 4;
+    /// Default connection pool size for DuckLake destinations.
+    pub const DEFAULT_DUCKLAKE_POOL_SIZE: u32 = 4;
 }
 
 /// Configuration for the iceberg destination with two variants
@@ -199,6 +228,25 @@ pub enum DestinationConfigWithoutSecrets {
         #[serde(flatten)]
         config: IcebergConfigWithoutSecrets,
     },
+    Ducklake {
+        /// DuckLake catalog URL.
+        catalog_url: String,
+        /// DuckLake data path.
+        data_path: String,
+        /// Size of the DuckDB connection pool.
+        #[serde(default = "default_ducklake_pool_size")]
+        pool_size: u32,
+        /// Optional S3-compatible storage region.
+        s3_region: Option<String>,
+        /// Optional S3-compatible storage endpoint.
+        s3_endpoint: Option<String>,
+        /// Optional S3 URL style.
+        s3_url_style: Option<String>,
+        /// Optional S3 SSL toggle.
+        s3_use_ssl: Option<bool>,
+        /// Optional metadata schema for DuckLake metadata tables.
+        metadata_schema: Option<String>,
+    },
 }
 
 impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
@@ -218,6 +266,27 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
             },
             DestinationConfig::Iceberg { config } => DestinationConfigWithoutSecrets::Iceberg {
                 config: config.into(),
+            },
+            DestinationConfig::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_access_key_id: _,
+                s3_secret_access_key: _,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
+            } => DestinationConfigWithoutSecrets::Ducklake {
+                catalog_url,
+                data_path,
+                pool_size,
+                s3_region,
+                s3_endpoint,
+                s3_url_style,
+                s3_use_ssl,
+                metadata_schema,
             },
         }
     }

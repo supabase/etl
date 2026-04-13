@@ -18,6 +18,82 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  msrv-sync-changes:
+    name: Detect MSRV Sync Changes
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      should_run: ${{ steps.filter.outputs.should_run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Detect Relevant Changes
+        id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          event_name="${{ github.event_name }}"
+
+          if [[ "${event_name}" == "workflow_dispatch" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "${event_name}" == "pull_request" ]]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+          else
+            base_sha="${{ github.event.before }}"
+          fi
+
+          head_sha="${{ github.sha }}"
+
+          if [[ "${base_sha}" =~ ^0+$ ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --quiet "${base_sha}" "${head_sha}" -- Cargo.toml rust-toolchain.toml; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+
+  msrv-sync:
+    name: MSRV Sync
+    needs: msrv-sync-changes
+    if: needs.msrv-sync-changes.outputs.should_run == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: msrv-sync
+
+      - name: Install cargo-msrv
+        uses: taiki-e/install-action@328a871ad8f62ecac78390391f463ccabc974b72 # v2.69.9
+        with:
+          tool: cargo-msrv
+
+      - name: Check MSRV Sync
+        run: ./scripts/check_msrv_sync.sh
+
+      - name: Verify MSRV
+        run: |
+          cargo msrv verify \
+            --manifest-path etl/Cargo.toml \
+            --output-format minimal \
+            -- cargo check --workspace --all-features --locked
+
   check:
     name: Lint
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -26,13 +102,13 @@ jobs:
         check: [fmt, clippy, sort]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.check }}
 
@@ -71,21 +147,32 @@ jobs:
       TESTS_DATABASE_PORT: 5430
       TESTS_DATABASE_USERNAME: postgres
       TESTS_DATABASE_PASSWORD: postgres
+      ETL_DUCKDB_EXTENSION_ROOT: ${{ github.workspace }}/vendor/duckdb/extensions
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: test-full
 
       - name: Start Docker Compose (Postgres ${{ matrix.postgres_version }})
         run: |
           POSTGRES_VERSION=${{ matrix.postgres_version }} docker compose -f ./scripts/docker-compose.yaml up -d
+
+      - name: Vendor DuckDB Extensions
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) duckdb_platform=linux_amd64 ;;
+            aarch64) duckdb_platform=linux_arm64 ;;
+            *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          ./scripts/vendor_duckdb_extensions.sh --platform "${duckdb_platform}"
 
       - name: Install sqlx-cli
         run: |
@@ -123,7 +210,9 @@ jobs:
 
       - name: Install cargo-llvm-cov
         if: matrix.postgres_version == 18
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@328a871ad8f62ecac78390391f463ccabc974b72 # v2.69.9
+        with:
+          tool: cargo-llvm-cov
 
       - name: Run Doctests
         run: |
@@ -153,7 +242,7 @@ jobs:
 
       - name: Upload Coverage to Coveralls
         if: matrix.postgres_version == 18
-        uses: coverallsapp/github-action@v2
+        uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e # v2.3.7
         with:
           fail-on-error: false
           github-token: ${{ secrets.GITHUB_TOKEN }}

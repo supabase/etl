@@ -4,7 +4,7 @@ use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use aws_lc_rs::rand::fill;
 use base64::prelude::*;
 use etl_api::config::{
-    ApiConfig, ApplicationSettings, EncryptionKey as ConfigEncryptionKey, SourceConfig,
+    ApiConfig, ApplicationSettings, EncryptionKey as ConfigEncryptionKey, K8sConfig, SourceConfig,
 };
 use etl_api::k8s::{K8sClient, TrustedRootCertsCache};
 use etl_api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
@@ -16,7 +16,7 @@ use etl_api::routes::pipelines::{
     CreatePipelineRequest, RollbackTablesRequest, UpdatePipelineRequest,
     UpdatePipelineVersionRequest,
 };
-use etl_api::routes::sources::{CreateSourceRequest, UpdateSourceRequest};
+use etl_api::routes::sources::{CreateSourceRequest, UpdateSourceRequest, ValidateSourceRequest};
 use etl_api::routes::tenants::{
     CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest,
 };
@@ -181,6 +181,19 @@ impl TestApp {
             .send()
             .await
             .expect("failed to execute request")
+    }
+
+    pub async fn validate_source(
+        &self,
+        tenant_id: &str,
+        source: &ValidateSourceRequest,
+    ) -> reqwest::Response {
+        self.post_authenticated(format!("{}/v1/sources/validate", &self.address))
+            .header("tenant_id", tenant_id)
+            .json(source)
+            .send()
+            .await
+            .expect("Failed to execute request.")
     }
 
     pub async fn create_destination(
@@ -567,6 +580,7 @@ async fn spawn_test_app_with_services(
             host: base_address.to_string(),
             port,
         },
+        k8s: K8sConfig::default(),
         encryption_key: ConfigEncryptionKey {
             id: 0,
             key: BASE64_STANDARD.encode(key_bytes),
@@ -590,7 +604,6 @@ async fn spawn_test_app_with_services(
         trusted_root_certs_cache,
         None,
     )
-    .await
     .expect("failed to bind address");
 
     let server_handle = tokio::spawn(server);

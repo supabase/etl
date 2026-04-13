@@ -1,21 +1,9 @@
-use etl::error::EtlResult;
-use etl::state::destination_metadata::DestinationTableMetadata;
-use etl::state::table::TableReplicationPhase;
-use etl::store::cleanup::CleanupStore;
-use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
-use etl::types::{SnapshotId, TableId, TableSchema};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
-
-/// The endpoint of the Supabase API to which error notifications are sent.
-const API_ENDPOINT: &str = "system/etl/error-notification";
 
 /// Request payload for error notifications.
 ///
@@ -25,8 +13,6 @@ const API_ENDPOINT: &str = "system/etl/error-notification";
 pub struct NotificationRequest {
     /// Unique identifier for the pipeline that encountered the error.
     pub pipeline_id: String,
-    /// Supabase project reference identifier.
-    pub project_ref: String,
     /// Human-readable error message describing the failure.
     pub error_message: String,
     /// Stable hash of the error for grouping and deduplication.
@@ -98,7 +84,6 @@ impl ErrorNotificationClient {
 
         let notification = NotificationRequest {
             pipeline_id: self.pipeline_id.clone(),
-            project_ref: self.project_ref.clone(),
             error_message,
             error_hash,
         };
@@ -127,7 +112,10 @@ impl ErrorNotificationClient {
 
     /// Returns the URL for the error notification endpoint.
     fn error_notification_url(&self) -> String {
-        format!("{}/{}", self.api_url, API_ENDPOINT)
+        format!(
+            "{}/system/replication/{}/pipeline-error",
+            self.api_url, self.project_ref
+        )
     }
 
     /// Sends the notification request to the API endpoint.
@@ -155,141 +143,6 @@ impl ErrorNotificationClient {
 
         let notification_response = response.json::<NotificationResponse>().await?;
         Ok(notification_response)
-    }
-}
-
-/// State store wrapper that sends notifications when tables transition to `Errored`.
-#[derive(Debug, Clone)]
-pub struct ErrorNotifyingStateStore<S> {
-    inner: S,
-    notification_client: Option<Arc<ErrorNotificationClient>>,
-}
-
-impl<S> ErrorNotifyingStateStore<S> {
-    /// Creates a new wrapper around `inner`.
-    pub fn new(inner: S, notification_client: Option<ErrorNotificationClient>) -> Self {
-        Self {
-            inner,
-            notification_client: notification_client.map(Arc::new),
-        }
-    }
-
-    /// Sends notifications for errored table state updates after they were stored successfully.
-    async fn notify_errored_updates(&self, updates: &[(TableId, TableReplicationPhase)]) {
-        let Some(notification_client) = &self.notification_client else {
-            return;
-        };
-
-        for (table_id, phase) in updates {
-            let TableReplicationPhase::Errored { reason, .. } = phase else {
-                continue;
-            };
-
-            info!(
-                table_id = table_id.0,
-                "sending notification for table replication error"
-            );
-
-            notification_client
-                .notify_error(reason.clone(), reason.clone())
-                .await;
-        }
-    }
-}
-
-impl<S> StateStore for ErrorNotifyingStateStore<S>
-where
-    S: StateStore + Send + Sync,
-{
-    async fn get_table_replication_state(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<TableReplicationPhase>> {
-        self.inner.get_table_replication_state(table_id).await
-    }
-
-    async fn get_table_replication_states(
-        &self,
-    ) -> EtlResult<BTreeMap<TableId, TableReplicationPhase>> {
-        self.inner.get_table_replication_states().await
-    }
-
-    async fn load_table_replication_states(&self) -> EtlResult<usize> {
-        self.inner.load_table_replication_states().await
-    }
-
-    async fn update_table_replication_states(
-        &self,
-        updates: Vec<(TableId, TableReplicationPhase)>,
-    ) -> EtlResult<()> {
-        self.inner
-            .update_table_replication_states(updates.clone())
-            .await?;
-        self.notify_errored_updates(&updates).await;
-
-        Ok(())
-    }
-
-    async fn rollback_table_replication_state(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<TableReplicationPhase> {
-        self.inner.rollback_table_replication_state(table_id).await
-    }
-
-    async fn get_destination_table_metadata(
-        &self,
-        table_id: TableId,
-    ) -> EtlResult<Option<DestinationTableMetadata>> {
-        self.inner.get_destination_table_metadata(table_id).await
-    }
-
-    async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
-        self.inner.load_destination_tables_metadata().await
-    }
-
-    async fn store_destination_table_metadata(
-        &self,
-        table_id: TableId,
-        metadata: DestinationTableMetadata,
-    ) -> EtlResult<()> {
-        self.inner
-            .store_destination_table_metadata(table_id, metadata)
-            .await
-    }
-}
-
-impl<S> SchemaStore for ErrorNotifyingStateStore<S>
-where
-    S: SchemaStore + Send + Sync,
-{
-    async fn get_table_schema(
-        &self,
-        table_id: &TableId,
-        snapshot_id: SnapshotId,
-    ) -> EtlResult<Option<Arc<TableSchema>>> {
-        self.inner.get_table_schema(table_id, snapshot_id).await
-    }
-
-    async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
-        self.inner.get_table_schemas().await
-    }
-
-    async fn load_table_schemas(&self) -> EtlResult<usize> {
-        self.inner.load_table_schemas().await
-    }
-
-    async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
-        self.inner.store_table_schema(table_schema).await
-    }
-}
-
-impl<S> CleanupStore for ErrorNotifyingStateStore<S>
-where
-    S: CleanupStore + Send + Sync,
-{
-    async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
-        self.inner.cleanup_table_state(table_id).await
     }
 }
 

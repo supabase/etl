@@ -50,7 +50,7 @@
 //! ```rust,no_run
 //! use etl::{
 //!     config::{BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TcpKeepaliveConfig, TlsConfig, TableSyncCopyConfig},
-//!     destination::Destination,
+//!     destination::{Destination, async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult}},
 //!     error::EtlResult,
 //!     pipeline::Pipeline,
 //!     store::both::memory::MemoryStore,
@@ -63,9 +63,18 @@
 //!
 //! impl Destination for NoopDestination {
 //!     fn name() -> &'static str { "noop" }
-//!     async fn truncate_table(&self, _replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<()> { Ok(()) }
-//!     async fn write_table_rows(&self, _replicated_table_schema: &ReplicatedTableSchema, _table_rows: Vec<TableRow>) -> EtlResult<()> { Ok(()) }
-//!     async fn write_events(&self, _events: Vec<Event>) -> EtlResult<()> { Ok(()) }
+//!     async fn truncate_table(&self, _replicated_table_schema: &ReplicatedTableSchema, async_result: TruncateTableResult<()>) -> EtlResult<()> {
+//!         async_result.send(Ok(()));
+//!         Ok(())
+//!     }
+//!     async fn write_table_rows(&self, _replicated_table_schema: &ReplicatedTableSchema, _table_rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> EtlResult<()> {
+//!         async_result.send(Ok(()));
+//!         Ok(())
+//!     }
+//!     async fn write_events(&self, _events: Vec<Event>, async_result: WriteEventsResult<()>) -> EtlResult<()> {
+//!         async_result.send(Ok(()));
+//!         Ok(())
+//!     }
 //! }
 //!
 //! #[tokio::main]

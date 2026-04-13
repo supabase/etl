@@ -4,6 +4,7 @@ use etl_api::routes::destinations_pipelines::{
     UpdateDestinationPipelineRequest,
 };
 use etl_api::routes::pipelines::ReadPipelineResponse;
+use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
@@ -22,8 +23,6 @@ use crate::{
     support::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
     support::test_app::spawn_test_app,
 };
-
-mod support;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bigquery_destination_and_pipeline_can_be_created() {
@@ -628,4 +627,6 @@ async fn destination_and_pipeline_can_be_deleted() {
 
     let pipeline_response = app.read_pipeline(tenant_id, pipeline_id).await;
     assert_eq!(pipeline_response.status(), StatusCode::NOT_FOUND);
+
+    drop_pg_database(&source_db_config).await;
 }

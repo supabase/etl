@@ -12,7 +12,7 @@ Prerequisites:
 4. Service account key file downloaded from GCP console
 
 Usage:
-    cargo run --example bigquery --features bigquery -- \
+    cargo run --bin bigquery -p etl-examples -- \
         --db-host localhost \
         --db-port 5432 \
         --db-name mydb \

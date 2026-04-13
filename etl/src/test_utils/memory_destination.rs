@@ -4,6 +4,9 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::destination::Destination;
+use crate::destination::async_result::{
+    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
 use crate::error::EtlResult;
 use crate::state::destination_metadata::DestinationTableMetadata;
 use crate::store::state::StateStore;
@@ -94,6 +97,7 @@ where
     async fn truncate_table(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
+        async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
         // For truncation, we simulate removing all table rows for a specific table and also the events
         // of that table.
@@ -121,6 +125,8 @@ where
             !has_table_id
         });
 
+        async_result.send(Ok(()));
+
         Ok(())
     }
 
@@ -128,6 +134,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
         let table_id = replicated_table_schema.id();
 
@@ -154,14 +161,22 @@ where
         info!(%table_id, row_count = table_rows.len(), "writing table rows");
         inner.table_rows.insert(table_id, table_rows);
 
+        async_result.send(Ok(()));
+
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
         info!(event_count = events.len(), "writing events");
         inner.events.extend(events);
+
+        async_result.send(Ok(()));
 
         Ok(())
     }

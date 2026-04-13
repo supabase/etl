@@ -16,8 +16,7 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::metrics::{
-    ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, PIPELINE_ID_LABEL,
-    WORKER_TYPE_LABEL,
+    ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL,
 };
 use crate::replication::apply::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext};
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState};
@@ -26,7 +25,7 @@ use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
-use crate::workers::policy::build_error_handling_policy;
+use crate::workers::policy::{RetryDirective, build_error_handling_policy};
 use crate::workers::pool::TableSyncWorkerPool;
 
 /// Handle for monitoring and controlling the apply worker.
@@ -139,7 +138,7 @@ where
     ///
     /// Errors that happen while handling the worker error in this function are immediately propagated.
     async fn handle_apply_worker_error(
-        pipeline_id: PipelineId,
+        _pipeline_id: PipelineId,
         config: &PipelineConfig,
         shutdown_rx: &mut ShutdownRx,
         retry_attempts: &mut u32,
@@ -148,11 +147,18 @@ where
         error!(error = %err, "apply worker failed");
 
         let policy = build_error_handling_policy(&err);
+        let error_type = match policy.retry_directive() {
+            RetryDirective::Timed if *retry_attempts >= config.table_error_retry_max_attempts => {
+                "no_retry"
+            }
+            RetryDirective::Timed => "timed",
+            RetryDirective::Manual => "manual",
+            RetryDirective::NoRetry => "no_retry",
+        };
         counter!(
             ETL_WORKER_ERRORS_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
             WORKER_TYPE_LABEL => "apply",
-            ERROR_TYPE_LABEL => policy.retry_directive().to_string(),
+            ERROR_TYPE_LABEL => error_type,
         )
         .increment(1);
 
@@ -198,7 +204,7 @@ where
     /// This method initializes the apply worker by determining the starting LSN,
     /// creating coordination signals, and launching the main apply loop. The worker
     /// runs asynchronously and can be monitored through the returned handle.
-    pub async fn spawn(self) -> EtlResult<ApplyWorkerHandle> {
+    pub fn spawn(self) -> EtlResult<ApplyWorkerHandle> {
         info!("starting apply worker");
 
         let apply_worker_span = tracing::info_span!(
@@ -310,9 +316,13 @@ where
         )
         .await?;
 
+        // The apply loop when used via the apply worker, should never complete since it's always
+        // streaming indefinitely.
+        debug_assert!(!matches!(apply_loop_result, ApplyLoopResult::Completed));
+
         match apply_loop_result {
             ApplyLoopResult::Completed => {
-                info!("apply worker apply loop completed successfully");
+                error!("apply worker apply loop completed, but it should never complete");
             }
             ApplyLoopResult::Paused => {
                 info!("apply worker apply loop paused for shutdown");
@@ -349,6 +359,26 @@ async fn get_start_lsn<S: StateStore>(
     // We try to get or create the slot. Both operations will return an LSN that we can use to start
     // streaming events.
     let slot = replication_client.get_or_create_slot(&slot_name).await?;
+    let start_lsn = slot.get_start_lsn();
+
+    match &slot {
+        GetOrCreateSlotResult::GetSlot(result) => {
+            info!(
+                slot_name,
+                %start_lsn,
+                confirmed_flush_lsn = %result.confirmed_flush_lsn,
+                "apply worker resume position selected from existing replication slot"
+            );
+        }
+        GetOrCreateSlotResult::CreateSlot(result) => {
+            info!(
+                slot_name,
+                %start_lsn,
+                consistent_point = %result.consistent_point,
+                "apply worker resume position selected from new replication slot"
+            );
+        }
+    }
 
     // When we get an existing slot, check if it's been invalidated
     if let GetOrCreateSlotResult::GetSlot(_) = &slot {
@@ -380,7 +410,7 @@ async fn get_start_lsn<S: StateStore>(
     }
 
     // We return the LSN from which we will start streaming events.
-    Ok(slot.get_start_lsn())
+    Ok(start_lsn)
 }
 
 /// Handles the case when the apply worker slot is found to be invalidated.
@@ -396,11 +426,7 @@ async fn handle_invalidated_slot<S: StateStore>(
     slot_name: &str,
     behavior: &InvalidatedSlotBehavior,
 ) -> EtlResult<PgLsn> {
-    counter!(
-        ETL_SLOT_INVALIDATIONS_TOTAL,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
-    )
-    .increment(1);
+    counter!(ETL_SLOT_INVALIDATIONS_TOTAL).increment(1);
 
     match behavior {
         InvalidatedSlotBehavior::Error => {

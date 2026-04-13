@@ -1,3 +1,4 @@
+use etl_config::SerializableSecretString;
 use rand::Rng;
 use serde::{Deserialize, Deserializer};
 
@@ -17,6 +18,17 @@ where
 {
     let opt = Option::<String>::deserialize(deserializer)?;
     Ok(opt.map(|s| s.trim().to_string()))
+}
+
+/// Deserializes an optional secret string and trims leading and trailing whitespace if present.
+pub fn trim_option_secret_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<SerializableSecretString>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    Ok(opt.map(|s| SerializableSecretString::from(s.trim().to_string())))
 }
 
 /// Generates a random alphabetic string of length `len`.

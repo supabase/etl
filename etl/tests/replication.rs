@@ -1,6 +1,5 @@
-#![cfg(feature = "test-utils")]
-
 use std::collections::HashSet;
+use std::time::Duration;
 
 use etl::error::ErrorKind;
 use etl::replication::client::{
@@ -16,6 +15,7 @@ use etl_postgres::types::ColumnSchema;
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
+use pg_escape::quote_identifier;
 use postgres_replication::LogicalReplicationStream;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use tokio::pin;
@@ -215,6 +215,20 @@ async fn test_replication_client_doesnt_recreate_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_replication_client_reads_wal_sender_timeout() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let wal_sender_timeout = client.get_wal_sender_timeout().await.unwrap();
+
+    assert_eq!(wal_sender_timeout, Some(Duration::from_secs(10)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_table_schema_copy_is_consistent() {
     init_test_tracing();
     let database = spawn_source_database().await;
@@ -389,13 +403,16 @@ async fn test_table_copy_stream_respects_row_filter() {
 
     database
         .run_sql(&format!(
-            "alter table {test_table_name} replica identity full"
+            "alter table {} replica identity full",
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
     database
         .run_sql(&format!(
-            "create publication test_pub for table {test_table_name} where (age >= 18)"
+            "create publication {} for table {} where (age >= 18)",
+            quote_identifier("test_pub"),
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
@@ -461,7 +478,8 @@ async fn test_get_replicated_column_names_respects_column_filter() {
 
     database
         .run_sql(&format!(
-            "alter table {test_table_name} replica identity full"
+            "alter table {} replica identity full",
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
@@ -470,12 +488,30 @@ async fn test_get_replicated_column_names_respects_column_filter() {
     let publication_name = "test_pub";
     database
         .run_sql(&format!(
-            "create publication {publication_name} for table {test_table_name} (id, name, age)"
+            "create publication {} for table {} (id, name, age)",
+            quote_identifier(publication_name),
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
 
     let parent_client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    // Insert test data with all columns.
+    database
+        .run_sql(&format!(
+            "insert into {} (name, age, email) values ('Alice', 25, 'alice@example.com')",
+            test_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (name, age, email) values ('Bob', 30, 'bob@example.com')",
+            test_table_name.as_quoted_identifier()
+        ))
         .await
         .unwrap();
 
@@ -761,13 +797,16 @@ async fn test_table_copy_stream_no_row_filter() {
 
     database
         .run_sql(&format!(
-            "alter table {test_table_name} replica identity full"
+            "alter table {} replica identity full",
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
     database
         .run_sql(&format!(
-            "create publication test_pub for table {test_table_name}"
+            "create publication {} for table {}",
+            quote_identifier("test_pub"),
+            test_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();

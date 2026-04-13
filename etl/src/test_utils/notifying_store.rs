@@ -40,7 +40,7 @@ struct Inner {
 }
 
 impl Inner {
-    async fn check_conditions(&mut self) {
+    fn check_conditions(&mut self) {
         let table_states = self.table_replication_states.clone();
         self.table_state_type_conditions
             .retain(|(tid, expected_state, notify)| {
@@ -69,7 +69,7 @@ impl Inner {
             });
     }
 
-    async fn dispatch_method_notification(&self, method: StateStoreMethod) {
+    fn dispatch_method_notification(&self, method: StateStoreMethod) {
         if let Some(notifiers) = self.method_call_notifiers.get(&method) {
             for notifier in notifiers {
                 notifier.notify_one();
@@ -154,7 +154,7 @@ impl NotifyingStore {
             .table_state_type_conditions
             .push((table_id, expected_state, notify.clone()));
 
-        inner.check_conditions().await;
+        inner.check_conditions();
 
         TimedNotify::new(notify)
     }
@@ -192,7 +192,7 @@ impl NotifyingStore {
             .table_state_conditions
             .push((table_id, notify.clone(), Box::new(condition)));
 
-        inner.check_conditions().await;
+        inner.check_conditions();
 
         TimedNotify::new(notify)
     }
@@ -224,9 +224,7 @@ impl StateStore for NotifyingStore {
         let inner = self.inner.read().await;
         let result = Ok(inner.table_replication_states.get(&table_id).cloned());
 
-        inner
-            .dispatch_method_notification(StateStoreMethod::GetTableReplicationState)
-            .await;
+        inner.dispatch_method_notification(StateStoreMethod::GetTableReplicationState);
 
         result
     }
@@ -237,9 +235,7 @@ impl StateStore for NotifyingStore {
         let inner = self.inner.read().await;
         let result = Ok(inner.table_replication_states.clone());
 
-        inner
-            .dispatch_method_notification(StateStoreMethod::GetTableReplicationStates)
-            .await;
+        inner.dispatch_method_notification(StateStoreMethod::GetTableReplicationStates);
 
         result
     }
@@ -248,9 +244,7 @@ impl StateStore for NotifyingStore {
         let inner = self.inner.read().await;
         let table_replication_states_len = inner.table_replication_states.len();
 
-        inner
-            .dispatch_method_notification(StateStoreMethod::LoadTableReplicationStates)
-            .await;
+        inner.dispatch_method_notification(StateStoreMethod::LoadTableReplicationStates);
 
         Ok(table_replication_states_len)
     }
@@ -274,10 +268,8 @@ impl StateStore for NotifyingStore {
             inner.table_replication_states.insert(table_id, state);
         }
 
-        inner.check_conditions().await;
-        inner
-            .dispatch_method_notification(StateStoreMethod::StoreTableReplicationState)
-            .await;
+        inner.check_conditions();
+        inner.dispatch_method_notification(StateStoreMethod::StoreTableReplicationState);
 
         Ok(())
     }
@@ -304,11 +296,9 @@ impl StateStore for NotifyingStore {
         inner
             .table_replication_states
             .insert(table_id, previous_state.clone());
-        inner.check_conditions().await;
+        inner.check_conditions();
 
-        inner
-            .dispatch_method_notification(StateStoreMethod::RollbackTableReplicationState)
-            .await;
+        inner.dispatch_method_notification(StateStoreMethod::RollbackTableReplicationState);
 
         Ok(previous_state)
     }

@@ -15,6 +15,7 @@ pub const ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE: &str = "etl_parallel_table_cop
 pub const ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE: &str = "etl_parallel_table_copy_rows_imbalance";
 pub const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
 pub const ETL_EVENTS_PROCESSED_TOTAL: &str = "etl_events_processed_total";
+pub const ETL_REPLICATION_MESSAGES_TOTAL: &str = "etl_replication_messages_total";
 pub const ETL_STATUS_UPDATES_TOTAL: &str = "etl_status_updates_total";
 pub const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_skipped_total";
 pub const ETL_ROW_SIZE_BYTES: &str = "etl_row_size_bytes";
@@ -35,8 +36,6 @@ pub const WORKER_TYPE_LABEL: &str = "worker_type";
 pub const ACTION_LABEL: &str = "action";
 /// Label key used to tag metrics by destination implementation (e.g., "big_query").
 pub const DESTINATION_LABEL: &str = "destination";
-/// Label key for pipeline id.
-pub const PIPELINE_ID_LABEL: &str = "pipeline_id";
 /// Label to tag the table copy metric if it was using partitioning.
 pub const PARTITIONING_LABEL: &str = "partitioning";
 /// Label key for event type (copy, insert, update, delete).
@@ -76,13 +75,13 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             ETL_TRANSACTIONS_TOTAL,
             Unit::Count,
-            "Total number of transactions seen, labeled by pipeline_id"
+            "Total number of transactions seen."
         );
 
         describe_histogram!(
             ETL_TRANSACTION_SIZE,
             Unit::Count,
-            "Number of events per transaction, labeled by pipeline_id"
+            "Number of events per transaction."
         );
 
         describe_histogram!(
@@ -94,41 +93,47 @@ pub(crate) fn register_metrics() {
         describe_histogram!(
             ETL_TABLE_COPY_ROWS,
             Unit::Count,
-            "Number of rows copied per table copy partition, labeled by pipeline_id, destination, and partitioning"
+            "Number of rows copied per table copy partition, labeled by destination and partitioning."
         );
 
         describe_histogram!(
             ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
-            "Load Imbalance Factor for parallel table copy duration (max_time / avg_time), labeled by pipeline_id and destination. Value of 1.0 indicates perfect balance, higher values indicate more imbalance."
+            "Load imbalance factor for parallel table copy duration (max_time / avg_time), labeled by destination. Value of 1.0 indicates perfect balance, higher values indicate more imbalance."
         );
 
         describe_histogram!(
             ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
-            "Load Imbalance Factor for parallel table copy row distribution (max_rows / avg_rows), labeled by pipeline_id and destination. Value of 1.0 indicates perfect balance, higher values indicate more imbalance."
+            "Load imbalance factor for parallel table copy row distribution (max_rows / avg_rows), labeled by destination. Value of 1.0 indicates perfect balance, higher values indicate more imbalance."
         );
 
         describe_counter!(
             ETL_EVENTS_PROCESSED_TOTAL,
             Unit::Count,
-            "Total number of events successfully processed (stored), labeled by worker_type, action, pipeline_id, and destination"
+            "Total number of events successfully processed, labeled by worker_type, action, and destination."
+        );
+
+        describe_counter!(
+            ETL_REPLICATION_MESSAGES_TOTAL,
+            Unit::Count,
+            "Total number of logical replication messages received by the apply loop, labeled by worker_type."
         );
 
         describe_counter!(
             ETL_BYTES_PROCESSED_TOTAL,
             Unit::Bytes,
-            "Total bytes processed by the pipeline, labeled by pipeline_id and event_type"
+            "Total bytes processed by the pipeline, labeled by event_type."
         );
 
         describe_counter!(
             ETL_STATUS_UPDATES_TOTAL,
             Unit::Count,
-            "Total number of status updates sent to Postgres, labeled by pipeline_id and forced"
+            "Total number of status updates sent to Postgres, labeled by forced and status_update_type."
         );
 
         describe_counter!(
             ETL_STATUS_UPDATES_SKIPPED_TOTAL,
             Unit::Count,
-            "Total number of status updates skipped due to throttling, labeled by pipeline_id"
+            "Total number of status updates skipped due to throttling, labeled by status_update_type."
         );
 
         describe_histogram!(
@@ -140,37 +145,37 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             ETL_SLOT_INVALIDATIONS_TOTAL,
             Unit::Count,
-            "Total number of times a replication slot was found invalidated on pipeline start, labeled by pipeline_id"
+            "Total number of times a replication slot was found invalidated on pipeline start."
         );
 
         describe_counter!(
             ETL_WORKER_ERRORS_TOTAL,
             Unit::Count,
-            "Total number of worker errors, labeled by pipeline_id, worker_type, and error_type"
+            "Total number of worker errors, labeled by worker_type and error_type."
         );
 
         describe_gauge!(
             ETL_MEMORY_BACKPRESSURE_ACTIVE,
             Unit::Count,
-            "Memory backpressure current state (0 or 1), labeled by pipeline_id"
+            "Memory backpressure current state (0 or 1)."
         );
 
         describe_counter!(
             ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
             Unit::Count,
-            "Total memory backpressure state transitions, labeled by pipeline_id and direction"
+            "Total memory backpressure state transitions, labeled by direction."
         );
 
         describe_histogram!(
             ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
             Unit::Seconds,
-            "Duration in seconds of each memory backpressure active period, labeled by pipeline_id"
+            "Duration in seconds of each memory backpressure active period."
         );
 
         describe_gauge!(
             ETL_IDEAL_BATCH_SIZE_BYTES,
             Unit::Bytes,
-            "Current ideal batch size in bytes, labeled by pipeline_id"
+            "Current ideal batch size in bytes."
         );
     });
 }

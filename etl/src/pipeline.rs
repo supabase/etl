@@ -24,7 +24,7 @@ use etl_postgres::types::TableId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Internal state tracking for pipeline lifecycle.
 ///
@@ -170,8 +170,7 @@ where
             table_sync_worker_permits,
             memory_monitor,
         )
-        .spawn()
-        .await?;
+        .spawn()?;
 
         self.state = PipelineState::Started { apply_worker, pool };
 
@@ -190,7 +189,7 @@ where
     /// 3. Any errors from workers are aggregated and returned
     pub async fn wait(self) -> EtlResult<()> {
         let PipelineState::Started { apply_worker, pool } = self.state else {
-            info!("pipeline was not started, skipping wait");
+            warn!("pipeline was not started, skipping wait");
 
             return Ok(());
         };
@@ -205,6 +204,8 @@ where
         // ones to finish.
         let apply_worker_result = apply_worker.wait().await;
         if let Err(err) = apply_worker_result {
+            warn!("apply worker failed, shutting down table sync workers and collecting error");
+
             errors.push(err);
 
             // TODO: in the future we might build a system based on the `ReactiveFuture` that
@@ -215,8 +216,6 @@ where
             // If we fail to send the shutdown signal, we are not going to capture the error since
             // it means that no table sync workers are running, which is fine.
             let _ = self.shutdown_tx.shutdown();
-
-            info!("apply worker failed, shutting down table sync workers");
         }
 
         info!("waiting for table sync workers to complete");
@@ -226,15 +225,20 @@ where
         if let Err(err) = table_sync_workers_result {
             // We naively use the `kinds` as number of errors.
             let errors_number = err.kinds().len();
+            warn!(
+                error_count = errors_number,
+                "table sync workers failed, collecting errors"
+            );
 
             errors.push(err);
-
-            info!(error_count = errors_number, "table sync workers failed");
         }
 
-        // Once all workers completed, we notify the destination of shutting down.
         info!("shutting down destination");
+
+        // Once all workers completed, we notify the destination of shutting down.
         if let Err(err) = self.destination.shutdown().await {
+            warn!("destination shutdown failed, collecting errors");
+
             errors.push(err);
         }
 

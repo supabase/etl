@@ -3,16 +3,31 @@ name = "etl-examples"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[[bin]]
+name = "bigquery"
+path = "src/bin/bigquery.rs"
+
+[[bin]]
+name = "ducklake"
+path = "src/bin/ducklake.rs"
+
 [dependencies]
 etl = { workspace = true }
-etl-destinations = { workspace = true, features = ["bigquery"] }
+etl-config = { workspace = true }
+etl-destinations = { workspace = true, features = ["bigquery", "ducklake"] }
+etl-telemetry = { workspace = true }
 
 clap = { workspace = true, default-features = true, features = ["std", "derive"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 tokio = { workspace = true, features = ["macros", "signal"] }
 tracing = { workspace = true, default-features = true }
 tracing-subscriber = { workspace = true, default-features = true, features = ["env-filter"] }
+url = { workspace = true }
+
+[lints]
+workspace = true

@@ -40,6 +40,15 @@ pub enum Secrets {
         /// AWS S3 secret access key for object storage.
         s3_secret_access_key: String,
     },
+    /// Credentials for DuckLake destinations using S3-compatible storage.
+    Ducklake {
+        /// PostgreSQL source database password.
+        postgres_password: String,
+        /// S3-compatible access key ID.
+        s3_access_key_id: Option<String>,
+        /// S3-compatible secret access key.
+        s3_secret_access_key: Option<String>,
+    },
 }
 
 /// Creates or updates all Kubernetes resources required for a pipeline.
@@ -172,6 +181,19 @@ fn build_secrets_from_configs(
             s3_access_key_id: s3_access_key_id.expose_secret().to_string(),
             s3_secret_access_key: s3_secret_access_key.expose_secret().to_string(),
         },
+        StoredDestinationConfig::Ducklake {
+            s3_access_key_id,
+            s3_secret_access_key,
+            ..
+        } => Secrets::Ducklake {
+            postgres_password,
+            s3_access_key_id: s3_access_key_id
+                .as_ref()
+                .map(|value| value.expose_secret().to_string()),
+            s3_secret_access_key: s3_secret_access_key
+                .as_ref()
+                .map(|value| value.expose_secret().to_string()),
+        },
     }
 }
 
@@ -248,6 +270,28 @@ async fn create_or_update_dynamic_replicator_secrets(
                     &s3_secret_access_key,
                 )
                 .await?;
+        }
+        Secrets::Ducklake {
+            postgres_password,
+            s3_access_key_id,
+            s3_secret_access_key,
+        } => {
+            k8s_client
+                .create_or_update_postgres_secret(prefix, &postgres_password)
+                .await?;
+            if let (Some(s3_access_key_id), Some(s3_secret_access_key)) =
+                (s3_access_key_id, s3_secret_access_key)
+            {
+                k8s_client
+                    .create_or_update_ducklake_secret(
+                        prefix,
+                        &s3_access_key_id,
+                        &s3_secret_access_key,
+                    )
+                    .await?;
+            } else {
+                k8s_client.delete_ducklake_secret(prefix).await?;
+            }
         }
     }
 
@@ -333,6 +377,7 @@ async fn delete_dynamic_replicator_secrets(
     // one which doesn't exist will be safely ignored.
     k8s_client.delete_bigquery_secret(prefix).await?;
     k8s_client.delete_iceberg_secret(prefix).await?;
+    k8s_client.delete_ducklake_secret(prefix).await?;
 
     Ok(())
 }
@@ -355,4 +400,206 @@ async fn delete_replicator_stateful_set(
     k8s_client.delete_replicator_stateful_set(prefix).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use etl_config::SerializableSecretString;
+    use k8s_openapi::api::core::v1::ConfigMap;
+
+    use super::*;
+    use crate::configs::destination::StoredDestinationConfig;
+    use crate::configs::log::LogLevel;
+    use crate::configs::source::StoredSourceConfig;
+    use crate::k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile};
+
+    #[derive(Debug, Default, Clone)]
+    struct RecordingK8sClient {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingK8sClient {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl K8sClient for RecordingK8sClient {
+        async fn create_or_update_postgres_secret(
+            &self,
+            prefix: &str,
+            postgres_password: &str,
+        ) -> Result<(), K8sError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("postgres:{prefix}:{postgres_password}"));
+            Ok(())
+        }
+
+        async fn create_or_update_bigquery_secret(
+            &self,
+            _prefix: &str,
+            _bq_service_account_key: &str,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn create_or_update_iceberg_secret(
+            &self,
+            _prefix: &str,
+            _catalog_token: &str,
+            _s3_access_key_id: &str,
+            _s3_secret_access_key: &str,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn create_or_update_ducklake_secret(
+            &self,
+            prefix: &str,
+            s3_access_key_id: &str,
+            s3_secret_access_key: &str,
+        ) -> Result<(), K8sError> {
+            self.calls.lock().unwrap().push(format!(
+                "ducklake:{prefix}:{s3_access_key_id}:{s3_secret_access_key}"
+            ));
+            Ok(())
+        }
+
+        async fn delete_postgres_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_bigquery_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_iceberg_secret(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_ducklake_secret(&self, prefix: &str) -> Result<(), K8sError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("delete-ducklake:{prefix}"));
+            Ok(())
+        }
+
+        async fn get_config_map(&self, _config_map_name: &str) -> Result<ConfigMap, K8sError> {
+            Ok(ConfigMap::default())
+        }
+
+        async fn create_or_update_replicator_config_map(
+            &self,
+            _prefix: &str,
+            _files: Vec<ReplicatorConfigMapFile>,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_replicator_config_map(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn create_or_update_replicator_stateful_set(
+            &self,
+            _prefix: &str,
+            _replicator_image: &str,
+            _environment: Environment,
+            _destination_type: DestinationType,
+            _log_level: LogLevel,
+        ) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn delete_replicator_stateful_set(&self, _prefix: &str) -> Result<(), K8sError> {
+            Ok(())
+        }
+
+        async fn get_replicator_pod_status(&self, _prefix: &str) -> Result<PodStatus, K8sError> {
+            Ok(PodStatus::Started)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ducklake_creates_postgres_and_s3_secrets() {
+        let source_config = StoredSourceConfig {
+            host: "localhost".to_string(),
+            port: 5432,
+            name: "postgres".to_string(),
+            username: "postgres".to_string(),
+            password: Some(SerializableSecretString::from("password".to_string())),
+        };
+        let destination_config = StoredDestinationConfig::Ducklake {
+            catalog_url: "postgres://catalog".to_string(),
+            data_path: "s3://bucket/path".to_string(),
+            pool_size: 4,
+            s3_access_key_id: Some(SerializableSecretString::from("key-id".to_string())),
+            s3_secret_access_key: Some(SerializableSecretString::from("secret-key".to_string())),
+            s3_region: None,
+            s3_endpoint: None,
+            s3_url_style: None,
+            s3_use_ssl: None,
+            metadata_schema: None,
+        };
+
+        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let client = RecordingK8sClient::default();
+
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client.calls(),
+            vec![
+                "postgres:tenant-42:password".to_string(),
+                "ducklake:tenant-42:key-id:secret-key".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ducklake_without_s3_still_creates_postgres_secret() {
+        let source_config = StoredSourceConfig {
+            host: "localhost".to_string(),
+            port: 5432,
+            name: "postgres".to_string(),
+            username: "postgres".to_string(),
+            password: Some(SerializableSecretString::from("password".to_string())),
+        };
+        let destination_config = StoredDestinationConfig::Ducklake {
+            catalog_url: "postgres://catalog".to_string(),
+            data_path: "file:///tmp/lake".to_string(),
+            pool_size: 4,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_region: None,
+            s3_endpoint: None,
+            s3_url_style: None,
+            s3_use_ssl: None,
+            metadata_schema: None,
+        };
+
+        let secrets = build_secrets_from_configs(&source_config, &destination_config);
+        let client = RecordingK8sClient::default();
+
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client.calls(),
+            vec![
+                "postgres:tenant-42:password".to_string(),
+                "delete-ducklake:tenant-42".to_string(),
+            ]
+        );
+    }
 }

@@ -1,11 +1,15 @@
 use crate::bigquery::client::{BigQueryClient, BigQueryOperationType};
 use crate::bigquery::encoding::BigQueryTableRow;
-use crate::bigquery::metrics::register_metrics;
+use crate::bigquery::metrics::{ETL_BQ_APPEND_BATCHES_BATCH_SIZE, register_metrics};
 use crate::bigquery::{BigQueryDatasetId, BigQueryTableId};
 #[cfg(feature = "egress")]
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
 use crate::table_name::try_stringify_table_name;
 use etl::destination::Destination;
+use etl::destination::async_result::{
+    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
+use etl::destination::task_set::DestinationTaskSet;
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus};
 use etl::store::schema::SchemaStore;
@@ -15,6 +19,7 @@ use etl::types::{
 };
 use etl::{bail, etl_error};
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
+use metrics::histogram;
 use prost::Message;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -157,11 +162,12 @@ pub struct BigQueryDestination<S> {
     pipeline_id: PipelineId,
     state_store: S,
     inner: Arc<Mutex<Inner>>,
+    streaming_tasks: DestinationTaskSet,
 }
 
 impl<S> BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
     /// Creates a new [`BigQueryDestination`] with a pre-configured client.
     ///
@@ -189,6 +195,7 @@ where
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_tasks: DestinationTaskSet::new(),
         }
     }
 
@@ -222,6 +229,7 @@ where
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_tasks: DestinationTaskSet::new(),
         })
     }
 
@@ -254,6 +262,7 @@ where
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_tasks: DestinationTaskSet::new(),
         })
     }
     /// Creates a new [`BigQueryDestination`] using Application Default Credentials (ADC).
@@ -284,6 +293,7 @@ where
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_tasks: DestinationTaskSet::new(),
         })
     }
 
@@ -328,6 +338,7 @@ where
             pipeline_id,
             state_store: store,
             inner: Arc::new(Mutex::new(inner)),
+            streaming_tasks: DestinationTaskSet::new(),
         })
     }
 
@@ -530,6 +541,7 @@ where
         let mut append_requests = Vec::with_capacity(table_rows_batches.len());
         for (batch_index, table_rows) in table_rows_batches.into_iter().enumerate() {
             if !table_rows.is_empty() {
+                histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
                 let append_request = self.client.create_batch_append_request(
                     self.pipeline_id,
                     batch_index,
@@ -546,9 +558,7 @@ where
         let (bytes_sent, bytes_received) = if append_requests.is_empty() {
             (0, 0)
         } else {
-            self.client
-                .append_table_batches(self.pipeline_id, append_requests)
-                .await?
+            self.client.append_table_batches(append_requests).await?
         };
 
         if bytes_sent > 0 {
@@ -880,6 +890,7 @@ where
                         .into_iter()
                         .map(BigQueryTableRow::try_from)
                         .collect::<EtlResult<Vec<BigQueryTableRow>>>()?;
+                    histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
 
                     let append_request = self.client.create_batch_append_request(
                         self.pipeline_id,
@@ -896,9 +907,7 @@ where
                 let (bytes_sent, bytes_received) = if append_requests.is_empty() {
                     (0, 0)
                 } else {
-                    self.client
-                        .append_table_batches(self.pipeline_id, append_requests)
-                        .await?
+                    self.client.append_table_batches(append_requests).await?
                 };
 
                 if bytes_sent > 0 {
@@ -1070,33 +1079,56 @@ where
 
 impl<S> Destination for BigQueryDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Clone + Send + Sync + 'static,
 {
     fn name() -> &'static str {
         "bigquery"
     }
 
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.streaming_tasks.shutdown().await
+    }
+
     async fn truncate_table(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
+        async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
-        self.process_truncate_for_schemas(iter::once(replicated_table_schema.clone()))
-            .await
+        let result = self
+            .process_truncate_for_schemas(iter::once(replicated_table_schema.clone()))
+            .await;
+        async_result.send(result);
+
+        Ok(())
     }
 
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        self.write_table_rows(replicated_table_schema, table_rows)
-            .await?;
+        let result =
+            BigQueryDestination::write_table_rows(self, replicated_table_schema, table_rows).await;
+        async_result.send(result);
 
         Ok(())
     }
 
-    async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.write_events(events).await?;
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
+        self.streaming_tasks.try_reap().await?;
+
+        let destination = self.clone();
+        self.streaming_tasks
+            .spawn(async move {
+                let result = destination.write_events(events).await;
+                async_result.send(result);
+            })
+            .await;
 
         Ok(())
     }

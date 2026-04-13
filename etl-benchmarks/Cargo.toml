@@ -3,6 +3,7 @@ name = "etl-benchmarks"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+
 rust-version.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -19,6 +20,9 @@ rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal"] }
 tracing = { workspace = true, default-features = true }
+
+[lints]
+workspace = true
 
 [[bench]]
 name = "table_copies"

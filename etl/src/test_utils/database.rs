@@ -22,6 +22,7 @@ use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
 use etl_postgres::replication::connect_to_source_database;
 use etl_postgres::tokio::test_utils::PgDatabase;
 use etl_postgres::types::TableName;
+use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
@@ -95,7 +96,10 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
         .client
         .as_ref()
         .expect("database client should be initialized")
-        .execute(&format!("create schema {TEST_DATABASE_SCHEMA}"), &[])
+        .execute(
+            &format!("create schema {}", quote_identifier(TEST_DATABASE_SCHEMA)),
+            &[],
+        )
         .await
         .expect("Failed to create test schema");
 

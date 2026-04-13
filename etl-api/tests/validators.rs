@@ -1,5 +1,4 @@
-mod support;
-
+use crate::support::database::get_test_db_config;
 use etl_api::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
 use etl_api::configs::pipeline::FullApiPipelineConfig;
 use etl_api::validation::{
@@ -16,7 +15,6 @@ use etl_destinations::iceberg::test_utils::{
 };
 use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use sqlx::Executor;
-use support::database::get_test_db_config;
 
 fn create_validation_context() -> ValidationContext {
     let environment = Environment::load().expect("Failed to load environment");

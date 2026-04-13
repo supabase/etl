@@ -10,10 +10,11 @@ use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::destination::Destination;
+use crate::destination::async_result::{TruncateTableResult, WriteTableRowsResult};
 use crate::error::{ErrorKind, EtlResult};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, etl_fail_point};
-use crate::metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL, PIPELINE_ID_LABEL};
+use crate::metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL};
 use crate::replication::client::PgReplicationClient;
 use crate::replication::masks::ReplicationMasksCache;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
@@ -159,9 +160,26 @@ where
                         table_schema,
                         current_metadata.replication_mask,
                     );
-                    destination.truncate_table(&replicated_table_schema).await?;
+                    let (truncate_result, pending_truncate_result) = TruncateTableResult::new(());
 
-                    info!(%table_id, "truncated destination table before starting copy");
+                    if let Err(err) = destination
+                        .truncate_table(&replicated_table_schema, truncate_result)
+                        .await
+                    {
+                        warn!(
+                            table_id = table_id.0,
+                            error = %err,
+                            "failed to dispatch destination table truncation before copy, continuing"
+                        );
+                    } else if let Err(err) = pending_truncate_result.await.into_result() {
+                        warn!(
+                            table_id = table_id.0,
+                            error = %err,
+                            "failed to truncate destination table before copy, continuing"
+                        );
+                    } else {
+                        info!(%table_id, "truncated destination table before starting copy");
+                    }
                 } else {
                     bail!(
                         ErrorKind::InvalidState,
@@ -280,6 +298,8 @@ where
                         return Ok(TableSyncResult::SyncStopped);
                     }
                 }
+            } else {
+                info!(table_id = table_id.0, "skipping table copy");
             }
 
             // We commit the transaction before starting the apply loop, otherwise it will fail
@@ -289,9 +309,11 @@ where
             // If no table rows were written, we call the method nonetheless with no rows, to kickstart
             // table creation.
             if total_table_copy_rows == 0 {
+                let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
                 destination
-                    .write_table_rows(&replicated_table_schema, vec![])
+                    .write_table_rows(&replicated_table_schema, vec![], flush_result)
                     .await?;
+                pending_flush_result.await.into_result()?;
                 info!(
                     table_id = table_id.0,
                     "writing empty table rows for empty table"
@@ -302,7 +324,6 @@ where
             let with_partitioning = config.max_copy_connections_per_table > 1;
             histogram!(
                 ETL_TABLE_COPY_DURATION_SECONDS,
-                PIPELINE_ID_LABEL => pipeline_id.to_string(),
                 PARTITIONING_LABEL => with_partitioning.to_string(),
             )
             .record(total_table_copy_duration_secs);

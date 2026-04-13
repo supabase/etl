@@ -97,6 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 |---------|------------------|
 | [Guides](guides/index.md) | Step-by-step instructions to get things done |
 | [Explanations](explanation/index.md) | Deep dives into concepts and architecture |
+| [Examples](https://github.com/supabase/etl/tree/main/etl-examples) | Runnable `bigquery` and `ducklake` example binaries |
 
 ## Contributing
 

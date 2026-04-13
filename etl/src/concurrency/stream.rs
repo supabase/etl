@@ -1,6 +1,7 @@
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use etl_config::shared::BatchConfig;
+use etl_postgres::types::TableId;
 use futures::{Stream, ready};
 use pin_project_lite::pin_project;
 use std::time::Duration;
@@ -10,6 +11,21 @@ use crate::concurrency::batch_budget::CachedBatchBudget;
 use crate::concurrency::memory_monitor::MemoryMonitorSubscription;
 use crate::types::SizeHint;
 
+/// Builds the stream id for a table sync worker's initial table-copy stream.
+pub(crate) fn table_sync_worker_copy_stream_id(table_id: TableId) -> String {
+    format!("table_sync_worker_copy_{}_stream", table_id.0)
+}
+
+/// Builds the stream id for a table sync worker's apply stream.
+pub(crate) fn table_sync_worker_apply_stream_id(table_id: TableId) -> String {
+    format!("table_sync_worker_apply_{}_stream", table_id.0)
+}
+
+/// Builds the stream id for the apply worker's apply stream.
+pub(crate) fn apply_worker_apply_stream_id() -> String {
+    "apply_worker_apply_stream".to_string()
+}
+
 pin_project! {
     /// A stream adapter that pauses polling when memory monitor reports pressure.
     #[must_use = "streams do nothing unless polled"]
@@ -17,6 +33,7 @@ pin_project! {
 pub struct BackpressureStream<S: Stream> {
         #[pin]
         stream: S,
+        stream_id: String,
         memory_subscription: Option<MemoryMonitorSubscription>,
         paused_for_memory: bool,
     }
@@ -24,9 +41,14 @@ pub struct BackpressureStream<S: Stream> {
 
 impl<S: Stream> BackpressureStream<S> {
     /// Creates a new [`BackpressureStream`] wrapping `stream`.
-    pub fn wrap(stream: S, memory_subscription: Option<MemoryMonitorSubscription>) -> Self {
+    pub fn wrap(
+        stream: S,
+        stream_id: impl Into<String>,
+        memory_subscription: Option<MemoryMonitorSubscription>,
+    ) -> Self {
         Self {
             stream,
+            stream_id: stream_id.into(),
             memory_subscription,
             paused_for_memory: false,
         }
@@ -78,9 +100,9 @@ impl<S: Stream> Stream for BackpressureStream<S> {
         }
 
         if !was_paused && *this.paused_for_memory {
-            info!("backpressure active, stream paused");
+            info!(stream_id = %this.stream_id, "backpressure active, stream paused");
         } else if was_paused && !*this.paused_for_memory {
-            info!("backpressure released, stream resumed");
+            info!(stream_id = %this.stream_id, "backpressure released, stream resumed");
         }
 
         if *this.paused_for_memory {
@@ -102,6 +124,7 @@ pin_project! {
 pub struct TryBatchBackpressureStream<B, E, S: Stream<Item = Result<B, E>>> {
         #[pin]
         stream: S,
+        stream_id: String,
         #[pin]
         deadline: Option<tokio::time::Sleep>,
         items: Vec<B>,
@@ -122,12 +145,14 @@ where
     /// Creates a new [`TryBatchBackpressureStream`].
     pub fn wrap(
         stream: S,
+        stream_id: impl Into<String>,
         batch_config: BatchConfig,
         memory_subscription: Option<MemoryMonitorSubscription>,
         cached_batch_budget: CachedBatchBudget,
     ) -> Self {
         Self {
             stream,
+            stream_id: stream_id.into(),
             deadline: None,
             items: Vec::new(),
             current_batch_bytes: 0,
@@ -195,14 +220,21 @@ where
             }
 
             if !was_paused && *this.paused_for_memory {
-                info!("backpressure active, batch stream paused");
+                info!(
+                    stream_id = %this.stream_id,
+                    "backpressure active, batch stream paused"
+                );
             } else if was_paused && !*this.paused_for_memory {
-                info!("backpressure released, batch stream resumed");
+                info!(
+                    stream_id = %this.stream_id,
+                    "backpressure released, batch stream resumed"
+                );
             }
 
             if *this.paused_for_memory {
                 if !this.items.is_empty() {
                     info!(
+                        stream_id = %this.stream_id,
                         buffered_items = this.items.len(),
                         buffered_bytes = *this.current_batch_bytes,
                         "backpressure active, flushing buffered batch"
@@ -292,6 +324,7 @@ mod tests {
     use crate::concurrency::memory_monitor::MemoryMonitor;
     use crate::types::SizeHint;
     use core::task::Poll;
+    use etl_postgres::types::TableId;
     use futures::StreamExt;
     use futures::future::poll_fn;
     use pin_project_lite::pin_project;
@@ -360,6 +393,27 @@ mod tests {
         (cached_budget, limit)
     }
 
+    #[test]
+    fn builds_table_sync_copy_stream_id() {
+        assert_eq!(
+            table_sync_worker_copy_stream_id(TableId::new(123)),
+            "table_sync_worker_copy_123_stream"
+        );
+    }
+
+    #[test]
+    fn builds_table_sync_apply_stream_id() {
+        assert_eq!(
+            table_sync_worker_apply_stream_id(TableId::new(456)),
+            "table_sync_worker_apply_456_stream"
+        );
+    }
+
+    #[test]
+    fn builds_apply_worker_apply_stream_id() {
+        assert_eq!(apply_worker_apply_stream_id(), "apply_worker_apply_stream");
+    }
+
     // BackpressureStream tests.
     #[tokio::test]
     async fn backpressure_stream_pauses_while_blocked_then_resumes() {
@@ -370,6 +424,7 @@ mod tests {
         // When backpressure is active, wrapped stream stays pending even if it has data.
         let mut stream = Box::pin(BackpressureStream::wrap(
             futures::stream::iter(vec![10]),
+            "test_stream",
             memory_sub,
         ));
 
@@ -392,6 +447,7 @@ mod tests {
         let memory_sub = memory.subscribe();
         let mut stream = Box::pin(BackpressureStream::wrap(
             futures::stream::iter(vec![11]),
+            "test_stream",
             memory_sub,
         ));
 
@@ -410,7 +466,8 @@ mod tests {
     async fn backpressure_stream_first_poll_blocked_update_waits_until_unblock() {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
-        let stream = BackpressureStream::wrap(futures::stream::iter(vec![14]), memory_sub);
+        let stream =
+            BackpressureStream::wrap(futures::stream::iter(vec![14]), "test_stream", memory_sub);
 
         // Set blocked before first poll so the first poll observes an immediate update.
         memory.set_backpressure_active_for_test(true);
@@ -453,6 +510,7 @@ mod tests {
         };
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             TwoThenPending::new(),
+            "test_stream",
             batch_config,
             memory_sub,
             test_cached_budget(&memory),
@@ -485,6 +543,7 @@ mod tests {
         };
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             futures::stream::iter(vec![Ok::<i32, &'static str>(1)]),
+            "test_stream",
             batch_config,
             memory_sub,
             test_cached_budget(&memory),
@@ -515,6 +574,7 @@ mod tests {
         };
         let stream = TryBatchBackpressureStream::wrap(
             futures::stream::iter(vec![Ok::<i32, &'static str>(2)]),
+            "test_stream",
             batch_config,
             memory_sub,
             test_cached_budget(&memory),
@@ -560,6 +620,7 @@ mod tests {
         };
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             TwoThenPending::new(),
+            "test_stream",
             batch_config,
             memory_sub,
             test_cached_budget(&memory),
@@ -609,6 +670,7 @@ mod tests {
                     .into_iter()
                     .map(Ok::<SizedToken, &'static str>),
             ),
+            "test_stream",
             batch_config,
             memory_sub,
             cached_budget,
@@ -657,6 +719,7 @@ mod tests {
                     .into_iter()
                     .map(Ok::<SizedToken, &'static str>),
             ),
+            "test_stream",
             batch_config,
             memory_sub,
             cached_budget,
@@ -677,6 +740,7 @@ mod tests {
         };
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             TwoThenPending::new(),
+            "test_stream",
             batch_config,
             memory_sub,
             test_cached_budget(&memory),
@@ -707,6 +771,7 @@ mod tests {
         };
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             futures::stream::iter(vec![Ok::<i32, &'static str>(7), Ok(8)]),
+            "test_stream",
             batch_config,
             memory_sub,
             test_cached_budget(&memory),
@@ -732,6 +797,7 @@ mod tests {
         };
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             futures::stream::empty::<Result<i32, &'static str>>(),
+            "test_stream",
             batch_config,
             memory_sub,
             test_cached_budget(&memory),
