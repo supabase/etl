@@ -105,11 +105,33 @@ impl ClickHouseTestDatabase {
             .expect("Failed to drop test ClickHouse database");
     }
 
-    /// Builds a [`ClickHouseDestination`] scoped to this test database.
+    /// Builds a [`ClickHouseDestination`] scoped to this test database with
+    /// default inserter config (100 MiB per INSERT -- large enough that tests
+    /// never hit an intermediate flush).
     pub fn build_destination<S>(
+        &self,
+        pipeline_id: PipelineId,
+        store: S,
+    ) -> ClickHouseDestination<S>
+    where
+        S: StateStore + SchemaStore + Send + Sync,
+    {
+        self.build_destination_with_config(
+            pipeline_id,
+            store,
+            ClickHouseInserterConfig {
+                max_bytes_per_insert: 100 * 1024 * 1024,
+            },
+        )
+    }
+
+    /// Builds a [`ClickHouseDestination`] scoped to this test database with
+    /// a caller-supplied [`ClickHouseInserterConfig`].
+    pub fn build_destination_with_config<S>(
         &self,
         _pipeline_id: PipelineId,
         store: S,
+        config: ClickHouseInserterConfig,
     ) -> ClickHouseDestination<S>
     where
         S: StateStore + SchemaStore + Send + Sync,
@@ -119,10 +141,7 @@ impl ClickHouseTestDatabase {
             &self.user,
             self.password.clone(),
             &self.database,
-            ClickHouseInserterConfig {
-                // 100 MiB — large enough that tests never hit an intermediate flush.
-                max_bytes_per_insert: 100 * 1024 * 1024,
-            },
+            config,
             store,
         )
         .expect("Failed to create ClickHouseDestination for test")

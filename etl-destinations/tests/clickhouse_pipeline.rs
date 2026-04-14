@@ -5,6 +5,7 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::types::PipelineId;
+use etl_destinations::clickhouse::ClickHouseInserterConfig;
 use etl_destinations::clickhouse::test_utils::{ClickHouseTestDatabase, setup_clickhouse_database};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
@@ -1080,4 +1081,105 @@ async fn truncate_clears_table_and_accepts_new_inserts() {
         r.cdc_lsn > 0,
         "post-truncate insert should come from CDC streaming"
     );
+}
+
+/// SELECT query used to verify the `flush_split` test.
+const FLUSH_SPLIT_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_flush__split\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
+/// Tests that the intermediate INSERT flush (`max_bytes_per_insert`) does not
+/// lose rows when a batch is split across multiple INSERT statements.
+///
+/// # GIVEN
+///
+/// A Postgres table with 10 rows, and a ClickHouse destination configured with
+/// `max_bytes_per_insert = 1` (forcing a new INSERT after every single row).
+///
+/// # WHEN
+///
+/// The pipeline runs initial table copy from Postgres to ClickHouse.
+///
+/// # THEN
+///
+/// All 10 rows arrive in ClickHouse despite being split across many INSERT
+/// statements. No rows are lost at flush boundaries.
+#[tokio::test(flavor = "multi_thread")]
+async fn intermediate_flush_preserves_all_rows() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: 10 rows and a tiny max_bytes_per_insert ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("flush_split");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create flush_split test table");
+
+    let publication_name = "test_pub_clickhouse_flush";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create flush_split publication");
+
+    let row_count = 10;
+    let values: Vec<String> = (1..=row_count).map(|i| format!("('row_{i}')")).collect();
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES {}",
+            table_name.as_quoted_identifier(),
+            values.join(", "),
+        ))
+        .await
+        .expect("Failed to insert flush_split rows");
+
+    let ch_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = ch_db.build_destination_with_config(
+        pipeline_id,
+        store.clone(),
+        ClickHouseInserterConfig {
+            // 1 byte -- forces a new INSERT after every row.
+            max_bytes_per_insert: 1,
+        },
+    );
+
+    let table_ready = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    // --- WHEN: pipeline copies data with aggressive flush splitting ---
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: all rows arrive despite being split across many INSERTs ---
+    let rows: Vec<UpdateFlowRow> = ch_db.query(FLUSH_SPLIT_SELECT).await;
+    assert_eq!(
+        rows.len(),
+        row_count,
+        "all rows must survive intermediate flush splits"
+    );
+
+    for (i, r) in rows.iter().enumerate() {
+        let expected_id = (i + 1) as i64;
+        let expected_value = format!("row_{}", i + 1);
+        assert_eq!(r.id, expected_id, "row {} id mismatch", i + 1);
+        assert_eq!(r.value, expected_value, "row {} value mismatch", i + 1);
+        assert_eq!(r.cdc_operation, "INSERT");
+        assert_eq!(r.cdc_lsn, 0, "all rows should be from table copy");
+    }
 }
