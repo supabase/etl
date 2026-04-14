@@ -35,7 +35,6 @@ pub async fn start_replicator_with_config(
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
     let pipeline_id = replicator_config.pipeline.id;
-    let network_probe_targets = metrics::build_network_probe_targets(&replicator_config);
 
     // We initialize the state store, which for the replicator is not configurable.
     let state_store = init_store(
@@ -69,7 +68,7 @@ pub async fn start_replicator_with_config(
             .await?;
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
-            start_pipeline(pipeline, network_probe_targets).await?;
+            start_pipeline(pipeline).await?;
         }
         DestinationConfig::Iceberg {
             config:
@@ -104,7 +103,7 @@ pub async fn start_replicator_with_config(
             let destination = IcebergDestination::new(client, namespace, state_store.clone());
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
-            start_pipeline(pipeline, network_probe_targets).await?;
+            start_pipeline(pipeline).await?;
         }
         DestinationConfig::Iceberg {
             config:
@@ -137,7 +136,7 @@ pub async fn start_replicator_with_config(
             let destination = IcebergDestination::new(client, namespace, state_store.clone());
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
-            start_pipeline(pipeline, network_probe_targets).await?;
+            start_pipeline(pipeline).await?;
         }
         DestinationConfig::Ducklake {
             catalog_url,
@@ -181,7 +180,7 @@ pub async fn start_replicator_with_config(
             .await?;
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
-            start_pipeline(pipeline, network_probe_targets).await?;
+            start_pipeline(pipeline).await?;
         }
     }
 
@@ -230,10 +229,7 @@ async fn init_store(
 /// and ensures proper cleanup on shutdown. The pipeline will attempt to
 /// finish processing current batches before terminating.
 #[tracing::instrument(skip(pipeline))]
-async fn start_pipeline<S, D>(
-    mut pipeline: Pipeline<S, D>,
-    network_probe_targets: Vec<metrics::NetworkProbeTarget>,
-) -> ReplicatorResult<()>
+async fn start_pipeline<S, D>(mut pipeline: Pipeline<S, D>) -> ReplicatorResult<()>
 where
     S: StateStore + SchemaStore + CleanupStore + Clone + Send + Sync + 'static,
     D: Destination + Clone + Send + Sync + 'static,
@@ -243,7 +239,7 @@ where
 
     // We spawn metrics collection after the pipeline was started, so that if we crash before starting
     // we don't keep emitting metrics that make it look as if the system is running.
-    metrics::spawn_metrics_tasks(pipeline.id(), network_probe_targets);
+    metrics::spawn_metrics_tasks(pipeline.id());
 
     // Spawn a task to listen for shutdown signals and trigger shutdown.
     let shutdown_tx = pipeline.shutdown_tx();
