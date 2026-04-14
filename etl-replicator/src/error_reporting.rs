@@ -1,5 +1,5 @@
 use etl::error::{EtlError, EtlResult};
-use etl::state::destination_metadata::DestinationTableMetadata;
+use etl::state::destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata};
 use etl::state::table::TableReplicationPhase;
 use etl::store::cleanup::CleanupStore;
 use etl::store::schema::SchemaStore;
@@ -127,6 +127,15 @@ where
         table_id: TableId,
     ) -> EtlResult<Option<DestinationTableMetadata>> {
         self.inner.get_destination_table_metadata(table_id).await
+    }
+
+    async fn get_applied_destination_table_metadata(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
+        self.inner
+            .get_applied_destination_table_metadata(table_id)
+            .await
     }
 
     async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {

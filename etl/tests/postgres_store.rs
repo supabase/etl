@@ -677,7 +677,7 @@ async fn test_multiple_pipelines_isolation() {
 
     assert_eq!(
         store1
-            .get_destination_table_metadata(table_id)
+            .get_applied_destination_table_metadata(table_id)
             .await
             .unwrap()
             .map(|m| m.destination_table_id),
@@ -685,7 +685,7 @@ async fn test_multiple_pipelines_isolation() {
     );
     assert_eq!(
         store2
-            .get_destination_table_metadata(table_id)
+            .get_applied_destination_table_metadata(table_id)
             .await
             .unwrap()
             .map(|m| m.destination_table_id),
@@ -699,7 +699,7 @@ async fn test_multiple_pipelines_isolation() {
     new_store1.load_destination_tables_metadata().await.unwrap();
     assert_eq!(
         new_store1
-            .get_destination_table_metadata(table_id)
+            .get_applied_destination_table_metadata(table_id)
             .await
             .unwrap()
             .map(|m| m.destination_table_id),
@@ -909,7 +909,7 @@ async fn test_cleanup_deletes_state_schema_and_metadata_for_table() {
     );
     assert!(
         store
-            .get_destination_table_metadata(table_1_id)
+            .get_applied_destination_table_metadata(table_1_id)
             .await
             .unwrap()
             .is_some()
@@ -935,7 +935,7 @@ async fn test_cleanup_deletes_state_schema_and_metadata_for_table() {
     );
     assert!(
         store
-            .get_destination_table_metadata(table_1_id)
+            .get_applied_destination_table_metadata(table_1_id)
             .await
             .unwrap()
             .is_none()
@@ -958,7 +958,7 @@ async fn test_cleanup_deletes_state_schema_and_metadata_for_table() {
     );
     assert!(
         store
-            .get_destination_table_metadata(table_2_id)
+            .get_applied_destination_table_metadata(table_2_id)
             .await
             .unwrap()
             .is_some()
@@ -989,7 +989,7 @@ async fn test_cleanup_deletes_state_schema_and_metadata_for_table() {
     );
     assert!(
         new_store
-            .get_destination_table_metadata(table_1_id)
+            .get_applied_destination_table_metadata(table_1_id)
             .await
             .unwrap()
             .is_none()
@@ -1012,7 +1012,7 @@ async fn test_cleanup_deletes_state_schema_and_metadata_for_table() {
     );
     assert!(
         new_store
-            .get_destination_table_metadata(table_2_id)
+            .get_applied_destination_table_metadata(table_2_id)
             .await
             .unwrap()
             .is_some()
@@ -1057,7 +1057,7 @@ async fn test_replication_mask_loads_correctly_from_string_bytea() {
 
     // Verify the loaded replication mask matches what was inserted
     let metadata = store
-        .get_destination_table_metadata(table_id)
+        .get_applied_destination_table_metadata(table_id)
         .await
         .unwrap()
         .expect("Metadata should exist");
@@ -1128,7 +1128,7 @@ async fn test_replication_mask_various_patterns() {
     // Verify each test case
     for (table_id, dest_name, expected_mask) in &test_cases {
         let metadata = store
-            .get_destination_table_metadata(*table_id)
+            .get_applied_destination_table_metadata(*table_id)
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("Metadata for {dest_name} should exist"));
@@ -1180,7 +1180,7 @@ async fn test_replication_mask_roundtrip() {
 
     // Verify the loaded mask matches the original
     let loaded_metadata = new_store
-        .get_destination_table_metadata(table_id)
+        .get_applied_destination_table_metadata(table_id)
         .await
         .unwrap()
         .expect("Metadata should exist after loading");

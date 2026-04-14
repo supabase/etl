@@ -152,39 +152,53 @@ where
             // If the metadata is not present, we can safely assume that no data is there in the
             // table; thus a truncate won't be issued.
             if let Some(current_metadata) = store.get_destination_table_metadata(table_id).await? {
-                if let Some(table_schema) = store
-                    .get_table_schema(&table_id, current_metadata.snapshot_id)
-                    .await?
-                {
-                    let replicated_table_schema = ReplicatedTableSchema::from_mask(
-                        table_schema,
-                        current_metadata.replication_mask,
-                    );
-                    let (truncate_result, pending_truncate_result) = TruncateTableResult::new(());
-
-                    if let Err(err) = destination
-                        .truncate_table(&replicated_table_schema, truncate_result)
-                        .await
-                    {
+                match current_metadata.into_applied() {
+                    Err(err) => {
+                        // The schema DDL never completed. Skip the truncate and let the
+                        // destination re-create the table during the copy phase.
                         warn!(
                             table_id = table_id.0,
                             error = %err,
-                            "failed to dispatch destination table truncation before copy, continuing"
+                            "destination table metadata is not in applied state; skipping pre-copy truncation"
                         );
-                    } else if let Err(err) = pending_truncate_result.await.into_result() {
-                        warn!(
-                            table_id = table_id.0,
-                            error = %err,
-                            "failed to truncate destination table before copy, continuing"
-                        );
-                    } else {
-                        info!(%table_id, "truncated destination table before starting copy");
                     }
-                } else {
-                    bail!(
-                        ErrorKind::InvalidState,
-                        "Destination table metadata found, but not corresponding table schema exists"
-                    );
+                    Ok(applied_metadata) => {
+                        if let Some(table_schema) = store
+                            .get_table_schema(&table_id, applied_metadata.snapshot_id)
+                            .await?
+                        {
+                            let replicated_table_schema = ReplicatedTableSchema::from_mask(
+                                table_schema,
+                                applied_metadata.replication_mask,
+                            );
+                            let (truncate_result, pending_truncate_result) =
+                                TruncateTableResult::new(());
+
+                            if let Err(err) = destination
+                                .truncate_table(&replicated_table_schema, truncate_result)
+                                .await
+                            {
+                                warn!(
+                                    table_id = table_id.0,
+                                    error = %err,
+                                    "failed to dispatch destination table truncation before copy, continuing"
+                                );
+                            } else if let Err(err) = pending_truncate_result.await.into_result() {
+                                warn!(
+                                    table_id = table_id.0,
+                                    error = %err,
+                                    "failed to truncate destination table before copy, continuing"
+                                );
+                            } else {
+                                info!(%table_id, "truncated destination table before starting copy");
+                            }
+                        } else {
+                            bail!(
+                                ErrorKind::InvalidState,
+                                "Destination table metadata found, but not corresponding table schema exists"
+                            );
+                        }
+                    }
                 }
             }
 

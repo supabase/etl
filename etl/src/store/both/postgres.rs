@@ -16,7 +16,9 @@ use tracing::{debug, info};
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 use crate::metrics::{ETL_TABLES_TOTAL, PHASE_LABEL};
-use crate::state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus};
+use crate::state::destination_metadata::{
+    AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
+};
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
@@ -403,6 +405,20 @@ impl StateStore for PostgresStore {
         let inner = self.inner.lock().await;
 
         Ok(inner.destination_tables_metadata.get(&table_id).cloned())
+    }
+
+    async fn get_applied_destination_table_metadata(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
+        let inner = self.inner.lock().await;
+
+        inner
+            .destination_tables_metadata
+            .get(&table_id)
+            .cloned()
+            .map(DestinationTableMetadata::into_applied)
+            .transpose()
     }
 
     /// Loads all destination table metadata from Postgres into memory cache.

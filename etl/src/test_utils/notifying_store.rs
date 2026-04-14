@@ -6,7 +6,9 @@ use tokio::sync::{Notify, RwLock};
 
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
-use crate::state::destination_metadata::DestinationTableMetadata;
+use crate::state::destination_metadata::{
+    AppliedDestinationTableMetadata, DestinationTableMetadata,
+};
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
@@ -309,6 +311,20 @@ impl StateStore for NotifyingStore {
     ) -> EtlResult<Option<DestinationTableMetadata>> {
         let inner = self.inner.read().await;
         Ok(inner.destination_tables_metadata.get(&table_id).cloned())
+    }
+
+    async fn get_applied_destination_table_metadata(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
+        let inner = self.inner.read().await;
+
+        inner
+            .destination_tables_metadata
+            .get(&table_id)
+            .cloned()
+            .map(DestinationTableMetadata::into_applied)
+            .transpose()
     }
 
     async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {

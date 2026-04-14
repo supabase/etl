@@ -1933,14 +1933,10 @@ async fn table_schema_change() {
 
     // Verify destination schema state is applied after initial table creation.
     let initial_state = store
-        .get_destination_table_metadata(table_id)
+        .get_applied_destination_table_metadata(table_id)
         .await
         .unwrap()
         .expect("destination schema state should exist after table creation");
-    assert!(
-        initial_state.is_applied(),
-        "initial destination schema state should be applied"
-    );
     let initial_snapshot_id = initial_state.snapshot_id;
 
     // Apply multiple schema changes:
@@ -2017,14 +2013,10 @@ async fn table_schema_change() {
 
     // Verify destination schema state is applied after schema changes.
     let final_state = store
-        .get_destination_table_metadata(table_id)
+        .get_applied_destination_table_metadata(table_id)
         .await
         .unwrap()
         .expect("destination schema state should exist after schema change");
-    assert!(
-        final_state.is_applied(),
-        "final destination schema state should be applied"
-    );
     assert!(
         final_state.snapshot_id > initial_snapshot_id,
         "snapshot_id should have increased after schema change"

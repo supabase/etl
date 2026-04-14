@@ -454,7 +454,7 @@ where
     ) -> EtlResult<Option<SequencedBigQueryTableId>> {
         let Some(metadata) = self
             .state_store
-            .get_destination_table_metadata(*table_id)
+            .get_applied_destination_table_metadata(*table_id)
             .await?
         else {
             return Ok(None);

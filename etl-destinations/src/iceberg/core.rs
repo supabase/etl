@@ -26,37 +26,6 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
-/// CDC operation types for Iceberg changelog tables.
-///
-/// Represents the type of change operation that occurred in the source database.
-/// These values are stored in the `cdc_operation` column of changelog tables
-/// to distinguish between data modifications and deletions.
-#[derive(Debug, Clone, Copy)]
-pub enum IcebergOperationType {
-    /// Represents insert operations from the source database.
-    Insert,
-    /// Represents update operations from the source database.
-    Update,
-    /// Represents delete operations from the source database.
-    Delete,
-}
-
-impl From<IcebergOperationType> for Cell {
-    fn from(value: IcebergOperationType) -> Self {
-        Cell::String(value.to_string())
-    }
-}
-
-impl fmt::Display for IcebergOperationType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            IcebergOperationType::Insert => write!(f, "INSERT"),
-            IcebergOperationType::Update => write!(f, "UPDATE"),
-            IcebergOperationType::Delete => write!(f, "DELETE"),
-        }
-    }
-}
-
 /// Type alias for Iceberg table names.
 type IcebergTableName = String;
 /// Suffix for changelog tables
@@ -87,6 +56,37 @@ pub fn table_name_to_iceberg_table_name(
         "{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}",
         table_name.name
     ))
+}
+
+/// CDC operation types for Iceberg changelog tables.
+///
+/// Represents the type of change operation that occurred in the source database.
+/// These values are stored in the `cdc_operation` column of changelog tables
+/// to distinguish between data modifications and deletions.
+#[derive(Debug, Clone, Copy)]
+pub enum IcebergOperationType {
+    /// Represents insert operations from the source database.
+    Insert,
+    /// Represents update operations from the source database.
+    Update,
+    /// Represents delete operations from the source database.
+    Delete,
+}
+
+impl From<IcebergOperationType> for Cell {
+    fn from(value: IcebergOperationType) -> Self {
+        Cell::String(value.to_string())
+    }
+}
+
+impl fmt::Display for IcebergOperationType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IcebergOperationType::Insert => write!(f, "INSERT"),
+            IcebergOperationType::Update => write!(f, "UPDATE"),
+            IcebergOperationType::Delete => write!(f, "DELETE"),
+        }
+    }
 }
 
 /// An iceberg destination that implements the ETL [`Destination`] trait.
@@ -138,18 +138,21 @@ impl DestinationNamespace {
 /// destination struct cloneable.
 #[derive(Debug)]
 struct Inner {
-    /// Cache of table names we already created/verified in the namespace.
+    /// Cache of source tables we already created/verified in the destination.
     ///
     /// Prevents redundant table existence checks and creation attempts.
     /// Tables are added to this cache after successful creation or verification.
+    ///
+    /// This cache is intentionally keyed by source [`TableId`] instead of the rendered Iceberg
+    /// table name. In a single destination namespace, distinct source tables from different
+    /// schemas can still render to the same destination table name. That collision should surface
+    /// as a destination error from Iceberg.
     created_tables: HashSet<IcebergTableName>,
-
     /// Cache of namespaces we already created/verified in the destination
     ///
     /// Prevents redundant namespace existence checks and creation attempts.
     /// Namespaces are added to this cache after successful creation or verification.
     created_namespaces: HashSet<String>,
-
     /// Namespace where the tables will be replicated. Depending on the variant either
     /// all tables will go in one namespace or there will be one namespace per
     /// source schema.
@@ -158,7 +161,7 @@ struct Inner {
 
 impl<S> IcebergDestination<S>
 where
-    S: StateStore + Send + Sync,
+    S: StateStore + Clone + Send + Sync + 'static,
 {
     /// Creates a new Iceberg destination instance.
     ///
@@ -198,7 +201,11 @@ where
         //
         // If no metadata exists, it means the table was never created in Iceberg (e.g., due to
         // errors during copy). In this case, we skip the truncate since there's nothing to truncate.
-        let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
+        let Some(metadata) = self
+            .store
+            .get_applied_destination_table_metadata(table_id)
+            .await?
+        else {
             warn!(
                 %table_id,
                 "skipping truncate because no metadata exists (table was likely never created)",
@@ -257,7 +264,7 @@ where
                 .await?;
 
             #[cfg(feature = "egress")]
-            log_processed_bytes("iceberg", PROCESSING_TYPE_TABLE_COPY, bytes_sent, 0);
+            log_processed_bytes(Self::name(), PROCESSING_TYPE_TABLE_COPY, bytes_sent, 0);
         }
 
         Ok(())
@@ -346,8 +353,10 @@ where
                         let new_replication_mask =
                             relation.replicated_table_schema.replication_mask();
 
-                        if let Some(metadata) =
-                            self.store.get_destination_table_metadata(table_id).await?
+                        if let Some(metadata) = self
+                            .store
+                            .get_applied_destination_table_metadata(table_id)
+                            .await?
                             && (metadata.snapshot_id != new_snapshot_id
                                 || &metadata.replication_mask != new_replication_mask)
                         {
@@ -400,7 +409,7 @@ where
                 }
 
                 #[cfg(feature = "egress")]
-                log_processed_bytes("iceberg", PROCESSING_TYPE_STREAMING, bytes_sent, 0);
+                log_processed_bytes(Self::name(), PROCESSING_TYPE_STREAMING, bytes_sent, 0);
             }
 
             // Collect and deduplicate schemas from all truncate events.

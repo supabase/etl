@@ -1,5 +1,7 @@
 use etl_postgres::types::{ReplicationMask, SnapshotId};
 
+use crate::error::{ErrorKind, EtlResult};
+
 /// Status of the schema at a destination.
 ///
 /// Tracks whether a schema change is in progress or complete.
@@ -112,4 +114,45 @@ impl DestinationTableMetadata {
         self.schema_status = status;
         self
     }
+
+    /// Converts this metadata into [`AppliedDestinationTableMetadata`], returning an
+    /// error if the schema is not in [`DestinationTableSchemaStatus::Applied`] state.
+    ///
+    /// Use this at any point where downstream code must guarantee that the destination
+    /// DDL completed successfully before proceeding. The caller decides whether to
+    /// propagate the error or handle it (e.g. warn and skip an optional operation).
+    pub fn into_applied(self) -> EtlResult<AppliedDestinationTableMetadata> {
+        if !self.is_applied() {
+            return Err(crate::etl_error!(
+                ErrorKind::InvalidState,
+                "destination table schema is not in applied state",
+                format!(
+                    "table '{}' has schema_status '{:?}'; \
+                     the DDL may not have completed — manual intervention may be required",
+                    self.destination_table_id, self.schema_status
+                )
+            ));
+        }
+        Ok(AppliedDestinationTableMetadata {
+            destination_table_id: self.destination_table_id,
+            snapshot_id: self.snapshot_id,
+            replication_mask: self.replication_mask,
+        })
+    }
+}
+
+/// Destination table metadata guaranteed to be in [`DestinationTableSchemaStatus::Applied`] state.
+///
+/// Can only be constructed via [`DestinationTableMetadata::into_applied`], which returns
+/// an error if the underlying metadata is not fully applied. Code that accepts this type
+/// has a static guarantee that the destination DDL completed successfully and the table
+/// is ready for reads and writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedDestinationTableMetadata {
+    /// The name/identifier of the table in the destination system.
+    pub destination_table_id: String,
+    /// The snapshot_id of the schema applied at the destination.
+    pub snapshot_id: SnapshotId,
+    /// The replication mask indicating which columns are replicated.
+    pub replication_mask: ReplicationMask,
 }
