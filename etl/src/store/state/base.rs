@@ -1,9 +1,16 @@
 use etl_postgres::types::TableId;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::sync::Arc;
 
 use crate::error::EtlResult;
 use crate::state::table::TableReplicationPhase;
+
+/// Arc-wrapped dictionary of table replication states.
+pub type TableReplicationStates = Arc<BTreeMap<TableId, TableReplicationPhase>>;
+
+/// Arc-wrapped dictionary of table mappings.
+pub type TableMappings = Arc<HashMap<TableId, String>>;
 
 /// Trait for storing and retrieving table replication state and mapping information.
 ///
@@ -25,7 +32,7 @@ pub trait StateStore {
     /// Does not read from the persistent store.
     fn get_table_replication_states(
         &self,
-    ) -> impl Future<Output = EtlResult<BTreeMap<TableId, TableReplicationPhase>>> + Send;
+    ) -> impl Future<Output = EtlResult<TableReplicationStates>> + Send;
 
     /// Loads the table replication states from the persistent state into the cache.
     /// This should be called once at program start to load the state into the cache
@@ -71,9 +78,7 @@ pub trait StateStore {
     /// Returns all table mappings from the cache.
     ///
     /// Does not read from the persistent store.
-    fn get_table_mappings(
-        &self,
-    ) -> impl Future<Output = EtlResult<HashMap<TableId, String>>> + Send;
+    fn get_table_mappings(&self) -> impl Future<Output = EtlResult<TableMappings>> + Send;
 
     /// Loads all table mappings from the persistent state into the cache.
     ///

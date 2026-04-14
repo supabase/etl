@@ -5,7 +5,7 @@
 
 use crate::bail;
 use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
+use crate::concurrency::shutdown::{create_shutdown_channel, ShutdownTx};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
@@ -366,7 +366,7 @@ where
         // The purging doesn't delete any data in the destination, it just removes internal state for
         // that table.
         let publication_set: HashSet<TableId> = publication_table_ids.iter().copied().collect();
-        for (table_id, _) in table_replication_states {
+        for &table_id in table_replication_states.keys() {
             if !publication_set.contains(&table_id) {
                 info!(
                     table_id = table_id.0,

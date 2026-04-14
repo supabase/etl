@@ -1899,18 +1899,17 @@ where
     }
 }
 
-/// Returns an iterator over tables that are still synchronizing.
-async fn get_syncing_tables<S>(
-    store: &S,
-) -> EtlResult<impl Iterator<Item = (TableId, TableReplicationPhase)> + use<S>>
+/// Returns tables that are still synchronizing.
+async fn get_syncing_tables<S>(store: &S) -> EtlResult<Vec<(TableId, TableReplicationPhase)>>
 where
     S: StateStore,
 {
-    Ok(store
-        .get_table_replication_states()
-        .await?
-        .into_iter()
-        .filter(|(_, state)| !state.as_type().is_done()))
+    let states = store.get_table_replication_states().await?;
+    Ok(states
+        .iter()
+        .filter(|(_, state)| !state.as_type().is_done())
+        .map(|(id, state)| (*id, state.clone()))
+        .collect())
 }
 
 /// Functions specific to the apply worker.
