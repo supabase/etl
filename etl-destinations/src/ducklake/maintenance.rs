@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-#[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::Duration;
 
@@ -54,7 +53,7 @@ const MAINTENANCE_MERGE_SMALL_FILE_RATIO_THRESHOLD: f64 = 0.5;
 /// Minimum small data-file count before merge is worth attempting.
 const MAINTENANCE_MIN_SMALL_DATA_FILES_FOR_MERGE: i64 = 2;
 /// Global checkpoint interval used to keep catalog maintenance moving.
-const MAINTENANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const MAINTENANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_mins(5); // TODO PUT IT BACK TO THE PREVIOUS VALUE
 /// Minimum active data-file count before emergency merge is worth attempting.
 const MAINTENANCE_MIN_ACTIVE_DATA_FILES: i64 = 8;
 /// Timeout for sending a notification to the maintenance worker.
@@ -565,6 +564,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
     manager: DuckLakeConnectionManager,
     checkpoint_gate: Arc<RwLock<()>>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    checkpoint_requested: Arc<AtomicBool>,
 ) -> EtlResult<DuckLakeMaintenanceWorker> {
     let mut pool = LazyDuckLakePool::new(manager, MAINTENANCE_POOL_SIZE, "maintenance");
     pool.warm_in_background();
@@ -574,6 +574,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
         pool,
         checkpoint_gate,
         table_write_slots,
+        checkpoint_requested,
         notification_rx,
         shutdown_rx,
     ));
@@ -590,6 +591,7 @@ async fn run_ducklake_maintenance_worker(
     mut pool: LazyDuckLakePool,
     checkpoint_gate: Arc<RwLock<()>>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    checkpoint_requested: Arc<AtomicBool>,
     mut notification_rx: mpsc::Receiver<TableMaintenanceNotification>,
     mut shutdown_rx: watch::Receiver<()>,
 ) {
@@ -769,28 +771,7 @@ async fn run_ducklake_maintenance_worker(
                 if table_states.is_empty() {
                     continue;
                 }
-
-                let pool = match pool.get_or_init_pool().await {
-                    Ok(pool) => pool,
-                    Err(error) => {
-                        warn!(error = ?error, "ducklake maintenance pool initialization failed");
-                        continue;
-                    }
-                };
-                if let Err(error) = run_background_checkpoint(
-                    pool,
-                    Arc::clone(&checkpoint_gate),
-                    Arc::clone(&blocking_slots),
-                    MaintenanceReason::CheckpointInterval,
-                )
-                .await
-                {
-                    warn!(
-                        reason = MaintenanceReason::CheckpointInterval.as_str(),
-                        error = ?error,
-                        "ducklake background checkpoint failed"
-                    );
-                }
+                checkpoint_requested.store(true, AtomicOrdering::Release);
             }
         }
     }
@@ -887,19 +868,31 @@ async fn run_targeted_table_maintenance(
     })
 }
 
-/// Runs a coarse-grained checkpoint to keep catalog maintenance moving.
-async fn run_background_checkpoint(
+/// Runs one requested checkpoint before foreground CDC ingestion begins.
+pub(super) async fn maybe_run_requested_checkpoint(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     checkpoint_gate: Arc<RwLock<()>>,
     blocking_slots: Arc<Semaphore>,
-    reason: MaintenanceReason,
+    checkpoint_requested: &AtomicBool,
 ) -> EtlResult<()> {
-    let _checkpoint_guard = checkpoint_gate.write_owned().await;
+    if !checkpoint_requested.swap(false, AtomicOrdering::AcqRel) {
+        return Ok(());
+    }
+
+    let Ok(_checkpoint_guard) = checkpoint_gate.try_write_owned() else {
+        checkpoint_requested.store(true, AtomicOrdering::Release);
+        record_ducklake_maintenance_skipped(
+            MAINTENANCE_TASK_CHECKPOINT,
+            MaintenanceOperation::Checkpoint,
+            MaintenanceReason::CheckpointInterval,
+        );
+        return Ok(());
+    };
     run_duckdb_blocking(
         pool,
         blocking_slots,
         DuckDbBlockingOperationKind::Maintenance,
-        move |conn| run_background_checkpoint_blocking(conn, reason),
+        move |conn| run_background_checkpoint_blocking(conn, MaintenanceReason::CheckpointInterval),
     )
     .await
 }
@@ -1922,6 +1915,7 @@ mod tests {
             },
             std::sync::Arc::new(RwLock::new(())),
             std::sync::Arc::new(Mutex::new(HashMap::new())),
+            std::sync::Arc::new(AtomicBool::new(false)),
         )
         .expect("failed to spawn maintenance worker");
 
@@ -1950,7 +1944,7 @@ mod tests {
 
     #[cfg(feature = "test-utils")]
     #[tokio::test]
-    async fn test_background_checkpoint_waits_for_active_mutation_guard() {
+    async fn test_requested_checkpoint_stays_pending_when_mutation_guard_is_active() {
         let pool = Arc::new(
             build_warm_ducklake_pool(
                 DuckLakeConnectionManager {
@@ -1964,26 +1958,47 @@ mod tests {
             .await
             .expect("failed to build checkpoint test pool"),
         );
+        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
+        register_metrics();
         let checkpoint_gate = Arc::new(RwLock::new(()));
         let mutation_guard = Arc::clone(&checkpoint_gate).read_owned().await;
-        let checkpoint_task = tokio::spawn(run_background_checkpoint(
+        let checkpoint_requested = Arc::new(AtomicBool::new(true));
+
+        let rendered_before = handle.render();
+        let skipped_before = maintenance_skipped_counter_value(
+            &rendered_before,
+            MAINTENANCE_TASK_CHECKPOINT,
+            MaintenanceOperation::Checkpoint,
+            MaintenanceReason::CheckpointInterval,
+        );
+
+        maybe_run_requested_checkpoint(
             Arc::clone(&pool),
             Arc::clone(&checkpoint_gate),
             Arc::new(Semaphore::new(1)),
+            checkpoint_requested.as_ref(),
+        )
+        .await
+        .expect("checkpoint should be skipped while mutation work is active");
+
+        let rendered_after = handle.render();
+        let skipped_after = maintenance_skipped_counter_value(
+            &rendered_after,
+            MAINTENANCE_TASK_CHECKPOINT,
+            MaintenanceOperation::Checkpoint,
             MaintenanceReason::CheckpointInterval,
-        ));
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(
-            !checkpoint_task.is_finished(),
-            "checkpoint should wait for active mutation work"
         );
-        drop(mutation_guard);
 
-        checkpoint_task
-            .await
-            .expect("checkpoint task should not panic")
-            .expect("checkpoint should succeed after active mutation work finishes");
+        assert!(
+            skipped_after > skipped_before,
+            "checkpoint skip count did not increase"
+        );
+        assert!(
+            checkpoint_requested.load(AtomicOrdering::Acquire),
+            "checkpoint request should stay pending for the next safe point"
+        );
+
+        drop(mutation_guard);
     }
 
     #[tokio::test]

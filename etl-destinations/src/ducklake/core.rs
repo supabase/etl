@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -48,7 +48,8 @@ use crate::ducklake::config::{
 };
 use crate::ducklake::maintenance::{
     DuckLakeMaintenanceWorker, TableMaintenanceNotification, TableWriteActivity,
-    send_maintenance_notification, spawn_ducklake_maintenance_worker, table_write_slot,
+    maybe_run_requested_checkpoint, send_maintenance_notification,
+    spawn_ducklake_maintenance_worker, table_write_slot,
 };
 use crate::ducklake::metrics::{
     BATCH_KIND_LABEL, DuckLakeMetricsSampler, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
@@ -117,6 +118,8 @@ pub struct DuckLakeDestination<S> {
     applied_batches_table_created: Arc<AtomicBool>,
     /// Cache tracking whether the ETL streaming progress table already exists.
     streaming_progress_table_created: Arc<AtomicBool>,
+    /// Signals that a checkpoint should run before the next streaming batch when safe.
+    checkpoint_requested: Arc<AtomicBool>,
 }
 
 impl<S> Destination for DuckLakeDestination<S>
@@ -281,6 +284,7 @@ where
         let pool = build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?;
         let created_tables = Arc::default();
         let checkpoint_gate = Arc::new(RwLock::new(()));
+        let checkpoint_requested = Arc::new(AtomicBool::new(false));
         let mut destination = Self {
             #[cfg(feature = "test-utils")]
             manager,
@@ -296,6 +300,7 @@ where
             created_tables: Arc::clone(&created_tables),
             applied_batches_table_created: Arc::default(),
             streaming_progress_table_created: Arc::default(),
+            checkpoint_requested: Arc::clone(&checkpoint_requested),
         };
         gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
         destination.ensure_applied_batches_table_exists().await?;
@@ -310,6 +315,7 @@ where
                 },
                 Arc::clone(&checkpoint_gate),
                 Arc::clone(&destination.table_write_slots),
+                Arc::clone(&checkpoint_requested),
             )?
             .into(),
         );
@@ -474,6 +480,7 @@ where
     /// streaming replay watermark so retries can safely detect already
     /// committed work.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
+        self.maybe_run_requested_checkpoint().await?;
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
@@ -846,6 +853,21 @@ where
     /// the middle of a foreground write sequence.
     async fn acquire_mutation_guard(&self) -> OwnedRwLockReadGuard<()> {
         Arc::clone(&self.checkpoint_gate).read_owned().await
+    }
+
+    /// Runs one requested checkpoint before ingesting the next CDC batch when safe.
+    async fn maybe_run_requested_checkpoint(&self) -> EtlResult<()> {
+        if !self.checkpoint_requested.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        maybe_run_requested_checkpoint(
+            Arc::clone(&self.pool),
+            Arc::clone(&self.checkpoint_gate),
+            Arc::clone(&self.blocking_slots),
+            self.checkpoint_requested.as_ref(),
+        )
+        .await
     }
 
     /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a
