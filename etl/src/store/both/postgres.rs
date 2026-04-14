@@ -1,5 +1,5 @@
 use etl_config::shared::{
-    IntoConnectOptions, PgConnectionConfig, ETL_MIGRATION_OPTIONS, ETL_STATE_MANAGEMENT_OPTIONS,
+    ETL_MIGRATION_OPTIONS, ETL_STATE_MANAGEMENT_OPTIONS, IntoConnectOptions, PgConnectionConfig,
 };
 use etl_postgres::replication::{schema, state, table_mappings};
 use etl_postgres::types::{TableId, TableSchema};

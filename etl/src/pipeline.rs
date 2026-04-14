@@ -5,7 +5,7 @@
 
 use crate::bail;
 use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::concurrency::shutdown::{create_shutdown_channel, ShutdownTx};
+use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
