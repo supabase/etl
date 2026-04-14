@@ -9,7 +9,7 @@ use crate::etl_error;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
+use crate::store::state::{StateStore, TableMappings, TableReplicationStates};
 use crate::test_utils::notify::TimedNotify;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -29,10 +29,10 @@ type TableStateCondition = (
 );
 
 struct Inner {
-    table_replication_states: BTreeMap<TableId, TableReplicationPhase>,
+    table_replication_states: TableReplicationStates,
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
-    table_mappings: HashMap<TableId, String>,
+    table_mappings: TableMappings,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
@@ -40,7 +40,7 @@ struct Inner {
 
 impl Inner {
     fn check_conditions(&mut self) {
-        let table_states = self.table_replication_states.clone();
+        let table_states = Arc::clone(&self.table_replication_states);
         self.table_state_type_conditions
             .retain(|(tid, expected_state, notify)| {
                 if let Some(state) = table_states.get(tid) {
@@ -87,10 +87,10 @@ impl NotifyingStore {
     /// Creates a new [`NotifyingStore`] instance.
     pub fn new() -> Self {
         let inner = Inner {
-            table_replication_states: BTreeMap::new(),
+            table_replication_states: Arc::new(BTreeMap::new()),
             table_state_history: HashMap::new(),
             table_schemas: HashMap::new(),
-            table_mappings: HashMap::new(),
+            table_mappings: Arc::new(HashMap::new()),
             table_state_type_conditions: Vec::new(),
             table_state_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
@@ -102,9 +102,9 @@ impl NotifyingStore {
     }
 
     /// Returns all table replication states.
-    pub async fn get_table_replication_states(&self) -> BTreeMap<TableId, TableReplicationPhase> {
+    pub async fn get_table_replication_states(&self) -> TableReplicationStates {
         let inner = self.inner.read().await;
-        inner.table_replication_states.clone()
+        Arc::clone(&inner.table_replication_states)
     }
 
     /// Returns all table schemas.
@@ -179,12 +179,10 @@ impl NotifyingStore {
     /// Resets the state of a table to [`TableReplicationPhase::Init`].
     pub async fn reset_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
-        inner.table_replication_states.remove(&table_id);
         inner.table_state_history.remove(&table_id);
-
-        inner
-            .table_replication_states
-            .insert(table_id, TableReplicationPhase::Init);
+        let states = Arc::make_mut(&mut inner.table_replication_states);
+        states.remove(&table_id);
+        states.insert(table_id, TableReplicationPhase::Init);
 
         Ok(())
     }
@@ -209,11 +207,9 @@ impl StateStore for NotifyingStore {
         result
     }
 
-    async fn get_table_replication_states(
-        &self,
-    ) -> EtlResult<BTreeMap<TableId, TableReplicationPhase>> {
+    async fn get_table_replication_states(&self) -> EtlResult<TableReplicationStates> {
         let inner = self.inner.read().await;
-        let result = Ok(inner.table_replication_states.clone());
+        let result = Ok(Arc::clone(&inner.table_replication_states));
 
         inner.dispatch_method_notification(StateStoreMethod::GetTableReplicationStates);
 
@@ -233,11 +229,13 @@ impl StateStore for NotifyingStore {
         &self,
         updates: Vec<(TableId, TableReplicationPhase)>,
     ) -> EtlResult<()> {
-        let mut inner = self.inner.write().await;
+        let mut guard = self.inner.write().await;
+        let inner = &mut *guard;
 
+        let states = Arc::make_mut(&mut inner.table_replication_states);
         for (table_id, state) in updates {
             // Store the current state in history before updating
-            if let Some(current_state) = inner.table_replication_states.get(&table_id).cloned() {
+            if let Some(current_state) = states.get(&table_id).cloned() {
                 inner
                     .table_state_history
                     .entry(table_id)
@@ -245,11 +243,11 @@ impl StateStore for NotifyingStore {
                     .push(current_state);
             }
 
-            inner.table_replication_states.insert(table_id, state);
+            states.insert(table_id, state);
         }
 
-        inner.check_conditions();
-        inner.dispatch_method_notification(StateStoreMethod::StoreTableReplicationState);
+        guard.check_conditions();
+        guard.dispatch_method_notification(StateStoreMethod::StoreTableReplicationState);
 
         Ok(())
     }
@@ -273,9 +271,7 @@ impl StateStore for NotifyingStore {
             })?;
 
         // Update the current state to the previous state
-        inner
-            .table_replication_states
-            .insert(table_id, previous_state.clone());
+        Arc::make_mut(&mut inner.table_replication_states).insert(table_id, previous_state.clone());
         inner.check_conditions();
 
         inner.dispatch_method_notification(StateStoreMethod::RollbackTableReplicationState);
@@ -288,9 +284,9 @@ impl StateStore for NotifyingStore {
         Ok(inner.table_mappings.get(source_table_id).cloned())
     }
 
-    async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
+    async fn get_table_mappings(&self) -> EtlResult<TableMappings> {
         let inner = self.inner.read().await;
-        Ok(inner.table_mappings.clone())
+        Ok(Arc::clone(&inner.table_mappings))
     }
 
     async fn load_table_mappings(&self) -> EtlResult<usize> {
@@ -304,9 +300,7 @@ impl StateStore for NotifyingStore {
         destination_table_id: String,
     ) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
-        inner
-            .table_mappings
-            .insert(source_table_id, destination_table_id);
+        Arc::make_mut(&mut inner.table_mappings).insert(source_table_id, destination_table_id);
 
         Ok(())
     }
@@ -345,10 +339,10 @@ impl CleanupStore for NotifyingStore {
     async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
 
-        inner.table_replication_states.remove(&table_id);
+        Arc::make_mut(&mut inner.table_replication_states).remove(&table_id);
         inner.table_state_history.remove(&table_id);
         inner.table_schemas.remove(&table_id);
-        inner.table_mappings.remove(&table_id);
+        Arc::make_mut(&mut inner.table_mappings).remove(&table_id);
 
         Ok(())
     }

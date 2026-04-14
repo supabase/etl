@@ -8,14 +8,14 @@ use crate::etl_error;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
+use crate::store::state::{StateStore, TableMappings, TableReplicationStates};
 
 /// Inner state of [`MemoryStore`]
 #[derive(Debug)]
 struct Inner {
     /// Current replication state for each table - this is the authoritative source of truth
     /// for table states. Every table being replicated must have an entry here.
-    table_replication_states: BTreeMap<TableId, TableReplicationPhase>,
+    table_replication_states: TableReplicationStates,
     /// Complete history of state transitions for each table, used for debugging and auditing.
     /// This is an append-only log that grows over time and provides visibility into
     /// table state evolution. Entries are chronologically ordered.
@@ -26,7 +26,7 @@ struct Inner {
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
     /// Mapping from table IDs to human-readable table names for easier debugging
     /// and logging. These mappings are established during schema discovery.
-    table_mappings: HashMap<TableId, String>,
+    table_mappings: TableMappings,
 }
 
 /// In-memory storage for ETL pipeline state and schema information.
@@ -50,10 +50,10 @@ impl MemoryStore {
     /// state and schema information.
     pub fn new() -> Self {
         let inner = Inner {
-            table_replication_states: BTreeMap::new(),
+            table_replication_states: Arc::new(BTreeMap::new()),
             table_state_history: HashMap::new(),
             table_schemas: HashMap::new(),
-            table_mappings: HashMap::new(),
+            table_mappings: Arc::new(HashMap::new()),
         };
 
         Self {
@@ -78,12 +78,10 @@ impl StateStore for MemoryStore {
         Ok(inner.table_replication_states.get(&table_id).cloned())
     }
 
-    async fn get_table_replication_states(
-        &self,
-    ) -> EtlResult<BTreeMap<TableId, TableReplicationPhase>> {
+    async fn get_table_replication_states(&self) -> EtlResult<TableReplicationStates> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_replication_states.clone())
+        Ok(Arc::clone(&inner.table_replication_states))
     }
 
     async fn load_table_replication_states(&self) -> EtlResult<usize> {
@@ -96,11 +94,15 @@ impl StateStore for MemoryStore {
         &self,
         updates: Vec<(TableId, TableReplicationPhase)>,
     ) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
+        let mut guard = self.inner.lock().await;
+        // To enable split-borrow (`Arc::make_mut()` borrows `table_replication_states` mutably,
+        // while `inner.table_state_history` borrows different field).
+        let inner = &mut *guard;
 
+        let states = Arc::make_mut(&mut inner.table_replication_states);
         for (table_id, state) in updates {
             // Store the current state in history before updating
-            if let Some(current_state) = inner.table_replication_states.get(&table_id).cloned() {
+            if let Some(current_state) = states.get(&table_id).cloned() {
                 inner
                     .table_state_history
                     .entry(table_id)
@@ -108,7 +110,7 @@ impl StateStore for MemoryStore {
                     .push(current_state);
             }
 
-            inner.table_replication_states.insert(table_id, state);
+            states.insert(table_id, state);
         }
 
         Ok(())
@@ -133,9 +135,7 @@ impl StateStore for MemoryStore {
             })?;
 
         // Update the current state to the previous state
-        inner
-            .table_replication_states
-            .insert(table_id, previous_state.clone());
+        Arc::make_mut(&mut inner.table_replication_states).insert(table_id, previous_state.clone());
 
         Ok(previous_state)
     }
@@ -146,10 +146,10 @@ impl StateStore for MemoryStore {
         Ok(inner.table_mappings.get(source_table_id).cloned())
     }
 
-    async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
+    async fn get_table_mappings(&self) -> EtlResult<TableMappings> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_mappings.clone())
+        Ok(Arc::clone(&inner.table_mappings))
     }
 
     async fn load_table_mappings(&self) -> EtlResult<usize> {
@@ -164,9 +164,7 @@ impl StateStore for MemoryStore {
         destination_table_id: String,
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
-        inner
-            .table_mappings
-            .insert(source_table_id, destination_table_id);
+        Arc::make_mut(&mut inner.table_mappings).insert(source_table_id, destination_table_id);
 
         Ok(())
     }
@@ -206,10 +204,10 @@ impl CleanupStore for MemoryStore {
     async fn cleanup_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
-        inner.table_replication_states.remove(&table_id);
+        Arc::make_mut(&mut inner.table_replication_states).remove(&table_id);
         inner.table_state_history.remove(&table_id);
         inner.table_schemas.remove(&table_id);
-        inner.table_mappings.remove(&table_id);
+        Arc::make_mut(&mut inner.table_mappings).remove(&table_id);
 
         Ok(())
     }

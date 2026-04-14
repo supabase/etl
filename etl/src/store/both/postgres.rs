@@ -19,7 +19,7 @@ use crate::metrics::{ETL_TABLES_TOTAL, PHASE_LABEL};
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
+use crate::store::state::{StateStore, TableMappings, TableReplicationStates};
 use crate::types::PipelineId;
 
 /// Maximum number of connections in the pool.
@@ -96,11 +96,11 @@ struct Inner {
     /// Count of number of tables in each phase. Used for metrics.
     phase_counts: HashMap<&'static str, u64>,
     /// Cached table replication states indexed by table ID.
-    table_states: BTreeMap<TableId, TableReplicationPhase>,
+    table_states: TableReplicationStates,
     /// Cached table schemas indexed by table ID.
     table_schemas: HashMap<TableId, Arc<TableSchema>>,
     /// Cached table mappings from source table ID to destination table name.
-    table_mappings: HashMap<TableId, String>,
+    table_mappings: TableMappings,
 }
 
 impl Inner {
@@ -117,8 +117,10 @@ impl Inner {
 
     /// Inserts or updates a table state and adjusts phase counts accordingly.
     fn set_table_state(&mut self, table_id: TableId, state: TableReplicationPhase) {
+        let states = Arc::make_mut(&mut self.table_states);
+
         // Decrement old phase count if the state existed.
-        if let Some(old_state) = self.table_states.get(&table_id) {
+        if let Some(old_state) = states.get(&table_id) {
             let old_phase = old_state.as_type().as_static_str();
             if let Some(count) = self.phase_counts.get_mut(old_phase) {
                 *count = count.saturating_sub(1);
@@ -130,12 +132,13 @@ impl Inner {
         let phase_count = self.phase_counts.entry(new_phase).or_default();
         *phase_count = phase_count.saturating_add(1);
 
-        self.table_states.insert(table_id, state);
+        states.insert(table_id, state);
     }
 
     /// Removes a table state and adjusts phase counts accordingly.
     fn remove_table_state(&mut self, table_id: TableId) {
-        if let Some(old_state) = self.table_states.remove(&table_id) {
+        let states = Arc::make_mut(&mut self.table_states);
+        if let Some(old_state) = states.remove(&table_id) {
             let old_phase = old_state.as_type().as_static_str();
             if let Some(count) = self.phase_counts.get_mut(old_phase) {
                 *count = count.saturating_sub(1);
@@ -199,9 +202,9 @@ impl PostgresStore {
         let pool = create_database_pool(&source_config);
         let inner = Inner {
             phase_counts: HashMap::new(),
-            table_states: BTreeMap::new(),
+            table_states: Arc::new(BTreeMap::new()),
             table_schemas: HashMap::new(),
-            table_mappings: HashMap::new(),
+            table_mappings: Arc::new(HashMap::new()),
         };
 
         Ok(Self {
@@ -232,12 +235,10 @@ impl StateStore for PostgresStore {
     /// This method returns a complete snapshot of all cached table replication
     /// states. It's useful for pipeline initialization and state inspection
     /// operations that need visibility into all tables.
-    async fn get_table_replication_states(
-        &self,
-    ) -> EtlResult<BTreeMap<TableId, TableReplicationPhase>> {
+    async fn get_table_replication_states(&self) -> EtlResult<TableReplicationStates> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_states.clone())
+        Ok(Arc::clone(&inner.table_states))
     }
 
     /// Loads table replication states from Postgres into memory cache.
@@ -265,7 +266,7 @@ impl StateStore for PostgresStore {
         // and from a single thread, we can afford to have a short critical section.
         let mut inner = self.inner.lock().await;
         inner.init_phase_counts(&table_states);
-        inner.table_states = table_states;
+        inner.table_states = Arc::new(table_states);
         emit_table_metrics(&inner.phase_counts);
 
         info!(
@@ -359,10 +360,10 @@ impl StateStore for PostgresStore {
     /// This method returns a complete snapshot of all cached table mappings,
     /// showing how source table IDs map to destination table names. Useful
     /// for operations that need visibility into the complete mapping configuration.
-    async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
+    async fn get_table_mappings(&self) -> EtlResult<TableMappings> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_mappings.clone())
+        Ok(Arc::clone(&inner.table_mappings))
     }
 
     /// Loads table mappings from Postgres into memory cache.
@@ -388,7 +389,7 @@ impl StateStore for PostgresStore {
         let table_mappings_len = table_mappings.len();
 
         let mut inner = self.inner.lock().await;
-        inner.table_mappings = table_mappings;
+        inner.table_mappings = Arc::new(table_mappings);
 
         info!(
             count = table_mappings_len,
@@ -426,9 +427,7 @@ impl StateStore for PostgresStore {
         })?;
 
         let mut inner = self.inner.lock().await;
-        inner
-            .table_mappings
-            .insert(source_table_id, destination_table_id);
+        Arc::make_mut(&mut inner.table_mappings).insert(source_table_id, destination_table_id);
 
         Ok(())
     }
@@ -554,7 +553,7 @@ impl CleanupStore for PostgresStore {
         let mut inner = self.inner.lock().await;
         inner.remove_table_state(table_id);
         inner.table_schemas.remove(&table_id);
-        inner.table_mappings.remove(&table_id);
+        Arc::make_mut(&mut inner.table_mappings).remove(&table_id);
         emit_table_metrics(&inner.phase_counts);
 
         Ok(())

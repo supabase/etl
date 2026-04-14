@@ -56,6 +56,7 @@
 - Keep top-level binaries focused on orchestration; move implementation detail into helpers or modules.
 - Prefer clear, boring code over clever abstractions.
 - Prefer existing workspace patterns over introducing new local conventions.
+- Use `Arc::clone(&value)` instead of `value.clone()` when cloning `Arc` pointers — it makes the cheap reference-count increment explicit and avoids confusion with deep clones.
 - All logs should be strictly lowercase.
 
 ## Error Handling And Panics
