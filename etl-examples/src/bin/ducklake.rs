@@ -39,7 +39,7 @@ use etl::config::{
 use etl::pipeline::Pipeline;
 use etl::store::both::postgres::PostgresStore;
 use etl_config::parse_ducklake_url;
-use etl_destinations::ducklake::{DuckLakeDestination, DuckLakeDestinationOptions, S3Config};
+use etl_destinations::ducklake::{DuckLakeDestination, S3Config};
 use std::error::Error;
 use std::sync::Once;
 use tokio::signal;
@@ -136,10 +136,6 @@ struct DuckLakeArgs {
     #[arg(long)]
     metadata_schema: Option<String>,
 
-    /// Enable background DuckLake maintenances and metrics sampling.
-    #[arg(long)]
-    enable_maintenances: bool,
-
     /// Shared DuckDB log storage path used by `CALL enable_logging(storage_path = ...)`.
     #[arg(long, requires = "duckdb_log_dump_path")]
     duckdb_log_storage_path: Option<String>,
@@ -235,16 +231,13 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         use_ssl: args.ducklake_args.s3_use_ssl,
     });
 
-    let ducklake_destination = DuckLakeDestination::new_with_options(
+    let ducklake_destination = DuckLakeDestination::new(
         args.ducklake_args.catalog_url,
         args.ducklake_args.data_path,
         args.ducklake_args.pool_size,
         s3_config,
         args.ducklake_args.metadata_schema,
         store.clone(),
-        DuckLakeDestinationOptions {
-            enable_maintenances: args.ducklake_args.enable_maintenances,
-        },
     )
     .await?;
 

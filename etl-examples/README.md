@@ -111,7 +111,6 @@ cargo run --bin ducklake -p etl-examples -- \
     --data-path /Users/bnj/misc/parquet_files \
     --publication my_pub \
     --metadata-schema ducklake \
-    --enable-maintenances \
     --pool-size 4 \
     --max-batch-fill-duration-ms 5000 \
     --max-table-sync-workers 4 \
@@ -124,7 +123,6 @@ In this example:
 - `--catalog-url` points to the PostgreSQL database that stores DuckLake metadata.
 - `--data-path` is a plain local path and will be normalized to a `file://` URL.
 - `--metadata-schema ducklake` keeps DuckLake metadata tables in a dedicated Postgres schema.
-- `--enable-maintenances` starts the background maintenance worker and metrics sampler.
 - `--duckdb-log-storage-path` enables `CALL enable_logging(storage_path = ...)` for each DuckDB connection.
 - `--duckdb-log-dump-path` writes a CSV dump of `SELECT * FROM duckdb_logs` during graceful shutdown.
 
@@ -189,7 +187,6 @@ connection setup.
 | `--s3-url-style` | `path` | URL style: `path` (MinIO/Supabase) or `vhost` (AWS) |
 | `--s3-use-ssl` | `false` | Enable TLS for the S3 connection |
 | `--metadata-schema` | — | Postgres schema for DuckLake metadata tables (e.g. `ducklake`) |
-| `--enable-maintenances` | `false` | Enable background DuckLake maintenances and metrics sampling |
 | `--duckdb-log-storage-path` | — | Enables DuckDB file-backed logging for each DuckDB connection |
 | `--duckdb-log-dump-path` | — | CSV file written from `duckdb_logs` during graceful shutdown |
 

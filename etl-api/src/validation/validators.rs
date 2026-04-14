@@ -919,7 +919,6 @@ impl Validator for DestinationValidator {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
-                ..
             } => {
                 let validator = DucklakeValidator::new(
                     catalog_url.clone(),

@@ -17,8 +17,7 @@ pub(super) type DuckLakeTableName = String;
 ///
 /// This applies to every DuckDB connection in the destination pool so small
 /// writes inline into the DuckLake metadata first and can later be
-/// materialized to Parquet by the background maintenance worker when
-/// maintenances are enabled.
+/// materialized to Parquet by the background maintenance worker.
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 
 #[cfg(feature = "test-utils")]
@@ -28,9 +27,7 @@ pub use batches::{
     reset_ducklake_test_hooks,
 };
 pub use config::S3Config;
-pub use core::{
-    DuckLakeDestination, DuckLakeDestinationOptions, table_name_to_ducklake_table_name,
-};
+pub use core::{DuckLakeDestination, table_name_to_ducklake_table_name};
 #[cfg(feature = "test-utils")]
 pub use core::{
     arm_pause_next_streaming_write_for_tests, release_paused_streaming_write_for_tests,

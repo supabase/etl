@@ -3,9 +3,6 @@
 This directory exposes DuckLake-specific metrics to help tune write-path
 behavior and the maintenance settings described in the DuckLake docs.
 
-Background maintenance operations and the periodic table-health sampler run only
-when DuckLake is configured with `enable_maintenances = true`.
-
 The metrics fall into four groups:
 
 - write-path metrics: show how the ETL writer is batching, waiting, retrying,

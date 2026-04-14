@@ -19,7 +19,7 @@ use etl_destinations::iceberg::{
 };
 use etl_destinations::{
     bigquery::BigQueryDestination,
-    ducklake::{DuckLakeDestination, DuckLakeDestinationOptions, S3Config as DucklakeS3Config},
+    ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
     iceberg::{IcebergClient, IcebergDestination},
 };
 use secrecy::ExposeSecret;
@@ -150,7 +150,6 @@ pub async fn start_replicator_with_config(
             s3_url_style,
             s3_use_ssl,
             metadata_schema,
-            enable_maintenances,
         } => {
             set_destination_scope::<DuckLakeDestination<PostgresStore>>();
 
@@ -171,16 +170,13 @@ pub async fn start_replicator_with_config(
                 }
             };
 
-            let destination = DuckLakeDestination::new_with_options(
+            let destination = DuckLakeDestination::new(
                 parse_ducklake_url(catalog_url).map_err(ReplicatorError::config)?,
                 parse_ducklake_url(data_path).map_err(ReplicatorError::config)?,
                 *pool_size,
                 s3_config,
                 metadata_schema.clone(),
                 state_store.clone(),
-                DuckLakeDestinationOptions {
-                    enable_maintenances: *enable_maintenances,
-                },
             )
             .await?;
 
