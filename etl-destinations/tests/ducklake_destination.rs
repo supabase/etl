@@ -1271,7 +1271,9 @@ async fn test_write_events_restart_overlap_rebatches_only_pending_suffix() {
         )
         .await
         .unwrap();
+    destination.shutdown().await.unwrap();
     drop(destination);
+    checkpoint_lake(&catalog_url, &data_url);
 
     let destination =
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
