@@ -31,8 +31,6 @@ const METRICS_POOL_SIZE: u32 = 1;
 const METRICS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) const ETL_DUCKLAKE_POOL_SIZE: &str = "etl_ducklake_pool_size";
-pub(crate) const ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS: &str =
-    "etl_ducklake_blocking_queue_wait_seconds";
 pub(crate) const ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS: &str =
     "etl_ducklake_blocking_slot_wait_seconds";
 pub(crate) const ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS: &str =
@@ -157,11 +155,6 @@ pub(crate) fn register_metrics() {
             "Configured size of the warm DuckLake connection pool."
         );
 
-        describe_histogram!(
-            ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS,
-            Unit::Seconds,
-            "Time spent waiting in tokio's blocking task queue after a DuckLake slot is acquired."
-        );
         describe_histogram!(
             ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS,
             Unit::Seconds,

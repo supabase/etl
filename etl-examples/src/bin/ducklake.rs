@@ -144,13 +144,9 @@ struct DuckLakeArgs {
     duckdb_log_dump_path: Option<String>,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        // .max_blocking_threads(4)
-        .enable_all()
-        .build()?;
-
-    if let Err(e) = runtime.block_on(main_impl()) {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    if let Err(e) = main_impl().await {
         error!("{e}");
         std::process::exit(1);
     }

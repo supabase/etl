@@ -26,24 +26,12 @@ per table.
 ### Connection and blocking metrics
 
 - `etl_ducklake_pool_size`
-- `etl_ducklake_blocking_queue_wait_seconds`
 - `etl_ducklake_blocking_slot_wait_seconds`
 - `etl_ducklake_pool_checkout_wait_seconds`
 - `etl_ducklake_blocking_operation_duration_seconds`
 
 Use these first to separate storage-shape problems from pure concurrency or pool
 pressure. If these are high, maintenance may not be your real bottleneck.
-
-- high `blocking_queue_wait_seconds` with low slot and checkout wait means the
-  Tokio blocking pool itself is backed up before DuckLake code even starts
-  running on a blocking thread.
-- high `blocking_slot_wait_seconds` means ETL's own DuckLake concurrency limit
-  is saturated before Tokio scheduling is the problem.
-- high `pool_checkout_wait_seconds` means DuckDB connection availability is the
-  bottleneck after a blocking thread is already running.
-- high `blocking_operation_duration_seconds` with the other waits staying low
-  means the slowdown is inside DuckDB or the downstream catalog/object store
-  path, not in Tokio queueing.
 
 ### Batch and retry metrics
 

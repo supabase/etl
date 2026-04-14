@@ -105,7 +105,6 @@ fn run_async_runtime(
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
     tokio::runtime::Builder::new_multi_thread()
-        // .max_blocking_threads(1)
         .enable_all()
         .build()?
         .block_on(async_main(replicator_config, notification_client))

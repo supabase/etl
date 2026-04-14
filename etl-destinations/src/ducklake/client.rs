@@ -15,8 +15,8 @@ use tracing::{info, warn};
 
 use crate::ducklake::config::DuckLakeSetupPlan;
 use crate::ducklake::metrics::{
-    ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS, ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS,
-    ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS, ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
+    ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS, ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS,
+    ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
 };
 
 /// Monotonic identifier assigned to each DuckLake connection setup attempt.
@@ -475,20 +475,10 @@ where
     // This is needed to make sure we properly interrupt the blocking operation if it exceeds the timeout, we don't just cancel the task and leave the connection active.
     let mut watchdog = DuckDbQueryWatchdog::spawn(deadline);
     let watchdog_task = watchdog.async_task_handle()?;
-    let blocking_queue_started = Instant::now();
 
     let blocking_result = tokio::task::spawn_blocking(move || -> EtlResult<R> {
         // Please if you modify the code inside this blocking task do not add any
         // blocking operations that could delay other tasks waiting on this slot.
-        let blocking_queue_wait = blocking_queue_started.elapsed();
-        histogram!(ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS)
-            .record(blocking_queue_wait.as_secs_f64());
-        info!(
-            operation_kind = operation_kind.as_str(),
-            wait_ms = blocking_queue_wait.as_millis() as u64,
-            timeout_ms = timeout.as_millis() as u64,
-            "ducklake blocking task started"
-        );
         let _permit = permit;
         let checkout_timeout = deadline
             .checked_duration_since(Instant::now())
@@ -497,7 +487,7 @@ where
             return Err(duckdb_blocking_timeout_error(
                 operation_kind,
                 timeout,
-                "blocking_queue",
+                "pool_checkout",
             ));
         }
         let checkout_started = Instant::now();
@@ -609,7 +599,7 @@ where
 mod tests {
     use super::*;
 
-    use std::sync::{Arc, mpsc};
+    use std::sync::Arc;
 
     use tokio::sync::Semaphore;
 
@@ -676,15 +666,13 @@ mod tests {
             error.description(),
             Some("DuckLake blocking operation timed out")
         );
-        // This timeout budget covers tokio blocking-queue delay, pool checkout,
-        // and query execution. Under full-suite load the deadline can expire in
-        // any of those stages as long as the pool remains usable for the
-        // follow-up query below.
+        // This timeout budget covers pool checkout and query execution. Under
+        // full-suite load the deadline can expire before the long-running query
+        // starts, so either stage is acceptable as long as the pool remains
+        // usable for the follow-up query below.
         assert!(
             error.detail().is_some_and(|detail| {
-                detail.contains("stage=blocking_queue")
-                    || detail.contains("stage=pool_checkout")
-                    || detail.contains("stage=query_execution")
+                detail.contains("stage=pool_checkout") || detail.contains("stage=query_execution")
             }),
             "unexpected error detail: {error:?}"
         );
@@ -744,72 +732,5 @@ mod tests {
             watchdog.timed_out(),
             "watchdog should remain timed out when the interrupt handle is published after the deadline"
         );
-    }
-
-    #[test]
-    fn test_run_duckdb_blocking_timeout_reports_blocking_queue_stage() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .max_blocking_threads(1)
-            .enable_all()
-            .build()
-            .expect("failed to build runtime");
-
-        runtime.block_on(async {
-            let pool = Arc::new(
-                build_warm_ducklake_pool(make_blocking_test_manager(), 1, "test")
-                    .await
-                    .expect("failed to build blocking test pool"),
-            );
-            let blocking_slots = Arc::new(Semaphore::new(1));
-            let (release_tx, release_rx) = mpsc::channel();
-
-            let blocking_guard = tokio::task::spawn_blocking(move || {
-                release_rx
-                    .recv()
-                    .expect("blocking guard should receive a release signal");
-            });
-
-            tokio::time::sleep(Duration::from_millis(20)).await;
-
-            let queued_operation = tokio::spawn(run_duckdb_blocking_with_timeout(
-                Arc::clone(&pool),
-                Arc::clone(&blocking_slots),
-                DuckDbBlockingOperationKind::Foreground,
-                Duration::from_millis(10),
-                |conn| -> EtlResult<i64> {
-                    conn.query_row("SELECT 1;", [], |row| row.get::<_, i64>(0))
-                        .map_err(|source| {
-                            etl_error!(
-                                ErrorKind::DestinationQueryFailed,
-                                "DuckLake blocking queue verification query failed",
-                                source: source
-                            )
-                        })
-                },
-            ));
-
-            tokio::time::sleep(Duration::from_millis(40)).await;
-            release_tx
-                .send(())
-                .expect("blocking guard should still be waiting");
-
-            blocking_guard
-                .await
-                .expect("blocking guard should not panic");
-
-            let error = queued_operation
-                .await
-                .expect("queued operation should not panic")
-                .expect_err("queued operation should time out");
-
-            assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
-            assert!(
-                error
-                    .detail()
-                    .is_some_and(|detail| detail.contains("stage=blocking_queue")),
-                "unexpected error detail: {error:?}"
-            );
-        });
     }
 }
