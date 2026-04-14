@@ -34,9 +34,9 @@ fn install_crypto_provider() {
 /// canonical `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` string form.
 ///
 /// All other columns are read with their native ClickHouse types:
-/// - `Date`          → u16  (days since 1970-01-01)
-/// - `DateTime64(6)` → i64  (microseconds since epoch)
-/// - `Array(Nullable(T))` → `Vec<Option<T>>`
+/// - `Date`          -> u16  (days since 1970-01-01)
+/// - `DateTime64(6)` -> i64  (microseconds since epoch)
+/// - `Array(Nullable(T))` -> `Vec<Option<T>>`
 const ALL_TYPES_SELECT: &str = concat!(
     "SELECT ",
     "id, smallint_col, integer_col, bigint_col, real_col, double_col, ",
@@ -129,26 +129,41 @@ async fn wait_for_delete_flow_rows(
 /// Tests that all Postgres column types (including nullable arrays) round-trip
 /// correctly through the ClickHouse RowBinary encoding.
 ///
-/// # Regression test
+/// # GIVEN
 ///
-/// This test specifically catches the nullable-array encoding bug where
-/// `nullable_flags[i] = true` for array columns caused `rb_encode_nullable` to
-/// prepend an extra null-indicator byte. ClickHouse read that byte as `varint(0)`
-/// (empty array) and then parsed the actual element bytes as subsequent column
-/// data, ultimately failing with "Cannot read all data" at row 2.
+/// A Postgres table covering every supported column type -- scalars (integers,
+/// floats, numeric, boolean, text, varchar, date, timestamp, timestamptz, time,
+/// interval, jsonb, json, bytea, inet, cidr, macaddr, uuid) and nullable array
+/// columns (`integer[]`, `text[]`). Two rows are inserted before the pipeline
+/// starts:
 ///
-/// The fix: array columns always use `nullable_flags[i] = false` because the DDL
-/// emits `Array(Nullable(T))` without an outer `Nullable` wrapper.
+/// 1. Positive/typical values with **empty** arrays.
+/// 2. Boundary values (min-ints, negative floats) with **non-empty** arrays.
 ///
-/// Row 1 has **empty** arrays (accidentally passed with the old code because
-/// `0x00` null-indicator == `varint(0)` = empty array).
-/// Row 2 has **non-empty** arrays (fails with the old code, passes with the fix).
+/// # WHEN
+///
+/// The pipeline runs initial table copy from Postgres to ClickHouse.
+///
+/// # THEN
+///
+/// Every column round-trips correctly:
+/// - Scalars match their inserted values exactly (floats within epsilon).
+/// - Empty arrays remain empty; non-empty arrays preserve elements.
+/// - Both rows have `cdc_operation = "INSERT"`.
+///
+/// # Regression
+///
+/// Row 2's non-empty arrays specifically catch the nullable-array encoding bug
+/// where `nullable_flags[i] = true` for array columns caused `rb_encode_nullable`
+/// to prepend an extra null-indicator byte. ClickHouse read that byte as
+/// `varint(0)` (empty array) and then parsed the actual element bytes as
+/// subsequent column data, failing with "Cannot read all data" at row 2.
 #[tokio::test(flavor = "multi_thread")]
 async fn all_types_table_copy() {
     init_test_tracing();
     install_crypto_provider();
 
-    // ── Postgres source ───────────────────────────────────────────────────────
+    // --- GIVEN: Postgres source with all supported column types ---
     let database = spawn_source_database().await;
     let table_name = test_table_name("all_types_encoding");
 
@@ -196,9 +211,6 @@ async fn all_types_table_copy() {
         .await
         .expect("Failed to create publication");
 
-    // Insert rows BEFORE starting the pipeline — they will be captured by the
-    // initial table-copy phase (write_table_rows path).
-    //
     // Row 1: empty arrays.  With the old encoding bug, this accidentally
     //        produced valid RowBinary because `0x00` (null-indicator) ==
     //        varint(0) == empty array.
@@ -260,7 +272,7 @@ async fn all_types_table_copy() {
         .await
         .expect("Failed to insert row 2");
 
-    // ── ClickHouse destination ────────────────────────────────────────────────
+    // --- WHEN: pipeline copies data to ClickHouse ---
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -282,12 +294,12 @@ async fn all_types_table_copy() {
     table_ready.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // ── Verify ClickHouse data ────────────────────────────────────────────────
+    // --- THEN: every column round-trips correctly ---
     let rows: Vec<AllTypesRow> = ch_db.query(ALL_TYPES_SELECT).await;
 
     assert_eq!(rows.len(), 2, "expected 2 rows in ClickHouse");
 
-    // ── Row 1 assertions ─────────────────────────────────────────────────────
+    // Row 1: positive/typical values, empty arrays.
     let r1 = &rows[0];
     assert_eq!(r1.id, 1);
     assert_eq!(r1.smallint_col, 42);
@@ -321,7 +333,7 @@ async fn all_types_table_copy() {
         "f47ac10b-58cc-4372-a567-0e02b2c3d479"
     );
     assert_eq!(r1.cdc_operation, "INSERT");
-    // Empty arrays — the regression case that accidentally worked before the fix.
+    // Empty arrays -- the regression case that accidentally worked before the fix.
     assert_eq!(
         r1.integer_array_col,
         Vec::<Option<i32>>::new(),
@@ -333,7 +345,7 @@ async fn all_types_table_copy() {
         "row 1 text_array_col should be empty"
     );
 
-    // ── Row 2 assertions ─────────────────────────────────────────────────────
+    // Row 2: boundary values, non-empty arrays (the regression case).
     let r2 = &rows[1];
     assert_eq!(r2.id, 2);
     assert_eq!(r2.smallint_col, -32768);
@@ -347,29 +359,41 @@ async fn all_types_table_copy() {
         "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
     );
     assert_eq!(r2.cdc_operation, "INSERT");
-    // Non-empty arrays — the regression case that triggered the bug before the fix.
+    // Non-empty arrays -- the regression case that triggered the bug before the fix.
     assert_eq!(
         r2.integer_array_col,
         vec![Some(1), Some(2), Some(3)],
-        "row 2 integer_array_col mismatch — nullable-array encoding bug likely present"
+        "row 2 integer_array_col mismatch -- nullable-array encoding bug likely present"
     );
     assert_eq!(
         r2.text_array_col,
         vec![Some("alpha".to_string()), Some("beta".to_string())],
-        "row 2 text_array_col mismatch — nullable-array encoding bug likely present"
+        "row 2 text_array_col mismatch -- nullable-array encoding bug likely present"
     );
 }
 
 /// Tests that UPDATE events are streamed to ClickHouse after the initial table copy.
 ///
-/// ClickHouse is append-only for CDC in this destination, so the original copied row
-/// remains present with `cdc_operation = "INSERT"` and the streamed change arrives as
-/// a second row with `cdc_operation = "UPDATE"` and a positive LSN.
+/// # GIVEN
+///
+/// A Postgres table with a single row (`id=1, value='before'`).
+///
+/// # WHEN
+///
+/// The pipeline copies the row, then an `UPDATE ... SET value = 'after'` is
+/// issued against Postgres.
+///
+/// # THEN
+///
+/// ClickHouse contains two rows (append-only CDC):
+/// - The original `INSERT` from table copy with `cdc_lsn = 0`.
+/// - The streamed `UPDATE` with the new value and a positive LSN.
 #[tokio::test(flavor = "multi_thread")]
 async fn updates_are_streamed_to_clickhouse() {
     init_test_tracing();
     install_crypto_provider();
 
+    // --- GIVEN: Postgres source with one row ---
     let database = spawn_source_database().await;
     let table_name = test_table_name("update_flow");
 
@@ -392,6 +416,7 @@ async fn updates_are_streamed_to_clickhouse() {
         .await
         .expect("Failed to insert initial update_flow row");
 
+    // --- WHEN: pipeline copies data, then an UPDATE is streamed ---
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -424,6 +449,7 @@ async fn updates_are_streamed_to_clickhouse() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
+    // --- THEN: one INSERT from table copy, one UPDATE from streaming ---
     assert_eq!(rows.len(), 2, "expected copied row plus streamed update");
 
     let insert_row = &rows[0];
@@ -442,8 +468,6 @@ async fn updates_are_streamed_to_clickhouse() {
     );
 }
 
-// ── Boundary-values test ─────────────────────────────────────────────────────
-
 const BOUNDARY_VALUES_SELECT: &str = concat!(
     "SELECT id, nullable_text, nullable_int, ",
     "int_array_col, text_array_col, ",
@@ -452,7 +476,7 @@ const BOUNDARY_VALUES_SELECT: &str = concat!(
     "ORDER BY id",
 );
 
-/// Tests that edge-case values survive the Postgres → ClickHouse pipeline
+/// Tests that edge-case values survive the Postgres -> ClickHouse pipeline
 /// without data loss or corruption.
 ///
 /// # GIVEN
@@ -460,11 +484,11 @@ const BOUNDARY_VALUES_SELECT: &str = concat!(
 /// A Postgres table with nullable scalar columns and nullable array columns,
 /// populated with four rows that exercise encoding boundary conditions:
 ///
-/// 1. **All NULLs** — nullable scalars are NULL, arrays are empty.
-/// 2. **NULL elements inside arrays** — `{1, NULL, 3}`, `{'a', NULL, 'c'}`.
-/// 3. **Empty strings** — a present-but-empty text value next to a NULL integer,
+/// 1. **All NULLs** -- nullable scalars are NULL, arrays are empty.
+/// 2. **NULL elements inside arrays** -- `{1, NULL, 3}`, `{'a', NULL, 'c'}`.
+/// 3. **Empty strings** -- a present-but-empty text value next to a NULL integer,
 ///    plus single-element arrays (varint length = 1).
-/// 4. **Multi-byte UTF-8** — emoji and CJK characters, verifying that the
+/// 4. **Multi-byte UTF-8** -- emoji and CJK characters, verifying that the
 ///    RowBinary varint encodes byte length (not character count) correctly.
 ///
 /// # WHEN
@@ -483,7 +507,7 @@ async fn boundary_values_table_copy() {
     init_test_tracing();
     install_crypto_provider();
 
-    // ── GIVEN: Postgres source with boundary-value rows ──────────────────────
+    // --- GIVEN: Postgres source with boundary-value rows ---
 
     let database = spawn_source_database().await;
     let table_name = test_table_name("boundary_values");
@@ -518,7 +542,7 @@ async fn boundary_values_table_copy() {
         .await
         .expect("Failed to insert row 1 (all NULLs)");
 
-    // Row 2: arrays with interior NULL elements — the element at index 1 is NULL
+    // Row 2: arrays with interior NULL elements -- the element at index 1 is NULL
     // while surrounding elements are present.
     database
         .run_sql(&format!(
@@ -540,7 +564,7 @@ async fn boundary_values_table_copy() {
         .await
         .expect("Failed to insert row 3 (empty string + single-element arrays)");
 
-    // Row 4: multi-byte UTF-8 — emoji (4 bytes per char) and CJK (3 bytes per char).
+    // Row 4: multi-byte UTF-8 -- emoji (4 bytes per char) and CJK (3 bytes per char).
     // The RowBinary varint encodes byte length, not character count.
     database
         .run_sql(&format!(
@@ -551,8 +575,7 @@ async fn boundary_values_table_copy() {
         .await
         .expect("Failed to insert row 4 (multi-byte UTF-8)");
 
-    // ── WHEN: pipeline copies data to ClickHouse ─────────────────────────────
-
+    // --- WHEN: pipeline copies data to ClickHouse ---
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -574,8 +597,7 @@ async fn boundary_values_table_copy() {
     table_ready.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // ── THEN: ClickHouse data matches Postgres exactly ───────────────────────
-
+    // --- THEN: ClickHouse data matches Postgres exactly ---
     let rows: Vec<BoundaryValuesRow> = ch_db.query(BOUNDARY_VALUES_SELECT).await;
     assert_eq!(rows.len(), 4, "expected 4 rows in ClickHouse");
 
@@ -641,8 +663,8 @@ async fn boundary_values_table_copy() {
 /// A Postgres table with `REPLICA IDENTITY FULL` (so Postgres sends all column
 /// values in DELETE events, not just the primary key), populated with two rows:
 ///
-/// 1. `id=1, value='keep_me'` — will remain untouched.
-/// 2. `id=2, value='delete_me'` — will be deleted after table copy.
+/// 1. `id=1, value='keep_me'` -- will remain untouched.
+/// 2. `id=2, value='delete_me'` -- will be deleted after table copy.
 ///
 /// # WHEN
 ///
@@ -660,7 +682,7 @@ async fn deletes_are_streamed_to_clickhouse() {
     init_test_tracing();
     install_crypto_provider();
 
-    // ── GIVEN: Postgres source with two rows, REPLICA IDENTITY FULL ─────────
+    // --- GIVEN: Postgres source with two rows, REPLICA IDENTITY FULL ---
 
     let database = spawn_source_database().await;
     let table_name = test_table_name("delete_flow");
@@ -692,7 +714,7 @@ async fn deletes_are_streamed_to_clickhouse() {
         .await
         .expect("Failed to insert delete_flow rows");
 
-    // ── WHEN: pipeline copies data, then a DELETE is streamed ────────────────
+    // --- WHEN: pipeline copies data, then a DELETE is streamed ---
 
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -726,7 +748,7 @@ async fn deletes_are_streamed_to_clickhouse() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // ── THEN: two INSERTs from table copy, one DELETE from streaming ─────────
+    // --- THEN: two INSERTs from table copy, one DELETE from streaming ---
 
     assert_eq!(
         rows.len(),

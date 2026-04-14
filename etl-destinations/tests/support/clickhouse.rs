@@ -4,10 +4,10 @@
 /// A row read back from the ClickHouse `all_types_encoding` test table.
 ///
 /// Column-to-type mapping:
-/// - `Date`          → `u16`  (days since 1970-01-01 in RowBinary)
-/// - `DateTime64(6)` → `i64`  (microseconds since epoch in RowBinary)
-/// - `UUID`          → `String` (via `toString()` in the SELECT query)
-/// - `Array(Nullable(T))` → `Vec<Option<T>>`
+/// - `Date`          -> `u16`  (days since 1970-01-01 in RowBinary)
+/// - `DateTime64(6)` -> `i64`  (microseconds since epoch in RowBinary)
+/// - `UUID`          -> `String` (via `toString()` in the SELECT query)
+/// - `Array(Nullable(T))` -> `Vec<Option<T>>`
 ///
 /// Fields must match the SELECT column list in the test query exactly.
 #[derive(clickhouse::Row, serde::Deserialize, Debug, Clone)]
@@ -22,9 +22,9 @@ pub struct AllTypesRow {
     pub boolean_col: bool,
     pub text_col: String,
     pub varchar_col: String,
-    pub date_col: u16,        // Date → days since epoch
-    pub timestamp_col: i64,   // DateTime64(6) → microseconds
-    pub timestamptz_col: i64, // DateTime64(6,'UTC') → microseconds
+    pub date_col: u16,        // Date -> days since epoch
+    pub timestamp_col: i64,   // DateTime64(6) -> microseconds
+    pub timestamptz_col: i64, // DateTime64(6,'UTC') -> microseconds
     pub time_col: String,
     pub interval_col: String,
     pub jsonb_col: String,
