@@ -15,7 +15,7 @@ use crate::ducklake::LAKE_CATALOG;
 
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";
-const DUCKDB_EXTENSION_VERSION: &str = "1.5.1";
+const DUCKDB_EXTENSION_VERSION: &str = "1.5.2";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";

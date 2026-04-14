@@ -349,63 +349,66 @@ where
         self.ensure_applied_batches_table_exists().await?;
         self.ensure_streaming_progress_table_exists().await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
-        self.run_duckdb_blocking(DuckDbBlockingOperationKind::Foreground, move |conn| -> EtlResult<()> {
-            conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
-                etl_error!(
-                    ErrorKind::DestinationQueryFailed,
-                    "DuckLake BEGIN TRANSACTION failed",
-                    source: e
-                )
-            })?;
-
-            let result = (|| -> EtlResult<()> {
-                let truncate_table_sql =
-                    format!(r#"TRUNCATE TABLE {LAKE_CATALOG}."{table_name}";"#);
-                conn.execute_batch(&truncate_table_sql).map_err(|e| {
+        self.run_duckdb_blocking(
+            DuckDbBlockingOperationKind::Foreground,
+            move |conn| -> EtlResult<()> {
+                conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
-                        "DuckLake TRUNCATE TABLE failed",
-                        format_query_error_detail(&truncate_table_sql, &e),
+                        "DuckLake BEGIN TRANSACTION failed",
                         source: e
                     )
                 })?;
 
-                clear_applied_batch_markers_for_kind(
-                    conn,
-                    &table_name,
-                    DuckLakeTableBatchKind::Copy,
-                )?;
-                clear_applied_batch_markers_for_kind(
-                    conn,
-                    &table_name,
-                    DuckLakeTableBatchKind::Mutation,
-                )?;
-                clear_applied_batch_markers_for_kind(
-                    conn,
-                    &table_name,
-                    DuckLakeTableBatchKind::Truncate,
-                )?;
-                clear_table_streaming_progress(conn, &table_name)?;
-                Ok(())
-            })();
+                let result = (|| -> EtlResult<()> {
+                    let truncate_table_sql =
+                        format!(r#"TRUNCATE TABLE {LAKE_CATALOG}."{table_name}";"#);
+                    conn.execute_batch(&truncate_table_sql).map_err(|e| {
+                        etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake TRUNCATE TABLE failed",
+                            format_query_error_detail(&truncate_table_sql, &e),
+                            source: e
+                        )
+                    })?;
 
-            match result {
-                Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
-                    etl_error!(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake COMMIT failed",
-                        source: e
-                    )
-                }),
-                Err(error) => {
-                    let err = conn.execute_batch("ROLLBACK");
-                    if let Err(err) = err {
-                        tracing::error!(?err, "error rollback");
+                    clear_applied_batch_markers_for_kind(
+                        conn,
+                        &table_name,
+                        DuckLakeTableBatchKind::Copy,
+                    )?;
+                    clear_applied_batch_markers_for_kind(
+                        conn,
+                        &table_name,
+                        DuckLakeTableBatchKind::Mutation,
+                    )?;
+                    clear_applied_batch_markers_for_kind(
+                        conn,
+                        &table_name,
+                        DuckLakeTableBatchKind::Truncate,
+                    )?;
+                    clear_table_streaming_progress(conn, &table_name)?;
+                    Ok(())
+                })();
+
+                match result {
+                    Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
+                        etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake COMMIT failed",
+                            source: e
+                        )
+                    }),
+                    Err(error) => {
+                        let err = conn.execute_batch("ROLLBACK");
+                        if let Err(err) = err {
+                            tracing::error!(?err, "error rollback");
+                        }
+                        Err(error)
                     }
-                    Err(error)
                 }
-            }
-        })
+            },
+        )
         .await
     }
 
@@ -1219,7 +1222,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for root in candidate_roots {
-            let extension_dir = root.join("1.5.1").join(platform_dir);
+            let extension_dir = root.join("1.5.2").join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
 
             if ducklake_extension.is_file() {
