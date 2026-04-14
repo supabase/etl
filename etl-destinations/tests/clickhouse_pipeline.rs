@@ -73,6 +73,13 @@ const DELETE_FLOW_SELECT: &str = concat!(
     "ORDER BY id, cdc_lsn",
 );
 
+/// SELECT query used to verify the `restart_flow` test.
+const RESTART_FLOW_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_restart__flow\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
 /// Days from 1970-01-01 to 2024-01-15 (used to verify the `date_col` round-trip).
 ///
 /// Python: `(date(2024, 1, 15) - date(1970, 1, 1)).days` = 19737
@@ -121,6 +128,27 @@ async fn wait_for_delete_flow_rows(
 
     panic!(
         "timed out waiting for clickhouse delete_flow rows: got {} of {}",
+        rows.len(),
+        expected_rows,
+    );
+}
+
+/// Waits until ClickHouse returns at least `expected_rows` from `RESTART_FLOW_SELECT`.
+async fn wait_for_restart_flow_rows(
+    ch_db: &ClickHouseTestDatabase,
+    expected_rows: usize,
+) -> Vec<UpdateFlowRow> {
+    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(expected_rows);
+    for _ in 0..50 {
+        rows = ch_db.query(RESTART_FLOW_SELECT).await;
+        if rows.len() >= expected_rows {
+            return rows;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!(
+        "timed out waiting for clickhouse restart_flow rows: got {} of {}",
         rows.len(),
         expected_rows,
     );
@@ -779,4 +807,128 @@ async fn deletes_are_streamed_to_clickhouse() {
     );
     assert_eq!(r.cdc_operation, "DELETE");
     assert!(r.cdc_lsn > 0, "streamed delete should have a positive LSN");
+}
+
+/// Tests that a pipeline restart resumes CDC streaming without re-running
+/// the initial table copy.
+///
+/// # GIVEN
+///
+/// A Postgres table with one row (`id=1, value='before_restart'`), copied
+/// to ClickHouse by a first pipeline run that then shuts down cleanly.
+///
+/// # WHEN
+///
+/// A new `ClickHouseDestination` and `Pipeline` are built with the same
+/// store and pipeline_id (simulating process restart), the pipeline is
+/// started, and a second row (`id=2, value='after_restart'`) is inserted
+/// into Postgres.
+///
+/// # THEN
+///
+/// ClickHouse contains exactly two rows:
+/// - `id=1` from the initial table copy (`cdc_lsn = 0`).
+/// - `id=2` from CDC streaming in the second run (`cdc_lsn > 0`).
+/// No duplicate `id=1` row exists -- table copy must not re-run.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_restart_resumes_streaming() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: first pipeline run copies one row ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("restart_flow");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create restart_flow test table");
+
+    let publication_name = "test_pub_clickhouse_restart";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create restart_flow publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('before_restart')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert initial restart_flow row");
+
+    let ch_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = ch_db.build_destination(pipeline_id, store.clone());
+
+    let table_ready = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Verify first run produced exactly one row.
+    let rows: Vec<UpdateFlowRow> = ch_db.query(RESTART_FLOW_SELECT).await;
+    assert_eq!(rows.len(), 1, "first run should copy exactly one row");
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].value, "before_restart");
+
+    // --- WHEN: rebuild destination and pipeline, then stream a new insert ---
+    let destination = ch_db.build_destination(pipeline_id, store.clone());
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('after_restart')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert post-restart row");
+
+    let rows = wait_for_restart_flow_rows(&ch_db, 2).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: exactly two rows, no duplicate from re-running table copy ---
+    assert_eq!(
+        rows.len(),
+        2,
+        "expected original copied row plus one streamed insert, no duplicates"
+    );
+
+    let r = &rows[0];
+    assert_eq!(r.id, 1);
+    assert_eq!(r.value, "before_restart");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert_eq!(r.cdc_lsn, 0, "first row should be from table copy");
+
+    let r = &rows[1];
+    assert_eq!(r.id, 2);
+    assert_eq!(r.value, "after_restart");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert!(
+        r.cdc_lsn > 0,
+        "second row should be from CDC streaming after restart"
+    );
 }
