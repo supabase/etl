@@ -66,6 +66,13 @@ const UPDATE_FLOW_SELECT: &str = concat!(
     "ORDER BY id, cdc_lsn",
 );
 
+/// SELECT query used to verify the `delete_flow` streaming test.
+const DELETE_FLOW_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_delete__flow\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
 /// Days from 1970-01-01 to 2024-01-15 (used to verify the `date_col` round-trip).
 ///
 /// Python: `(date(2024, 1, 15) - date(1970, 1, 1)).days` = 19737
@@ -93,6 +100,27 @@ async fn wait_for_update_flow_rows(
 
     panic!(
         "timed out waiting for clickhouse update_flow rows: got {} of {}",
+        rows.len(),
+        expected_rows,
+    );
+}
+
+/// Waits until ClickHouse returns at least `expected_rows` from `DELETE_FLOW_SELECT`.
+async fn wait_for_delete_flow_rows(
+    ch_db: &ClickHouseTestDatabase,
+    expected_rows: usize,
+) -> Vec<UpdateFlowRow> {
+    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(expected_rows);
+    for _ in 0..50 {
+        rows = ch_db.query(DELETE_FLOW_SELECT).await;
+        if rows.len() >= expected_rows {
+            return rows;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!(
+        "timed out waiting for clickhouse delete_flow rows: got {} of {}",
         rows.len(),
         expected_rows,
     );
@@ -604,4 +632,129 @@ async fn boundary_values_table_copy() {
         vec![Some("日本語".to_string()), Some("中文".to_string())],
         "multi-byte UTF-8 in arrays must round-trip exactly"
     );
+}
+
+/// Tests that DELETE events are streamed to ClickHouse after the initial table copy.
+///
+/// # GIVEN
+///
+/// A Postgres table with `REPLICA IDENTITY FULL` (so Postgres sends all column
+/// values in DELETE events, not just the primary key), populated with two rows:
+///
+/// 1. `id=1, value='keep_me'` — will remain untouched.
+/// 2. `id=2, value='delete_me'` — will be deleted after table copy.
+///
+/// # WHEN
+///
+/// The pipeline copies both rows, then a `DELETE ... WHERE id = 2` is issued
+/// against Postgres.
+///
+/// # THEN
+///
+/// ClickHouse contains three rows (append-only CDC):
+/// - Two `INSERT` rows from the initial table copy (`cdc_lsn = 0`).
+/// - One `DELETE` row for `id=2` with the old row data preserved and a positive LSN.
+/// - The `id=1` row has no corresponding `DELETE`.
+#[tokio::test(flavor = "multi_thread")]
+async fn deletes_are_streamed_to_clickhouse() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // ── GIVEN: Postgres source with two rows, REPLICA IDENTITY FULL ─────────
+
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("delete_flow");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create delete_flow test table");
+
+    database
+        .run_sql(&format!(
+            "ALTER TABLE {} REPLICA IDENTITY FULL",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to set replica identity full");
+
+    let publication_name = "test_pub_clickhouse_deletes";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create delete_flow publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('keep_me'), ('delete_me')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert delete_flow rows");
+
+    // ── WHEN: pipeline copies data, then a DELETE is streamed ────────────────
+
+    let ch_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = ch_db.build_destination(pipeline_id, store.clone());
+
+    let table_ready = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    database
+        .run_sql(&format!(
+            "DELETE FROM {} WHERE id = 2",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to delete delete_flow row");
+
+    let rows = wait_for_delete_flow_rows(&ch_db, 3).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // ── THEN: two INSERTs from table copy, one DELETE from streaming ─────────
+
+    assert_eq!(
+        rows.len(),
+        3,
+        "expected 2 copied rows plus 1 streamed delete"
+    );
+
+    // Row 1: copied, untouched.
+    let r = &rows[0];
+    assert_eq!(r.id, 1);
+    assert_eq!(r.value, "keep_me");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert_eq!(r.cdc_lsn, 0);
+
+    // Row 2: copied, then deleted.
+    let r = &rows[1];
+    assert_eq!(r.id, 2);
+    assert_eq!(r.value, "delete_me");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert_eq!(r.cdc_lsn, 0);
+
+    // Row 3: the streamed DELETE for id=2, preserving old row data.
+    let r = &rows[2];
+    assert_eq!(r.id, 2, "delete must target the correct row");
+    assert_eq!(
+        r.value, "delete_me",
+        "old row data must be preserved in DELETE"
+    );
+    assert_eq!(r.cdc_operation, "DELETE");
+    assert!(r.cdc_lsn > 0, "streamed delete should have a positive LSN");
 }
