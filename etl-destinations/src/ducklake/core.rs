@@ -27,7 +27,7 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore}
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use url::Url;
 
 use crate::ducklake::batches::{
@@ -52,29 +52,13 @@ use crate::ducklake::maintenance::{
     spawn_ducklake_maintenance_worker, table_write_slot,
 };
 use crate::ducklake::metrics::{
-    BATCH_KIND_LABEL, DuckLakeMetricsSampler, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
+    DuckLakeMetricsSampler, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
     ETL_DUCKLAKE_INLINE_FLUSH_ROWS, ETL_DUCKLAKE_POOL_SIZE, RESULT_LABEL, register_metrics,
     spawn_ducklake_metrics_sampler,
 };
 use crate::ducklake::schema::build_create_table_sql_ducklake;
 use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG, S3Config};
 use crate::table_name::try_stringify_table_name;
-
-/// Label values used only for inline-flush metrics and logs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum DuckLakeInlineFlushKind {
-    Mutation,
-    Shutdown,
-}
-
-impl DuckLakeInlineFlushKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Mutation => "mutation",
-            Self::Shutdown => "shutdown",
-        }
-    }
-}
 
 /// Returns whether a DuckLake DDL error indicates another transaction already
 /// created the requested table.
@@ -134,7 +118,6 @@ where
         self.streaming_tasks.drain().await?;
         self.shutdown_maintenance_worker().await?;
         self.shutdown_metrics_sampler().await?;
-        self.flush_known_tables_on_shutdown().await;
 
         Ok(())
     }
@@ -890,99 +873,6 @@ where
         .await
     }
 
-    /// Flushes any remaining inlined rows for known tables before shutdown completes.
-    async fn flush_known_tables_on_shutdown(&self) {
-        let table_names = {
-            let cache = self.created_tables.lock();
-            cache.iter().cloned().collect::<Vec<_>>()
-        };
-
-        if table_names.is_empty() {
-            debug!("ducklake shutdown inline flush skipped, no known tables");
-            return;
-        }
-
-        let known_table_count = table_names.len();
-        let mut join_set = JoinSet::new();
-
-        for table_name in table_names {
-            let pool = Arc::clone(&self.pool);
-            let blocking_slots = Arc::clone(&self.blocking_slots);
-            let table_write_slots = Arc::clone(&self.table_write_slots);
-            let result_table_name = table_name.clone();
-
-            join_set.spawn(async move {
-                let result = async move {
-                    let table_write_permit = table_write_slot(&table_write_slots, &table_name)
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| {
-                            etl_error!(
-                                ErrorKind::InvalidState,
-                                "DuckLake table write semaphore closed"
-                            )
-                        })?;
-
-                    run_duckdb_blocking(
-                        pool,
-                        blocking_slots,
-                        DuckDbBlockingOperationKind::Maintenance,
-                        move |conn| {
-                            let _table_write_permit = table_write_permit;
-                            flush_table_inlined_data(
-                                conn,
-                                &table_name,
-                                DuckLakeInlineFlushKind::Shutdown,
-                            )
-                        },
-                    )
-                    .await
-                }
-                .await;
-
-                (result_table_name, result)
-            });
-        }
-
-        let mut successful_tables = 0usize;
-        let mut failed_tables = 0usize;
-        let mut total_rows_flushed = 0u64;
-
-        while let Some(result) = join_set.join_next().await {
-            match result {
-                Ok((table_name, Ok(rows_flushed))) => {
-                    successful_tables += 1;
-                    total_rows_flushed = total_rows_flushed.saturating_add(rows_flushed);
-                    debug!(
-                        table = %table_name,
-                        rows_flushed,
-                        "ducklake shutdown inline flush completed"
-                    );
-                }
-                Ok((table_name, Err(error))) => {
-                    failed_tables += 1;
-                    warn!(
-                        table = %table_name,
-                        error = ?error,
-                        "ducklake shutdown inline flush failed"
-                    );
-                }
-                Err(error) => {
-                    failed_tables += 1;
-                    warn!(error = ?error, "ducklake shutdown inline flush task panicked");
-                }
-            }
-        }
-
-        info!(
-            known_table_count,
-            successful_tables,
-            failed_tables,
-            total_rows_flushed,
-            "ducklake shutdown inline flush sweep completed"
-        );
-    }
-
     /// Stops the background DuckLake maintenance worker.
     async fn shutdown_maintenance_worker(&self) -> EtlResult<()> {
         if let Some(maintenance_worker) = &*self.maintenance_worker {
@@ -1145,7 +1035,6 @@ pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> EtlResult<Du
 pub(super) fn flush_table_inlined_data(
     conn: &duckdb::Connection,
     table_name: &str,
-    inline_flush_kind: DuckLakeInlineFlushKind,
 ) -> EtlResult<u64> {
     let flush_started = Instant::now();
     let sql = format!(
@@ -1166,13 +1055,11 @@ pub(super) fn flush_table_inlined_data(
     let flush_result = if rows_flushed > 0 { "flushed" } else { "noop" };
     histogram!(
         ETL_DUCKLAKE_INLINE_FLUSH_ROWS,
-        BATCH_KIND_LABEL => inline_flush_kind.as_str(),
         RESULT_LABEL => flush_result,
     )
     .record(rows_flushed as f64);
     histogram!(
         ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
-        BATCH_KIND_LABEL => inline_flush_kind.as_str(),
         RESULT_LABEL => flush_result,
     )
     .record(flush_started.elapsed().as_secs_f64());
@@ -1180,14 +1067,12 @@ pub(super) fn flush_table_inlined_data(
     if rows_flushed > 0 {
         debug!(
             table = %table_name,
-            batch_kind = inline_flush_kind.as_str(),
             rows_flushed,
             "ducklake inlined data flushed"
         );
     } else {
         debug!(
             table = %table_name,
-            batch_kind = inline_flush_kind.as_str(),
             "ducklake inlined data already flushed"
         );
     }
@@ -1403,9 +1288,8 @@ mod tests {
             .expect("failed to write rows");
 
         let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
-        let _rows_flushed =
-            flush_table_inlined_data(&conn, &table_name, DuckLakeInlineFlushKind::Mutation)
-                .expect("failed to materialize inlined rows for storage metrics test");
+        let _rows_flushed = flush_table_inlined_data(&conn, &table_name)
+            .expect("failed to materialize inlined rows for storage metrics test");
         let deadline = Instant::now() + Duration::from_secs(10);
         let metrics = loop {
             let metrics = query_table_storage_metrics_blocking(&conn, &table_name)
@@ -1457,9 +1341,8 @@ mod tests {
             .expect("failed to write rows");
 
         let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
-        let _rows_flushed =
-            flush_table_inlined_data(&conn, &table_name, DuckLakeInlineFlushKind::Mutation)
-                .expect("failed to materialize inlined rows for catalog metrics test");
+        let _rows_flushed = flush_table_inlined_data(&conn, &table_name)
+            .expect("failed to materialize inlined rows for catalog metrics test");
         let deadline = Instant::now() + Duration::from_secs(10);
         let metrics = loop {
             let metrics = query_catalog_maintenance_metrics_blocking(&conn)

@@ -49,6 +49,10 @@ pub(crate) const ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS: &str =
 pub(crate) const ETL_DUCKLAKE_RETRIES_TOTAL: &str = "etl_ducklake_retries_total";
 pub(crate) const ETL_DUCKLAKE_FAILED_BATCHES_TOTAL: &str = "etl_ducklake_failed_batches_total";
 pub(crate) const ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL: &str = "etl_ducklake_replayed_batches_total";
+pub(crate) const ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL: &str =
+    "etl_ducklake_maintenance_started_total";
+pub(crate) const ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS: &str =
+    "etl_ducklake_maintenance_in_progress";
 pub(crate) const ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS: &str =
     "etl_ducklake_maintenance_duration_seconds";
 pub(crate) const ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL: &str =
@@ -214,6 +218,16 @@ pub(crate) fn register_metrics() {
             ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL,
             Unit::Count,
             "DuckLake batches skipped because an applied marker already existed, labeled by batch_kind."
+        );
+        describe_counter!(
+            ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL,
+            Unit::Count,
+            "DuckLake background maintenance operations started, labeled by task, operation, and reason."
+        );
+        describe_gauge!(
+            ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS,
+            Unit::Count,
+            "DuckLake background maintenance operations currently in progress, labeled by task, operation, and reason."
         );
         describe_histogram!(
             ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,

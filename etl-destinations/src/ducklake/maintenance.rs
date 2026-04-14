@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use etl::error::{ErrorKind, EtlError, EtlResult};
 use etl::etl_error;
-use metrics::{counter, histogram};
+use metrics::{counter, gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::quote_literal;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, watch};
@@ -17,10 +17,11 @@ use crate::ducklake::client::{
     DuckDbBlockingOperationKind, DuckLakeConnectionManager, LazyDuckLakePool,
     format_query_error_detail, run_duckdb_blocking,
 };
-use crate::ducklake::core::{DuckLakeInlineFlushKind, flush_table_inlined_data};
+use crate::ducklake::core::flush_table_inlined_data;
 use crate::ducklake::metrics::{
     DuckLakeTableStorageMetrics, ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
-    ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL, MAINTENANCE_OPERATION_LABEL, MAINTENANCE_OUTCOME_LABEL,
+    ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS, ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL,
+    ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL, MAINTENANCE_OPERATION_LABEL, MAINTENANCE_OUTCOME_LABEL,
     MAINTENANCE_REASON_LABEL, MAINTENANCE_TASK_LABEL, SMALL_FILE_SIZE_BYTES,
 };
 use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG};
@@ -358,6 +359,82 @@ pub(super) struct DuckLakeMaintenanceWorker {
     pub(super) notification_tx: mpsc::Sender<TableMaintenanceNotification>,
     pub(super) shutdown_tx: watch::Sender<()>,
     pub(super) handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// Records one DuckLake background maintenance operation start.
+fn record_ducklake_maintenance_started(
+    task: &'static str,
+    operation: MaintenanceOperation,
+    reason: MaintenanceReason,
+) {
+    counter!(
+        ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL,
+        MAINTENANCE_TASK_LABEL => task,
+        MAINTENANCE_OPERATION_LABEL => operation.as_str(),
+        MAINTENANCE_REASON_LABEL => reason.as_str(),
+    )
+    .increment(1);
+}
+
+/// Increments one DuckLake background maintenance operation in-progress sample.
+fn increment_ducklake_maintenance_in_progress(
+    task: &'static str,
+    operation: MaintenanceOperation,
+    reason: MaintenanceReason,
+) {
+    gauge!(
+        ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS,
+        MAINTENANCE_TASK_LABEL => task,
+        MAINTENANCE_OPERATION_LABEL => operation.as_str(),
+        MAINTENANCE_REASON_LABEL => reason.as_str(),
+    )
+    .increment(1.0);
+}
+
+/// Decrements one DuckLake background maintenance operation in-progress sample.
+fn decrement_ducklake_maintenance_in_progress(
+    task: &'static str,
+    operation: MaintenanceOperation,
+    reason: MaintenanceReason,
+) {
+    gauge!(
+        ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS,
+        MAINTENANCE_TASK_LABEL => task,
+        MAINTENANCE_OPERATION_LABEL => operation.as_str(),
+        MAINTENANCE_REASON_LABEL => reason.as_str(),
+    )
+    .decrement(1.0);
+}
+
+/// Keeps the maintenance in-progress gauge balanced for one operation attempt.
+#[must_use = "the returned guard tracks an in-progress maintenance metric until dropped"]
+struct DuckLakeMaintenanceInProgressGuard {
+    task: &'static str,
+    operation: MaintenanceOperation,
+    reason: MaintenanceReason,
+}
+
+impl DuckLakeMaintenanceInProgressGuard {
+    /// Starts one maintenance attempt and tracks it until the guard is dropped.
+    fn start(
+        task: &'static str,
+        operation: MaintenanceOperation,
+        reason: MaintenanceReason,
+    ) -> Self {
+        record_ducklake_maintenance_started(task, operation, reason);
+        increment_ducklake_maintenance_in_progress(task, operation, reason);
+        Self {
+            task,
+            operation,
+            reason,
+        }
+    }
+}
+
+impl Drop for DuckLakeMaintenanceInProgressGuard {
+    fn drop(&mut self) {
+        decrement_ducklake_maintenance_in_progress(self.task, self.operation, self.reason);
+    }
 }
 
 /// Records one DuckLake background maintenance operation duration sample.
@@ -904,18 +981,20 @@ fn flush_table_inlined_data_in_background_blocking(
     reason: MaintenanceReason,
 ) -> EtlResult<MaintenanceOutcome> {
     let flush_started = Instant::now();
-    let rows_flushed =
-        flush_table_inlined_data(conn, table_name, DuckLakeInlineFlushKind::Mutation).inspect_err(
-            |_error| {
-                record_ducklake_maintenance_duration(
-                    MAINTENANCE_TASK_FLUSH,
-                    MaintenanceOperation::FlushInlinedData,
-                    reason,
-                    MaintenanceOutcome::Failed,
-                    flush_started.elapsed().as_secs_f64(),
-                );
-            },
-        )?;
+    let _in_progress_guard = DuckLakeMaintenanceInProgressGuard::start(
+        MAINTENANCE_TASK_FLUSH,
+        MaintenanceOperation::FlushInlinedData,
+        reason,
+    );
+    let rows_flushed = flush_table_inlined_data(conn, table_name).inspect_err(|_error| {
+        record_ducklake_maintenance_duration(
+            MAINTENANCE_TASK_FLUSH,
+            MaintenanceOperation::FlushInlinedData,
+            reason,
+            MaintenanceOutcome::Failed,
+            flush_started.elapsed().as_secs_f64(),
+        );
+    })?;
     let outcome = MaintenanceOutcome::from(rows_flushed);
     record_ducklake_maintenance_duration(
         MAINTENANCE_TASK_FLUSH,
@@ -940,6 +1019,11 @@ fn run_targeted_table_maintenance_blocking(
 
     if let Some(reason) = plan.rewrite_reason {
         let rewrite_started = Instant::now();
+        let _in_progress_guard = DuckLakeMaintenanceInProgressGuard::start(
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::RewriteDataFiles,
+            reason,
+        );
         rewritten_files = rewrite_table_data_files(conn, table_name).inspect_err(|_error| {
             record_ducklake_maintenance_duration(
                 MAINTENANCE_TASK_TARGETED_MAINTENANCE,
@@ -962,6 +1046,11 @@ fn run_targeted_table_maintenance_blocking(
 
     if let Some(reason) = plan.merge_reason {
         let merge_started = Instant::now();
+        let _in_progress_guard = DuckLakeMaintenanceInProgressGuard::start(
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::MergeAdjacentFiles,
+            reason,
+        );
         merged_files = merge_adjacent_table_files(conn, table_name).inspect_err(|_error| {
             record_ducklake_maintenance_duration(
                 MAINTENANCE_TASK_TARGETED_MAINTENANCE,
@@ -1000,6 +1089,11 @@ fn run_background_checkpoint_blocking(
     reason: MaintenanceReason,
 ) -> EtlResult<()> {
     let checkpoint_started = Instant::now();
+    let _in_progress_guard = DuckLakeMaintenanceInProgressGuard::start(
+        MAINTENANCE_TASK_CHECKPOINT,
+        MaintenanceOperation::Checkpoint,
+        reason,
+    );
     #[cfg(test)]
     if FAIL_CHECKPOINT_ONCE_FOR_TESTS.swap(false, AtomicOrdering::Relaxed) {
         record_ducklake_maintenance_duration(
@@ -1167,6 +1261,58 @@ mod tests {
             .lines()
             .find_map(|line| {
                 if line.starts_with(ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL)
+                    && line.contains(&task_label)
+                    && line.contains(&operation_label)
+                    && line.contains(&reason_label)
+                {
+                    line.split_whitespace().last()?.parse::<f64>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.0)
+    }
+
+    fn maintenance_started_counter_value(
+        rendered: &str,
+        task: &str,
+        operation: MaintenanceOperation,
+        reason: MaintenanceReason,
+    ) -> f64 {
+        let task_label = format!(r#"{MAINTENANCE_TASK_LABEL}="{task}""#);
+        let operation_label = format!(r#"{MAINTENANCE_OPERATION_LABEL}="{}""#, operation.as_str());
+        let reason_label = format!(r#"{MAINTENANCE_REASON_LABEL}="{}""#, reason.as_str());
+
+        rendered
+            .lines()
+            .find_map(|line| {
+                if line.starts_with(ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL)
+                    && line.contains(&task_label)
+                    && line.contains(&operation_label)
+                    && line.contains(&reason_label)
+                {
+                    line.split_whitespace().last()?.parse::<f64>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0.0)
+    }
+
+    fn maintenance_in_progress_gauge_value(
+        rendered: &str,
+        task: &str,
+        operation: MaintenanceOperation,
+        reason: MaintenanceReason,
+    ) -> f64 {
+        let task_label = format!(r#"{MAINTENANCE_TASK_LABEL}="{task}""#);
+        let operation_label = format!(r#"{MAINTENANCE_OPERATION_LABEL}="{}""#, operation.as_str());
+        let reason_label = format!(r#"{MAINTENANCE_REASON_LABEL}="{}""#, reason.as_str());
+
+        rendered
+            .lines()
+            .find_map(|line| {
+                if line.starts_with(ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS)
                     && line.contains(&task_label)
                     && line.contains(&operation_label)
                     && line.contains(&reason_label)
@@ -1352,6 +1498,81 @@ mod tests {
         assert!(
             checkpoint_failed_after > checkpoint_failed_before,
             "checkpoint failed duration count did not increase"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maintenance_started_counter_and_in_progress_gauge_are_exported_with_labels() {
+        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
+        register_metrics();
+
+        let rendered_before = handle.render();
+        let started_before = maintenance_started_counter_value(
+            &rendered_before,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::MergeAdjacentFiles,
+            MaintenanceReason::EmergencyMergeMetricsThreshold,
+        );
+        let in_progress_before = maintenance_in_progress_gauge_value(
+            &rendered_before,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::MergeAdjacentFiles,
+            MaintenanceReason::EmergencyMergeMetricsThreshold,
+        );
+
+        let started_during;
+        let in_progress_during;
+        {
+            let _in_progress_guard = DuckLakeMaintenanceInProgressGuard::start(
+                MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+                MaintenanceOperation::MergeAdjacentFiles,
+                MaintenanceReason::EmergencyMergeMetricsThreshold,
+            );
+
+            let rendered_during = handle.render();
+            started_during = maintenance_started_counter_value(
+                &rendered_during,
+                MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+                MaintenanceOperation::MergeAdjacentFiles,
+                MaintenanceReason::EmergencyMergeMetricsThreshold,
+            );
+            in_progress_during = maintenance_in_progress_gauge_value(
+                &rendered_during,
+                MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+                MaintenanceOperation::MergeAdjacentFiles,
+                MaintenanceReason::EmergencyMergeMetricsThreshold,
+            );
+        }
+
+        let rendered_after = handle.render();
+        let started_after = maintenance_started_counter_value(
+            &rendered_after,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::MergeAdjacentFiles,
+            MaintenanceReason::EmergencyMergeMetricsThreshold,
+        );
+        let in_progress_after = maintenance_in_progress_gauge_value(
+            &rendered_after,
+            MAINTENANCE_TASK_TARGETED_MAINTENANCE,
+            MaintenanceOperation::MergeAdjacentFiles,
+            MaintenanceReason::EmergencyMergeMetricsThreshold,
+        );
+
+        assert!(
+            started_during > started_before,
+            "maintenance started counter did not increase"
+        );
+        assert!(
+            in_progress_during > in_progress_before,
+            "maintenance in-progress gauge did not increase"
+        );
+        assert_eq!(
+            started_after, started_during,
+            "maintenance started counter should stay unchanged after completion"
+        );
+        assert_eq!(
+            in_progress_after, in_progress_before,
+            "maintenance in-progress gauge should return to its previous value"
         );
     }
 
