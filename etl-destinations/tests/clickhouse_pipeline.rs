@@ -80,6 +80,13 @@ const RESTART_FLOW_SELECT: &str = concat!(
     "ORDER BY id, cdc_lsn",
 );
 
+/// SELECT query used to verify the `truncate_flow` test.
+const TRUNCATE_FLOW_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_truncate__flow\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
 /// Days from 1970-01-01 to 2024-01-15 (used to verify the `date_col` round-trip).
 ///
 /// Python: `(date(2024, 1, 15) - date(1970, 1, 1)).days` = 19737
@@ -149,6 +156,40 @@ async fn wait_for_restart_flow_rows(
 
     panic!(
         "timed out waiting for clickhouse restart_flow rows: got {} of {}",
+        rows.len(),
+        expected_rows,
+    );
+}
+
+/// Waits until ClickHouse returns exactly zero rows from `TRUNCATE_FLOW_SELECT`.
+async fn wait_for_truncate_flow_empty(ch_db: &ClickHouseTestDatabase) {
+    for _ in 0..50 {
+        let rows: Vec<UpdateFlowRow> = ch_db.query(TRUNCATE_FLOW_SELECT).await;
+        if rows.is_empty() {
+            return;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!("timed out waiting for clickhouse truncate_flow table to become empty");
+}
+
+/// Waits until ClickHouse returns at least `expected_rows` from `TRUNCATE_FLOW_SELECT`.
+async fn wait_for_truncate_flow_rows(
+    ch_db: &ClickHouseTestDatabase,
+    expected_rows: usize,
+) -> Vec<UpdateFlowRow> {
+    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(expected_rows);
+    for _ in 0..50 {
+        rows = ch_db.query(TRUNCATE_FLOW_SELECT).await;
+        if rows.len() >= expected_rows {
+            return rows;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!(
+        "timed out waiting for clickhouse truncate_flow rows: got {} of {}",
         rows.len(),
         expected_rows,
     );
@@ -930,5 +971,113 @@ async fn pipeline_restart_resumes_streaming() {
     assert!(
         r.cdc_lsn > 0,
         "second row should be from CDC streaming after restart"
+    );
+}
+
+/// Tests that TRUNCATE clears the ClickHouse table and that subsequent inserts
+/// produce a clean slate with only post-truncate data.
+///
+/// # GIVEN
+///
+/// A Postgres table with two rows (`id=1, value='alpha'` and `id=2,
+/// value='beta'`), copied to ClickHouse by the initial table copy.
+///
+/// # WHEN
+///
+/// 1. Postgres issues `TRUNCATE` on the table.
+/// 2. After the table becomes empty in ClickHouse, a new row
+///    (`id=3, value='gamma'`) is inserted into Postgres.
+///
+/// # THEN
+///
+/// After truncate, ClickHouse contains zero rows.
+/// After the post-truncate insert, ClickHouse contains exactly one row:
+/// - `id=3, value='gamma', cdc_operation='INSERT', cdc_lsn > 0`.
+/// No pre-truncate rows survive.
+#[tokio::test(flavor = "multi_thread")]
+async fn truncate_clears_table_and_accepts_new_inserts() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: two rows copied to ClickHouse ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("truncate_flow");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create truncate_flow test table");
+
+    let publication_name = "test_pub_clickhouse_truncate";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create truncate_flow publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('alpha'), ('beta')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert truncate_flow rows");
+
+    let ch_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = ch_db.build_destination(pipeline_id, store.clone());
+
+    let table_ready = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    // Verify both rows arrived from table copy.
+    let rows: Vec<UpdateFlowRow> = ch_db.query(TRUNCATE_FLOW_SELECT).await;
+    assert_eq!(rows.len(), 2, "table copy should produce two rows");
+
+    // --- WHEN: truncate, then insert a new row ---
+    database
+        .truncate_table(table_name.clone())
+        .await
+        .expect("Failed to truncate table in Postgres");
+
+    wait_for_truncate_flow_empty(&ch_db).await;
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('gamma')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert post-truncate row");
+
+    let rows = wait_for_truncate_flow_rows(&ch_db, 1).await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: only the post-truncate row exists ---
+    assert_eq!(rows.len(), 1, "only post-truncate row should exist");
+
+    let r = &rows[0];
+    assert_eq!(
+        r.id, 3,
+        "post-truncate row should have id=3 (serial continues)"
+    );
+    assert_eq!(r.value, "gamma");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert!(
+        r.cdc_lsn > 0,
+        "post-truncate insert should come from CDC streaming"
     );
 }
