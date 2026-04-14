@@ -15,8 +15,7 @@ const SHARED_PG_FILTER: &str = "\
        & test(/^(bigquery_pipeline|ducklake_pipeline|iceberg_destination)::/))\
 ";
 
-const DEFAULT_PG_SHARD_COUNT: u16 = 3;
-const DEFAULT_BASE_PORT: u16 = 5430;
+use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT};
 
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum Mode {

@@ -165,7 +165,7 @@ jobs:
       - name: Start Docker Compose (Postgres ${{ matrix.postgres_version }})
         run: |
           POSTGRES_VERSION=${{ matrix.postgres_version }} \
-            bash ./scripts/start_test_postgres_shards.sh
+            cargo xtask postgres start
 
       - name: Vendor DuckDB Extensions
         run: |
