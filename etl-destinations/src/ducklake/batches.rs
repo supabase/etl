@@ -26,7 +26,7 @@ use rand::Rng;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, info, warn};
+use tracing::{debug, trace, warn};
 
 use crate::ducklake::client::{
     DuckDbBlockingOperationKind, DuckLakeConnectionManager, format_query_error_detail,
@@ -212,7 +212,7 @@ pub(super) enum DuckLakeTableBatchKind {
 }
 
 impl DuckLakeTableBatchKind {
-    pub(super) fn as_str(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Self::Copy => "copy",
             Self::Mutation => "mutation",
@@ -520,9 +520,8 @@ pub(super) async fn apply_table_batch_with_retry(
                 max = attempt.max_retries,
                 table = %table_name,
                 batch_id = %batch_id,
-                batch_kind = batch_kind.as_str(),
                 error = ?attempt.error,
-                "ducklake table batch attempt failed, retrying"
+                "ducklake table mutation attempt failed, retrying"
             );
         },
         move || {
@@ -1529,47 +1528,15 @@ fn apply_table_batch(
     batch: &PreparedDuckLakeTableBatch,
 ) -> EtlResult<()> {
     let batch_started = Instant::now();
-    let batch_kind = batch.batch_kind.as_str();
-    let sub_batch_kind = batch_log_kind(batch);
-    let batch_size = batch_item_count(batch);
-    let prepared_mutation_count = prepared_mutation_count(batch);
-    let upsert_rows = batch_upsert_row_count(batch);
-    let delete_predicates = batch_delete_predicate_count(batch);
 
-    let begin_started = Instant::now();
-    if let Err(error) = conn.execute_batch("BEGIN TRANSACTION") {
+    conn.execute_batch("BEGIN TRANSACTION").map_err(|error| {
         tracing::error!(?error, "error transaction");
-        warn!(
-            table = %batch.table_name,
-            batch_id = %batch.batch_id,
-            batch_kind,
-            sub_batch_kind,
-            batch_size,
-            prepared_mutation_count,
-            upsert_rows,
-            delete_predicates,
-            elapsed_ms = begin_started.elapsed().as_millis() as u64,
-            error = ?error,
-            "ducklake begin transaction failed"
-        );
-        return Err(etl_error!(
+        etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake BEGIN TRANSACTION failed",
             source: error
-        ));
-    }
-    info!(
-        table = %batch.table_name,
-        batch_id = %batch.batch_id,
-        batch_kind,
-        sub_batch_kind,
-        batch_size,
-        prepared_mutation_count,
-        upsert_rows,
-        delete_predicates,
-        elapsed_ms = begin_started.elapsed().as_millis() as u64,
-        "ducklake transaction opened"
-    );
+        )
+    })?;
 
     let mut reusable_staging_table = ReusableStagingTable::new(&batch.table_name);
     let result = (|| -> EtlResult<()> {
@@ -1599,56 +1566,35 @@ fn apply_table_batch(
 
     match result {
         Ok(()) => {
-            let commit_started = Instant::now();
-            if let Err(error) = conn.execute_batch("COMMIT") {
+            conn.execute_batch("COMMIT").map_err(|error| {
                 tracing::error!(?error, "error commit");
                 reusable_staging_table.cleanup(conn);
-                warn!(
-                    table = %batch.table_name,
-                    batch_id = %batch.batch_id,
-                    batch_kind,
-                    sub_batch_kind,
-                    batch_size,
-                    prepared_mutation_count,
-                    upsert_rows,
-                    delete_predicates,
-                    commit_elapsed_ms = commit_started.elapsed().as_millis() as u64,
-                    elapsed_ms = batch_started.elapsed().as_millis() as u64,
-                    error = ?error,
-                    "ducklake commit failed"
-                );
-                return Err(etl_error!(
+                etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake COMMIT failed",
                     source: error
-                ));
-            }
+                )
+            })?;
             reusable_staging_table.cleanup(conn);
             histogram!(
                 ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS,
-                BATCH_KIND_LABEL => batch_kind,
-                SUB_BATCH_KIND_LABEL => sub_batch_kind,
+                BATCH_KIND_LABEL => batch.batch_kind.as_str(),
+                SUB_BATCH_KIND_LABEL => batch_log_kind(batch),
             )
             .record(batch_started.elapsed().as_secs_f64());
             histogram!(
                 ETL_DUCKLAKE_BATCH_PREPARED_MUTATIONS,
-                BATCH_KIND_LABEL => batch_kind,
-                SUB_BATCH_KIND_LABEL => sub_batch_kind,
+                BATCH_KIND_LABEL => batch.batch_kind.as_str(),
+                SUB_BATCH_KIND_LABEL => batch_log_kind(batch),
             )
-            .record(prepared_mutation_count as f64);
-            info!(
+            .record(prepared_mutation_count(batch) as f64);
+            trace!(
                 table = %batch.table_name,
                 batch_id = %batch.batch_id,
-                batch_kind,
+                batch_kind = batch.batch_kind.as_str(),
                 first_start_lsn = ?batch.first_start_lsn,
                 last_commit_lsn = ?batch.last_commit_lsn,
-                sub_batch_kind,
-                batch_size,
-                prepared_mutation_count,
-                upsert_rows,
-                delete_predicates,
-                commit_elapsed_ms = commit_started.elapsed().as_millis() as u64,
-                elapsed_ms = batch_started.elapsed().as_millis() as u64,
+                sub_batch_kind = batch_log_kind(batch),
                 insert_sub_batch_rows = apply_sub_batch_rows(batch),
                 "ducklake batch committed"
             );
@@ -1659,42 +1605,10 @@ fn apply_table_batch(
             Ok(())
         }
         Err(error) => {
-            let rollback_started = Instant::now();
             let rollback = conn.execute_batch("ROLLBACK");
-            let rollback_elapsed_ms = rollback_started.elapsed().as_millis() as u64;
             reusable_staging_table.cleanup(conn);
             if let Err(rollback) = rollback {
                 tracing::error!(?rollback, "error rollback");
-                warn!(
-                    table = %batch.table_name,
-                    batch_id = %batch.batch_id,
-                    batch_kind,
-                    sub_batch_kind,
-                    batch_size,
-                    prepared_mutation_count,
-                    upsert_rows,
-                    delete_predicates,
-                    rollback_elapsed_ms,
-                    elapsed_ms = batch_started.elapsed().as_millis() as u64,
-                    error = ?error,
-                    rollback_error = ?rollback,
-                    "ducklake transaction rollback failed"
-                );
-            } else {
-                warn!(
-                    table = %batch.table_name,
-                    batch_id = %batch.batch_id,
-                    batch_kind,
-                    sub_batch_kind,
-                    batch_size,
-                    prepared_mutation_count,
-                    upsert_rows,
-                    delete_predicates,
-                    rollback_elapsed_ms,
-                    elapsed_ms = batch_started.elapsed().as_millis() as u64,
-                    error = ?error,
-                    "ducklake transaction rolled back"
-                );
             }
             Err(error)
         }
@@ -1861,63 +1775,6 @@ fn prepared_mutation_count(batch: &PreparedDuckLakeTableBatch) -> usize {
     match &batch.action {
         PreparedDuckLakeTableBatchAction::Truncate => 1,
         PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => prepared_mutations.len(),
-    }
-}
-
-/// Returns the total number of row, delete, and update entries carried by one
-/// batch.
-fn batch_item_count(batch: &PreparedDuckLakeTableBatch) -> usize {
-    match &batch.action {
-        PreparedDuckLakeTableBatchAction::Truncate => 1,
-        PreparedDuckLakeTableBatchAction::Mutation(_) => {
-            batch_upsert_row_count(batch)
-                + batch_delete_predicate_count(batch)
-                + batch_update_count(batch)
-        }
-    }
-}
-
-/// Returns the total number of upsert rows carried by one batch.
-fn batch_upsert_row_count(batch: &PreparedDuckLakeTableBatch) -> usize {
-    match &batch.action {
-        PreparedDuckLakeTableBatchAction::Truncate => 0,
-        PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => prepared_mutations
-            .iter()
-            .map(|prepared_mutation| match prepared_mutation {
-                PreparedTableMutation::Upsert(prepared_rows) => prepared_rows_count(prepared_rows),
-                PreparedTableMutation::Delete { .. } => 0,
-                PreparedTableMutation::Update { .. } => 0,
-            })
-            .sum(),
-    }
-}
-
-/// Returns the total number of delete predicates carried by one batch.
-fn batch_delete_predicate_count(batch: &PreparedDuckLakeTableBatch) -> usize {
-    match &batch.action {
-        PreparedDuckLakeTableBatchAction::Truncate => 0,
-        PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => prepared_mutations
-            .iter()
-            .map(|prepared_mutation| match prepared_mutation {
-                PreparedTableMutation::Upsert(_) => 0,
-                PreparedTableMutation::Delete { predicates, .. } => predicates.len(),
-                PreparedTableMutation::Update { .. } => 0,
-            })
-            .sum(),
-    }
-}
-
-/// Returns the total number of update statements carried by one batch.
-fn batch_update_count(batch: &PreparedDuckLakeTableBatch) -> usize {
-    match &batch.action {
-        PreparedDuckLakeTableBatchAction::Truncate => 0,
-        PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => prepared_mutations
-            .iter()
-            .map(|prepared_mutation| match prepared_mutation {
-                PreparedTableMutation::Update { .. } => 1,
-                PreparedTableMutation::Upsert(_) | PreparedTableMutation::Delete { .. } => 0,
-            })
-            .sum(),
     }
 }
 
