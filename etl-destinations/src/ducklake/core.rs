@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -51,34 +51,20 @@ use crate::ducklake::client::{
 use crate::ducklake::config::{
     build_maintenance_setup_plan, build_setup_plan, current_duckdb_extension_strategy,
 };
+use crate::ducklake::inline_size::DuckLakePendingInlineSizeSampler;
 use crate::ducklake::maintenance::{
-    DuckLakeMaintenanceWorker, TableMaintenanceNotification, TableWriteActivity,
+    DuckLakeMaintenanceWorker, ENABLE_CHECKPOINT_MAINTENANCE, TableMaintenanceNotification,
+    TableWriteActivity, maybe_run_requested_checkpoint, maybe_run_requested_merge_adjacent_files,
     send_maintenance_notification, spawn_ducklake_maintenance_worker, table_write_slot,
 };
 use crate::ducklake::metrics::{
-    BATCH_KIND_LABEL, DuckLakeMetricsSampler, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
+    DuckLakeMetricsSampler, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
     ETL_DUCKLAKE_INLINE_FLUSH_ROWS, ETL_DUCKLAKE_POOL_SIZE, RESULT_LABEL, register_metrics,
-    spawn_ducklake_metrics_sampler,
+    resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
 };
 use crate::ducklake::schema::build_create_table_sql_ducklake;
 use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG, S3Config};
 use crate::table_name::try_stringify_table_name;
-
-/// Label values used only for inline-flush metrics and logs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum DuckLakeInlineFlushKind {
-    Mutation,
-    Shutdown,
-}
-
-impl DuckLakeInlineFlushKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Mutation => "mutation",
-            Self::Shutdown => "shutdown",
-        }
-    }
-}
 
 /// Returns whether a DuckLake DDL error indicates another transaction already
 /// created the requested table.
@@ -122,6 +108,12 @@ pub struct DuckLakeDestination<S> {
     applied_batches_table_created: Arc<AtomicBool>,
     /// Cache tracking whether the ETL streaming progress table already exists.
     streaming_progress_table_created: Arc<AtomicBool>,
+    /// Signals that tier-0 merge_adjacent_files should run before the next streaming batch when safe.
+    merge_adjacent_files_requested: Arc<AtomicBool>,
+    /// Tracks whether recent writes may have produced files worth revisiting with tier-0 compaction.
+    merge_adjacent_files_dirty: Arc<AtomicBool>,
+    /// Signals that a checkpoint should run before the next streaming batch when safe.
+    checkpoint_requested: Arc<AtomicBool>,
 }
 
 impl<S> Destination for DuckLakeDestination<S>
@@ -136,7 +128,6 @@ where
         self.streaming_tasks.drain().await?;
         self.shutdown_maintenance_worker().await?;
         self.shutdown_metrics_sampler().await?;
-        self.flush_known_tables_on_shutdown().await;
 
         Ok(())
     }
@@ -253,7 +244,6 @@ where
         metadata_schema: Option<String>,
         store: S,
     ) -> EtlResult<Self> {
-        let initialization_started = Instant::now();
         register_metrics();
 
         if pool_size == 0 {
@@ -266,15 +256,6 @@ where
 
         let extension_strategy = current_duckdb_extension_strategy()?;
         let disable_extension_autoload = extension_strategy.disables_autoload();
-        info!(
-            pool_size,
-            catalog_scheme = catalog_url.scheme(),
-            data_path_scheme = data_path.scheme(),
-            metadata_schema = metadata_schema.as_deref().unwrap_or("default"),
-            s3_configured = s3.is_some(),
-            extension_strategy = ?extension_strategy,
-            "starting ducklake destination"
-        );
         if let crate::ducklake::config::DuckDbExtensionStrategy::VendoredLocal { platform_dir } =
             extension_strategy
         {
@@ -295,19 +276,43 @@ where
             open_count: Arc::new(AtomicUsize::new(0)),
         });
 
-        let write_pool_started = Instant::now();
-        let pool = build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?;
-        info!(
-            elapsed_ms = write_pool_started.elapsed().as_millis() as u64,
-            pool_size, "ducklake write pool ready"
-        );
+        let pool =
+            Arc::new(build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?);
+        let blocking_slots = Arc::new(Semaphore::new(pool_size as usize));
+        let pending_inline_size_sampler =
+            if matches!(catalog_url.scheme(), "postgres" | "postgresql") {
+                match run_duckdb_blocking(
+                    Arc::clone(&pool),
+                    Arc::clone(&blocking_slots),
+                    DuckDbBlockingOperationKind::Foreground,
+                    resolve_ducklake_metadata_schema_blocking,
+                )
+                .await
+                {
+                    Ok(metadata_schema) => {
+                        DuckLakePendingInlineSizeSampler::new(&catalog_url, metadata_schema)?
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = ?error,
+                            "ducklake inline-size sampler initialization skipped"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
         let created_tables = Arc::default();
         let checkpoint_gate = Arc::new(RwLock::new(()));
+        let merge_adjacent_files_requested = Arc::new(AtomicBool::new(false));
+        let merge_adjacent_files_dirty = Arc::new(AtomicBool::new(false));
+        let checkpoint_requested = Arc::new(AtomicBool::new(false));
         let mut destination = Self {
             #[cfg(feature = "test-utils")]
             manager,
-            pool: Arc::new(pool),
-            blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
+            pool: Arc::clone(&pool),
+            blocking_slots: Arc::clone(&blocking_slots),
             checkpoint_gate: Arc::clone(&checkpoint_gate),
             streaming_tasks: DestinationTaskSet::new(),
             maintenance_worker: Arc::new(None),
@@ -318,21 +323,13 @@ where
             created_tables: Arc::clone(&created_tables),
             applied_batches_table_created: Arc::default(),
             streaming_progress_table_created: Arc::default(),
+            merge_adjacent_files_requested: Arc::clone(&merge_adjacent_files_requested),
+            merge_adjacent_files_dirty: Arc::clone(&merge_adjacent_files_dirty),
+            checkpoint_requested: Arc::clone(&checkpoint_requested),
         };
         gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
-        let marker_table_started = Instant::now();
         destination.ensure_applied_batches_table_exists().await?;
-        info!(
-            elapsed_ms = marker_table_started.elapsed().as_millis() as u64,
-            "ducklake applied batch marker table ready"
-        );
-        let progress_table_started = Instant::now();
         destination.ensure_streaming_progress_table_exists().await?;
-        info!(
-            elapsed_ms = progress_table_started.elapsed().as_millis() as u64,
-            "ducklake streaming progress table ready"
-        );
-        let maintenance_started = Instant::now();
         destination.maintenance_worker = Arc::new(
             spawn_ducklake_maintenance_worker(
                 DuckLakeConnectionManager {
@@ -343,14 +340,13 @@ where
                 },
                 Arc::clone(&checkpoint_gate),
                 Arc::clone(&destination.table_write_slots),
+                Arc::clone(&checkpoint_requested),
+                Arc::clone(&merge_adjacent_files_requested),
+                Arc::clone(&merge_adjacent_files_dirty),
+                pending_inline_size_sampler,
             )?
             .into(),
         );
-        info!(
-            elapsed_ms = maintenance_started.elapsed().as_millis() as u64,
-            "ducklake maintenance worker ready"
-        );
-        let metrics_started = Instant::now();
         destination.metrics_sampler = Arc::new(
             spawn_ducklake_metrics_sampler(
                 DuckLakeConnectionManager {
@@ -376,14 +372,6 @@ where
             )?
             .into(),
         );
-        info!(
-            elapsed_ms = metrics_started.elapsed().as_millis() as u64,
-            "ducklake metrics sampler ready"
-        );
-        info!(
-            elapsed_ms = initialization_started.elapsed().as_millis() as u64,
-            pool_size, "ducklake destination started"
-        );
 
         Ok(destination)
     }
@@ -398,8 +386,6 @@ where
         self.run_duckdb_blocking(
             DuckDbBlockingOperationKind::Foreground,
             move |conn| -> EtlResult<()> {
-                let transaction_started = Instant::now();
-                let begin_started = Instant::now();
                 conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
@@ -407,13 +393,6 @@ where
                         source: e
                     )
                 })?;
-                info!(
-                    table = %table_name,
-                    batch_kind = DuckLakeTableBatchKind::Truncate.as_str(),
-                    batch_size = 1u64,
-                    elapsed_ms = begin_started.elapsed().as_millis() as u64,
-                    "ducklake transaction opened"
-                );
 
                 let result = (|| -> EtlResult<()> {
                     let truncate_table_sql =
@@ -447,54 +426,17 @@ where
                 })();
 
                 match result {
-                    Ok(()) => {
-                        let commit_started = Instant::now();
-                        conn.execute_batch("COMMIT").map_err(|e| {
-                            etl_error!(
-                                ErrorKind::DestinationQueryFailed,
-                                "DuckLake COMMIT failed",
-                                source: e
-                            )
-                        })?;
-                        info!(
-                            table = %table_name,
-                            batch_kind = DuckLakeTableBatchKind::Truncate.as_str(),
-                            batch_size = 1u64,
-                            commit_elapsed_ms = commit_started.elapsed().as_millis() as u64,
-                            elapsed_ms = transaction_started.elapsed().as_millis() as u64,
-                            "ducklake transaction committed"
-                        );
-                        Ok(())
-                    }
+                    Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
+                        etl_error!(
+                            ErrorKind::DestinationQueryFailed,
+                            "DuckLake COMMIT failed",
+                            source: e
+                        )
+                    }),
                     Err(error) => {
-                        let rollback_started = Instant::now();
-                        let rollback = conn.execute_batch("ROLLBACK");
-                        let rollback_elapsed_ms = rollback_started.elapsed().as_millis() as u64;
-                        match rollback {
-                            Ok(()) => {
-                                warn!(
-                                    table = %table_name,
-                                    batch_kind = DuckLakeTableBatchKind::Truncate.as_str(),
-                                    batch_size = 1u64,
-                                    rollback_elapsed_ms,
-                                    elapsed_ms = transaction_started.elapsed().as_millis() as u64,
-                                    error = ?error,
-                                    "ducklake transaction rolled back"
-                                );
-                            }
-                            Err(rollback_error) => {
-                                tracing::error!(?rollback_error, "error rollback");
-                                warn!(
-                                    table = %table_name,
-                                    batch_kind = DuckLakeTableBatchKind::Truncate.as_str(),
-                                    batch_size = 1u64,
-                                    rollback_elapsed_ms,
-                                    elapsed_ms = transaction_started.elapsed().as_millis() as u64,
-                                    error = ?error,
-                                    rollback_error = ?rollback_error,
-                                    "ducklake transaction rollback failed"
-                                );
-                            }
+                        let err = conn.execute_batch("ROLLBACK");
+                        if let Err(err) = err {
+                            tracing::error!(?err, "error rollback");
                         }
                         Err(error)
                     }
@@ -535,6 +477,8 @@ where
             prepared_batch,
         )
         .await?;
+        self.merge_adjacent_files_dirty
+            .store(true, Ordering::Release);
 
         self.notify_background_maintenance(TableMaintenanceNotification::WriteActivity(
             TableWriteActivity {
@@ -728,6 +672,10 @@ where
     /// streaming replay watermark so retries can safely detect already
     /// committed work.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
+        let merge_adjacent_files_ran = self.maybe_run_requested_merge_adjacent_files().await?;
+        if !merge_adjacent_files_ran {
+            self.maybe_run_requested_checkpoint().await?;
+        }
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
@@ -816,6 +764,7 @@ where
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     let destination_table_name = table_name.clone();
                     let maintenance_worker = Arc::clone(&self.maintenance_worker);
+                    let merge_adjacent_files_dirty = Arc::clone(&self.merge_adjacent_files_dirty);
 
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
@@ -853,6 +802,7 @@ where
                         )?;
                         apply_table_batches_with_retry(pool, blocking_slots, prepared_batches)
                             .await?;
+                        merge_adjacent_files_dirty.store(true, Ordering::Release);
                         if let (Some(worker), Some(notification)) =
                             (maintenance_worker.as_ref(), maintenance_notification)
                         {
@@ -1102,6 +1052,43 @@ where
         Arc::clone(&self.checkpoint_gate).read_owned().await
     }
 
+    /// Runs one requested tier-0 merge before ingesting the next CDC batch when safe.
+    ///
+    /// Returns whether the merge maintenance actually ran.
+    async fn maybe_run_requested_merge_adjacent_files(&self) -> EtlResult<bool> {
+        if !self.merge_adjacent_files_requested.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+
+        maybe_run_requested_merge_adjacent_files(
+            Arc::clone(&self.pool),
+            Arc::clone(&self.checkpoint_gate),
+            Arc::clone(&self.blocking_slots),
+            self.merge_adjacent_files_requested.as_ref(),
+            self.merge_adjacent_files_dirty.as_ref(),
+        )
+        .await
+    }
+
+    /// Runs one requested checkpoint before ingesting the next CDC batch when safe.
+    async fn maybe_run_requested_checkpoint(&self) -> EtlResult<()> {
+        if !ENABLE_CHECKPOINT_MAINTENANCE {
+            self.checkpoint_requested.store(false, Ordering::Release);
+            return Ok(());
+        }
+
+        if !self.checkpoint_requested.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        maybe_run_requested_checkpoint(
+            Arc::clone(&self.pool),
+            Arc::clone(&self.checkpoint_gate),
+            Arc::clone(&self.blocking_slots),
+            self.checkpoint_requested.as_ref(),
+        )
+        .await
+    }
     /// Runs one DuckDB operation on Tokio's blocking pool after acquiring a
     /// permit that matches the configured DuckDB concurrency limit.
     async fn run_duckdb_blocking<R, F>(
@@ -1120,99 +1107,6 @@ where
             operation,
         )
         .await
-    }
-
-    /// Flushes any remaining inlined rows for known tables before shutdown completes.
-    async fn flush_known_tables_on_shutdown(&self) {
-        let table_names = {
-            let cache = self.created_tables.lock();
-            cache.iter().cloned().collect::<Vec<_>>()
-        };
-
-        if table_names.is_empty() {
-            debug!("ducklake shutdown inline flush skipped, no known tables");
-            return;
-        }
-
-        let known_table_count = table_names.len();
-        let mut join_set = JoinSet::new();
-
-        for table_name in table_names {
-            let pool = Arc::clone(&self.pool);
-            let blocking_slots = Arc::clone(&self.blocking_slots);
-            let table_write_slots = Arc::clone(&self.table_write_slots);
-            let result_table_name = table_name.clone();
-
-            join_set.spawn(async move {
-                let result = async move {
-                    let table_write_permit = table_write_slot(&table_write_slots, &table_name)
-                        .acquire_owned()
-                        .await
-                        .map_err(|_| {
-                            etl_error!(
-                                ErrorKind::InvalidState,
-                                "DuckLake table write semaphore closed"
-                            )
-                        })?;
-
-                    run_duckdb_blocking(
-                        pool,
-                        blocking_slots,
-                        DuckDbBlockingOperationKind::Maintenance,
-                        move |conn| {
-                            let _table_write_permit = table_write_permit;
-                            flush_table_inlined_data(
-                                conn,
-                                &table_name,
-                                DuckLakeInlineFlushKind::Shutdown,
-                            )
-                        },
-                    )
-                    .await
-                }
-                .await;
-
-                (result_table_name, result)
-            });
-        }
-
-        let mut successful_tables = 0usize;
-        let mut failed_tables = 0usize;
-        let mut total_rows_flushed = 0u64;
-
-        while let Some(result) = join_set.join_next().await {
-            match result {
-                Ok((table_name, Ok(rows_flushed))) => {
-                    successful_tables += 1;
-                    total_rows_flushed = total_rows_flushed.saturating_add(rows_flushed);
-                    debug!(
-                        table = %table_name,
-                        rows_flushed,
-                        "ducklake shutdown inline flush completed"
-                    );
-                }
-                Ok((table_name, Err(error))) => {
-                    failed_tables += 1;
-                    warn!(
-                        table = %table_name,
-                        error = ?error,
-                        "ducklake shutdown inline flush failed"
-                    );
-                }
-                Err(error) => {
-                    failed_tables += 1;
-                    warn!(error = ?error, "ducklake shutdown inline flush task panicked");
-                }
-            }
-        }
-
-        info!(
-            known_table_count,
-            successful_tables,
-            failed_tables,
-            total_rows_flushed,
-            "ducklake shutdown inline flush sweep completed"
-        );
     }
 
     /// Stops the background DuckLake maintenance worker.
@@ -1406,7 +1300,6 @@ pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> EtlResult<Du
 pub(super) fn flush_table_inlined_data(
     conn: &duckdb::Connection,
     table_name: &str,
-    inline_flush_kind: DuckLakeInlineFlushKind,
 ) -> EtlResult<u64> {
     let flush_started = Instant::now();
     let sql = format!(
@@ -1427,30 +1320,24 @@ pub(super) fn flush_table_inlined_data(
     let flush_result = if rows_flushed > 0 { "flushed" } else { "noop" };
     histogram!(
         ETL_DUCKLAKE_INLINE_FLUSH_ROWS,
-        BATCH_KIND_LABEL => inline_flush_kind.as_str(),
         RESULT_LABEL => flush_result,
     )
     .record(rows_flushed as f64);
     histogram!(
         ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
-        BATCH_KIND_LABEL => inline_flush_kind.as_str(),
         RESULT_LABEL => flush_result,
     )
     .record(flush_started.elapsed().as_secs_f64());
 
     if rows_flushed > 0 {
-        info!(
+        debug!(
             table = %table_name,
-            batch_kind = inline_flush_kind.as_str(),
             rows_flushed,
-            elapsed_ms = flush_started.elapsed().as_millis() as u64,
             "ducklake inlined data flushed"
         );
     } else {
-        info!(
+        debug!(
             table = %table_name,
-            batch_kind = inline_flush_kind.as_str(),
-            elapsed_ms = flush_started.elapsed().as_millis() as u64,
             "ducklake inlined data already flushed"
         );
     }
@@ -1507,7 +1394,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for root in candidate_roots {
-            let extension_dir = root.join("1.5.1").join(platform_dir);
+            let extension_dir = root.join("1.5.2").join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
             let json_extension = extension_dir.join("json.duckdb_extension");
             let parquet_extension = extension_dir.join("parquet.duckdb_extension");
@@ -1675,9 +1562,8 @@ mod tests {
             .expect("failed to write rows");
 
         let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
-        let _rows_flushed =
-            flush_table_inlined_data(&conn, &table_name, DuckLakeInlineFlushKind::Mutation)
-                .expect("failed to materialize inlined rows for storage metrics test");
+        let _rows_flushed = flush_table_inlined_data(&conn, &table_name)
+            .expect("failed to materialize inlined rows for storage metrics test");
         let deadline = Instant::now() + Duration::from_secs(10);
         let metrics = loop {
             let metrics = query_table_storage_metrics_blocking(&conn, &table_name)
@@ -1729,9 +1615,8 @@ mod tests {
             .expect("failed to write rows");
 
         let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
-        let _rows_flushed =
-            flush_table_inlined_data(&conn, &table_name, DuckLakeInlineFlushKind::Mutation)
-                .expect("failed to materialize inlined rows for catalog metrics test");
+        let _rows_flushed = flush_table_inlined_data(&conn, &table_name)
+            .expect("failed to materialize inlined rows for catalog metrics test");
         let deadline = Instant::now() + Duration::from_secs(10);
         let metrics = loop {
             let metrics = query_catalog_maintenance_metrics_blocking(&conn)

@@ -83,7 +83,7 @@ const INITIAL_RETRY_DELAY_MS: u64 = 50;
 const MAX_RETRY_DELAY_MS: u64 = 2_000;
 /// Minimum retry delay for transient delete-file visibility failures.
 const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
-/// Shared label value for mutation samples that do not execute a delete.
+/// Label value used when a mutation is not tied to a delete origin.
 const DELETE_ORIGIN_NONE: &str = "none";
 
 /// Event-level table mutations that must be applied in order.
@@ -160,7 +160,6 @@ impl DuckLakeBatchSubstage {
         }
     }
 }
-
 /// Event-level table mutation annotated with source LSNs for idempotent replay.
 pub(super) struct TrackedTableMutation {
     start_lsn: PgLsn,
@@ -266,7 +265,7 @@ pub(super) enum DuckLakeTableBatchKind {
 }
 
 impl DuckLakeTableBatchKind {
-    pub(super) fn as_str(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Self::Copy => "copy",
             Self::Mutation => "mutation",
@@ -574,9 +573,8 @@ pub(super) async fn apply_table_batch_with_retry(
                 max = attempt.max_retries,
                 table = %table_name,
                 batch_id = %batch_id,
-                batch_kind = batch_kind.as_str(),
                 error = ?attempt.error,
-                "ducklake table batch attempt failed, retrying"
+                "ducklake table mutation attempt failed, retrying"
             );
         },
         move || {
@@ -2839,7 +2837,6 @@ fn batch_update_count(batch: &PreparedDuckLakeTableBatch) -> usize {
             .sum(),
     }
 }
-
 /// Returns the insert row count when the batch is a pure insert sub-batch.
 fn apply_sub_batch_rows(batch: &PreparedDuckLakeTableBatch) -> Option<usize> {
     let PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) = &batch.action else {
@@ -2974,14 +2971,10 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::sync::Arc;
-
     use arrow::array::UInt64Array;
-    use duckdb::Connection;
     use etl::table_rows_to_arrow_batch;
     use etl::types::{ColumnSchema, TableId, TableName, Type as PgType};
-    use etl_telemetry::metrics::init_metrics_handle;
+    use std::sync::Arc;
 
     fn make_schema() -> TableSchema {
         TableSchema::new(
@@ -2997,86 +2990,6 @@ mod tests {
     fn make_arrow_batch(table_schema: &Arc<TableSchema>, rows: &[TableRow]) -> TableArrowBatch {
         table_rows_to_arrow_batch(Arc::clone(table_schema), rows).unwrap()
     }
-    fn open_metric_test_connection() -> Connection {
-        let conn = Connection::open_in_memory().expect("failed to open metric test duckdb");
-        conn.execute_batch(&format!(
-            r#"ATTACH ':memory:' AS {LAKE_CATALOG};
-               CREATE TABLE {LAKE_CATALOG}."public_users" (
-                   id INTEGER NOT NULL,
-                   name TEXT
-               );
-               CREATE TABLE {LAKE_CATALOG}."{STREAMING_PROGRESS_TABLE}" (
-                   table_name TEXT NOT NULL,
-                   last_commit_lsn UBIGINT NOT NULL,
-                   last_tx_ordinal UBIGINT NOT NULL,
-                   updated_at TIMESTAMP NOT NULL
-               );"#
-        ))
-        .expect("failed to initialize metric test schema");
-        conn.execute_batch(
-            r#"
-            SET enable_profiling = 'no_output';
-            SET profiling_mode = 'standard';
-            SET profiling_coverage = 'ALL';
-            SET custom_profiling_settings = '{"LATENCY":"true"}';
-            "#,
-        )
-        .expect("failed to enable duckdb profiling for metrics");
-        conn
-    }
-
-    fn mutation_operation_duration_count(
-        rendered: &str,
-        operation_kind: DuckLakeMutationOperationKind,
-        delete_origin: &str,
-    ) -> f64 {
-        let operation_kind_label =
-            format!(r#"{OPERATION_KIND_LABEL}="{}""#, operation_kind.as_str());
-        let delete_origin_label = format!(r#"{DELETE_ORIGIN_LABEL}="{}""#, delete_origin);
-
-        rendered
-            .lines()
-            .find_map(|line| {
-                if line.starts_with(&format!(
-                    "{ETL_DUCKLAKE_MUTATION_OPERATION_DURATION_SECONDS}_count"
-                )) && line.contains(&operation_kind_label)
-                    && line.contains(&delete_origin_label)
-                {
-                    line.split_whitespace().last()?.parse::<f64>().ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0.0)
-    }
-
-    fn batch_substage_duration_count(
-        rendered: &str,
-        batch_kind: &str,
-        sub_batch_kind: &str,
-        substage: DuckLakeBatchSubstage,
-    ) -> f64 {
-        let batch_kind_label = format!(r#"{BATCH_KIND_LABEL}="{}""#, batch_kind);
-        let sub_batch_kind_label = format!(r#"{SUB_BATCH_KIND_LABEL}="{}""#, sub_batch_kind);
-        let substage_label = format!(r#"{SUBSTAGE_LABEL}="{}""#, substage.as_str());
-
-        rendered
-            .lines()
-            .find_map(|line| {
-                if line.starts_with(&format!(
-                    "{ETL_DUCKLAKE_BATCH_SUBSTAGE_DURATION_SECONDS}_count"
-                )) && line.contains(&batch_kind_label)
-                    && line.contains(&sub_batch_kind_label)
-                    && line.contains(&substage_label)
-                {
-                    line.split_whitespace().last()?.parse::<f64>().ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0.0)
-    }
-
     #[test]
     fn test_delete_predicate_from_row_uses_only_primary_key_columns() {
         let table_schema = TableSchema::new(
@@ -3737,307 +3650,5 @@ mod tests {
         );
 
         assert_ne!(first.batch_id, second.batch_id);
-    }
-
-    #[tokio::test]
-    async fn test_apply_table_batch_records_mutation_duration_histogram_by_operation_kind() {
-        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
-        crate::ducklake::metrics::register_metrics();
-
-        let conn = open_metric_test_connection();
-        conn.execute_batch(&format!(
-            r#"INSERT INTO {LAKE_CATALOG}."public_users" VALUES (1, 'before');"#
-        ))
-        .expect("failed to seed mutation metric test row");
-
-        let batch = prepare_mutation_table_batches(
-            &make_schema(),
-            "public_users".to_string(),
-            vec![TrackedTableMutation::new(
-                PgLsn::from(10),
-                PgLsn::from(20),
-                0,
-                TableMutation::Update {
-                    delete_row: TableRow::new(vec![
-                        Cell::I32(1),
-                        Cell::String("before".to_string()),
-                    ]),
-                    upsert_row: TableRow::new(vec![
-                        Cell::I32(1),
-                        Cell::String("after".to_string()),
-                    ]),
-                },
-            )],
-        )
-        .expect("failed to prepare mutation batch")
-        .into_iter()
-        .next()
-        .expect("expected prepared mutation batch");
-
-        let rendered_before = handle.render();
-        let insert_before = mutation_operation_duration_count(
-            &rendered_before,
-            DuckLakeMutationOperationKind::Insert,
-            DELETE_ORIGIN_NONE,
-        );
-        let update_before = mutation_operation_duration_count(
-            &rendered_before,
-            DuckLakeMutationOperationKind::Update,
-            "update",
-        );
-
-        apply_table_batch(&conn, &batch).expect("failed to apply mutation batch");
-
-        let rendered_after = handle.render();
-        let insert_after = mutation_operation_duration_count(
-            &rendered_after,
-            DuckLakeMutationOperationKind::Insert,
-            DELETE_ORIGIN_NONE,
-        );
-        let update_after = mutation_operation_duration_count(
-            &rendered_after,
-            DuckLakeMutationOperationKind::Update,
-            "update",
-        );
-
-        assert!(
-            insert_after == insert_before,
-            "update mutation should not record insert duration samples"
-        );
-        assert!(
-            update_after > update_before,
-            "update mutation duration count did not increase"
-        );
-        assert_eq!(
-            conn.query_row(
-                &format!(r#"SELECT name FROM {LAKE_CATALOG}."public_users" WHERE id = 1 LIMIT 1;"#),
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("failed to read updated metric test row"),
-            "after".to_string()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_apply_table_batch_records_one_delete_duration_sample_per_delete_statement() {
-        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
-        crate::ducklake::metrics::register_metrics();
-
-        let conn = open_metric_test_connection();
-        for id in 0..=SQL_DELETE_BATCH_SIZE {
-            conn.execute_batch(&format!(
-                r#"INSERT INTO {LAKE_CATALOG}."public_users" VALUES ({id}, 'before');"#
-            ))
-            .expect("failed to seed delete metric test row");
-        }
-
-        let predicates = (0..=SQL_DELETE_BATCH_SIZE)
-            .map(|id| format!("id = {id}"))
-            .collect::<Vec<_>>();
-        let batch = PreparedDuckLakeTableBatch {
-            table_name: "public_users".to_string(),
-            batch_id: "mutation:test-delete-chunks".to_string(),
-            batch_kind: DuckLakeTableBatchKind::Mutation,
-            first_start_lsn: Some(PgLsn::from(10)),
-            last_commit_lsn: Some(PgLsn::from(20)),
-            first_sequence_key: Some(EventSequenceKey::new(PgLsn::from(20), 0)),
-            last_sequence_key: Some(EventSequenceKey::new(PgLsn::from(20), 0)),
-            action: PreparedDuckLakeTableBatchAction::Mutation(vec![
-                PreparedTableMutation::Delete {
-                    predicates,
-                    origin: "delete",
-                },
-            ]),
-        };
-
-        let rendered_before = handle.render();
-        let delete_before = mutation_operation_duration_count(
-            &rendered_before,
-            DuckLakeMutationOperationKind::Delete,
-            "delete",
-        );
-
-        apply_table_batch(&conn, &batch).expect("failed to apply delete batch");
-
-        let rendered_after = handle.render();
-        let delete_after = mutation_operation_duration_count(
-            &rendered_after,
-            DuckLakeMutationOperationKind::Delete,
-            "delete",
-        );
-
-        assert_eq!(
-            delete_after - delete_before,
-            2.0,
-            "delete mutation duration count should increase once per chunked delete statement"
-        );
-        assert_eq!(
-            conn.query_row(
-                &format!(r#"SELECT COUNT(*) FROM {LAKE_CATALOG}."public_users";"#),
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("failed to count remaining delete metric test rows"),
-            0
-        );
-    }
-
-    #[tokio::test]
-    async fn test_apply_table_batch_records_batch_substage_duration_histogram() {
-        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
-        crate::ducklake::metrics::register_metrics();
-
-        let conn = open_metric_test_connection();
-        conn.execute_batch(&format!(
-            r#"INSERT INTO {LAKE_CATALOG}."public_users" VALUES (1, 'before');"#
-        ))
-        .expect("failed to seed substage metric test row");
-
-        let batch = prepare_mutation_table_batches(
-            &make_schema(),
-            "public_users".to_string(),
-            vec![TrackedTableMutation::new(
-                PgLsn::from(10),
-                PgLsn::from(20),
-                0,
-                TableMutation::Update {
-                    delete_row: TableRow::new(vec![
-                        Cell::I32(1),
-                        Cell::String("before".to_string()),
-                    ]),
-                    upsert_row: TableRow::new(vec![
-                        Cell::I32(1),
-                        Cell::String("after".to_string()),
-                    ]),
-                },
-            )],
-        )
-        .expect("failed to prepare substage metric batch")
-        .into_iter()
-        .next()
-        .expect("expected prepared substage metric batch");
-
-        let rendered_before = handle.render();
-        let staging_prepare_before = batch_substage_duration_count(
-            &rendered_before,
-            "mutation",
-            "update",
-            DuckLakeBatchSubstage::StagingPrepare,
-        );
-        let staging_load_before = batch_substage_duration_count(
-            &rendered_before,
-            "mutation",
-            "update",
-            DuckLakeBatchSubstage::StagingLoad,
-        );
-        let progress_update_before = batch_substage_duration_count(
-            &rendered_before,
-            "mutation",
-            "update",
-            DuckLakeBatchSubstage::ProgressUpdate,
-        );
-        let commit_only_before = batch_substage_duration_count(
-            &rendered_before,
-            "mutation",
-            "update",
-            DuckLakeBatchSubstage::CommitOnly,
-        );
-
-        apply_table_batch(&conn, &batch).expect("failed to apply substage metric batch");
-
-        let rendered_after = handle.render();
-        let staging_prepare_after = batch_substage_duration_count(
-            &rendered_after,
-            "mutation",
-            "update",
-            DuckLakeBatchSubstage::StagingPrepare,
-        );
-        let staging_load_after = batch_substage_duration_count(
-            &rendered_after,
-            "mutation",
-            "update",
-            DuckLakeBatchSubstage::StagingLoad,
-        );
-        let progress_update_after = batch_substage_duration_count(
-            &rendered_after,
-            "mutation",
-            "update",
-            DuckLakeBatchSubstage::ProgressUpdate,
-        );
-        let commit_only_after = batch_substage_duration_count(
-            &rendered_after,
-            "mutation",
-            "update",
-            DuckLakeBatchSubstage::CommitOnly,
-        );
-
-        assert!(
-            staging_prepare_after == staging_prepare_before,
-            "update batches should not record staging prepare substage samples"
-        );
-        assert!(
-            staging_load_after == staging_load_before,
-            "update batches should not record staging load substage samples"
-        );
-        assert!(
-            progress_update_after > progress_update_before,
-            "progress update substage count did not increase"
-        );
-        assert!(
-            commit_only_after > commit_only_before,
-            "commit-only substage count did not increase"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_apply_table_batch_records_replace_delete_duration_under_replace_origin() {
-        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
-        crate::ducklake::metrics::register_metrics();
-
-        let conn = open_metric_test_connection();
-        conn.execute_batch(&format!(
-            r#"INSERT INTO {LAKE_CATALOG}."public_users" VALUES (1, 'before');"#
-        ))
-        .expect("failed to seed replace metric test row");
-
-        let batch = prepare_mutation_table_batches(
-            &make_schema(),
-            "public_users".to_string(),
-            vec![TrackedTableMutation::new(
-                PgLsn::from(10),
-                PgLsn::from(20),
-                0,
-                TableMutation::Replace(TableRow::new(vec![
-                    Cell::I32(1),
-                    Cell::String("after".to_string()),
-                ])),
-            )],
-        )
-        .expect("failed to prepare replace metric batch")
-        .into_iter()
-        .next()
-        .expect("expected prepared replace metric batch");
-
-        let rendered_before = handle.render();
-        let replace_delete_before = mutation_operation_duration_count(
-            &rendered_before,
-            DuckLakeMutationOperationKind::Delete,
-            "replace",
-        );
-
-        apply_table_batch(&conn, &batch).expect("failed to apply replace metric batch");
-
-        let rendered_after = handle.render();
-        let replace_delete_after = mutation_operation_duration_count(
-            &rendered_after,
-            DuckLakeMutationOperationKind::Delete,
-            "replace",
-        );
-
-        assert!(
-            replace_delete_after > replace_delete_before,
-            "replace delete mutation duration count did not increase"
-        );
     }
 }

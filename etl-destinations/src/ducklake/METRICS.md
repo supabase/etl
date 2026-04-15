@@ -26,35 +26,16 @@ per table.
 ### Connection and blocking metrics
 
 - `etl_ducklake_pool_size`
-- `etl_ducklake_blocking_queue_wait_seconds`
 - `etl_ducklake_blocking_slot_wait_seconds`
 - `etl_ducklake_pool_checkout_wait_seconds`
 - `etl_ducklake_blocking_operation_duration_seconds`
 
 Use these first to separate storage-shape problems from pure concurrency or pool
 pressure. If these are high, maintenance may not be your real bottleneck.
-Each histogram is labeled by `operation_kind` with one of:
-
-- `foreground` for write-path work.
-- `maintenance` for background flush, rewrite, merge, and checkpoint work.
-- `metrics` for background catalog and table-health sampling.
-
-- high `blocking_queue_wait_seconds` with low slot and checkout wait means the
-  Tokio blocking pool itself is backed up before DuckLake code even starts
-  running on a blocking thread.
-- high `blocking_slot_wait_seconds` means ETL's own DuckLake concurrency limit
-  is saturated before Tokio scheduling is the problem.
-- high `pool_checkout_wait_seconds` means DuckDB connection availability is the
-  bottleneck after a blocking thread is already running.
-- high `blocking_operation_duration_seconds` with the other waits staying low
-  means the slowdown is inside DuckDB or the downstream catalog/object store
-  path, not in Tokio queueing.
 
 ### Batch and retry metrics
 
 - `etl_ducklake_batch_commit_duration_seconds`
-- `etl_ducklake_batch_substage_duration_seconds`
-- `etl_ducklake_mutation_operation_duration_seconds`
 - `etl_ducklake_batch_prepared_mutations`
 - `etl_ducklake_upsert_rows`
 - `etl_ducklake_delete_predicates`
@@ -64,36 +45,9 @@ Each histogram is labeled by `operation_kind` with one of:
 
 These explain the pressure your writer is putting on DuckLake:
 
-- `mutation_operation_duration_seconds` is the direct latency split between
-  DuckDB-profiled `insert`, `update`, and `delete` work on the target table. It is labeled
-  by `operation_kind` and `delete_origin`.
-- `operation_kind="insert"` measures the final `INSERT ... SELECT` into the
-  DuckLake table. It uses `delete_origin="none"` and does not include
-  staging-table creation, clearing, or row-loading time before that statement
-  runs.
-- `operation_kind="update"` records one sample per executed `UPDATE`
-  statement. It uses `delete_origin="update"` and measures only the final
-  target-table statement.
-- `operation_kind="delete"` records one sample per executed `DELETE`
-  statement. `delete_origin` then tells you whether that delete came from a
-  source `delete` or `replace`. If one prepared delete mutation is
-  split into multiple chunked statements, each statement contributes its own
-  histogram sample.
-- `batch_substage_duration_seconds` records unprofiled write-path time that
-  sits outside the final target-table `INSERT`, `UPDATE`, and `DELETE`
-  statements. The
-  `substage` label currently uses `staging_prepare`, `staging_load`,
-  `progress_update`, and `commit_only`, and records one sample per substage
-  invocation.
 - larger `upsert_rows` usually means fewer, larger files.
 - larger `delete_predicates` usually means more delete pressure and more need
   for `rewrite_data_files`.
-- if `operation_kind="delete"` is consistently slower than `insert`, delete
-  files and rewrite pressure are usually the next place to investigate.
-- if `operation_kind="update"` is high while `insert` and `delete` stay low,
-  look first at row width and primary-key filter selectivity.
-- if `operation_kind="insert"` is high while delete stays low, look first at
-  batch shape, staging overhead, and the downstream object-store path.
 - growing retries usually points to transaction conflicts or file-visibility
   issues before it points to bad maintenance thresholds.
 
@@ -136,24 +90,31 @@ event count for non-skipped outcomes.
 
 It carries these labels:
 
-- `task`: `flush`, `targeted_maintenance`, or `checkpoint`
+- `task`: `flush`, `scheduled_maintenance`, `targeted_maintenance`, or `checkpoint`
 - `operation`: `flush_inlined_data`, `rewrite_data_files`,
   `merge_adjacent_files`, or `checkpoint`
 - `reason`: the primary cause for the maintenance decision
 - `outcome`: `applied`, `noop`, or `failed`
 
 `etl_ducklake_maintenance_skipped_total` counts maintenance operations that
-were skipped because the worker could not acquire the table-local write slot.
-It is labeled by `task`, `operation`, and `reason`.
+were deferred because their guard or execution window was unavailable. It is
+labeled by `task`, `operation`, and `reason`.
 
 How to read it:
 
+- `task="flush"` with
+  `reason="pending_inlined_data_bytes_threshold"` means the flush was
+  scheduled from sampled inline insert-data table size in a PostgreSQL-backed
+  DuckLake catalog.
 - `task="flush"` with `reason="pending_bytes_threshold"` means the flush was
-  scheduled because estimated pre-compression inline bytes crossed the
-  configured threshold. The current heuristic assumes a 4:1 raw-to-parquet
-  compression ratio.
+  scheduled because the fallback estimated pre-compression inline bytes
+  crossed the configured threshold. The current heuristic assumes a 4:1
+  raw-to-parquet compression ratio.
 - `task="flush"` with `reason="pending_inserted_rows_threshold"` means the
   optional row-count threshold was enabled in code and fired before shutdown.
+- `task="scheduled_maintenance"` with `reason="merge_interval"` means the
+  next `write_events` batch tried to run the tier-0 `< 1MiB -> ~5MiB`
+  `merge_adjacent_files` pass first.
 - `task="targeted_maintenance"` with
   `reason="idle_rewrite_metrics_threshold"` or
   `reason="emergency_rewrite_metrics_threshold"` means rewrite was selected
@@ -164,8 +125,9 @@ How to read it:
   sampled small-file pressure.
 - `task="targeted_maintenance"` may emit one duration series or two for a
   maintenance cycle, depending on which operations crossed their thresholds.
-- rising `etl_ducklake_maintenance_skipped_total` means the worker wants to run
-  maintenance but the table-local write slot is still busy.
+- rising `etl_ducklake_maintenance_skipped_total` means maintenance keeps
+  missing its execution window because writes or another guarded operation are
+  still active.
 - rising histogram `_count` for `outcome="failed"` points to maintenance
   execution issues, while many `outcome="noop"` samples usually mean
   maintenance is polling more often than work is actually accumulating.

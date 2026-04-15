@@ -31,8 +31,6 @@ const METRICS_POOL_SIZE: u32 = 1;
 const METRICS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) const ETL_DUCKLAKE_POOL_SIZE: &str = "etl_ducklake_pool_size";
-pub(crate) const ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS: &str =
-    "etl_ducklake_blocking_queue_wait_seconds";
 pub(crate) const ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS: &str =
     "etl_ducklake_blocking_slot_wait_seconds";
 pub(crate) const ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS: &str =
@@ -55,6 +53,10 @@ pub(crate) const ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS: &str =
 pub(crate) const ETL_DUCKLAKE_RETRIES_TOTAL: &str = "etl_ducklake_retries_total";
 pub(crate) const ETL_DUCKLAKE_FAILED_BATCHES_TOTAL: &str = "etl_ducklake_failed_batches_total";
 pub(crate) const ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL: &str = "etl_ducklake_replayed_batches_total";
+pub(crate) const ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL: &str =
+    "etl_ducklake_maintenance_started_total";
+pub(crate) const ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS: &str =
+    "etl_ducklake_maintenance_in_progress";
 pub(crate) const ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS: &str =
     "etl_ducklake_maintenance_duration_seconds";
 pub(crate) const ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL: &str =
@@ -164,24 +166,19 @@ pub(crate) fn register_metrics() {
         );
 
         describe_histogram!(
-            ETL_DUCKLAKE_BLOCKING_QUEUE_WAIT_SECONDS,
-            Unit::Seconds,
-            "Time spent waiting in tokio's blocking task queue after a DuckLake slot is acquired, labeled by operation_kind."
-        );
-        describe_histogram!(
             ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS,
             Unit::Seconds,
-            "Time spent waiting for a DuckLake blocking slot, labeled by operation_kind."
+            "Time spent waiting for a DuckLake blocking slot."
         );
         describe_histogram!(
             ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
             Unit::Seconds,
-            "Time spent waiting to check out a DuckLake connection from the pool, labeled by operation_kind."
+            "Time spent waiting to check out a DuckLake connection from the pool."
         );
         describe_histogram!(
             ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS,
             Unit::Seconds,
-            "Time spent executing a DuckLake blocking operation after checkout, labeled by operation_kind."
+            "Time spent executing a DuckLake blocking operation after checkout."
         );
         describe_histogram!(
             ETL_DUCKLAKE_MUTATION_OPERATION_DURATION_SECONDS,
@@ -237,6 +234,16 @@ pub(crate) fn register_metrics() {
             ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL,
             Unit::Count,
             "DuckLake batches skipped because an applied marker already existed, labeled by batch_kind."
+        );
+        describe_counter!(
+            ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL,
+            Unit::Count,
+            "DuckLake background maintenance operations started, labeled by task, operation, and reason."
+        );
+        describe_gauge!(
+            ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS,
+            Unit::Count,
+            "DuckLake background maintenance operations currently in progress, labeled by task, operation, and reason."
         );
         describe_histogram!(
             ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
@@ -322,11 +329,6 @@ pub(super) fn spawn_ducklake_metrics_sampler(
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
     maintenance_notification_tx: mpsc::Sender<TableMaintenanceNotification>,
 ) -> EtlResult<DuckLakeMetricsSampler> {
-    let started = Instant::now();
-    info!(
-        pool_size = METRICS_POOL_SIZE,
-        "starting ducklake metrics sampler"
-    );
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let handle = tokio::spawn(run_ducklake_metrics_sampler(
         manager,
@@ -334,11 +336,6 @@ pub(super) fn spawn_ducklake_metrics_sampler(
         maintenance_notification_tx,
         shutdown_rx,
     ));
-    info!(
-        pool_size = METRICS_POOL_SIZE,
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "ducklake metrics sampler started"
-    );
 
     Ok(DuckLakeMetricsSampler {
         shutdown_tx,
@@ -633,6 +630,36 @@ fn epoch_age_seconds(now_epoch_ms: i64, oldest_epoch_ms: Option<i64>) -> i64 {
         .unwrap_or(0)
 }
 
+/// Resolves the schema name that DuckLake uses inside its hidden metadata catalog.
+pub(super) fn resolve_ducklake_metadata_schema_blocking(
+    conn: &duckdb::Connection,
+) -> EtlResult<String> {
+    let metadata_catalog = format!("__ducklake_metadata_{LAKE_CATALOG}");
+    let sql = format!(
+        r#"SELECT table_schema
+           FROM information_schema.tables
+           WHERE table_catalog = {}
+             AND table_name = 'ducklake_snapshot'
+           ORDER BY CASE
+               WHEN table_schema = 'main' THEN 0
+               WHEN table_schema = 'ducklake' THEN 1
+               ELSE 2
+           END,
+           table_schema
+           LIMIT 1;"#,
+        quote_literal(&metadata_catalog),
+    );
+    conn.query_row(&sql, [], |row| row.get::<_, String>(0))
+        .map_err(|e| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake metadata schema query failed",
+                format_query_error_detail(&sql, &e),
+                source: e
+            )
+        })
+}
+
 /// Returns the fully-qualified hidden DuckLake metadata namespace.
 fn ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<String> {
     static METADATA_NAMESPACE: OnceLock<String> = OnceLock::new();
@@ -649,30 +676,7 @@ fn ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<String> {
 /// Resolves the schema that DuckLake uses inside its hidden metadata catalog.
 fn resolve_ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<String> {
     let metadata_catalog = format!("__ducklake_metadata_{LAKE_CATALOG}");
-    let sql = format!(
-        r#"SELECT table_schema
-           FROM information_schema.tables
-           WHERE table_catalog = {}
-             AND table_name = 'ducklake_snapshot'
-           ORDER BY CASE
-               WHEN table_schema = 'main' THEN 0
-               WHEN table_schema = 'ducklake' THEN 1
-               ELSE 2
-           END,
-           table_schema
-           LIMIT 1;"#,
-        quote_literal(&metadata_catalog),
-    );
-    let table_schema = conn
-        .query_row(&sql, [], |row| row.get::<_, String>(0))
-        .map_err(|e| {
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake metadata namespace query failed",
-                format_query_error_detail(&sql, &e),
-                source: e
-            )
-        })?;
+    let table_schema = resolve_ducklake_metadata_schema_blocking(conn)?;
 
     Ok(format!(
         "{}.{}",
@@ -681,14 +685,16 @@ fn resolve_ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<S
     ))
 }
 
-#[cfg(all(test, feature = "test-utils"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     use std::collections::HashSet;
     use std::sync::Arc;
+    #[cfg(feature = "test-utils")]
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
+    #[cfg(feature = "test-utils")]
     #[tokio::test]
     async fn test_spawn_ducklake_metrics_sampler_initializes_pool_lazily() {
         let open_count = Arc::new(AtomicUsize::new(0));
