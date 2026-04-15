@@ -1335,3 +1335,133 @@ async fn multiple_tables_receive_independent_writes() {
     assert_eq!(rows_b[1].cdc_operation, "INSERT");
     assert!(rows_b[1].cdc_lsn > 0);
 }
+
+/// SELECT query used to verify the `tx_order` test.
+const TX_ORDER_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_tx__order\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
+/// Tests that updates from separately committed transactions arrive in
+/// ClickHouse with LSNs reflecting Postgres commit order.
+///
+/// # GIVEN
+///
+/// A Postgres table with one row (`id=1, value='original'`), copied to
+/// ClickHouse. Two database connections to the same source.
+///
+/// # WHEN
+///
+/// Transaction A (on connection 1) updates the row to `'update_a'` and
+/// commits. Then transaction B (on connection 2) updates the row to
+/// `'update_b'` and commits.
+///
+/// # THEN
+///
+/// ClickHouse contains three rows (append-only CDC) with strictly
+/// increasing `cdc_lsn`:
+/// - `value='original'`,  `cdc_operation='INSERT'`, `cdc_lsn=0`
+/// - `value='update_a'`,  `cdc_operation='UPDATE'`, `cdc_lsn > 0`
+/// - `value='update_b'`,  `cdc_operation='UPDATE'`, `cdc_lsn > update_a's lsn`
+#[tokio::test(flavor = "multi_thread")]
+async fn sequential_transactions_preserve_commit_order() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: one row, two database connections ---
+    let mut database_1 = spawn_source_database().await;
+    let mut database_2 = database_1.duplicate().await;
+    let table_name = test_table_name("tx_order");
+
+    let table_id = database_1
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create tx_order test table");
+
+    let publication_name = "test_pub_clickhouse_tx_order";
+    database_1
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create tx_order publication");
+
+    database_1
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('original')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert initial tx_order row");
+
+    let ch_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = ch_db.build_destination(pipeline_id, store.clone());
+
+    let table_ready = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    let mut pipeline = create_pipeline(
+        &database_1.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+
+    // --- WHEN: two transactions commit sequentially on separate connections ---
+    let tx_a = database_1.begin_transaction().await;
+    tx_a.run_sql(&format!(
+        "UPDATE {} SET value = 'update_a' WHERE id = 1",
+        table_name.as_quoted_identifier(),
+    ))
+    .await
+    .expect("Failed to execute update_a");
+    tx_a.commit_transaction().await;
+
+    let tx_b = database_2.begin_transaction().await;
+    tx_b.run_sql(&format!(
+        "UPDATE {} SET value = 'update_b' WHERE id = 1",
+        table_name.as_quoted_identifier(),
+    ))
+    .await
+    .expect("Failed to execute update_b");
+    tx_b.commit_transaction().await;
+
+    // Poll until all three rows arrive.
+    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(3);
+    for _ in 0..50 {
+        rows = ch_db.query(TX_ORDER_SELECT).await;
+        if rows.len() >= 3 {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: three rows with strictly increasing LSNs ---
+    assert_eq!(rows.len(), 3, "expected INSERT + two UPDATEs");
+
+    let r = &rows[0];
+    assert_eq!(r.value, "original");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert_eq!(r.cdc_lsn, 0);
+
+    let r = &rows[1];
+    assert_eq!(r.value, "update_a");
+    assert_eq!(r.cdc_operation, "UPDATE");
+    assert!(r.cdc_lsn > 0);
+
+    let r = &rows[2];
+    assert_eq!(r.value, "update_b");
+    assert_eq!(r.cdc_operation, "UPDATE");
+    assert!(
+        r.cdc_lsn > rows[1].cdc_lsn,
+        "update_b must have a higher LSN than update_a"
+    );
+}
