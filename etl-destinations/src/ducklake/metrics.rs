@@ -614,6 +614,36 @@ fn epoch_age_seconds(now_epoch_ms: i64, oldest_epoch_ms: Option<i64>) -> i64 {
         .unwrap_or(0)
 }
 
+/// Resolves the schema name that DuckLake uses inside its hidden metadata catalog.
+pub(super) fn resolve_ducklake_metadata_schema_blocking(
+    conn: &duckdb::Connection,
+) -> EtlResult<String> {
+    let metadata_catalog = format!("__ducklake_metadata_{LAKE_CATALOG}");
+    let sql = format!(
+        r#"SELECT table_schema
+           FROM information_schema.tables
+           WHERE table_catalog = {}
+             AND table_name = 'ducklake_snapshot'
+           ORDER BY CASE
+               WHEN table_schema = 'main' THEN 0
+               WHEN table_schema = 'ducklake' THEN 1
+               ELSE 2
+           END,
+           table_schema
+           LIMIT 1;"#,
+        quote_literal(&metadata_catalog),
+    );
+    conn.query_row(&sql, [], |row| row.get::<_, String>(0))
+        .map_err(|e| {
+            etl_error!(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake metadata schema query failed",
+                format_query_error_detail(&sql, &e),
+                source: e
+            )
+        })
+}
+
 /// Returns the fully-qualified hidden DuckLake metadata namespace.
 fn ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<String> {
     static METADATA_NAMESPACE: OnceLock<String> = OnceLock::new();
@@ -630,30 +660,7 @@ fn ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<String> {
 /// Resolves the schema that DuckLake uses inside its hidden metadata catalog.
 fn resolve_ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<String> {
     let metadata_catalog = format!("__ducklake_metadata_{LAKE_CATALOG}");
-    let sql = format!(
-        r#"SELECT table_schema
-           FROM information_schema.tables
-           WHERE table_catalog = {}
-             AND table_name = 'ducklake_snapshot'
-           ORDER BY CASE
-               WHEN table_schema = 'main' THEN 0
-               WHEN table_schema = 'ducklake' THEN 1
-               ELSE 2
-           END,
-           table_schema
-           LIMIT 1;"#,
-        quote_literal(&metadata_catalog),
-    );
-    let table_schema = conn
-        .query_row(&sql, [], |row| row.get::<_, String>(0))
-        .map_err(|e| {
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake metadata namespace query failed",
-                format_query_error_detail(&sql, &e),
-                source: e
-            )
-        })?;
+    let table_schema = resolve_ducklake_metadata_schema_blocking(conn)?;
 
     Ok(format!(
         "{}.{}",

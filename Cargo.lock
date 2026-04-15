@@ -1900,6 +1900,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "tokio-postgres",

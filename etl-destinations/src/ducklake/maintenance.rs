@@ -19,6 +19,9 @@ use crate::ducklake::client::{
 };
 use crate::ducklake::config::{MAINTENANCE_TARGET_FILE_SIZE, TARGET_FILE_SIZE_OPTION_NAME};
 use crate::ducklake::core::flush_table_inlined_data;
+use crate::ducklake::inline_size::{
+    DuckLakePendingInlineDataSizes, DuckLakePendingInlineSizeSampler,
+};
 use crate::ducklake::metrics::{
     DuckLakeTableStorageMetrics, ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
     ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS, ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL,
@@ -31,9 +34,11 @@ use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG};
 const MAINTENANCE_POOL_SIZE: u32 = 1;
 /// Poll interval for checking per-table inline flush thresholds.
 const MAINTENANCE_FLUSH_POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// Pending inline insert-data bytes threshold that triggers a background inline flush.
+const MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD: u64 = 10_000_000;
 /// Estimated ratio from raw row payload to compressed parquet bytes.
 const PARQUET_COMPRESSION_RATIO_ESTIMATE: u64 = 4;
-/// Pending bytes threshold that triggers a background inline flush.
+/// Fallback estimated pending bytes threshold when inline-size sampling is unavailable.
 const MAINTENANCE_PENDING_BYTES_THRESHOLD: u64 =
     SMALL_FILE_SIZE_BYTES as u64 * PARQUET_COMPRESSION_RATIO_ESTIMATE;
 /// Optional pending inserted-rows threshold that triggers a background inline flush.
@@ -44,6 +49,8 @@ const MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD: Duration = Duration::from_sec
 const MAINTENANCE_TABLE_COMPACTION_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Keeps the legacy targeted rewrite/merge path compiled without scheduling it.
 const ENABLE_TARGETED_TABLE_MAINTENANCE: bool = false;
+/// Keeps checkpoint maintenance compiled without scheduling or running it.
+pub(super) const ENABLE_CHECKPOINT_MAINTENANCE: bool = false;
 /// Interval for scheduling tier-0 file merges before the next streaming batch.
 const MAINTENANCE_MERGE_ADJACENT_FILES_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Minimum active delete-file count before idle rewrite is worth attempting.
@@ -102,6 +109,7 @@ impl MaintenanceOperation {
 /// Primary reasons that schedule one background maintenance decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MaintenanceReason {
+    PendingInlinedDataBytesThreshold,
     PendingBytesThreshold,
     PendingInsertedRowsThreshold,
     IdleRewriteMetricsThreshold,
@@ -116,6 +124,7 @@ impl MaintenanceReason {
     /// Returns the stable metric label value for this reason.
     fn as_str(self) -> &'static str {
         match self {
+            Self::PendingInlinedDataBytesThreshold => "pending_inlined_data_bytes_threshold",
             Self::PendingBytesThreshold => "pending_bytes_threshold",
             Self::PendingInsertedRowsThreshold => "pending_inserted_rows_threshold",
             Self::IdleRewriteMetricsThreshold => "idle_rewrite_metrics_threshold",
@@ -223,6 +232,8 @@ struct TableMaintenanceState {
     pending_inserted_rows: u64,
     dirty_since_compaction: bool,
     last_write_at: Option<Instant>,
+    latest_pending_inline_data_sizes: Option<DuckLakePendingInlineDataSizes>,
+    latest_pending_inline_data_sampled_at: Option<Instant>,
     last_targeted_maintenance_at: Option<Instant>,
     latest_storage_metrics: Option<DuckLakeTableStorageMetrics>,
     latest_storage_metrics_sampled_at: Option<Instant>,
@@ -240,6 +251,16 @@ impl TableMaintenanceState {
         self.last_write_at = Some(now);
     }
 
+    /// Records one sampled inline insert-data snapshot for this table.
+    fn record_pending_inline_data_sizes(
+        &mut self,
+        sampled_at: Instant,
+        sizes: DuckLakePendingInlineDataSizes,
+    ) {
+        self.latest_pending_inline_data_sizes = Some(sizes);
+        self.latest_pending_inline_data_sampled_at = Some(sampled_at);
+    }
+
     /// Records one sampled metrics snapshot for this table.
     fn record_metrics_sample(&mut self, sample: TableMetricsSample) {
         self.latest_storage_metrics = Some(sample.metrics);
@@ -249,6 +270,27 @@ impl TableMaintenanceState {
     /// Returns whether the table still has pending inline work.
     fn has_pending_flush_work(&self) -> bool {
         self.pending_bytes > 0 || self.pending_inserted_rows > 0
+    }
+
+    /// Returns whether the current dirty period still needs an inline-size sample.
+    fn needs_pending_inline_data_sizes_sample(&self) -> bool {
+        self.dirty_since_compaction
+            && self.last_write_at.is_some()
+            && self.current_pending_inline_data_sizes().is_none()
+    }
+
+    /// Returns the latest inline insert-data sample covering the current dirty period.
+    fn current_pending_inline_data_sizes(&self) -> Option<DuckLakePendingInlineDataSizes> {
+        let sizes = self.latest_pending_inline_data_sizes?;
+        let sampled_at = self.latest_pending_inline_data_sampled_at?;
+
+        if let Some(last_write_at) = self.last_write_at
+            && sampled_at < last_write_at
+        {
+            return None;
+        }
+
+        Some(sizes)
     }
 
     /// Returns the primary reason that pending inlined work should be flushed.
@@ -262,6 +304,11 @@ impl TableMaintenanceState {
         _now: Instant,
         pending_rows_threshold: Option<u64>,
     ) -> Option<MaintenanceReason> {
+        if let Some(sizes) = self.current_pending_inline_data_sizes() {
+            return (sizes.inlined_data_bytes >= MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD)
+                .then_some(MaintenanceReason::PendingInlinedDataBytesThreshold);
+        }
+
         if self.pending_bytes >= MAINTENANCE_PENDING_BYTES_THRESHOLD {
             return Some(MaintenanceReason::PendingBytesThreshold);
         }
@@ -276,9 +323,11 @@ impl TableMaintenanceState {
     }
 
     /// Clears pending flush counters after a successful flush/materialization.
-    fn clear_pending_flush(&mut self) {
+    fn clear_pending_flush(&mut self, now: Instant) {
         self.pending_bytes = 0;
         self.pending_inserted_rows = 0;
+        self.latest_pending_inline_data_sizes = Some(DuckLakePendingInlineDataSizes::default());
+        self.latest_pending_inline_data_sampled_at = Some(now);
     }
 
     /// Returns the latest metrics sample covering the current dirty period.
@@ -655,6 +704,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
     checkpoint_requested: Arc<AtomicBool>,
     merge_adjacent_files_requested: Arc<AtomicBool>,
     merge_adjacent_files_dirty: Arc<AtomicBool>,
+    pending_inline_size_sampler: Option<DuckLakePendingInlineSizeSampler>,
 ) -> EtlResult<DuckLakeMaintenanceWorker> {
     let mut pool = LazyDuckLakePool::new(manager, MAINTENANCE_POOL_SIZE, "maintenance");
     pool.warm_in_background();
@@ -667,6 +717,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
         checkpoint_requested,
         merge_adjacent_files_requested,
         merge_adjacent_files_dirty,
+        pending_inline_size_sampler,
         notification_rx,
         shutdown_rx,
     ));
@@ -687,6 +738,7 @@ async fn run_ducklake_maintenance_worker(
     checkpoint_requested: Arc<AtomicBool>,
     merge_adjacent_files_requested: Arc<AtomicBool>,
     merge_adjacent_files_dirty: Arc<AtomicBool>,
+    pending_inline_size_sampler: Option<DuckLakePendingInlineSizeSampler>,
     mut notification_rx: mpsc::Receiver<TableMaintenanceNotification>,
     mut shutdown_rx: watch::Receiver<()>,
 ) {
@@ -747,6 +799,23 @@ async fn run_ducklake_maintenance_worker(
                 let mut now = Instant::now();
 
                 for (table_name, table_state) in &mut table_states {
+                    if let Some(pending_inline_size_sampler) = &pending_inline_size_sampler
+                        && table_state.needs_pending_inline_data_sizes_sample()
+                    {
+                        match pending_inline_size_sampler.sample_table(table_name).await {
+                            Ok(sizes) => {
+                                table_state.record_pending_inline_data_sizes(Instant::now(), sizes);
+                            }
+                            Err(error) => {
+                                warn!(
+                                    table = %table_name,
+                                    error = ?error,
+                                    "ducklake inline-size sampler query failed"
+                                );
+                            }
+                        }
+                    }
+
                     // If it needs to be flushed
                     if let Some(reason) = table_state.flush_reason(now) {
                         let pool = match pool.get_or_init_pool().await {
@@ -768,7 +837,7 @@ async fn run_ducklake_maintenance_worker(
                         {
                             Ok(outcome) => {
                                 if outcome.is_completed() {
-                                    table_state.clear_pending_flush();
+                                    table_state.clear_pending_flush(Instant::now());
                                     if outcome == MaintenanceOutcome::Applied {
                                         merge_adjacent_files_dirty
                                             .store(true, AtomicOrdering::Release);
@@ -881,6 +950,9 @@ async fn run_ducklake_maintenance_worker(
                 }
             }
             _ = checkpoint_interval.tick() => {
+                if !ENABLE_CHECKPOINT_MAINTENANCE {
+                    continue;
+                }
                 if table_states.is_empty() {
                     continue;
                 }
@@ -1869,6 +1941,39 @@ mod tests {
     }
 
     #[test]
+    fn test_table_maintenance_state_uses_sampled_inline_data_bytes_flush_reason() {
+        let now = Instant::now();
+        let mut state = TableMaintenanceState::default();
+        state.record_write_activity(&write_activity(1, 1), now);
+        state.record_pending_inline_data_sizes(
+            now + Duration::from_secs(1),
+            DuckLakePendingInlineDataSizes {
+                inlined_data_bytes: MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD,
+            },
+        );
+
+        assert_eq!(
+            state.flush_reason(now + Duration::from_secs(2)),
+            Some(MaintenanceReason::PendingInlinedDataBytesThreshold)
+        );
+    }
+
+    #[test]
+    fn test_table_maintenance_state_prefers_sampled_inline_data_over_estimated_bytes() {
+        let now = Instant::now();
+        let mut state = TableMaintenanceState::default();
+        state.record_write_activity(&write_activity(MAINTENANCE_PENDING_BYTES_THRESHOLD, 1), now);
+        state.record_pending_inline_data_sizes(
+            now + Duration::from_secs(1),
+            DuckLakePendingInlineDataSizes {
+                inlined_data_bytes: MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD - 1,
+            },
+        );
+
+        assert_eq!(state.flush_reason(now + Duration::from_secs(2)), None);
+    }
+
+    #[test]
     fn test_table_maintenance_state_disables_pending_inserted_rows_flush_reason_by_default() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
@@ -2334,6 +2439,7 @@ mod tests {
             std::sync::Arc::new(AtomicBool::new(false)),
             std::sync::Arc::new(AtomicBool::new(false)),
             std::sync::Arc::new(AtomicBool::new(false)),
+            None,
         )
         .expect("failed to spawn maintenance worker");
 

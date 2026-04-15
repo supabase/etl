@@ -16,6 +16,7 @@ ducklake = [
     "dep:pg_escape",
     "dep:r2d2",
     "dep:rand",
+    "dep:sqlx",
     "dep:tokio-postgres",
     "dep:tracing",
     "dep:tokio",
@@ -70,6 +71,7 @@ rand = { workspace = true, optional = true, features = ["thread_rng"] }
 reqwest = { workspace = true, optional = true, features = ["json"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true, features = ["runtime-tokio-rustls", "postgres"] }
 tokio = { workspace = true, optional = true, features = ["rt", "sync", "time"] }
 tokio-postgres = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }

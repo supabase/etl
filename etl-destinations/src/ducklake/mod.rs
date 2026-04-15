@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod core;
 mod encoding;
+mod inline_size;
 mod maintenance;
 mod metrics;
 mod schema;

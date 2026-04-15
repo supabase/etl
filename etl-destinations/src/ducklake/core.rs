@@ -27,7 +27,7 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore}
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::ducklake::batches::{
@@ -46,15 +46,16 @@ use crate::ducklake::client::{
 use crate::ducklake::config::{
     build_maintenance_setup_plan, build_setup_plan, current_duckdb_extension_strategy,
 };
+use crate::ducklake::inline_size::DuckLakePendingInlineSizeSampler;
 use crate::ducklake::maintenance::{
-    DuckLakeMaintenanceWorker, TableMaintenanceNotification, TableWriteActivity,
-    maybe_run_requested_checkpoint, maybe_run_requested_merge_adjacent_files,
+    DuckLakeMaintenanceWorker, ENABLE_CHECKPOINT_MAINTENANCE, TableMaintenanceNotification,
+    TableWriteActivity, maybe_run_requested_checkpoint, maybe_run_requested_merge_adjacent_files,
     send_maintenance_notification, spawn_ducklake_maintenance_worker, table_write_slot,
 };
 use crate::ducklake::metrics::{
     DuckLakeMetricsSampler, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
     ETL_DUCKLAKE_INLINE_FLUSH_ROWS, ETL_DUCKLAKE_POOL_SIZE, RESULT_LABEL, register_metrics,
-    spawn_ducklake_metrics_sampler,
+    resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
 };
 use crate::ducklake::schema::build_create_table_sql_ducklake;
 use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG, S3Config};
@@ -268,7 +269,33 @@ where
             open_count: Arc::new(AtomicUsize::new(0)),
         });
 
-        let pool = build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?;
+        let pool =
+            Arc::new(build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?);
+        let blocking_slots = Arc::new(Semaphore::new(pool_size as usize));
+        let pending_inline_size_sampler =
+            if matches!(catalog_url.scheme(), "postgres" | "postgresql") {
+                match run_duckdb_blocking(
+                    Arc::clone(&pool),
+                    Arc::clone(&blocking_slots),
+                    DuckDbBlockingOperationKind::Foreground,
+                    resolve_ducklake_metadata_schema_blocking,
+                )
+                .await
+                {
+                    Ok(metadata_schema) => {
+                        DuckLakePendingInlineSizeSampler::new(&catalog_url, metadata_schema)?
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = ?error,
+                            "ducklake inline-size sampler initialization skipped"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
         let created_tables = Arc::default();
         let checkpoint_gate = Arc::new(RwLock::new(()));
         let merge_adjacent_files_requested = Arc::new(AtomicBool::new(false));
@@ -277,8 +304,8 @@ where
         let mut destination = Self {
             #[cfg(feature = "test-utils")]
             manager,
-            pool: Arc::new(pool),
-            blocking_slots: Arc::new(Semaphore::new(pool_size as usize)),
+            pool: Arc::clone(&pool),
+            blocking_slots: Arc::clone(&blocking_slots),
             checkpoint_gate: Arc::clone(&checkpoint_gate),
             streaming_tasks: DestinationTaskSet::new(),
             maintenance_worker: Arc::new(None),
@@ -309,6 +336,7 @@ where
                 Arc::clone(&checkpoint_requested),
                 Arc::clone(&merge_adjacent_files_requested),
                 Arc::clone(&merge_adjacent_files_dirty),
+                pending_inline_size_sampler,
             )?
             .into(),
         );
@@ -875,6 +903,11 @@ where
 
     /// Runs one requested checkpoint before ingesting the next CDC batch when safe.
     async fn maybe_run_requested_checkpoint(&self) -> EtlResult<()> {
+        if !ENABLE_CHECKPOINT_MAINTENANCE {
+            self.checkpoint_requested.store(false, Ordering::Release);
+            return Ok(());
+        }
+
         if !self.checkpoint_requested.load(Ordering::Acquire) {
             return Ok(());
         }
