@@ -1183,3 +1183,155 @@ async fn intermediate_flush_preserves_all_rows() {
         assert_eq!(r.cdc_lsn, 0, "all rows should be from table copy");
     }
 }
+
+/// Tests that CDC events for multiple tables in the same publication are
+/// written correctly to separate ClickHouse tables.
+///
+/// # GIVEN
+///
+/// Two Postgres tables in the same publication, each with one pre-existing
+/// row:
+/// - `multi_a` with `(id=1, value='init_a')`
+/// - `multi_b` with `(id=1, value='init_b')`
+///
+/// # WHEN
+///
+/// The pipeline copies both tables, then one new row is inserted into each
+/// Postgres table (`'streamed_a'` and `'streamed_b'`).
+///
+/// # THEN
+///
+/// Each ClickHouse table contains exactly two rows:
+/// - One from table copy (`cdc_lsn = 0`)
+/// - One from CDC streaming (`cdc_lsn > 0`)
+#[tokio::test(flavor = "multi_thread")]
+async fn multiple_tables_receive_independent_writes() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: two tables in one publication, each with one row ---
+    let database = spawn_source_database().await;
+    let table_a = test_table_name("multi_a");
+    let table_b = test_table_name("multi_b");
+
+    let table_a_id = database
+        .create_table(table_a.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create multi_a table");
+
+    let table_b_id = database
+        .create_table(table_b.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create multi_b table");
+
+    let publication_name = "test_pub_clickhouse_multi";
+    database
+        .create_publication(publication_name, &[table_a.clone(), table_b.clone()])
+        .await
+        .expect("Failed to create multi-table publication");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('init_a')",
+            table_a.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert into multi_a");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('init_b')",
+            table_b.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert into multi_b");
+
+    let ch_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = ch_db.build_destination(pipeline_id, store.clone());
+
+    let table_a_ready = store
+        .notify_on_table_state_type(table_a_id, TableReplicationPhaseType::Ready)
+        .await;
+    let table_b_ready = store
+        .notify_on_table_state_type(table_b_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    tokio::join!(table_a_ready.notified(), table_b_ready.notified());
+
+    // --- WHEN: insert one row into each table ---
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('streamed_a')",
+            table_a.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert streamed row into multi_a");
+
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('streamed_b')",
+            table_b.as_quoted_identifier(),
+        ))
+        .await
+        .expect("Failed to insert streamed row into multi_b");
+
+    let select_a = concat!(
+        "SELECT id, value, cdc_operation, cdc_lsn ",
+        "FROM \"test_multi__a\" ",
+        "ORDER BY id, cdc_lsn",
+    );
+    let select_b = concat!(
+        "SELECT id, value, cdc_operation, cdc_lsn ",
+        "FROM \"test_multi__b\" ",
+        "ORDER BY id, cdc_lsn",
+    );
+
+    // Poll until both tables have 2 rows.
+    let mut rows_a: Vec<UpdateFlowRow> = Vec::with_capacity(2);
+    let mut rows_b: Vec<UpdateFlowRow> = Vec::with_capacity(2);
+    for _ in 0..50 {
+        rows_a = ch_db.query(select_a).await;
+        rows_b = ch_db.query(select_b).await;
+        if rows_a.len() >= 2 && rows_b.len() >= 2 {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: each table has one copied row and one streamed row ---
+    assert_eq!(rows_a.len(), 2, "multi_a should have 2 rows");
+    assert_eq!(rows_b.len(), 2, "multi_b should have 2 rows");
+
+    assert_eq!(rows_a[0].id, 1);
+    assert_eq!(rows_a[0].value, "init_a");
+    assert_eq!(rows_a[0].cdc_operation, "INSERT");
+    assert_eq!(rows_a[0].cdc_lsn, 0);
+
+    assert_eq!(rows_a[1].id, 2);
+    assert_eq!(rows_a[1].value, "streamed_a");
+    assert_eq!(rows_a[1].cdc_operation, "INSERT");
+    assert!(rows_a[1].cdc_lsn > 0);
+
+    assert_eq!(rows_b[0].id, 1);
+    assert_eq!(rows_b[0].value, "init_b");
+    assert_eq!(rows_b[0].cdc_operation, "INSERT");
+    assert_eq!(rows_b[0].cdc_lsn, 0);
+
+    assert_eq!(rows_b[1].id, 2);
+    assert_eq!(rows_b[1].value, "streamed_b");
+    assert_eq!(rows_b[1].cdc_operation, "INSERT");
+    assert!(rows_b[1].cdc_lsn > 0);
+}
