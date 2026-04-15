@@ -22,20 +22,16 @@
   - `cargo fmt --all`
 - Lint:
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- Run all tests:
-  - `cargo test --workspace --all-features`
-- Run doctests:
-  - `cargo test --workspace --all-features --doc`
-- List tests before running filtered or crate-specific test commands:
-  - `cargo test --workspace --all-features -- --list`
-- List doctests before running filtered doctest commands:
-  - `cargo test --workspace --all-features --doc -- --list`
-- Run one crate:
-  - `cargo test -p etl-replicator --all-features`
-- Show tracing during integration tests:
-  - `ENABLE_TRACING=1 cargo test --workspace --all-features`
-- Override log level when needed:
-  - `RUST_LOG=debug cargo test -p etl-replicator --all-features`
+- Run unit tests (no Postgres required):
+  - `cargo nextest run --workspace --all-features --lib`
+- Run unit tests for one crate:
+  - `cargo nextest run -p etl-config --all-features`
+- Run doctests (nextest does not support doctests):
+  - `cargo test --doc --workspace --all-features`
+- List tests:
+  - `cargo nextest list --workspace --all-features`
+- Run full test suite (requires Postgres clusters via `cargo xtask postgres start`):
+  - `cargo xtask nextest run`
 
 ## Agent Workflow
 - Keep changes focused on the issue being solved.
@@ -86,9 +82,12 @@
 - Prefer low-cardinality labels unless higher-cardinality labels are operationally necessary.
 
 ## Testing
+- Tests run via `cargo-nextest` (process-per-test). Use `cargo xtask nextest run` for the full sharded suite, or `cargo nextest run` for single-crate runs.
+- Integration tests are consolidated into `tests/main.rs` per crate. Address individual modules with `-- module_name::`.
+- Doctests use `cargo test --doc` (nextest does not support them).
 - If test output shows `0 passed; 0 failed; 0 ignored; n filtered out`, treat that as a failure to run tests.
 - Verify that expected tests actually ran, not just that Cargo exited successfully.
-- Prefer running `cargo test -- --list` before using filters or crate-specific commands if there is any doubt.
+- Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
 
