@@ -467,4 +467,23 @@ mod tests {
         assert_eq!(bytes_to_hex([0xff].to_vec()), "ff");
         assert_eq!(bytes_to_hex([0xde, 0xad, 0xbe, 0xef].to_vec()), "deadbeef");
     }
+
+    /// # GIVEN
+    /// A NULL ClickHouseValue passed to the non-nullable encoder.
+    ///
+    /// # WHEN
+    /// `rb_encode_value` is called.
+    ///
+    /// # THEN
+    /// It returns a ConversionError rather than writing invalid RowBinary.
+    #[test]
+    fn test_rb_encode_value_rejects_null_for_non_nullable_column() {
+        let mut buf = Vec::new();
+        let result = rb_encode_value(ClickHouseValue::Null, &mut buf);
+
+        assert!(result.is_err(), "NULL in non-nullable column must error");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConversionError);
+        assert!(buf.is_empty(), "no bytes should be written on error");
+    }
 }
