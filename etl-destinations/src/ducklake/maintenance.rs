@@ -838,10 +838,10 @@ async fn run_ducklake_maintenance_worker(
                             Ok(outcome) => {
                                 if outcome.is_completed() {
                                     table_state.clear_pending_flush(Instant::now());
-                                    if outcome == MaintenanceOutcome::Applied {
-                                        merge_adjacent_files_dirty
-                                            .store(true, AtomicOrdering::Release);
-                                    }
+                                    // if outcome == MaintenanceOutcome::Applied {
+                                    //     merge_adjacent_files_dirty
+                                    //         .store(true, AtomicOrdering::Release);
+                                    // }
                                 }
                             }
                             Err(error) => {

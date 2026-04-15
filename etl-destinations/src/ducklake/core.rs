@@ -478,8 +478,8 @@ where
             prepared_batch,
         )
         .await?;
-        self.merge_adjacent_files_dirty
-            .store(true, Ordering::Release);
+        // self.merge_adjacent_files_dirty
+        //     .store(true, Ordering::Release);
 
         self.notify_background_maintenance(TableMaintenanceNotification::WriteActivity(
             TableWriteActivity {
@@ -633,7 +633,7 @@ where
                         )?;
                         apply_table_batches_with_retry(pool, blocking_slots, prepared_batches)
                             .await?;
-                        merge_adjacent_files_dirty.store(true, Ordering::Release);
+                        // merge_adjacent_files_dirty.store(true, Ordering::Release);
                         if let (Some(worker), Some(notification)) =
                             (maintenance_worker.as_ref(), maintenance_notification)
                         {
