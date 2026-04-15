@@ -14,8 +14,7 @@ use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL};
 use crate::types::{
-    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, PipelineId, TableRow, TruncateEvent,
-    UpdateEvent,
+    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow, TruncateEvent, UpdateEvent,
 };
 use crate::{bail, etl_error};
 

@@ -10,7 +10,7 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
 use crate::replication::client::PgReplicationClient;
-use crate::replication::masks::ReplicationMasksCache;
+use crate::replication::table_cache::SharedTableCache;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
@@ -155,9 +155,9 @@ where
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
-        // We create the shared replication masks container that will be used by both the apply
-        // worker and table sync workers to track which columns are being replicated for each table.
-        let replication_masks = ReplicationMasksCache::new();
+        // We create the shared per-table protocol cache used by both the apply worker and table
+        // sync workers. It tracks the latest schema snapshot and replication mask for each table.
+        let shared_table_cache = SharedTableCache::new();
 
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
@@ -166,7 +166,7 @@ where
             pool.clone(),
             self.store.clone(),
             self.destination.clone(),
-            replication_masks,
+            shared_table_cache,
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
             memory_monitor,

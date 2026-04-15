@@ -581,9 +581,12 @@ where
     /// invariant violation since the metadata should have been recorded during initial table
     /// synchronization in [`Self::write_table_rows`]. If the snapshot ID or replication mask differs
     /// from the incoming [`ReplicatedTableSchema`], the method computes and applies the schema diff.
-    async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
-        let table_id = new_schema.id();
-        let new_snapshot_id = new_schema.get_inner().snapshot_id;
+    async fn handle_relation_event(
+        &self,
+        new_replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_id = new_replicated_table_schema.id();
+        let new_snapshot_id = new_replicated_table_schema.get_inner().snapshot_id;
 
         // Get current applied destination metadata. If the table is still in `Applying`, the
         // state store surfaces that as an error.
@@ -608,7 +611,7 @@ where
 
         let current_snapshot_id = metadata.snapshot_id;
         let current_replication_mask = metadata.replication_mask.clone();
-        let new_replication_mask = new_schema.replication_mask().clone();
+        let new_replication_mask = new_replicated_table_schema.replication_mask().clone();
         // Check both snapshot_id and replication mask - the mask can change
         // independently if columns are added/removed from the publication.
         if current_snapshot_id == new_snapshot_id
@@ -677,7 +680,7 @@ where
             .await?;
 
         // Compute and apply the diff.
-        let diff = current_schema.diff(new_schema);
+        let diff = current_schema.diff(new_replicated_table_schema);
         if let Err(err) = self
             .apply_schema_diff(&table_id, &bigquery_table_id, &diff)
             .await

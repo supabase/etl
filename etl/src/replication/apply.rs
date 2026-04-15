@@ -53,8 +53,8 @@ use crate::metrics::{
     ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::{PgReplicationClient, PostgresConnectionUpdate};
-use crate::replication::masks::ReplicationMasksCache;
 use crate::replication::stream::{EventsStream, StatusUpdateType};
+use crate::replication::table_cache::{SharedTableCache, SharedTableState};
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
@@ -206,8 +206,8 @@ pub struct ApplyWorkerContext<S, D> {
     pub store: S,
     /// Destination where replicated data is written.
     pub destination: D,
-    /// Shared replication masks container for tracking column replication status.
-    pub replication_masks: ReplicationMasksCache,
+    /// Shared per-table protocol state used to decode relation and row messages.
+    pub shared_table_cache: SharedTableCache,
     /// Shutdown signal receiver for graceful termination.
     pub shutdown_rx: ShutdownRx,
     /// Semaphore controlling maximum concurrent table sync workers.
@@ -370,10 +370,11 @@ struct ApplyLoopState {
     /// While this is set, the loop stops both deadline-driven flush attempts and new message intake
     /// until the in-flight flush resolves and the queued batch can be retried.
     processing_paused: bool,
-    /// The current schema snapshot being tracked.
+    /// Fallback snapshot used before a table has established shared protocol state.
     ///
-    /// This is updated when DDL messages are processed, tracking the latest schema version.
-    current_schema_snapshot_id: SnapshotId,
+    /// This is seeded from the worker start LSN so a first `RELATION` message can always resolve
+    /// the latest schema version whose snapshot is less than or equal to the worker's start point.
+    bootstrap_snapshot_id: SnapshotId,
 }
 
 impl ApplyLoopState {
@@ -381,7 +382,7 @@ impl ApplyLoopState {
     fn new(
         replication_progress: ReplicationProgress,
         keep_alive_deadline_duration: Duration,
-        current_schema_snapshot_id: SnapshotId,
+        bootstrap_snapshot_id: SnapshotId,
     ) -> Self {
         Self {
             last_commit_end_lsn: None,
@@ -398,7 +399,7 @@ impl ApplyLoopState {
             pending_flush_result: None,
             exit_intent: None,
             processing_paused: false,
-            current_schema_snapshot_id,
+            bootstrap_snapshot_id,
         }
     }
 
@@ -420,9 +421,9 @@ impl ApplyLoopState {
         (events_batch, events_batch_bytes)
     }
 
-    /// Updates the current schema snapshot ID.
-    fn update_schema_snapshot_id(&mut self, snapshot_id: SnapshotId) {
-        self.current_schema_snapshot_id = snapshot_id;
+    /// Returns the bootstrap snapshot used before a table has shared protocol state.
+    fn bootstrap_snapshot_id(&self) -> SnapshotId {
+        self.bootstrap_snapshot_id
     }
 
     /// Sets the batch flush deadline, if not already set.
@@ -589,8 +590,8 @@ pub struct ApplyLoop<S, D> {
     schema_store: S,
     /// Destination where replicated data is written.
     destination: D,
-    /// Shared replication masks container for tracking column replication status.
-    replication_masks: ReplicationMasksCache,
+    /// Shared per-table protocol state used to decode relation and row messages.
+    shared_table_cache: SharedTableCache,
     /// Shutdown signal receiver.
     shutdown_rx: ShutdownRx,
     /// Worker-specific dependencies and coordination hooks.
@@ -623,7 +624,7 @@ where
         replication_client: PgReplicationClient,
         schema_store: S,
         destination: D,
-        replication_masks: ReplicationMasksCache,
+        shared_table_cache: SharedTableCache,
         worker_context: WorkerContext<S, D>,
         shutdown_rx: ShutdownRx,
         memory_monitor: MemoryMonitor,
@@ -658,7 +659,7 @@ where
                 Self::compute_keep_alive_deadline_duration(DEFAULT_KEEP_ALIVE_DURATION)
             }
         };
-        let current_schema_snapshot_id: SnapshotId = start_lsn.into();
+        let bootstrap_snapshot_id: SnapshotId = start_lsn.into();
 
         let initial_progress = ReplicationProgress {
             last_received_lsn: start_lsn,
@@ -668,7 +669,7 @@ where
         let state = ApplyLoopState::new(
             initial_progress,
             keep_alive_deadline_duration,
-            current_schema_snapshot_id,
+            bootstrap_snapshot_id,
         );
 
         let mut apply_loop = Self {
@@ -676,7 +677,7 @@ where
             config: config.clone(),
             schema_store,
             destination,
-            replication_masks,
+            shared_table_cache,
             shutdown_rx,
             worker_context,
             memory_monitor,
@@ -1550,7 +1551,9 @@ where
 
         let table_id = TableId::new(schema_change_message.table_id as u32);
 
-        // Check if we should apply changes for this table.
+        // Exactly one worker owns protocol interpretation for a table at a time. If this worker
+        // is not the owner, it must skip the DDL so the owning worker is solely responsible for
+        // advancing the shared per-table protocol state.
         if !self
             .should_apply_changes(table_id, remote_final_lsn)
             .await?
@@ -1574,14 +1577,12 @@ where
         // Store the new schema version in the store.
         self.schema_store.store_table_schema(table_schema).await?;
 
-        // Update the current schema snapshot in the state.
-        self.state.update_schema_snapshot_id(snapshot_id);
-
-        // The next post-DDL DML will cause pgoutput to synthesize a fresh
-        // Relation message for this table. Drop any cached mask now so that
-        // relation handling rebuilds it from the schema version we just stored,
-        // rather than reusing a pre-DDL column mapping.
-        self.replication_masks.remove(&table_id).await;
+        // The next post-DDL DML will cause pgoutput to synthesize a fresh `RELATION` message for
+        // this table. Record the new snapshot and clear any cached mask now so relation handling
+        // rebuilds it from the schema version we just stored rather than reusing pre-DDL state.
+        self.shared_table_cache
+            .note_schema_snapshot(table_id, snapshot_id)
+            .await;
 
         let table_id_u32: u32 = table_id.into();
         info!(
@@ -1695,6 +1696,8 @@ where
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
+        // Exactly one worker owns protocol interpretation for a table at a time. Non-owning
+        // workers skip `RELATION` handling and rely on the owner to refresh shared table state.
         if !self
             .should_apply_changes(table_id, remote_final_lsn)
             .await?
@@ -1711,15 +1714,17 @@ where
         );
 
         // Build the replication mask by validating that all replicated columns exist in the schema.
-        let table_schema = get_table_schema(
-            &self.schema_store,
-            &table_id,
-            self.state.current_schema_snapshot_id,
-        )
-        .await?;
+        let table_snapshot_id = self
+            .shared_table_cache
+            .get(&table_id)
+            .await
+            .map(|state| state.snapshot_id)
+            .unwrap_or_else(|| self.state.bootstrap_snapshot_id());
+        let table_schema =
+            get_table_schema(&self.schema_store, &table_id, table_snapshot_id).await?;
         let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
-        self.replication_masks
-            .set(table_id, replication_mask.clone())
+        self.shared_table_cache
+            .note_replication_mask(table_id, table_schema.snapshot_id, replication_mask.clone())
             .await;
 
         // Build the ReplicatedTableSchema and emit a Relation event.
@@ -1755,6 +1760,8 @@ where
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
+        // Exactly one worker owns protocol interpretation for a table at a time, so non-owning
+        // workers skip row decoding and leave the shared table state untouched.
         if !self
             .should_apply_changes(table_id, remote_final_lsn)
             .await?
@@ -1762,13 +1769,9 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        let replicated_table_schema = get_replicated_table_schema(
-            &table_id,
-            self.state.current_schema_snapshot_id,
-            &self.schema_store,
-            &self.replication_masks,
-        )
-        .await?;
+        let replicated_table_schema =
+            get_replicated_table_schema(&table_id, &self.schema_store, &self.shared_table_cache)
+                .await?;
 
         let event = parse_event_from_insert_message(
             replicated_table_schema,
@@ -1798,6 +1801,8 @@ where
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
+        // Exactly one worker owns protocol interpretation for a table at a time, so non-owning
+        // workers skip row decoding and leave the shared table state untouched.
         if !self
             .should_apply_changes(table_id, remote_final_lsn)
             .await?
@@ -1805,13 +1810,9 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        let replicated_table_schema = get_replicated_table_schema(
-            &table_id,
-            self.state.current_schema_snapshot_id,
-            &self.schema_store,
-            &self.replication_masks,
-        )
-        .await?;
+        let replicated_table_schema =
+            get_replicated_table_schema(&table_id, &self.schema_store, &self.shared_table_cache)
+                .await?;
 
         let event = parse_event_from_update_message(
             replicated_table_schema,
@@ -1841,6 +1842,8 @@ where
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
+        // Exactly one worker owns protocol interpretation for a table at a time, so non-owning
+        // workers skip row decoding and leave the shared table state untouched.
         if !self
             .should_apply_changes(table_id, remote_final_lsn)
             .await?
@@ -1848,13 +1851,9 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        let replicated_table_schema = get_replicated_table_schema(
-            &table_id,
-            self.state.current_schema_snapshot_id,
-            &self.schema_store,
-            &self.replication_masks,
-        )
-        .await?;
+        let replicated_table_schema =
+            get_replicated_table_schema(&table_id, &self.schema_store, &self.shared_table_cache)
+                .await?;
 
         let event = parse_event_from_delete_message(
             replicated_table_schema,
@@ -1882,20 +1881,21 @@ where
         };
         let tx_ordinal = self.state.next_tx_ordinal();
 
-        // Collect the replicated schemas for tables we are allowed to apply changes to.
+        // Collect the replicated schemas for tables this worker currently owns.
         let mut truncated_tables = Vec::with_capacity(message.rel_ids().len());
         for &rel_id in message.rel_ids().iter() {
             let table_id = TableId::new(rel_id);
 
+            // Exactly one worker owns protocol interpretation for a table at a time, so
+            // non-owning workers skip truncation handling for that table as well.
             if self
                 .should_apply_changes(table_id, remote_final_lsn)
                 .await?
             {
                 let replicated_table_schema = get_replicated_table_schema(
                     &table_id,
-                    self.state.current_schema_snapshot_id,
                     &self.schema_store,
-                    &self.replication_masks,
+                    &self.shared_table_cache,
                 )
                 .await?;
                 truncated_tables.push(replicated_table_schema);
@@ -1918,9 +1918,11 @@ where
         Ok(HandleMessageResult::return_event(Event::Truncate(event)))
     }
 
-    /// Determines whether changes should be applied for a given table.
+    /// Determines whether this worker currently owns protocol interpretation for a table.
     ///
-    /// Dispatches to worker-specific implementation based on the worker context.
+    /// Exactly one worker owns DDL, `RELATION`, and DML handling for a table at a time. When this
+    /// returns `false`, the caller must skip the message and leave the shared per-table protocol
+    /// state untouched so the owning worker remains the single writer for that table.
     async fn should_apply_changes(
         &self,
         table_id: TableId,
@@ -2692,7 +2694,7 @@ mod apply_worker {
             table_id,
             ctx.store.clone(),
             ctx.destination.clone(),
-            ctx.replication_masks.clone(),
+            ctx.shared_table_cache.clone(),
             ctx.shutdown_rx.clone(),
             ctx.table_sync_worker_permits.clone(),
             ctx.memory_monitor.clone(),
@@ -2905,25 +2907,28 @@ where
         })
 }
 
-/// Retrieves a [`ReplicatedTableSchema`] for the given table at the specified snapshot.
+/// Retrieves a [`ReplicatedTableSchema`] for the given table from the shared table state.
 ///
-/// This function combines the table schema from the schema store with the replication mask
-/// from the shared [`ReplicationMasksCache`] to create a [`ReplicatedTableSchema`].
+/// This function combines the table schema from the schema store with the shared per-table
+/// protocol state to create a [`ReplicatedTableSchema`].
 async fn get_replicated_table_schema<S>(
     table_id: &TableId,
-    snapshot_id: SnapshotId,
     schema_store: &S,
-    replication_masks: &ReplicationMasksCache,
+    shared_table_cache: &SharedTableCache,
 ) -> EtlResult<ReplicatedTableSchema>
 where
     S: SchemaStore + Clone + Send + 'static,
 {
-    let Some(replication_mask) = replication_masks.get(table_id).await else {
+    let Some(SharedTableState {
+        snapshot_id,
+        replication_mask: Some(replication_mask),
+    }) = shared_table_cache.get(table_id).await
+    else {
         bail!(
             ErrorKind::InvalidState,
-            "Missing replication mask",
+            "Missing shared table state",
             format!(
-                "No replication mask found for table {}, this event can't be processed",
+                "No shared table state with a replication mask found for table {}, this event can't be processed",
                 table_id
             )
         );

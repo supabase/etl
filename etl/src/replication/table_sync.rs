@@ -16,7 +16,7 @@ use crate::error::{ErrorKind, EtlResult};
 use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, etl_fail_point};
 use crate::metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL};
 use crate::replication::client::PgReplicationClient;
-use crate::replication::masks::ReplicationMasksCache;
+use crate::replication::table_cache::SharedTableCache;
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
@@ -56,7 +56,7 @@ pub async fn start_table_sync<S, D>(
     table_sync_worker_state: TableSyncWorkerState,
     store: S,
     destination: D,
-    replication_masks: &ReplicationMasksCache,
+    shared_table_cache: &SharedTableCache,
     shutdown_rx: ShutdownRx,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -252,7 +252,7 @@ where
                 .get_replicated_column_names(table_id, &table_schema, &config.publication_name)
                 .await?;
 
-            // Build and store the replication mask for use during CDC.
+            // Build and store the per-table protocol state for use during CDC.
             // We use `try_build` here because the schema was just loaded and should match
             // the publication's column filter. Any mismatch indicates a schema inconsistency.
             let replication_mask =
@@ -265,8 +265,8 @@ where
                         )
                     },
                 )?;
-            replication_masks
-                .set(table_id, replication_mask.clone())
+            shared_table_cache
+                .note_replication_mask(table_id, table_schema.snapshot_id, replication_mask.clone())
                 .await;
 
             // Create the replicated table schema with the replication mask.
