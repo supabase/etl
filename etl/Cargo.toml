@@ -48,15 +48,13 @@ x509-cert = { workspace = true, default-features = false }
 etl-postgres = { workspace = true, features = ["tokio", "replication", "test-utils"] }
 etl-telemetry = { workspace = true }
 
-rand = { workspace = true, features = ["thread_rng"] }
-
 [[test]]
 name = "main"
 path = "tests/main.rs"
 
 [[test]]
 name = "failpoints_pipeline"
-path = "tests/pipeline_with_failpoints.rs"
+path = "tests/failpoints_pipeline.rs"
 
 [lints]
 workspace = true

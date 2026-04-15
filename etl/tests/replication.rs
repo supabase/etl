@@ -1025,8 +1025,8 @@ async fn test_get_slot_state_returns_error_for_nonexistent_slot() {
     );
 }
 
+// Serialized via nextest test-group "shared-pg" (shares the source PG cluster).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "modifies cluster-wide PG settings; run independently with: cargo test -- --ignored exclusive_ --test-threads=1"]
 async fn exclusive_get_slot_state_returns_invalidated_for_lost_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;

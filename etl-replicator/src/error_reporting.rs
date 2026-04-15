@@ -3,9 +3,8 @@ use etl::state::destination_metadata::{AppliedDestinationTableMetadata, Destinat
 use etl::state::table::TableReplicationPhase;
 use etl::store::cleanup::CleanupStore;
 use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
+use etl::store::state::{StateStore, TableReplicationStates};
 use etl::types::{SnapshotId, TableId, TableSchema};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::info;
 
@@ -88,9 +87,7 @@ where
         self.inner.get_table_replication_state(table_id).await
     }
 
-    async fn get_table_replication_states(
-        &self,
-    ) -> EtlResult<BTreeMap<TableId, TableReplicationPhase>> {
+    async fn get_table_replication_states(&self) -> EtlResult<TableReplicationStates> {
         self.inner.get_table_replication_states().await
     }
 

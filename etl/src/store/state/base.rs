@@ -1,12 +1,19 @@
 use etl_postgres::types::TableId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::sync::Arc;
 
 use crate::error::EtlResult;
 use crate::state::destination_metadata::{
     AppliedDestinationTableMetadata, DestinationTableMetadata,
 };
 use crate::state::table::TableReplicationPhase;
+
+/// Arc-wrapped dictionary of table replication states.
+pub type TableReplicationStates = Arc<BTreeMap<TableId, TableReplicationPhase>>;
+
+/// Arc-wrapped dictionary of destination table metadata.
+pub type DestinationTablesMetadata = Arc<HashMap<TableId, DestinationTableMetadata>>;
 
 /// Trait for storing and retrieving table replication state and destination metadata.
 ///
@@ -28,7 +35,7 @@ pub trait StateStore {
     /// Does not read from the persistent store.
     fn get_table_replication_states(
         &self,
-    ) -> impl Future<Output = EtlResult<BTreeMap<TableId, TableReplicationPhase>>> + Send;
+    ) -> impl Future<Output = EtlResult<TableReplicationStates>> + Send;
 
     /// Loads the table replication states from the persistent state into the cache.
     ///

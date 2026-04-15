@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 anyhow = { workspace = true }
-clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context", "env"] }
 k8s-openapi = { workspace = true, features = ["latest"] }
 kube = { workspace = true, features = ["client", "derive", "rustls-tls", "ring"] }
 schemars = "0.8"

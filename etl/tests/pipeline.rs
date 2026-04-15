@@ -173,8 +173,8 @@ async fn pipeline_fails_when_slot_deleted_with_non_init_tables() {
     assert_eq!(slot_state, None);
 }
 
+// Serialized via nextest test-group "shared-pg" (shares the source PG cluster).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "modifies cluster-wide PG settings; run independently with: cargo test -- --ignored exclusive_ --test-threads=1"]
 async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
     init_test_tracing();
 
@@ -242,8 +242,8 @@ async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
     assert!(err.kinds().contains(&ErrorKind::ReplicationSlotInvalidated));
 }
 
+// Serialized via nextest test-group "shared-pg" (shares the source PG cluster).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "modifies cluster-wide PG settings; run independently with: cargo test -- --ignored exclusive_ --test-threads=1"]
 async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavior() {
     init_test_tracing();
 
