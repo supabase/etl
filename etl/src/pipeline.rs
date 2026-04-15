@@ -71,7 +71,8 @@ where
     ///
     /// The pipeline is initially in the not-started state and must be
     /// explicitly started using [`Pipeline::start`]. The state store is used for tracking
-    /// replication progress, table schemas, and table mappings, while the destination receives replicated data.
+    /// replication progress, table schemas, and destination table metadata, while the
+    /// destination receives replicated data.
     /// The pipeline ID is extracted from the configuration, ensuring consistency between
     /// pipeline identity and configuration settings.
     pub fn new(config: PipelineConfig, state_store: S, destination: D) -> Self {
@@ -287,7 +288,7 @@ where
     /// Also detects tables for which we have stored state but are no longer
     /// part of the publication, performs a best-effort cleanup of their table
     /// sync replication slots, and deletes their stored state (replication
-    /// state, table mappings, and table schemas) without touching the actual
+    /// state, destination table metadata, and table schemas) without touching the actual
     /// destination tables.
     async fn initialize_table_states(
         &self,

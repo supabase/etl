@@ -84,6 +84,35 @@ where
         inner.events.clear();
         inner.table_rows.clear();
     }
+
+    /// Stores destination metadata for a table if it has not been seen before.
+    async fn ensure_destination_table_metadata(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_id = replicated_table_schema.id();
+        let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
+        if existing_metadata.is_none() {
+            let metadata = Self::build_destination_table_metadata(replicated_table_schema);
+            self.store
+                .store_destination_table_metadata(table_id, metadata)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Builds applied destination metadata for a memory-backed table.
+    fn build_destination_table_metadata(
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> DestinationTableMetadata {
+        let table_id = replicated_table_schema.id();
+        let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
+        let replication_mask = replicated_table_schema.replication_mask().clone();
+        let destination_table_id = format!("memory_{}", table_id.into_inner());
+
+        DestinationTableMetadata::new_applied(destination_table_id, snapshot_id, replication_mask)
+    }
 }
 
 impl<S> Destination for MemoryDestination<S>
@@ -139,23 +168,8 @@ where
         let table_id = replicated_table_schema.id();
 
         // Store destination metadata on first write, like real destinations (BigQuery, Iceberg) do.
-        let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
-        if existing_metadata.is_none() {
-            let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
-            let replication_mask = replicated_table_schema.replication_mask().clone();
-            let table_id_inner = table_id.into_inner();
-            let destination_table_id = format!("memory_{table_id_inner}");
-
-            let metadata = DestinationTableMetadata::new_applied(
-                destination_table_id,
-                snapshot_id,
-                replication_mask,
-            );
-
-            self.store
-                .store_destination_table_metadata(table_id, metadata)
-                .await?;
-        }
+        self.ensure_destination_table_metadata(replicated_table_schema)
+            .await?;
 
         let mut inner = self.inner.lock().await;
         info!(%table_id, row_count = table_rows.len(), "writing table rows");
@@ -171,8 +185,51 @@ where
         events: Vec<Event>,
         async_result: WriteEventsResult<()>,
     ) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
+        let mut table_schemas = HashMap::new();
+        for event in &events {
+            match event {
+                Event::Insert(event) => {
+                    table_schemas.insert(
+                        event.replicated_table_schema.id(),
+                        event.replicated_table_schema.clone(),
+                    );
+                }
+                Event::Update(event) => {
+                    table_schemas.insert(
+                        event.replicated_table_schema.id(),
+                        event.replicated_table_schema.clone(),
+                    );
+                }
+                Event::Delete(event) => {
+                    table_schemas.insert(
+                        event.replicated_table_schema.id(),
+                        event.replicated_table_schema.clone(),
+                    );
+                }
+                Event::Relation(event) => {
+                    table_schemas.insert(
+                        event.replicated_table_schema.id(),
+                        event.replicated_table_schema.clone(),
+                    );
+                }
+                Event::Truncate(event) => {
+                    for replicated_table_schema in &event.truncated_tables {
+                        table_schemas.insert(
+                            replicated_table_schema.id(),
+                            replicated_table_schema.clone(),
+                        );
+                    }
+                }
+                Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
+            }
+        }
 
+        for replicated_table_schema in table_schemas.into_values() {
+            self.ensure_destination_table_metadata(&replicated_table_schema)
+                .await?;
+        }
+
+        let mut inner = self.inner.lock().await;
         info!(event_count = events.len(), "writing events");
         inner.events.extend(events);
 

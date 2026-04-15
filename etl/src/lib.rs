@@ -30,10 +30,10 @@
 //!
 //! ## Store
 //! The [`store::schema::SchemaStore`] and [`store::state::StateStore`] traits define where the
-//! table schemas, replication state, and table mappings are stored. These stores are critical to a pipeline's
+//! table schemas, replication state, and destination table metadata are stored. These stores are critical to a pipeline's
 //! operation, as they allow it to be safely paused and resumed.
 //!
-//! The [`store::state::StateStore`] trait handles both table replication states and table mappings,
+//! The [`store::state::StateStore`] trait handles both table replication states and destination table metadata,
 //! providing a single interface for all state-related storage operations.
 //!
 //! **Note:** To pause and resume a pipeline after the process is stopped, it must be able to

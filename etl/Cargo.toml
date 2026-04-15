@@ -52,9 +52,5 @@ etl-telemetry = { workspace = true }
 name = "main"
 path = "tests/main.rs"
 
-[[test]]
-name = "failpoints_pipeline"
-path = "tests/failpoints_pipeline.rs"
-
 [lints]
 workspace = true

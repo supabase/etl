@@ -456,14 +456,16 @@ where
         let replication_mask = replicated_table_schema.replication_mask().clone();
         let column_schemas = Self::build_cdc_column_schemas(replicated_table_schema);
 
-        // Check if we have existing metadata for this table.
-        let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
-
         let iceberg_table_name =
             table_name_to_iceberg_table_name(table_name, inner.namespace.is_single())?;
-        let iceberg_table_name = match &existing_metadata {
-            Some(metadata) => metadata.destination_table_id.clone(),
-            None => iceberg_table_name,
+        let iceberg_table_name = if let Some(metadata) = self
+            .store
+            .get_applied_destination_table_metadata(table_id)
+            .await?
+        {
+            metadata.destination_table_id
+        } else {
+            iceberg_table_name
         };
 
         // We prepare the namespace.

@@ -170,7 +170,7 @@ cargo sqlx prepare
 
 ### Postgres State Store Migrations
 
-Located in `etl/migrations/`, these create the Postgres state store schema (`etl` schema) that ETL uses to persist the replication state, table schemas, and mappings required to run and resume replication.
+Located in `etl/migrations/`, these create the Postgres state store schema (`etl` schema) that ETL uses to persist replication state, versioned table schemas, and destination table metadata required to run and resume replication.
 
 **Running Postgres state store migrations:**
 

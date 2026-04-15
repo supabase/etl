@@ -13,11 +13,6 @@
 //! messages are sent at the start of each connection and whenever the schema changes. This
 //! ensures we always receive schema information before any data events that depend on it,
 //! allowing us to compute the mask on-demand without persistence.
-//!
-//! **Limitation**: Adding or removing columns from a publication while the pipeline is
-//! running will cause schema mismatches. Downstream tables that rely on a fixed schema
-//! will break because the replicated column set changes but the destination schema does
-//! not automatically update.
 
 use etl_postgres::types::{ReplicationMask, TableId};
 use std::collections::HashMap;

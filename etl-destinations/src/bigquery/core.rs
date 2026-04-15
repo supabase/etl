@@ -366,7 +366,7 @@ where
         // Check if we have existing metadata for this table.
         let existing_metadata = self
             .state_store
-            .get_destination_table_metadata(table_id)
+            .get_applied_destination_table_metadata(table_id)
             .await?;
 
         let sequenced_bigquery_table_id = match &existing_metadata {

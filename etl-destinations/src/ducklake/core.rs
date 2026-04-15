@@ -627,7 +627,7 @@ where
         let table_schema = replicated_table_schema.get_inner();
 
         let table_name = self
-            .get_or_create_table_mapping(table_id, table_schema)
+            .get_or_create_applied_table_mapping(table_id, table_schema)
             .await?;
 
         // Fast path: already created.
@@ -722,15 +722,21 @@ where
     /// Returns the destination table name for `table_id`, creating and persisting a new mapping
     /// via [`DestinationTableMetadata`] if none exists yet.
     ///
-    /// When a mapping is created for the first time, it is stored with [`DestinationTableSchemaStatus::Applying`]
-    /// status. The caller is responsible for transitioning to [`DestinationTableSchemaStatus::Applied`]
-    /// once the DDL has been executed successfully.
-    async fn get_or_create_table_mapping(
+    /// Existing metadata must already be in the applied state; otherwise the state store returns
+    /// an error and the caller must stop. When a mapping is created for the first time, it is
+    /// stored with [`DestinationTableSchemaStatus::Applying`] status. The caller is responsible
+    /// for transitioning it to [`DestinationTableSchemaStatus::Applied`] once the DDL has been
+    /// executed successfully.
+    async fn get_or_create_applied_table_mapping(
         &self,
         table_id: TableId,
         table_schema: &TableSchema,
     ) -> EtlResult<DuckLakeTableName> {
-        if let Some(existing) = self.store.get_destination_table_metadata(table_id).await? {
+        if let Some(existing) = self
+            .store
+            .get_applied_destination_table_metadata(table_id)
+            .await?
+        {
             return existing
                 .destination_table_id
                 .parse::<DuckLakeTableName>()
@@ -752,6 +758,7 @@ where
         self.store
             .store_destination_table_metadata(table_id, metadata)
             .await?;
+
         Ok(ducklake_table_name)
     }
 

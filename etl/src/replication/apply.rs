@@ -1316,13 +1316,6 @@ where
             } else {
                 "early flush requested"
             };
-            info!(
-                worker_type = %self.worker_context.worker_type(),
-                batch_size = self.state.events_batch.len(),
-                batch_size_bytes = self.state.events_batch_bytes,
-                %reason,
-                "flushing batch",
-            );
 
             self.flush_batch(reason).await?;
         }
@@ -1783,7 +1776,6 @@ where
             remote_final_lsn,
             tx_ordinal,
             message,
-            self.pipeline_id,
         )?;
 
         Ok(HandleMessageResult::return_event(Event::Insert(event)))
@@ -1827,7 +1819,6 @@ where
             remote_final_lsn,
             tx_ordinal,
             message,
-            self.pipeline_id,
         )?;
 
         Ok(HandleMessageResult::return_event(Event::Update(event)))
@@ -1871,7 +1862,6 @@ where
             remote_final_lsn,
             tx_ordinal,
             message,
-            self.pipeline_id,
         )?;
 
         Ok(HandleMessageResult::return_event(Event::Delete(event)))

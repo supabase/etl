@@ -269,11 +269,11 @@ impl Event {
     /// specific tables and will always return false.
     pub fn has_table_id(&self, table_id: &TableId) -> bool {
         match self {
-            Event::Insert(e) => e.replicated_table_schema.id() == *table_id,
-            Event::Update(e) => e.replicated_table_schema.id() == *table_id,
-            Event::Delete(e) => e.replicated_table_schema.id() == *table_id,
-            Event::Truncate(e) => e.truncated_tables.iter().any(|s| s.id() == *table_id),
-            Event::Relation(e) => e.replicated_table_schema.id() == *table_id,
+            Event::Insert(event) => event.replicated_table_schema.id() == *table_id,
+            Event::Update(event) => event.replicated_table_schema.id() == *table_id,
+            Event::Delete(event) => event.replicated_table_schema.id() == *table_id,
+            Event::Truncate(event) => event.truncated_tables.iter().any(|s| s.id() == *table_id),
+            Event::Relation(event) => event.replicated_table_schema.id() == *table_id,
             _ => false,
         }
     }
@@ -302,7 +302,8 @@ impl SizeHint for Event {
                 size_of::<DeleteEvent>() + old_row_size
             }
             Self::Truncate(event) => {
-                size_of::<TruncateEvent>() + event.truncated_tables.len() * size_of::<u64>()
+                size_of::<TruncateEvent>()
+                    + event.truncated_tables.len() * size_of::<ReplicatedTableSchema>()
             }
             Self::Relation(_) => size_of::<RelationEvent>(),
             Self::Unsupported => 0,
@@ -368,5 +369,57 @@ impl From<&Event> for EventType {
 impl From<Event> for EventType {
     fn from(event: Event) -> Self {
         (&event).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::size_of;
+    use std::sync::Arc;
+
+    use etl_postgres::types::{ColumnSchema, TableName, TableSchema};
+    use tokio_postgres::types::{PgLsn, Type};
+
+    use super::*;
+
+    fn test_column(name: &str, ordinal_position: i32) -> ColumnSchema {
+        ColumnSchema::new(
+            name.to_string(),
+            Type::TEXT,
+            -1,
+            ordinal_position,
+            None,
+            false,
+        )
+    }
+
+    fn test_replicated_table_schema(table_id: u32, table_name: &str) -> ReplicatedTableSchema {
+        let schema = TableSchema::new(
+            TableId::new(table_id),
+            TableName::new("public".to_string(), table_name.to_string()),
+            vec![test_column("name", 1)],
+        );
+
+        ReplicatedTableSchema::all(Arc::new(schema))
+    }
+
+    #[test]
+    fn truncate_event_size_hint_accounts_for_replicated_table_schemas() {
+        let mut truncated_tables = Vec::with_capacity(4);
+        truncated_tables.push(test_replicated_table_schema(1, "users"));
+        truncated_tables.push(test_replicated_table_schema(2, "orders"));
+
+        let event = Event::Truncate(TruncateEvent {
+            start_lsn: PgLsn::from(0),
+            commit_lsn: PgLsn::from(0),
+            tx_ordinal: 0,
+            options: 0,
+            truncated_tables,
+        });
+
+        assert_eq!(
+            event.size_hint(),
+            size_of::<TruncateEvent>() + 4 * size_of::<ReplicatedTableSchema>()
+        );
     }
 }

@@ -392,6 +392,8 @@ impl ReplicationMask {
         // the schema at the time the in-flight events were emitted. This is how Postgres handles
         // initial `Relation` messages on reconnection. It's not the wrong behavior since the data
         // has the columns that it announces, but it conflicts with our schema management logic.
+        // TODO: We are still debugging this case to validate when it happens, since it's hard to
+        //  reproduce. Nonetheless, the error should be raised.
         //
         // Invariant: Our schema management assumes the schema in `Relation` messages is consistent
         // with the schema under which the corresponding row events were produced.

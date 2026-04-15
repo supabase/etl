@@ -190,9 +190,7 @@ pub fn parse_event_from_insert_message(
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     insert_body: &protocol::InsertBody,
-    pipeline_id: PipelineId,
 ) -> EtlResult<InsertEvent> {
-    let _ = pipeline_id;
     let tuple_data = insert_body.tuple().tuple_data();
     let row_size_bytes = calculate_tuple_bytes(tuple_data);
 
@@ -228,9 +226,7 @@ pub fn parse_event_from_update_message(
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     update_body: &protocol::UpdateBody,
-    pipeline_id: PipelineId,
 ) -> EtlResult<UpdateEvent> {
-    let _ = pipeline_id;
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = update_body.old_tuple().is_none();
@@ -288,9 +284,7 @@ pub fn parse_event_from_delete_message(
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     delete_body: &protocol::DeleteBody,
-    pipeline_id: PipelineId,
 ) -> EtlResult<DeleteEvent> {
-    let _ = pipeline_id;
     // We try to extract the old tuple by either taking the entire old tuple or the key of the old
     // tuple.
     let is_key = delete_body.old_tuple().is_none();

@@ -1,4 +1,4 @@
--- Schema change logical messages (DDL)
+-- Schema change logical messages (DDL).
 -- Adds helpers and trigger to emit logical decoding messages when tables change.
 
 create or replace function etl.describe_table_schema(
@@ -106,8 +106,8 @@ begin
     for v_object_type, v_objid, v_command_tag in
         select object_type, objid, command_tag from pg_event_trigger_ddl_commands()
     loop
-        -- 'table' covers most ALTER TABLE operations (ADD/DROP COLUMN, ALTER TYPE, etc.)
-        -- 'table column' is returned specifically for RENAME COLUMN operations
+        -- 'table' covers most ALTER TABLE operations (ADD/DROP COLUMN, ALTER TYPE, etc.).
+        -- 'table column' is returned specifically for RENAME COLUMN operations.
         if v_object_type not in ('table', 'table column') then
             continue;
         end if;
