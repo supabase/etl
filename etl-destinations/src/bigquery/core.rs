@@ -576,147 +576,135 @@ where
 
     /// Handles a schema change event (Relation) by computing the diff and applying changes.
     ///
-    /// This method retrieves the current destination schema state via
-    /// [`state_store.get_destination_table_metadata`] and determines the appropriate action.
-    /// Missing metadata is treated as an invariant violation since the metadata should have been
-    /// recorded during initial table synchronization in [`Self::write_table_rows`]. In this case,
-    /// the method bails with [`ErrorKind::CorruptedTableSchema`]. If the metadata exists but is in
-    /// the `Applying` state, a previous schema change was interrupted and manual intervention is
-    /// required, also resulting in [`ErrorKind::CorruptedTableSchema`]. Otherwise, if the snapshot
-    /// ID or replication mask differs from the incoming [`ReplicatedTableSchema`], the method
-    /// computes and applies the schema diff.
+    /// This method retrieves the current applied destination schema state via
+    /// [`StateStore::get_applied_destination_table_metadata`]. Missing metadata is treated as an
+    /// invariant violation since the metadata should have been recorded during initial table
+    /// synchronization in [`Self::write_table_rows`]. If the snapshot ID or replication mask differs
+    /// from the incoming [`ReplicatedTableSchema`], the method computes and applies the schema diff.
     async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
         let table_id = new_schema.id();
         let new_snapshot_id = new_schema.get_inner().snapshot_id;
 
-        // Get current destination metadata.
-        let current_metadata = self
+        // Get current applied destination metadata. If the table is still in `Applying`, the
+        // state store surfaces that as an error.
+        let Some(metadata) = self
             .state_store
-            .get_destination_table_metadata(table_id)
+            .get_applied_destination_table_metadata(table_id)
+            .await?
+        else {
+            // No metadata exists, this is a broken invariant since the metadata should
+            // have been recorded during write_table_rows before any Relation event.
+            bail!(
+                ErrorKind::CorruptedTableSchema,
+                "Missing destination table metadata",
+                format!(
+                    "No destination table metadata found for table {} when processing schema change. \
+                     This indicates a broken invariant, the metadata should have been recorded \
+                     during initial table synchronization.",
+                    table_id
+                )
+            );
+        };
+
+        let current_snapshot_id = metadata.snapshot_id;
+        let current_replication_mask = metadata.replication_mask.clone();
+        let new_replication_mask = new_schema.replication_mask().clone();
+        // Check both snapshot_id and replication mask - the mask can change
+        // independently if columns are added/removed from the publication.
+        if current_snapshot_id == new_snapshot_id
+            && current_replication_mask == new_replication_mask
+        {
+            // Schema hasn't changed, nothing to do.
+            info!(
+                "schema for table {} unchanged (snapshot_id: {}, replication_mask: {})",
+                table_id, new_snapshot_id, new_replication_mask
+            );
+
+            return Ok(());
+        }
+
+        info!(
+            "schema change detected for table {}: snapshot_id {} -> {}, mask {} -> {}",
+            table_id,
+            current_snapshot_id,
+            new_snapshot_id,
+            current_replication_mask,
+            new_replication_mask
+        );
+
+        // Get the current schema from the schema store to compute the diff.
+        let current_table_schema = self
+            .state_store
+            .get_table_schema(&table_id, current_snapshot_id)
+            .await?
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "Old schema not found",
+                    format!(
+                        "Could not find schema for table {} at snapshot_id {}",
+                        table_id, current_snapshot_id
+                    )
+                )
+            })?;
+
+        // Build a ReplicatedTableSchema using the stored replication mask.
+        let current_schema = ReplicatedTableSchema::from_mask(
+            current_table_schema,
+            current_replication_mask.clone(),
+        );
+
+        let bigquery_table_id = metadata.destination_table_id.parse()?;
+
+        // Mark as applying before making changes (with the NEW snapshot_id and mask).
+        //
+        // NOTE: BigQuery does not support transactional DDL, so if the system crashes
+        // while in 'Applying' state, the destination table may be in an inconsistent
+        // state and manual intervention may be required. The `previous_snapshot_id`
+        // is stored for debugging purposes but automatic recovery is not possible.
+        let updated_metadata = DestinationTableMetadata::new_applied(
+            metadata.destination_table_id.clone(),
+            current_snapshot_id,
+            current_replication_mask.clone(),
+        )
+        .with_schema_change(
+            new_snapshot_id,
+            new_replication_mask.clone(),
+            DestinationTableSchemaStatus::Applying,
+        );
+        self.state_store
+            .store_destination_table_metadata(table_id, updated_metadata.clone())
             .await?;
 
-        match current_metadata {
-            None => {
-                // No metadata exists, this is a broken invariant since the metadata should
-                // have been recorded during write_table_rows before any Relation event.
-                bail!(
-                    ErrorKind::CorruptedTableSchema,
-                    "Missing destination table metadata",
-                    format!(
-                        "No destination table metadata found for table {} when processing schema change. \
-                         This indicates a broken invariant, the metadata should have been recorded \
-                         during initial table synchronization.",
-                        table_id
-                    )
-                );
-            }
-            Some(metadata) if metadata.is_applying() => {
-                // A previous schema change was interrupted, require manual intervention since BigQuery
-                // DDL is not atomic, thus we can't say anything about the table schema.
-                bail!(
-                    ErrorKind::CorruptedTableSchema,
-                    "Schema change recovery required",
-                    format!(
-                        "A previous schema change for table {} was interrupted at snapshot_id {}. \
-                         Manual intervention is required to resolve the destination schema state. \
-                         The previous valid snapshot can be derived from the table_schemas table.",
-                        table_id, metadata.snapshot_id
-                    )
-                );
-            }
-            Some(metadata) if metadata.is_applied() => {
-                let current_snapshot_id = metadata.snapshot_id;
-                let current_replication_mask = metadata.replication_mask.clone();
-                let new_replication_mask = new_schema.replication_mask().clone();
-                // Check both snapshot_id and replication mask - the mask can change
-                // independently if columns are added/removed from the publication.
-                if current_snapshot_id == new_snapshot_id
-                    && current_replication_mask == new_replication_mask
-                {
-                    // Schema hasn't changed, nothing to do.
-                    info!(
-                        "schema for table {} unchanged (snapshot_id: {}, replication_mask: {})",
-                        table_id, new_snapshot_id, new_replication_mask
-                    );
-
-                    return Ok(());
-                }
-
-                info!(
-                    "schema change detected for table {}: snapshot_id {} -> {}, mask {} -> {}",
-                    table_id,
-                    current_snapshot_id,
-                    new_snapshot_id,
-                    current_replication_mask,
-                    new_replication_mask
-                );
-
-                // Get the current schema from the schema store to compute the diff.
-                let current_table_schema = self
-                    .state_store
-                    .get_table_schema(&table_id, current_snapshot_id)
-                    .await?
-                    .ok_or_else(|| {
-                        etl_error!(
-                            ErrorKind::InvalidState,
-                            "Old schema not found",
-                            format!(
-                                "Could not find schema for table {} at snapshot_id {}",
-                                table_id, current_snapshot_id
-                            )
-                        )
-                    })?;
-
-                // Build a ReplicatedTableSchema using the stored replication mask.
-                let current_schema = ReplicatedTableSchema::from_mask(
-                    current_table_schema,
-                    current_replication_mask,
-                );
-
-                // Mark as applying before making changes (with the NEW snapshot_id and mask).
-                //
-                // NOTE: BigQuery does not support transactional DDL, so if the system crashes
-                // while in 'Applying' state, the destination table may be in an inconsistent
-                // state and manual intervention may be required. The `previous_snapshot_id`
-                // is stored for debugging purposes but automatic recovery is not possible.
-                let updated_metadata = metadata.with_schema_change(
-                    new_snapshot_id,
-                    new_replication_mask.clone(),
-                    DestinationTableSchemaStatus::Applying,
-                );
-                self.state_store
-                    .store_destination_table_metadata(table_id, updated_metadata.clone())
-                    .await?;
-
-                // Compute and apply the diff.
-                let diff = current_schema.diff(new_schema);
-                if let Err(err) = self.apply_schema_diff(&table_id, &diff).await {
-                    warn!(
-                        "schema change failed for table {}: {}. Manual intervention may be required.",
-                        table_id, err
-                    );
-                    return Err(err);
-                }
-
-                // Mark as applied after successful changes.
-                self.state_store
-                    .store_destination_table_metadata(table_id, updated_metadata.to_applied())
-                    .await?;
-
-                // We must invalidate all connections here to make sure that caches on the connection
-                // side on BigQuery do not interfere with the schema changes. Each worker processes
-                // invalidations in channel order and this call waits for all workers to ack them.
-                // Parallel invalidations may interleave, but once this returns, later appends will
-                // use fresh connections.
-                self.client.invalidate_all_connections().await;
-
-                info!(
-                    "schema change completed for table {}: snapshot_id {} applied",
-                    table_id, new_snapshot_id
-                );
-            }
-            Some(_) => unreachable!("All state types are covered"),
+        // Compute and apply the diff.
+        let diff = current_schema.diff(new_schema);
+        if let Err(err) = self
+            .apply_schema_diff(&table_id, &bigquery_table_id, &diff)
+            .await
+        {
+            warn!(
+                "schema change failed for table {}: {}. Manual intervention may be required.",
+                table_id, err
+            );
+            return Err(err);
         }
+
+        // Mark as applied after successful changes.
+        self.state_store
+            .store_destination_table_metadata(table_id, updated_metadata.to_applied())
+            .await?;
+
+        // We must invalidate all connections here to make sure that caches on the connection
+        // side on BigQuery do not interfere with the schema changes. Each worker processes
+        // invalidations in channel order and this call waits for all workers to ack them.
+        // Parallel invalidations may interleave, but once this returns, later appends will
+        // use fresh connections.
+        self.client.invalidate_all_connections().await;
+
+        info!(
+            "schema change completed for table {}: snapshot_id {} applied",
+            table_id, new_snapshot_id
+        );
 
         Ok(())
     }
@@ -725,26 +713,16 @@ where
     ///
     /// Executes the necessary DDL operations (ADD COLUMN, DROP COLUMN, RENAME COLUMN)
     /// to transform the destination schema.
-    async fn apply_schema_diff(&self, table_id: &TableId, diff: &SchemaDiff) -> EtlResult<()> {
+    async fn apply_schema_diff(
+        &self,
+        table_id: &TableId,
+        bigquery_table_id: &SequencedBigQueryTableId,
+        diff: &SchemaDiff,
+    ) -> EtlResult<()> {
         if diff.is_empty() {
             debug!(%table_id, "no schema changes to apply for table");
             return Ok(());
         }
-
-        // Get the BigQuery table ID for this table.
-        let bigquery_table_id = self
-            .get_sequenced_bigquery_table_id(table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::InvalidState,
-                    "Table not found",
-                    format!(
-                        "No BigQuery table mapping found for table {}. Schema changes cannot be applied to a non-existent table.",
-                        table_id
-                    )
-                )
-            })?;
 
         info!(
             "applying schema changes to table {}: {} additions, {} removals, {} renames",

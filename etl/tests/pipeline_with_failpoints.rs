@@ -311,9 +311,9 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     );
 }
 
-#[ignore = "same-transaction alter table + insert is not supported yet because ddl messages may be observed after affected dml in logical replication"]
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_ddl_in_same_transaction() {
+async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_ddl_in_same_transaction()
+ {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
 
@@ -357,7 +357,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     ready_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 3)])
+        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
         .await;
 
     let transaction = database.begin_transaction().await;
@@ -396,7 +396,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .unwrap();
 
     transaction
-        .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
+        .insert_values(
+            table_name.clone(),
+            &["name", "status"],
+            &[&"third", &"pending"],
+        )
         .await
         .unwrap();
 
@@ -409,12 +413,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    let first_relation_count = grouped
-        .get(&(EventType::Relation, table_id))
-        .map(|events| events.len())
-        .unwrap_or_default();
-
-    assert!(first_relation_count >= 2);
+    assert_eq!(
+        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
+        3
+    );
     assert_eq!(
         grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
         3
@@ -425,14 +427,16 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     assert_eq!(table_schemas_snapshots.len(), 3);
     assert_schema_snapshots_ordering(table_schemas_snapshots, true);
 
-    // Verify the first snapshot has the initial schema (id, name, age).
     let (_, first_schema) = &table_schemas_snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
     );
 
-    // Verify the second snapshot has the new column added (id, name, age, status).
     let (_, second_schema) = &table_schemas_snapshots[1];
     assert_table_schema_column_names_types(
         second_schema,
@@ -444,11 +448,14 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         ],
     );
 
-    // Verify the third snapshot has the dropped column removed (id, name, status).
     let (_, third_schema) = &table_schemas_snapshots[2];
     assert_table_schema_column_names_types(
         third_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)],
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("status", Type::TEXT),
+        ],
     );
 
     destination.clear_events().await;
@@ -461,23 +468,26 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         destination.clone(),
     );
 
-    let ready = store
+    let ready_notify = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 3)])
+    let events_notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
         .await;
 
     pipeline.start().await.unwrap();
-    ready.notified().await;
 
-    notify.notified().await;
+    ready_notify.notified().await;
+
+    events_notify.notified().await;
+
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_ddl_across_transactions() {
+async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_ddl_across_transactions()
+ {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
 
@@ -558,7 +568,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .unwrap();
 
     database
-        .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
+        .insert_values(
+            table_name.clone(),
+            &["name", "status"],
+            &[&"third", &"pending"],
+        )
         .await
         .unwrap();
 
@@ -586,7 +600,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     let (_, first_schema) = &table_schemas_snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
     );
 
     let (_, second_schema) = &table_schemas_snapshots[1];
@@ -603,7 +621,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     let (_, third_schema) = &table_schemas_snapshots[2];
     assert_table_schema_column_names_types(
         third_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)],
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("status", Type::TEXT),
+        ],
     );
 
     destination.clear_events().await;
@@ -616,24 +638,26 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         destination.clone(),
     );
 
-    let ready = store
+    let ready_notify = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
-    let notify = destination
+    let events_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
         .await;
 
     pipeline.start().await.unwrap();
-    ready.notified().await;
 
-    notify.notified().await;
+    ready_notify.notified().await;
+
+    events_notify.notified().await;
+
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
-#[ignore = "same-transaction alter table + insert is not supported yet because ddl messages may be observed after affected dml in logical replication"]
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_starting_ddl_in_same_transaction() {
+async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_starting_ddl_in_same_transaction()
+ {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
 
@@ -673,6 +697,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .await;
 
     pipeline.start().await.unwrap();
+
     ready_notify.notified().await;
 
     let events_notify = destination
@@ -710,7 +735,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .unwrap();
 
     transaction
-        .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
+        .insert_values(
+            table_name.clone(),
+            &["name", "status"],
+            &[&"third", &"pending"],
+        )
         .await
         .unwrap();
 
@@ -723,12 +752,10 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    let first_relation_count = grouped
-        .get(&(EventType::Relation, table_id))
-        .map(|events| events.len())
-        .unwrap_or_default();
-
-    assert!(first_relation_count >= 2);
+    assert_eq!(
+        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
+        2
+    );
     assert_eq!(
         grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
         2
@@ -742,7 +769,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     let (_, first_schema) = &table_schemas_snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
     );
 
     let (_, second_schema) = &table_schemas_snapshots[1];
@@ -759,7 +790,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     let (_, third_schema) = &table_schemas_snapshots[2];
     assert_table_schema_column_names_types(
         third_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)],
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("status", Type::TEXT),
+        ],
     );
 
     destination.clear_events().await;
@@ -772,23 +807,26 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         destination.clone(),
     );
 
-    let ready = store
+    let ready_notify = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
-    let notify = destination
+    let events_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
         .await;
 
     pipeline.start().await.unwrap();
-    ready.notified().await;
 
-    notify.notified().await;
+    ready_notify.notified().await;
+
+    events_notify.notified().await;
+
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_starting_ddl_across_transactions() {
+async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_interleaved_starting_ddl_across_transactions()
+ {
     let _scenario = FailScenario::setup();
     fail::cfg(SEND_STATUS_UPDATE_FP, "return").unwrap();
 
@@ -828,6 +866,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .await;
 
     pipeline.start().await.unwrap();
+
     ready_notify.notified().await;
 
     let events_notify = destination
@@ -863,7 +902,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .unwrap();
 
     database
-        .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
+        .insert_values(
+            table_name.clone(),
+            &["name", "status"],
+            &[&"third", &"pending"],
+        )
         .await
         .unwrap();
 
@@ -891,7 +934,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     let (_, first_schema) = &table_schemas_snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
     );
 
     let (_, second_schema) = &table_schemas_snapshots[1];
@@ -908,7 +955,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     let (_, third_schema) = &table_schemas_snapshots[2];
     assert_table_schema_column_names_types(
         third_schema,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)],
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("status", Type::TEXT),
+        ],
     );
 
     destination.clear_events().await;
@@ -921,18 +972,20 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         destination.clone(),
     );
 
-    let ready = store
+    let ready_notify = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
 
-    let notify = destination
+    let events_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
         .await;
 
     pipeline.start().await.unwrap();
-    ready.notified().await;
 
-    notify.notified().await;
+    ready_notify.notified().await;
+
+    events_notify.notified().await;
+
     pipeline.shutdown_and_wait().await.unwrap();
 }
 

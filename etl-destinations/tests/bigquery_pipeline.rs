@@ -1923,6 +1923,7 @@ async fn table_schema_change() {
         .unwrap();
 
     event_notify.notified().await;
+    destination.clear_events().await;
 
     // Verify initial schema.
     let initial_schema = bigquery_database
@@ -1993,9 +1994,6 @@ async fn table_schema_change() {
         .unwrap();
 
     event_notify.notified().await;
-
-    // Give BigQuery time to apply all schema changes.
-    sleep(Duration::from_secs(3)).await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 

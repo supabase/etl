@@ -1502,8 +1502,24 @@ where
 
     /// Handles Postgres MESSAGE messages (pg_logical_emit_message).
     ///
-    /// Processes DDL schema change messages with the `supabase_etl_ddl` prefix by
-    /// storing the new schema version with the start_lsn as the snapshot_id.
+    /// For `supabase_etl_ddl`, we persist the new table schema as soon as the
+    /// logical message is decoded and invalidate any cached replication mask for
+    /// that table before more changes in the same transaction are processed.
+    ///
+    /// This ordering matches how `pgoutput` produces the stream:
+    /// - `pgoutput_message()` writes logical `Message` records directly and does
+    ///   not inject `Relation` metadata.
+    /// - `Relation` records are synthesized lazily by `maybe_send_schema()`
+    ///   only when `pgoutput_change()` is about to emit a DML change.
+    /// - relcache invalidation from the DDL resets `schema_sent`, so the first
+    ///   post-DDL DML for the relation gets a fresh `Relation` message just
+    ///   before the row event.
+    ///
+    /// In other words, the protocol variant this code relies on is:
+    /// `... -> ddl Message -> Relation(new schema) -> Insert/Update/Delete ...`.
+    /// Because the DDL message itself is not a DML event, we must update the
+    /// stored schema and drop the old mask here, so that the very next
+    /// `Relation` rebuilds the mask against the new schema snapshot.
     async fn handle_message(
         &mut self,
         start_lsn: PgLsn,
@@ -1568,7 +1584,10 @@ where
         // Update the current schema snapshot in the state.
         self.state.update_schema_snapshot_id(snapshot_id);
 
-        // Invalidate the cached replication mask for this table.
+        // The next post-DDL DML will cause pgoutput to synthesize a fresh
+        // Relation message for this table. Drop any cached mask now so that
+        // relation handling rebuilds it from the schema version we just stored,
+        // rather than reusing a pre-DDL column mapping.
         self.replication_masks.remove(&table_id).await;
 
         let table_id_u32: u32 = table_id.into();

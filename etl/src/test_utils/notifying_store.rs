@@ -375,6 +375,7 @@ impl SchemaStore for NotifyingStore {
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         let inner = self.inner.read().await;
+
         Ok(inner.table_schemas.values().map(|v| v.len()).sum())
     }
 
