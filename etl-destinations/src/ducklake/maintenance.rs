@@ -679,6 +679,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
 }
 
 /// Coalesces notifications and runs background DuckLake maintenance.
+#[allow(clippy::too_many_arguments)]
 async fn run_ducklake_maintenance_worker(
     mut pool: LazyDuckLakePool,
     checkpoint_gate: Arc<RwLock<()>>,
