@@ -1479,29 +1479,30 @@ const DEFAULT_IDENTITY_DELETE_SELECT: &str = concat!(
 ///
 /// # GIVEN
 ///
-/// A Postgres table with **default replica identity** (not FULL) and one row
-/// (`id=1, value='to_delete'`), copied to ClickHouse.
+/// A Postgres table with **default replica identity** (not FULL) and two rows
+/// (`id=1, value='keep'` and `id=2, value='to_delete'`), copied to ClickHouse.
 ///
 /// # WHEN
 ///
-/// The row is deleted in Postgres, then a new row (`id=2, value='after'`) is
-/// inserted.
+/// Row `id=2` is deleted in Postgres, then a new row (`id=3, value='after'`)
+/// is inserted.
 ///
 /// # THEN
 ///
-/// ClickHouse contains three rows:
-/// - `id=1, value='to_delete', cdc_operation='INSERT', cdc_lsn=0` (table copy)
-/// - `id=1, value='',          cdc_operation='DELETE', cdc_lsn > 0` (streamed
+/// ClickHouse contains four rows:
+/// - `id=1, value='keep',      cdc_operation='INSERT', cdc_lsn=0` (untouched)
+/// - `id=2, value='to_delete', cdc_operation='INSERT', cdc_lsn=0` (table copy)
+/// - `id=2, value='',          cdc_operation='DELETE', cdc_lsn > 0` (streamed
 ///   delete -- Postgres only sent the PK, so the non-PK `value` column is a
 ///   zero-value empty string, not the original data)
-/// - `id=2, value='after',     cdc_operation='INSERT', cdc_lsn > 0` (proves
+/// - `id=3, value='after',     cdc_operation='INSERT', cdc_lsn > 0` (proves
 ///   the pipeline continued after the delete)
 #[tokio::test(flavor = "multi_thread")]
 async fn delete_with_default_replica_identity() {
     init_test_tracing();
     install_crypto_provider();
 
-    // --- GIVEN: one row, default replica identity (NOT full) ---
+    // --- GIVEN: two rows, default replica identity (NOT full) ---
     let database = spawn_source_database().await;
     let table_name = test_table_name("default_identity_delete");
 
@@ -1520,11 +1521,11 @@ async fn delete_with_default_replica_identity() {
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (value) VALUES ('to_delete')",
+            "INSERT INTO {} (value) VALUES ('keep'), ('to_delete')",
             table_name.as_quoted_identifier(),
         ))
         .await
-        .expect("Failed to insert row");
+        .expect("Failed to insert rows");
 
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
@@ -1546,10 +1547,10 @@ async fn delete_with_default_replica_identity() {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
-    // --- WHEN: delete the row, then insert a new one ---
+    // --- WHEN: delete id=2, then insert a new row ---
     database
         .run_sql(&format!(
-            "DELETE FROM {} WHERE id = 1",
+            "DELETE FROM {} WHERE id = 2",
             table_name.as_quoted_identifier(),
         ))
         .await
@@ -1563,11 +1564,11 @@ async fn delete_with_default_replica_identity() {
         .await
         .expect("Failed to insert post-delete row");
 
-    // Poll for 3 rows: original INSERT + DELETE + new INSERT.
-    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(3);
+    // Poll for 4 rows: 2 copied INSERTs + DELETE + new INSERT.
+    let mut rows: Vec<UpdateFlowRow> = Vec::with_capacity(4);
     for _ in 0..50 {
         rows = ch_db.query(DEFAULT_IDENTITY_DELETE_SELECT).await;
-        if rows.len() >= 3 {
+        if rows.len() >= 4 {
             break;
         }
         sleep(Duration::from_millis(100)).await;
@@ -1575,17 +1576,27 @@ async fn delete_with_default_replica_identity() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // --- THEN: DELETE row has correct PK, zero-value non-PK columns ---
-    assert_eq!(rows.len(), 3, "expected INSERT + DELETE + INSERT");
+    // --- THEN: DELETE targets the correct row, non-PK columns are zero-values ---
+    assert_eq!(
+        rows.len(),
+        4,
+        "expected 2 copied INSERTs + DELETE + new INSERT"
+    );
 
     let r = &rows[0];
     assert_eq!(r.id, 1);
-    assert_eq!(r.value, "to_delete");
+    assert_eq!(r.value, "keep");
     assert_eq!(r.cdc_operation, "INSERT");
     assert_eq!(r.cdc_lsn, 0);
 
     let r = &rows[1];
-    assert_eq!(r.id, 1, "DELETE row must have the correct PK");
+    assert_eq!(r.id, 2);
+    assert_eq!(r.value, "to_delete");
+    assert_eq!(r.cdc_operation, "INSERT");
+    assert_eq!(r.cdc_lsn, 0);
+
+    let r = &rows[2];
+    assert_eq!(r.id, 2, "DELETE must target the correct row among multiple");
     assert_eq!(
         r.value, "",
         "non-PK column should be zero-value (empty string) under default replica identity"
@@ -1593,8 +1604,8 @@ async fn delete_with_default_replica_identity() {
     assert_eq!(r.cdc_operation, "DELETE");
     assert!(r.cdc_lsn > 0);
 
-    let r = &rows[2];
-    assert_eq!(r.id, 2);
+    let r = &rows[3];
+    assert_eq!(r.id, 3);
     assert_eq!(r.value, "after");
     assert_eq!(r.cdc_operation, "INSERT");
     assert!(r.cdc_lsn > 0, "pipeline must continue after the delete");
