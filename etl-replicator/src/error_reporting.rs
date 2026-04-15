@@ -2,9 +2,8 @@ use etl::error::{EtlError, EtlResult};
 use etl::state::table::TableReplicationPhase;
 use etl::store::cleanup::CleanupStore;
 use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
+use etl::store::state::{StateStore, TableMappings, TableReplicationStates};
 use etl::types::{TableId, TableSchema};
-use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tracing::info;
 
@@ -87,9 +86,7 @@ where
         self.inner.get_table_replication_state(table_id).await
     }
 
-    async fn get_table_replication_states(
-        &self,
-    ) -> EtlResult<BTreeMap<TableId, TableReplicationPhase>> {
+    async fn get_table_replication_states(&self) -> EtlResult<TableReplicationStates> {
         self.inner.get_table_replication_states().await
     }
 
@@ -125,7 +122,7 @@ where
         self.inner.get_table_mapping(source_table_id).await
     }
 
-    async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
+    async fn get_table_mappings(&self) -> EtlResult<TableMappings> {
         self.inner.get_table_mappings().await
     }
 
