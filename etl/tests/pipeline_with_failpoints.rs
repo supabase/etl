@@ -108,18 +108,7 @@ fn assert_restarted_schema_snapshot_pairs(
         initial_snapshots.len() >= 2,
         "expected at least one non-initial schema snapshot"
     );
-    assert_eq!(
-        restarted_snapshots[..initial_snapshots.len()],
-        initial_snapshots[..],
-    );
-    assert_eq!(
-        restarted_snapshots.len(),
-        initial_snapshots.len() + (initial_snapshots.len() - 1),
-    );
-    assert_eq!(
-        restarted_snapshots[initial_snapshots.len()..],
-        initial_snapshots[1..],
-    );
+    assert_eq!(restarted_snapshots, initial_snapshots);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -416,42 +405,20 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
 
     init_test_tracing();
 
-    let mut database = spawn_source_database().await;
-    let table_name = test_table_name("schema_add_column");
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
-            &[("name", "text not null"), ("age", "integer not null")],
-        )
-        .await
-        .unwrap();
-
-    let publication = format!("pub_{}", random::<u32>());
-    database
-        .create_publication(&publication, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
+    let (
+        mut database,
+        table_name,
+        table_id,
+        store,
+        destination,
+        pipeline,
         pipeline_id,
-        publication.clone(),
-        store.clone(),
-        destination.clone(),
-    );
-
-    let ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    ready_notify.notified().await;
+        publication,
+    ) = create_database_and_ready_pipeline_with_table(
+        "schema_add_column",
+        &[("name", "text not null"), ("age", "integer not null")],
+    )
+    .await;
 
     let events_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
@@ -620,42 +587,12 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
 
     init_test_tracing();
 
-    let database = spawn_source_database().await;
-    let table_name = test_table_name("schema_add_column");
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
+    let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
+        create_database_and_ready_pipeline_with_table(
+            "schema_add_column",
             &[("name", "text not null"), ("age", "integer not null")],
         )
-        .await
-        .unwrap();
-
-    let publication = format!("pub_{}", random::<u32>());
-    database
-        .create_publication(&publication, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication.clone(),
-        store.clone(),
-        destination.clone(),
-    );
-
-    let ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
-
-    pipeline.start().await.unwrap();
-
-    ready_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
@@ -820,42 +757,20 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
 
     init_test_tracing();
 
-    let mut database = spawn_source_database().await;
-    let table_name = test_table_name("schema_add_column");
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
-            &[("name", "text not null"), ("age", "integer not null")],
-        )
-        .await
-        .unwrap();
-
-    let publication = format!("pub_{}", random::<u32>());
-    database
-        .create_publication(&publication, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
+    let (
+        mut database,
+        table_name,
+        table_id,
+        store,
+        destination,
+        pipeline,
         pipeline_id,
-        publication.clone(),
-        store.clone(),
-        destination.clone(),
-    );
-
-    let ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
-
-    pipeline.start().await.unwrap();
-
-    ready_notify.notified().await;
+        publication,
+    ) = create_database_and_ready_pipeline_with_table(
+        "schema_add_column",
+        &[("name", "text not null"), ("age", "integer not null")],
+    )
+    .await;
 
     destination.clear_events().await;
 
@@ -1011,42 +926,12 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
 
     init_test_tracing();
 
-    let database = spawn_source_database().await;
-    let table_name = test_table_name("schema_add_column");
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
+    let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
+        create_database_and_ready_pipeline_with_table(
+            "schema_add_column",
             &[("name", "text not null"), ("age", "integer not null")],
         )
-        .await
-        .unwrap();
-
-    let publication = format!("pub_{}", random::<u32>());
-    database
-        .create_publication(&publication, std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication.clone(),
-        store.clone(),
-        destination.clone(),
-    );
-
-    let ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
         .await;
-
-    pipeline.start().await.unwrap();
-
-    ready_notify.notified().await;
 
     let events_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
