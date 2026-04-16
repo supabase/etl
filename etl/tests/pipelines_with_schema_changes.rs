@@ -1,7 +1,5 @@
 #![cfg(feature = "test-utils")]
 
-use std::time::Duration;
-
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
@@ -19,7 +17,6 @@ use etl_postgres::tokio::test_utils::TableModification;
 use etl_postgres::types::TableId;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
-use tokio::time::sleep;
 
 fn get_last_relation_event(events: &[Event], table_id: TableId) -> &Event {
     events
@@ -48,7 +45,7 @@ async fn relation_message_updates_when_column_added() {
         )
         .await;
 
-    let notify = destination
+    let events_received = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
 
@@ -72,7 +69,7 @@ async fn relation_message_updates_when_column_added() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    events_received.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
@@ -143,7 +140,7 @@ async fn relation_message_updates_when_column_removed() {
         )
         .await;
 
-    let notify = destination
+    let events_received = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
 
@@ -160,7 +157,7 @@ async fn relation_message_updates_when_column_removed() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    events_received.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
@@ -221,7 +218,7 @@ async fn relation_message_updates_when_column_renamed() {
         )
         .await;
 
-    let notify = destination
+    let events_received = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
 
@@ -241,7 +238,7 @@ async fn relation_message_updates_when_column_renamed() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    events_received.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
@@ -310,7 +307,7 @@ async fn relation_message_updates_when_column_type_changes() {
         )
         .await;
 
-    let notify = destination
+    let events_received = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
 
@@ -330,7 +327,7 @@ async fn relation_message_updates_when_column_type_changes() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    events_received.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
@@ -392,7 +389,7 @@ async fn relation_message_updates_when_column_type_changes() {
 async fn alter_table_without_dml_stores_schema_snapshot() {
     init_test_tracing();
 
-    let (database, table_name, table_id, store, _destination, pipeline, _pipeline_id, _publication) =
+    let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
         create_database_and_pipeline_with_table(
             "schema_add_column_no_dml",
             &[("name", "text not null"), ("age", "integer not null")],
@@ -413,6 +410,9 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
 
     schema_stored.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    assert!(events.is_empty(), "expected no events for schema-only DDL");
 
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
@@ -445,7 +445,6 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
 async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     init_test_tracing();
 
-    // Start with initial schema: id (auto), name (text), age (integer), status (text)
     let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
         create_database_and_pipeline_with_table(
             "schema_multi_change_restart",
@@ -457,7 +456,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         )
         .await;
 
-    // Phase 1: Add column + insert, then restart
+    // Add column + insert, then restart.
     let notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
@@ -483,11 +482,11 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .unwrap();
 
     notify.notified().await;
-    sleep(Duration::from_secs(5)).await;
     pipeline.shutdown_and_wait().await.unwrap();
+
     destination.clear_events().await;
 
-    // Phase 2: Rename column + change type + insert, then restart
+    // Rename column + change type + insert, then restart.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -533,11 +532,11 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .unwrap();
 
     notify.notified().await;
-    sleep(Duration::from_secs(1)).await;
     pipeline.shutdown_and_wait().await.unwrap();
+
     destination.clear_events().await;
 
-    // Phase 3: Drop column + insert, then restart
+    // Drop column + insert, then restart.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -545,6 +544,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         store.clone(),
         destination.clone(),
     );
+
     pipeline.start().await.unwrap();
 
     let notify = destination
@@ -569,11 +569,11 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .unwrap();
 
     notify.notified().await;
-    sleep(Duration::from_secs(1)).await;
     pipeline.shutdown_and_wait().await.unwrap();
+
     destination.clear_events().await;
 
-    // Phase 4: Add another column + rename existing + insert, then verify
+    // Add another column + rename existing + insert, then verify.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -581,6 +581,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         store.clone(),
         destination.clone(),
     );
+
     pipeline.start().await.unwrap();
 
     let notify = destination
@@ -621,7 +622,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Final schema should be: id (int8), name (text), years (int8), contact_email (text), created_at (timestamp)
     let events = destination.get_events().await;
 
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
@@ -656,7 +656,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     assert_eq!(snapshots.len(), 7);
     assert_schema_snapshots_ordering(snapshots, true);
 
-    // Initial schema: id, name, age, status
     let (_, schema) = &snapshots[0];
     assert_table_schema_column_names_types(
         schema,
@@ -668,7 +667,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         ],
     );
 
-    // After adding email: id, name, age, status, email
     let (_, schema) = &snapshots[1];
     assert_table_schema_column_names_types(
         schema,
@@ -681,7 +679,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         ],
     );
 
-    // After renaming age -> years: id, name, years, status, email
     let (_, schema) = &snapshots[2];
     assert_table_schema_column_names_types(
         schema,
@@ -694,7 +691,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         ],
     );
 
-    // After changing years type to bigint: id, name, years (int8), status, email
     let (_, schema) = &snapshots[3];
     assert_table_schema_column_names_types(
         schema,
@@ -707,7 +703,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         ],
     );
 
-    // After dropping status: id, name, years, email
     let (_, schema) = &snapshots[4];
     assert_table_schema_column_names_types(
         schema,
@@ -719,7 +714,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         ],
     );
 
-    // After adding created_at: id, name, years, email, created_at
     let (_, schema) = &snapshots[5];
     assert_table_schema_column_names_types(
         schema,
@@ -732,7 +726,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         ],
     );
 
-    // Final schema after renaming email -> contact_email: id, name, years, contact_email, created_at
     let (_, schema) = &snapshots[6];
     assert_table_schema_column_names_types(
         schema,
@@ -868,7 +861,6 @@ async fn partitioned_table_schema_change_updates_relation_message() {
     assert_eq!(snapshots.len(), 2);
     assert_schema_snapshots_ordering(snapshots, true);
 
-    // Initial schema: id, data, partition_key.
     let (_, first_schema) = &snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
@@ -879,7 +871,6 @@ async fn partitioned_table_schema_change_updates_relation_message() {
         ],
     );
 
-    // After adding category: id, data, partition_key, category.
     let (_, second_schema) = &snapshots[1];
     assert_table_schema_column_names_types(
         second_schema,
