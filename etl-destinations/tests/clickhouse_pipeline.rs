@@ -1610,3 +1610,100 @@ async fn delete_with_default_replica_identity() {
     assert_eq!(r.cdc_operation, "INSERT");
     assert!(r.cdc_lsn > 0, "pipeline must continue after the delete");
 }
+
+/// SELECT query used to verify the `large_batch` test.
+const LARGE_BATCH_SELECT: &str = concat!(
+    "SELECT id, value, cdc_operation, cdc_lsn ",
+    "FROM \"test_large__batch\" ",
+    "ORDER BY id, cdc_lsn",
+);
+
+/// Tests that a large table copy (1024 rows) completes without data loss or
+/// corruption.
+///
+/// # GIVEN
+///
+/// A Postgres table with 1024 rows, each with a unique value derived from its
+/// row number.
+///
+/// # WHEN
+///
+/// The pipeline runs initial table copy from Postgres to ClickHouse.
+///
+/// # THEN
+///
+/// All 1024 rows arrive in ClickHouse. A sample of rows at known positions
+/// (first, last, powers of two, and a few interior points) are spot-checked
+/// for correct id and value.
+#[tokio::test(flavor = "multi_thread")]
+async fn large_batch_table_copy() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // --- GIVEN: 1024 rows with unique values ---
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("large_batch");
+
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .expect("Failed to create large_batch test table");
+
+    let publication_name = "test_pub_clickhouse_large_batch";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .expect("Failed to create large_batch publication");
+
+    let row_count: usize = 1024;
+    let values: Vec<String> = (1..=row_count).map(|i| format!("('val_{i:04}')")).collect();
+    // Insert in chunks to avoid exceeding Postgres query size limits.
+    for chunk in values.chunks(256) {
+        database
+            .run_sql(&format!(
+                "INSERT INTO {} (value) VALUES {}",
+                table_name.as_quoted_identifier(),
+                chunk.join(", "),
+            ))
+            .await
+            .expect("Failed to insert large_batch rows");
+    }
+
+    let ch_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = ch_db.build_destination(pipeline_id, store.clone());
+
+    let table_ready = store
+        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
+        .await;
+
+    // --- WHEN: pipeline copies all rows ---
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+    table_ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // --- THEN: all rows arrive, spot-check a sample ---
+    let rows: Vec<UpdateFlowRow> = ch_db.query(LARGE_BATCH_SELECT).await;
+    assert_eq!(rows.len(), row_count, "all 1024 rows must arrive");
+
+    // Spot-check: first, last, powers of two, and a few interior points.
+    let sample_ids: &[usize] = &[
+        1, 2, 4, 8, 16, 32, 64, 100, 128, 256, 500, 512, 750, 1000, 1024,
+    ];
+    for &id in sample_ids {
+        let r = &rows[id - 1];
+        assert_eq!(r.id, id as i64, "row {id} id mismatch");
+        assert_eq!(r.value, format!("val_{id:04}"), "row {id} value mismatch");
+        assert_eq!(r.cdc_operation, "INSERT");
+        assert_eq!(r.cdc_lsn, 0);
+    }
+}
