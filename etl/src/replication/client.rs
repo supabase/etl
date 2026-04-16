@@ -1,11 +1,11 @@
-use crate::conversions::event::{ColumnSchemaMessage, IdentityMessage, build_column_schemas};
+use crate::conversions::event::{ColumnSchemaMessage, IdentityMessage, build_table_schema};
 use crate::error::{ErrorKind, EtlResult};
 use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
 use etl_config::shared::{ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig};
 use etl_postgres::below_version;
 use etl_postgres::replication::extract_server_version;
-use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
+use etl_postgres::types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
 use etl_postgres::version::POSTGRES_15;
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
@@ -1207,10 +1207,15 @@ impl PgReplicationClient {
     /// column filtering. Publication filtering is handled separately via
     /// [`Self::get_replicated_column_names`] and represented as a [`ReplicationMask`].
     async fn get_table_schema(&self, table_id: TableId) -> EtlResult<TableSchema> {
-        let table_name = self.get_table_name(table_id).await?;
-        let column_schemas = self.get_column_schemas(table_id).await?;
+        let (table_name, columns, identity) = self.get_table_schema_snapshot(table_id).await?;
 
-        Ok(TableSchema::new(table_id, table_name, column_schemas))
+        Ok(build_table_schema(
+            table_id,
+            table_name,
+            columns,
+            identity.primary_key_attnums,
+            SnapshotId::initial(),
+        ))
     }
 
     /// Loads the table name and schema information for a given table OID.
@@ -1244,41 +1249,11 @@ impl PgReplicationClient {
         );
     }
 
-    /// Retrieves schema information for all visible columns in a table.
+    /// Warns when the source table contains generated columns.
     ///
-    /// This uses the same `etl.describe_table_schema` and `etl.describe_table_identity`
-    /// helpers that the DDL event trigger relies on so initial schema loading and
-    /// WAL-driven schema updates share the same source semantics.
-    ///
-    /// Generated columns are always excluded since they are not supported in PostgreSQL
-    /// logical replication.
-    async fn get_column_schemas(&self, table_id: TableId) -> EtlResult<Vec<ColumnSchema>> {
-        let column_info_query = format!(
-            r#"
-            with schema_snapshot as (
-                select coalesce(
-                    pg_catalog.jsonb_agg(
-                        pg_catalog.jsonb_build_object(
-                            'attname', s.attname,
-                            'attnum', s.attnum,
-                            'atttypid', s.atttypid::pg_catalog.int8,
-                            'atttypmod', s.atttypmod,
-                            'attnotnull', s.attnotnull
-                        )
-                        order by s.attnum
-                    ),
-                    '[]'::pg_catalog.jsonb
-                ) as columns
-                from etl.describe_table_schema({table_id}) s
-            )
-            select
-                ss.columns::pg_catalog.text as columns,
-                etl.describe_table_identity({table_id})::pg_catalog.text as identity
-            from schema_snapshot ss
-            "#,
-        );
-
-        // Check for generated columns so we can warn if there are any.
+    /// PostgreSQL logical replication does not replicate generated columns, so they are excluded
+    /// from ETL schema snapshots.
+    async fn warn_if_generated_columns_exist(&self, table_id: TableId) -> EtlResult<()> {
         let generated_columns_check_query = format!(
             r#"select exists (
                 select 1
@@ -1312,11 +1287,66 @@ impl PgReplicationClient {
             }
         }
 
-        let mut column_schemas = vec![];
+        Ok(())
+    }
+
+    /// Retrieves the raw schema snapshot used for bootstrap table loading.
+    ///
+    /// This uses the same `etl.describe_table_schema` and `etl.describe_table_identity`
+    /// helpers that power DDL messages so initial table copy starts from the same
+    /// schema representation that later DDL updates produce.
+    ///
+    /// Generated columns are always excluded since they are not supported in PostgreSQL
+    /// logical replication.
+    async fn get_table_schema_snapshot(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<(TableName, Vec<ColumnSchemaMessage>, IdentityMessage)> {
+        self.warn_if_generated_columns_exist(table_id).await?;
+
+        let schema_snapshot_query = format!(
+            r#"
+            with table_info as (
+                select
+                    n.nspname as schema_name,
+                    c.relname as table_name
+                from pg_class c
+                join pg_namespace n on c.relnamespace = n.oid
+                where c.oid = {table_id}
+            ),
+            schema_snapshot as (
+                select coalesce(
+                    pg_catalog.jsonb_agg(
+                        pg_catalog.jsonb_build_object(
+                            'attname', s.attname,
+                            'attnum', s.attnum,
+                            'atttypid', s.atttypid::pg_catalog.int8,
+                            'atttypmod', s.atttypmod,
+                            'attnotnull', s.attnotnull
+                        )
+                        order by s.attnum
+                    ),
+                    '[]'::pg_catalog.jsonb
+                ) as columns
+                from etl.describe_table_schema({table_id}) s
+            )
+            select
+                ti.schema_name,
+                ti.table_name,
+                ss.columns::pg_catalog.text as columns,
+                etl.describe_table_identity({table_id})::pg_catalog.text as identity
+            from table_info ti
+            cross join schema_snapshot ss
+            "#,
+        );
+
         // TODO: there's a lot of code using simple_query but only checking for SimpleQueryMessage::Row, a small optimization could be done here if we upgraded tokio-postgres to a newer version
         //  in order to use https://docs.rs/tokio-postgres/0.7.15/tokio_postgres/struct.Client.html#method.simple_query_raw to filter on SimpleQueryMessage::Row and avoid useless allocations
-        for message in self.client.simple_query(&column_info_query).await? {
+        for message in self.client.simple_query(&schema_snapshot_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
+                let schema_name =
+                    Self::get_row_value::<String>(&row, "schema_name", "pg_namespace")?;
+                let table_name = Self::get_row_value::<String>(&row, "table_name", "pg_class")?;
                 let columns_json = Self::get_row_value::<String>(&row, "columns", "etl")?;
                 let identity_json = Self::get_row_value::<String>(&row, "identity", "etl")?;
                 let columns: Vec<ColumnSchemaMessage> = serde_json::from_str(&columns_json)
@@ -1342,13 +1372,15 @@ impl PgReplicationClient {
                         )
                     })?;
 
-                column_schemas = build_column_schemas(columns, identity.primary_key_attnums);
-
-                break;
+                return Ok((TableName::new(schema_name, table_name), columns, identity));
             }
         }
 
-        Ok(column_schemas)
+        bail!(
+            ErrorKind::SourceSchemaError,
+            "Table schema snapshot not found in source database",
+            format!("Table with ID {} not found in database", table_id)
+        )
     }
 
     /// Retrieves the publication row filter for a table.

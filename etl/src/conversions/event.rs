@@ -60,13 +60,11 @@ impl SchemaChangeMessage {
     /// This is used to update the stored table schema when a DDL change is detected.
     /// The snapshot_id should be the start_lsn of the DDL message.
     pub fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
-        let table_name = TableName::new(self.nspname, self.relname);
-        let column_schemas = build_column_schemas(self.columns, self.identity.primary_key_attnums);
-
-        TableSchema::with_snapshot_id(
+        build_table_schema(
             TableId::new(self.oid as u32),
-            table_name,
-            column_schemas,
+            TableName::new(self.nspname, self.relname),
+            self.columns,
+            self.identity.primary_key_attnums,
             snapshot_id,
         )
     }
@@ -140,6 +138,25 @@ pub fn build_column_schemas(
             )
         })
         .collect()
+}
+
+/// Builds a [`TableSchema`] from PostgreSQL-native schema and identity snapshots.
+///
+/// This is shared by bootstrap schema loading and DDL message handling so both paths produce
+/// the exact same [`TableSchema`] representation.
+pub fn build_table_schema(
+    table_id: TableId,
+    table_name: TableName,
+    columns: Vec<ColumnSchemaMessage>,
+    primary_key_attnums: Vec<i32>,
+    snapshot_id: SnapshotId,
+) -> TableSchema {
+    TableSchema::with_snapshot_id(
+        table_id,
+        table_name,
+        build_column_schemas(columns, primary_key_attnums),
+        snapshot_id,
+    )
 }
 
 /// Calculates the total byte size of tuple data from a replication message.
