@@ -1021,7 +1021,7 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .await
     .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, ordinal_position) values ($1, 'id', 'INT4', -1, false, true, 1)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1)")
         .bind(table_schema_id)
         .execute(&source_db_pool)
         .await
@@ -1142,7 +1142,7 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
     .await
     .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, ordinal_position) values ($1, 'id', 'INT4', -1, false, true, 1)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1)")
         .bind(table_schema_id)
         .execute(&source_db_pool)
         .await
@@ -1229,7 +1229,7 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     .await
     .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, ordinal_position) values ($1, 'id', 'INT4', -1, false, true, 1)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1)")
         .bind(table_schema_id)
         .execute(&source_db_pool)
         .await
@@ -1343,10 +1343,10 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
     ).bind(pipeline_id).bind(table2_oid).fetch_one(&source_db_pool).await.unwrap();
 
     // Insert multiple columns for each table to test CASCADE behavior
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, ordinal_position) values ($1, 'id', 'INT4', -1, false, true, 1), ($1, 'name', 'TEXT', -1, true, false, 2)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1), ($1, 'name', 'TEXT', -1, true, 2, NULL)")
         .bind(table_schema_id_1).execute(&source_db_pool).await.unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, ordinal_position) values ($1, 'order_id', 'INT8', -1, false, true, 1), ($1, 'amount', 'NUMERIC', -1, false, false, 2)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'order_id', 'INT8', -1, false, 1, 1), ($1, 'amount', 'NUMERIC', -1, false, 2, NULL)")
         .bind(table_schema_id_2).execute(&source_db_pool).await.unwrap();
 
     // Verify data exists before deletion
