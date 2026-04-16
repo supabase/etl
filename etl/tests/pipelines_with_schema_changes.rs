@@ -5,7 +5,7 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::memory_destination::MemoryDestination;
 use etl::test_utils::notifying_store::NotifyingStore;
-use etl::test_utils::pipeline::{create_database_and_pipeline_with_table, create_pipeline};
+use etl::test_utils::pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline};
 use etl::test_utils::schema::{
     assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
     assert_table_schema_column_names_types,
@@ -39,7 +39,7 @@ async fn relation_message_updates_when_column_added() {
     init_test_tracing();
 
     let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
-        create_database_and_pipeline_with_table(
+        create_database_and_ready_pipeline_with_table(
             "schema_add_column",
             &[("name", "text not null"), ("age", "integer not null")],
         )
@@ -134,7 +134,7 @@ async fn relation_message_updates_when_column_removed() {
     init_test_tracing();
 
     let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
-        create_database_and_pipeline_with_table(
+        create_database_and_ready_pipeline_with_table(
             "schema_remove_column",
             &[("name", "text not null"), ("age", "integer not null")],
         )
@@ -212,7 +212,7 @@ async fn relation_message_updates_when_column_renamed() {
     init_test_tracing();
 
     let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
-        create_database_and_pipeline_with_table(
+        create_database_and_ready_pipeline_with_table(
             "schema_rename_column",
             &[("name", "text not null"), ("age", "integer not null")],
         )
@@ -301,7 +301,7 @@ async fn relation_message_updates_when_column_type_changes() {
     init_test_tracing();
 
     let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
-        create_database_and_pipeline_with_table(
+        create_database_and_ready_pipeline_with_table(
             "schema_change_type",
             &[("name", "text not null"), ("age", "integer not null")],
         )
@@ -389,8 +389,8 @@ async fn relation_message_updates_when_column_type_changes() {
 async fn alter_table_without_dml_stores_schema_snapshot() {
     init_test_tracing();
 
-    let (database, table_name, table_id, store, destination, pipeline, _pipeline_id, _publication) =
-        create_database_and_pipeline_with_table(
+    let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
+        create_database_and_ready_pipeline_with_table(
             "schema_add_column_no_dml",
             &[("name", "text not null"), ("age", "integer not null")],
         )
@@ -439,6 +439,89 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
             ("email", Type::TEXT),
         ],
     );
+
+    destination.clear_events().await;
+
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication,
+        store.clone(),
+        destination.clone(),
+    );
+    pipeline.start().await.unwrap();
+
+    let notify = destination
+        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
+
+    database
+        .insert_values(
+            table_name.clone(),
+            &["name", "age", "email"],
+            &[&"Alice", &25, &"alice@example.com"],
+        )
+        .await
+        .unwrap();
+
+    notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let grouped = group_events_by_type_and_table_id(&events);
+
+    assert_eq!(
+        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
+        1
+    );
+
+    let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
+        panic!("expected relation event");
+    };
+    assert_replicated_schema_column_names_types(
+        &r.replicated_table_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+            ("email", Type::TEXT),
+        ],
+    );
+
+    let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
+        panic!("expected insert event");
+    };
+    assert_eq!(i.table_row.values().len(), 4);
+
+    let table_schemas = store.get_table_schemas().await;
+    let snapshots = table_schemas.get(&table_id).unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert_schema_snapshots_ordering(snapshots, true);
+
+    let (_, first_schema) = &snapshots[0];
+    assert_table_schema_column_names_types(
+        first_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
+    );
+
+    let (_, second_schema) = &snapshots[1];
+    assert_table_schema_column_names_types(
+        second_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+            ("email", Type::TEXT),
+        ],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -446,7 +529,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     init_test_tracing();
 
     let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
-        create_database_and_pipeline_with_table(
+        create_database_and_ready_pipeline_with_table(
             "schema_multi_change_restart",
             &[
                 ("name", "text not null"),

@@ -270,7 +270,7 @@ where
     .build()
 }
 
-pub async fn create_database_and_pipeline_with_table(
+pub async fn create_database_and_ready_pipeline_with_table(
     table_suffix: &str,
     columns: &[(&str, &str)],
 ) -> (

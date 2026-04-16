@@ -414,12 +414,19 @@ impl SchemaStore for NotifyingStore {
         let mut inner = self.inner.write().await;
 
         let table_id = table_schema.id;
+        let snapshot_id = table_schema.snapshot_id;
         let table_schema = Arc::new(table_schema);
-        inner
-            .table_schemas
-            .entry(table_id)
-            .or_default()
-            .push(table_schema.clone());
+
+        let schemas = inner.table_schemas.entry(table_id).or_default();
+        if let Some(existing_schema) = schemas
+            .iter_mut()
+            .find(|schema| schema.snapshot_id == snapshot_id)
+        {
+            *existing_schema = Arc::clone(&table_schema);
+        } else {
+            schemas.push(Arc::clone(&table_schema));
+        }
+
         inner.check_conditions();
 
         Ok(table_schema)

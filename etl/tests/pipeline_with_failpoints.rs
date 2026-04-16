@@ -10,7 +10,7 @@ use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::event::group_events_by_type_and_table_id;
 use etl::test_utils::memory_destination::MemoryDestination;
 use etl::test_utils::notifying_store::NotifyingStore;
-use etl::test_utils::pipeline::{create_database_and_pipeline_with_table, create_pipeline};
+use etl::test_utils::pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline};
 use etl::test_utils::schema::{
     assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
     assert_table_schema_column_names_types,
@@ -1196,7 +1196,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     init_test_tracing();
 
     let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
-        create_database_and_pipeline_with_table(
+        create_database_and_ready_pipeline_with_table(
             "schema_add_column",
             &[("name", "text not null"), ("age", "integer not null")],
         )
