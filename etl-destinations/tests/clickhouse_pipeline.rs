@@ -6,7 +6,11 @@ use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::create_pipeline;
 use etl::types::PipelineId;
 use etl_destinations::clickhouse::ClickHouseInserterConfig;
-use etl_destinations::clickhouse::test_utils::{ClickHouseTestDatabase, setup_clickhouse_database};
+use etl_destinations::clickhouse::client::ClickHouseClient;
+use etl_destinations::clickhouse::test_utils::{
+    ClickHouseTestDatabase, get_clickhouse_password, get_clickhouse_url, get_clickhouse_user,
+    setup_clickhouse_database,
+};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 use std::sync::Once;
@@ -1706,4 +1710,37 @@ async fn large_batch_table_copy() {
         assert_eq!(r.cdc_operation, "INSERT");
         assert_eq!(r.cdc_lsn, 0);
     }
+}
+
+/// # GIVEN
+/// A ClickHouseClient pointed at the running test ClickHouse instance.
+///
+/// # WHEN
+/// `ping()` is called.
+///
+/// # THEN
+/// It returns Ok(()).
+#[tokio::test(flavor = "multi_thread")]
+async fn ping_succeeds_against_running_clickhouse() {
+    let client = ClickHouseClient::new(
+        get_clickhouse_url(),
+        get_clickhouse_user(),
+        get_clickhouse_password(),
+        "default",
+    );
+    assert!(client.ping().await.is_ok());
+}
+
+/// # GIVEN
+/// A ClickHouseClient pointed at a URL where nothing is listening.
+///
+/// # WHEN
+/// `ping()` is called.
+///
+/// # THEN
+/// It returns Err.
+#[tokio::test(flavor = "multi_thread")]
+async fn ping_fails_against_unreachable_clickhouse() {
+    let client = ClickHouseClient::new("http://localhost:1", "nobody", None::<String>, "default");
+    assert!(client.ping().await.is_err());
 }
