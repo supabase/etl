@@ -6,7 +6,7 @@ use etl_postgres::types::{
 use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use tokio_postgres::types::PgLsn;
 
@@ -26,49 +26,45 @@ pub const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
 ///
 /// This message is emitted when ALTER TABLE commands are executed on tables
 /// that are part of a publication.
+///
+/// Unknown fields are ignored on purpose so the SQL payload can grow richer
+/// without forcing a synchronized rollout of every consumer.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SchemaChangeMessage {
-    /// The DDL command that triggered this message (e.g., "ALTER TABLE").
-    pub event: String,
-    /// The schema name of the affected table.
-    pub schema_name: String,
-    /// The name of the affected table.
-    pub table_name: String,
-    /// The OID of the affected table.
+    /// The command tag from `pg_event_trigger_ddl_commands().command_tag`.
+    pub command_tag: String,
+    /// The schema name from `pg_namespace.nspname`.
+    pub nspname: String,
+    /// The table name from `pg_class.relname`.
+    pub relname: String,
+    /// The table OID from `pg_class.oid`.
     ///
     /// PostgreSQL table OIDs are `u32` values, but JSON serialization from the event trigger
     /// uses `bigint` (i64) for transmission. The cast back to `u32` in [`into_table_schema`]
     /// is safe because PostgreSQL OIDs are always within the `u32` range.
-    pub table_id: i64,
+    pub oid: i64,
+    /// The identity metadata emitted by Postgres for this table snapshot.
+    pub identity: IdentityMessage,
     /// The columns of the table after the schema change.
     pub columns: Vec<ColumnSchemaMessage>,
 }
 
 impl SchemaChangeMessage {
+    /// Returns the table identifier as [`TableId`].
+    pub fn table_id(&self) -> TableId {
+        TableId::new(self.oid as u32)
+    }
+
     /// Converts a [`SchemaChangeMessage`] to a [`TableSchema`] with a specific snapshot ID.
     ///
     /// This is used to update the stored table schema when a DDL change is detected.
     /// The snapshot_id should be the start_lsn of the DDL message.
     pub fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
-        let table_name = TableName::new(self.schema_name, self.table_name);
-        let column_schemas = self
-            .columns
-            .into_iter()
-            .map(|column| {
-                let typ = convert_type_oid_to_type(column.type_oid);
-                ColumnSchema::new(
-                    column.name,
-                    typ,
-                    column.type_modifier,
-                    column.ordinal_position,
-                    column.primary_key_ordinal_position,
-                    column.nullable,
-                )
-            })
-            .collect();
+        let table_name = TableName::new(self.nspname, self.relname);
+        let column_schemas = build_column_schemas(self.columns, self.identity.primary_key_attnums);
 
         TableSchema::with_snapshot_id(
-            TableId::new(self.table_id as u32),
+            TableId::new(self.oid as u32),
             table_name,
             column_schemas,
             snapshot_id,
@@ -90,21 +86,60 @@ impl FromStr for SchemaChangeMessage {
     }
 }
 
-/// Represents a column schema in a schema change message.
+/// The identity metadata emitted by Postgres.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IdentityMessage {
+    /// The primary key columns in key order, expressed as `pg_attribute.attnum` values.
+    pub primary_key_attnums: Vec<i32>,
+}
+
+/// The column schema shape emitted by Postgres.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ColumnSchemaMessage {
-    /// The name of the column.
-    pub name: String,
-    /// The OID of the column's data type.
-    pub type_oid: u32,
-    /// Type-specific modifier value (e.g., length for varchar).
-    pub type_modifier: i32,
-    /// The 1-based ordinal position of the column in the table.
-    pub ordinal_position: i32,
-    /// The 1-based ordinal position of this column in the primary key, or null if not a primary key.
-    pub primary_key_ordinal_position: Option<i32>,
-    /// Whether the column can contain NULL values.
-    pub nullable: bool,
+    /// The column name from `pg_attribute.attname`.
+    pub attname: String,
+    /// The type OID from `pg_attribute.atttypid`.
+    pub atttypid: u32,
+    /// The type modifier from `pg_attribute.atttypmod`.
+    pub atttypmod: i32,
+    /// The physical column number from `pg_attribute.attnum`.
+    pub attnum: i32,
+    /// Whether the column is marked `NOT NULL` in `pg_attribute.attnotnull`.
+    pub attnotnull: bool,
+}
+
+/// Builds [`ColumnSchema`] values from PostgreSQL-native schema and identity snapshots.
+///
+/// The resulting columns are always sorted by `attnum`, preserving physical table order, while
+/// `primary_key_ordinal_position` stays tied to the order of `primary_key_attnums`.
+pub fn build_column_schemas(
+    mut columns: Vec<ColumnSchemaMessage>,
+    primary_key_attnums: Vec<i32>,
+) -> Vec<ColumnSchema> {
+    let primary_key_positions: HashMap<i32, i32> = primary_key_attnums
+        .into_iter()
+        .enumerate()
+        .map(|(index, attnum)| (attnum, (index + 1) as i32))
+        .collect();
+
+    // We sort columns by their ordinal position to keep the ordering consistent within the
+    // application.
+    columns.sort_by_key(|column| column.attnum);
+
+    columns
+        .into_iter()
+        .map(|column| {
+            let typ = convert_type_oid_to_type(column.atttypid);
+            ColumnSchema::new(
+                column.attname,
+                typ,
+                column.atttypmod,
+                column.attnum,
+                primary_key_positions.get(&column.attnum).copied(),
+                !column.attnotnull,
+            )
+        })
+        .collect()
 }
 
 /// Calculates the total byte size of tuple data from a replication message.

@@ -345,10 +345,18 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
             {
                 return false;
             }
+
             // Compare table IDs of truncated tables
             let left_ids: Vec<_> = left.truncated_tables.iter().map(|s| s.id()).collect();
             let right_ids: Vec<_> = right.truncated_tables.iter().map(|s| s.id()).collect();
             left_ids == right_ids
+        }
+        (Event::Relation(left), Event::Relation(right)) => {
+            left.replicated_table_schema.id() == right.replicated_table_schema.id()
+                && left
+                    .replicated_table_schema
+                    .column_schemas()
+                    .eq(right.replicated_table_schema.column_schemas())
         }
         (Event::Unsupported, Event::Unsupported) => true,
         _ => false,

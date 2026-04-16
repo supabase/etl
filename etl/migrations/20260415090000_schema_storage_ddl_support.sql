@@ -2,124 +2,162 @@
 --
 -- This is an intentional one-way upgrade for this branch:
 -- - `etl.table_columns.column_order` is renamed to `ordinal_position`.
+-- - `etl.table_columns.primary_key` is replaced by `primary_key_ordinal_position`.
 -- - existing stored values are shifted by `+ 1` to match PostgreSQL's 1-based ordinals.
 -- - no backward-compatibility layer is kept for older pipelines.
 --
 -- All pipelines must be upgraded together with code that reads `ordinal_position`.
 
+-- Rename the stored column order field to its new steady-state name.
 alter table etl.table_columns
     rename column column_order to ordinal_position;
 
--- Shift through a temporary offset first so the existing unique constraint on
--- (table_schema_id, ordinal_position) does not see transient collisions.
+-- Shift stored ordinals from 0-based to 1-based without violating the
+-- existing unique constraint on (table_schema_id, ordinal_position).
 update etl.table_columns
 set ordinal_position = ordinal_position + 1000000;
-
 update etl.table_columns
 set ordinal_position = ordinal_position - 999999;
 
+-- Add the new primary-key position field.
 alter table etl.table_columns
-    add column if not exists primary_key_ordinal_position pg_catalog.int4;
+    add column if not exists primary_key_ordinal_position integer;
 
--- Backfill primary_key_ordinal_position by querying the actual PK constraint from pg_constraint.
--- This assumes the source tables still exist and their PK order has not changed.
-update etl.table_columns tc
-set primary_key_ordinal_position = pk_info.pk_position
-from (
+-- Backfill primary_key_ordinal_position from the live primary-key definition
+-- for each stored schema row.
+update etl.table_columns
+set primary_key_ordinal_position = null
+where primary_key = false;
+
+with live_primary_key_columns as (
     select
-        tc_inner.id as column_id,
-        x.n as pk_position
-    from etl.table_columns tc_inner
-    join etl.table_schemas ts on ts.id = tc_inner.table_schema_id
-    join pg_catalog.pg_constraint con on con.conrelid = ts.table_id and con.contype = 'p'
-    join pg_catalog.pg_attribute a on a.attrelid = ts.table_id and a.attname = tc_inner.column_name
+        ts.id as table_schema_id,
+        a.attname as column_name,
+        x.n::pg_catalog.int4 as pk_position
+    from etl.table_schemas ts
+    join pg_catalog.pg_constraint con
+      on con.conrelid = ts.table_id
+     and con.contype = 'p'
     cross join lateral unnest(con.conkey) with ordinality as x(attnum, n)
-    where x.attnum = a.attnum
-      and tc_inner.primary_key = true
-) pk_info
-where tc.id = pk_info.column_id
-  and tc.primary_key_ordinal_position is null;
+    join pg_catalog.pg_attribute a
+      on a.attrelid = ts.table_id
+     and a.attnum = x.attnum
+)
+update etl.table_columns tc
+set primary_key_ordinal_position = lpkc.pk_position
+from live_primary_key_columns lpkc
+where tc.table_schema_id = lpkc.table_schema_id
+  and tc.column_name = lpkc.column_name
+  and tc.primary_key = true;
 
--- Add snapshot_id column to table_schemas for schema versioning.
--- The snapshot_id value is the start_lsn of the DDL message that created this schema version.
--- Initial schemas use snapshot_id = '0/0'.
+-- Drop the old boolean primary-key flag now that the ordinal form is
+-- populated.
+alter table etl.table_columns
+    drop column primary_key;
+
+-- Add snapshot_id so one table can have multiple stored schema versions over
+-- time. Existing rows become the initial version at `0/0`.
 alter table etl.table_schemas
     add column if not exists snapshot_id pg_lsn not null default '0/0';
 
--- Change unique constraint from (pipeline_id, table_id) to (pipeline_id, table_id, snapshot_id)
--- to allow multiple schema versions per table.
+-- Expand the uniqueness key to include snapshot_id.
 alter table etl.table_schemas
     drop constraint if exists table_schemas_pipeline_id_table_id_key;
-
 alter table etl.table_schemas
     add constraint table_schemas_pipeline_id_table_id_snapshot_id_key
     unique (pipeline_id, table_id, snapshot_id);
 
--- Index for efficient "find largest snapshot_id <= X" queries.
+-- Add the lookup index used to find the latest schema at or before a given
+-- snapshot.
 create index if not exists idx_table_schemas_pipeline_table_snapshot_id
     on etl.table_schemas (pipeline_id, table_id, snapshot_id desc);
 
--- Unified destination table metadata.
---
--- Tracks all destination-related state for each replicated table in a single row.
+-- Add the status enum used by destination schema application.
 create type etl.destination_table_schema_status as enum (
     'applying',
     'applied'
 );
 
+-- Create the new destination metadata table that replaces the old
+-- `table_mappings` rows with a richer per-table state record.
 create table etl.destination_tables_metadata (
     id bigint generated always as identity primary key,
     pipeline_id bigint not null,
     table_id oid not null,
-    -- The name/identifier of the table in the destination system.
     destination_table_id text not null,
-    -- The snapshot_id of the schema currently applied at the destination.
     snapshot_id pg_lsn not null,
-    -- The schema version before the current change. null for initial schemas.
-    -- Destinations that support atomic DDL can use this for recovery by rolling back
-    -- to the previous snapshot when schema_status is 'applying' on startup.
     previous_snapshot_id pg_lsn,
-    -- Status: 'applying' when a schema change is in progress, 'applied' when complete.
-    -- If 'applying' is found on startup, recovery may be needed.
     schema_status etl.destination_table_schema_status not null,
-    -- The replication mask as a byte array where each byte is 0 (not replicated) or 1 (replicated).
-    -- The index corresponds to the column's ordinal position in the schema.
     replication_mask bytea not null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
-    -- One metadata row per table per pipeline.
     unique (pipeline_id, table_id)
 );
 
--- Backfill destination_tables_metadata from existing table_mappings and table_schemas.
--- For each mapped table, create metadata with snapshot_id = 0/0 (initial schema)
--- and all columns marked as replicated.
+-- Backfill the new destination metadata table from the old mappings. Existing
+-- rows become `snapshot_id = 0/0`, `schema_status = applied`, and an all-ones
+-- replication mask, while preserving the original timestamps.
 insert into etl.destination_tables_metadata (
     pipeline_id,
     table_id,
     destination_table_id,
     snapshot_id,
     schema_status,
-    replication_mask
+    replication_mask,
+    created_at,
+    updated_at
+)
+with initial_schema_matches as (
+    select
+        tm.pipeline_id,
+        tm.source_table_id,
+        tm.destination_table_id,
+        count(ts.id)::pg_catalog.int4 as schema_count,
+        min(ts.id) as table_schema_id
+    from etl.table_mappings tm
+    left join etl.table_schemas ts
+      on ts.pipeline_id = tm.pipeline_id
+     and ts.table_id = tm.source_table_id
+     and ts.snapshot_id = '0/0'::pg_catalog.pg_lsn
+    group by tm.pipeline_id, tm.source_table_id, tm.destination_table_id
+),
+schema_stats as (
+    select
+        ts.id as table_schema_id,
+        count(tc.id)::pg_catalog.int4 as column_count
+    from etl.table_schemas ts
+    left join etl.table_columns tc
+      on tc.table_schema_id = ts.id
+    group by ts.id
+),
+mapping_backfill as (
+    select
+        tm.pipeline_id,
+        tm.source_table_id as table_id,
+        tm.destination_table_id,
+        tm.created_at,
+        tm.updated_at,
+        ss.column_count
+    from etl.table_mappings tm
+    join initial_schema_matches ism
+      on ism.pipeline_id = tm.pipeline_id
+     and ism.source_table_id = tm.source_table_id
+     and ism.destination_table_id = tm.destination_table_id
+    join schema_stats ss
+      on ss.table_schema_id = ism.table_schema_id
 )
 select
-    tm.pipeline_id,
-    tm.source_table_id as table_id,
-    tm.destination_table_id,
-    '0/0'::pg_lsn as snapshot_id,
+    mb.pipeline_id,
+    mb.table_id,
+    mb.destination_table_id,
+    '0/0'::pg_catalog.pg_lsn as snapshot_id,
     'applied'::etl.destination_table_schema_status,
-    -- Create a bytea of 1s with length equal to the number of columns.
-    decode(repeat('01', column_counts.num_columns::int), 'hex') as replication_mask
-from etl.table_mappings tm
-join etl.table_schemas ts on ts.pipeline_id = tm.pipeline_id
-    and ts.table_id = tm.source_table_id
-    and ts.snapshot_id = '0/0'::pg_lsn
-join (
-    select table_schema_id, count(*) as num_columns
-    from etl.table_columns
-    group by table_schema_id
-) column_counts on column_counts.table_schema_id = ts.id;
+    -- Create one `0x01` byte per stored column in ordinal order.
+    decode(repeat('01', mb.column_count::int), 'hex') as replication_mask,
+    mb.created_at,
+    mb.updated_at
+from mapping_backfill mb;
 
--- Drop the old table_mappings table as it is now unified into destination_tables_metadata.
--- This is a breaking change. We intentionally require all pipelines on this branch to upgrade.
+-- Remove the old mapping table now that its state lives in
+-- `destination_tables_metadata`.
 drop table etl.table_mappings;

@@ -12,18 +12,115 @@ use etl::test_utils::memory_destination::MemoryDestination;
 use etl::test_utils::notifying_store::NotifyingStore;
 use etl::test_utils::pipeline::{create_database_and_pipeline_with_table, create_pipeline};
 use etl::test_utils::schema::{
-    assert_schema_snapshots_ordering, assert_table_schema_column_names_types,
+    assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
+    assert_table_schema_column_names_types,
 };
 use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
+use etl::test_utils::test_schema::assert_events_equal;
 use etl::test_utils::test_schema::{TableSelection, insert_users_data, setup_test_database_schema};
 use etl::types::Type;
 use etl::types::{Event, EventType, InsertEvent, PipelineId, TableId};
 use etl_postgres::below_version;
 use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::types::{SnapshotId, TableSchema};
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
+
+enum ExpectedReplicatedEvent<'a> {
+    Relation(&'a [(&'static str, Type)]),
+    Insert(&'a [(&'static str, Type)]),
+}
+
+fn collect_table_events(events: &[Event], table_id: TableId) -> Vec<Event> {
+    events
+        .iter()
+        .filter(|event| event.has_table_id(&table_id))
+        .cloned()
+        .collect()
+}
+
+fn assert_table_event_sequence(
+    events: &[Event],
+    table_id: TableId,
+    expected: &[ExpectedReplicatedEvent<'_>],
+) {
+    let table_events = collect_table_events(events, table_id);
+    let expected_types = expected
+        .iter()
+        .map(|event| match event {
+            ExpectedReplicatedEvent::Relation(_) => EventType::Relation,
+            ExpectedReplicatedEvent::Insert(_) => EventType::Insert,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        table_events
+            .iter()
+            .map(Event::event_type)
+            .collect::<Vec<_>>(),
+        expected_types
+    );
+    assert_eq!(table_events.len(), expected.len());
+
+    for (actual_event, expected_event) in table_events.iter().zip(expected) {
+        match (actual_event, expected_event) {
+            (Event::Relation(relation), ExpectedReplicatedEvent::Relation(expected_columns)) => {
+                assert_replicated_schema_column_names_types(
+                    &relation.replicated_table_schema,
+                    expected_columns,
+                );
+            }
+            (Event::Insert(insert), ExpectedReplicatedEvent::Insert(expected_columns)) => {
+                assert_replicated_schema_column_names_types(
+                    &insert.replicated_table_schema,
+                    expected_columns,
+                );
+            }
+            (unexpected_event, ExpectedReplicatedEvent::Relation(_)) => {
+                panic!("expected relation event, got {unexpected_event:?}");
+            }
+            (unexpected_event, ExpectedReplicatedEvent::Insert(_)) => {
+                panic!("expected insert event, got {unexpected_event:?}");
+            }
+        }
+    }
+}
+
+fn assert_table_schema_snapshots(
+    snapshots: &[(SnapshotId, TableSchema)],
+    expected_schemas: &[&[(&'static str, Type)]],
+) {
+    assert_eq!(snapshots.len(), expected_schemas.len());
+    assert_schema_snapshots_ordering(snapshots, true);
+
+    for ((_, schema), expected_columns) in snapshots.iter().zip(expected_schemas) {
+        assert_table_schema_column_names_types(schema, expected_columns);
+    }
+}
+
+fn assert_restarted_schema_snapshot_pairs(
+    restarted_snapshots: &[(SnapshotId, TableSchema)],
+    initial_snapshots: &[(SnapshotId, TableSchema)],
+) {
+    assert!(
+        initial_snapshots.len() >= 2,
+        "expected at least one non-initial schema snapshot"
+    );
+    assert_eq!(
+        restarted_snapshots[..initial_snapshots.len()],
+        initial_snapshots[..],
+    );
+    assert_eq!(
+        restarted_snapshots.len(),
+        initial_snapshots.len() + (initial_snapshots.len() - 1),
+    );
+    assert_eq!(
+        restarted_snapshots[initial_snapshots.len()..],
+        initial_snapshots[1..],
+    );
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
@@ -411,52 +508,70 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
-    let grouped = group_events_by_type_and_table_id(&events);
-
-    assert_eq!(
-        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
-        3
-    );
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        3
+    assert_table_event_sequence(
+        &events,
+        table_id,
+        &[
+            ExpectedReplicatedEvent::Relation(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+            ]),
+            ExpectedReplicatedEvent::Insert(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+            ]),
+            ExpectedReplicatedEvent::Relation(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("status", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Insert(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("status", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Relation(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("status", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Insert(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("status", Type::TEXT),
+            ]),
+        ],
     );
 
     let table_schemas = store.get_table_schemas().await;
     let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
-    assert_eq!(table_schemas_snapshots.len(), 3);
-    assert_schema_snapshots_ordering(table_schemas_snapshots, true);
-
-    let (_, first_schema) = &table_schemas_snapshots[0];
-    assert_table_schema_column_names_types(
-        first_schema,
+    assert_table_schema_snapshots(
+        table_schemas_snapshots,
         &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+            ],
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("status", Type::TEXT),
+            ],
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("status", Type::TEXT),
+            ],
         ],
     );
-
-    let (_, second_schema) = &table_schemas_snapshots[1];
-    assert_table_schema_column_names_types(
-        second_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-            ("status", Type::TEXT),
-        ],
-    );
-
-    let (_, third_schema) = &table_schemas_snapshots[2];
-    assert_table_schema_column_names_types(
-        third_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("status", Type::TEXT),
-        ],
-    );
+    let initial_events = collect_table_events(&events, table_id);
+    let initial_table_schema_snapshots = table_schemas_snapshots.clone();
 
     destination.clear_events().await;
 
@@ -483,6 +598,18 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let restarted_events = destination.get_events().await;
+    assert_events_equal(
+        &collect_table_events(&restarted_events, table_id),
+        &initial_events,
+    );
+
+    let restarted_table_schemas = store.get_table_schemas().await;
+    assert_restarted_schema_snapshot_pairs(
+        restarted_table_schemas.get(&table_id).unwrap(),
+        &initial_table_schema_snapshots,
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -581,52 +708,70 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
-    let grouped = group_events_by_type_and_table_id(&events);
-
-    assert_eq!(
-        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
-        3
-    );
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        3
+    assert_table_event_sequence(
+        &events,
+        table_id,
+        &[
+            ExpectedReplicatedEvent::Relation(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+            ]),
+            ExpectedReplicatedEvent::Insert(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+            ]),
+            ExpectedReplicatedEvent::Relation(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("status", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Insert(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("status", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Relation(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("status", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Insert(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("status", Type::TEXT),
+            ]),
+        ],
     );
 
     let table_schemas = store.get_table_schemas().await;
     let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
-    assert_eq!(table_schemas_snapshots.len(), 3);
-    assert_schema_snapshots_ordering(table_schemas_snapshots, true);
-
-    let (_, first_schema) = &table_schemas_snapshots[0];
-    assert_table_schema_column_names_types(
-        first_schema,
+    assert_table_schema_snapshots(
+        table_schemas_snapshots,
         &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+            ],
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("status", Type::TEXT),
+            ],
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("status", Type::TEXT),
+            ],
         ],
     );
-
-    let (_, second_schema) = &table_schemas_snapshots[1];
-    assert_table_schema_column_names_types(
-        second_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-            ("status", Type::TEXT),
-        ],
-    );
-
-    let (_, third_schema) = &table_schemas_snapshots[2];
-    assert_table_schema_column_names_types(
-        third_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("status", Type::TEXT),
-        ],
-    );
+    let initial_events = collect_table_events(&events, table_id);
+    let initial_table_schema_snapshots = table_schemas_snapshots.clone();
 
     destination.clear_events().await;
 
@@ -653,6 +798,18 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let restarted_events = destination.get_events().await;
+    assert_events_equal(
+        &collect_table_events(&restarted_events, table_id),
+        &initial_events,
+    );
+
+    let restarted_table_schemas = store.get_table_schemas().await;
+    assert_restarted_schema_snapshot_pairs(
+        restarted_table_schemas.get(&table_id).unwrap(),
+        &initial_table_schema_snapshots,
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -699,6 +856,8 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     pipeline.start().await.unwrap();
 
     ready_notify.notified().await;
+
+    destination.clear_events().await;
 
     let events_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
@@ -750,52 +909,60 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
-    let grouped = group_events_by_type_and_table_id(&events);
-
-    assert_eq!(
-        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
-        2
-    );
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        2
+    assert_table_event_sequence(
+        &events,
+        table_id,
+        &[
+            ExpectedReplicatedEvent::Relation(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("status", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Insert(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("status", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Relation(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("status", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Insert(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("status", Type::TEXT),
+            ]),
+        ],
     );
 
     let table_schemas = store.get_table_schemas().await;
     let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
-    assert_eq!(table_schemas_snapshots.len(), 3);
-    assert_schema_snapshots_ordering(table_schemas_snapshots, true);
-
-    let (_, first_schema) = &table_schemas_snapshots[0];
-    assert_table_schema_column_names_types(
-        first_schema,
+    assert_table_schema_snapshots(
+        table_schemas_snapshots,
         &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+            ],
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("status", Type::TEXT),
+            ],
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("status", Type::TEXT),
+            ],
         ],
     );
-
-    let (_, second_schema) = &table_schemas_snapshots[1];
-    assert_table_schema_column_names_types(
-        second_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-            ("status", Type::TEXT),
-        ],
-    );
-
-    let (_, third_schema) = &table_schemas_snapshots[2];
-    assert_table_schema_column_names_types(
-        third_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("status", Type::TEXT),
-        ],
-    );
+    let initial_events = collect_table_events(&events, table_id);
+    let initial_table_schema_snapshots = table_schemas_snapshots.clone();
 
     destination.clear_events().await;
 
@@ -822,6 +989,18 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let restarted_events = destination.get_events().await;
+    assert_events_equal(
+        &collect_table_events(&restarted_events, table_id),
+        &initial_events,
+    );
+
+    let restarted_table_schemas = store.get_table_schemas().await;
+    assert_restarted_schema_snapshot_pairs(
+        restarted_table_schemas.get(&table_id).unwrap(),
+        &initial_table_schema_snapshots,
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -915,52 +1094,60 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
-    let grouped = group_events_by_type_and_table_id(&events);
-
-    assert_eq!(
-        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
-        2
-    );
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        2
+    assert_table_event_sequence(
+        &events,
+        table_id,
+        &[
+            ExpectedReplicatedEvent::Relation(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("status", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Insert(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("status", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Relation(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("status", Type::TEXT),
+            ]),
+            ExpectedReplicatedEvent::Insert(&[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("status", Type::TEXT),
+            ]),
+        ],
     );
 
     let table_schemas = store.get_table_schemas().await;
     let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
-    assert_eq!(table_schemas_snapshots.len(), 3);
-    assert_schema_snapshots_ordering(table_schemas_snapshots, true);
-
-    let (_, first_schema) = &table_schemas_snapshots[0];
-    assert_table_schema_column_names_types(
-        first_schema,
+    assert_table_schema_snapshots(
+        table_schemas_snapshots,
         &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+            ],
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("status", Type::TEXT),
+            ],
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("status", Type::TEXT),
+            ],
         ],
     );
-
-    let (_, second_schema) = &table_schemas_snapshots[1];
-    assert_table_schema_column_names_types(
-        second_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-            ("status", Type::TEXT),
-        ],
-    );
-
-    let (_, third_schema) = &table_schemas_snapshots[2];
-    assert_table_schema_column_names_types(
-        third_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("status", Type::TEXT),
-        ],
-    );
+    let initial_events = collect_table_events(&events, table_id);
+    let initial_table_schema_snapshots = table_schemas_snapshots.clone();
 
     destination.clear_events().await;
 
@@ -987,6 +1174,18 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let restarted_events = destination.get_events().await;
+    assert_events_equal(
+        &collect_table_events(&restarted_events, table_id),
+        &initial_events,
+    );
+
+    let restarted_table_schemas = store.get_table_schemas().await;
+    assert_restarted_schema_snapshot_pairs(
+        restarted_table_schemas.get(&table_id).unwrap(),
+        &initial_table_schema_snapshots,
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

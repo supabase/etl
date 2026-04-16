@@ -11,14 +11,16 @@ use etl::test_utils::schema::assert_table_schema_columns;
 use etl::test_utils::test_schema::create_partitioned_table;
 use etl_postgres::below_version;
 use etl_postgres::tokio::test_utils::{TableModification, id_column_schema};
-use etl_postgres::types::ColumnSchema;
+use etl_postgres::types::{ColumnSchema, convert_type_oid_to_type};
 use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
 use pg_escape::quote_identifier;
 use postgres_replication::LogicalReplicationStream;
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use serde_json::Value as JsonValue;
 use tokio::pin;
+use tokio::time::timeout;
 use tokio_postgres::CopyOutStream;
 use tokio_postgres::types::{ToSql, Type};
 
@@ -40,6 +42,43 @@ fn test_column(
     )
 }
 
+fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
+    let primary_key_positions: std::collections::HashMap<i32, i32> =
+        message["identity"]["primary_key_attnums"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(|(index, attnum)| {
+                (
+                    attnum.as_i64().unwrap() as i32,
+                    i32::try_from(index + 1).unwrap(),
+                )
+            })
+            .collect();
+
+    let mut columns = message["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|column| {
+            ColumnSchema::new(
+                column["attname"].as_str().unwrap().to_string(),
+                convert_type_oid_to_type(column["atttypid"].as_u64().unwrap() as u32),
+                column["atttypmod"].as_i64().unwrap() as i32,
+                column["attnum"].as_i64().unwrap() as i32,
+                primary_key_positions
+                    .get(&(column["attnum"].as_i64().unwrap() as i32))
+                    .copied(),
+                !column["attnotnull"].as_bool().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    columns.sort_by_key(|column| column.ordinal_position);
+
+    columns
+}
+
 async fn count_stream_rows(stream: CopyOutStream) -> u64 {
     pin!(stream);
 
@@ -57,6 +96,8 @@ struct MessageCounts {
     begin_count: u64,
     commit_count: u64,
     origin_count: u64,
+    message_count: u64,
+    ddl_message_count: u64,
     relation_count: u64,
     type_count: u64,
     insert_count: u64,
@@ -83,6 +124,15 @@ where
                     LogicalReplicationMessage::Begin(_) => counts.begin_count += 1,
                     LogicalReplicationMessage::Commit(_) => counts.commit_count += 1,
                     LogicalReplicationMessage::Origin(_) => counts.origin_count += 1,
+                    LogicalReplicationMessage::Message(message) => {
+                        counts.message_count += 1;
+                        if message
+                            .prefix()
+                            .is_ok_and(|prefix| prefix == "supabase_etl_ddl")
+                        {
+                            counts.ddl_message_count += 1;
+                        }
+                    }
                     LogicalReplicationMessage::Relation(_) => counts.relation_count += 1,
                     LogicalReplicationMessage::Type(_) => counts.type_count += 1,
                     LogicalReplicationMessage::Insert(_) => counts.insert_count += 1,
@@ -101,6 +151,117 @@ where
     }
 
     counts
+}
+
+async fn collect_ddl_messages(
+    stream: LogicalReplicationStream,
+    expected_count: usize,
+) -> Vec<JsonValue> {
+    let mut messages = Vec::with_capacity(expected_count);
+
+    pin!(stream);
+    while messages.len() < expected_count {
+        let event = timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("timed out while waiting for logical replication data")
+            .expect("logical replication stream ended unexpectedly")
+            .expect("failed to decode logical replication data");
+
+        let ReplicationMessage::XLogData(event) = event else {
+            continue;
+        };
+
+        let LogicalReplicationMessage::Message(message) = event.data() else {
+            continue;
+        };
+
+        let prefix = message.prefix().expect("message prefix should decode");
+        if prefix != "supabase_etl_ddl" {
+            continue;
+        }
+
+        let content = message.content().expect("message content should decode");
+        let json = serde_json::from_str(content).expect("ddl message should be valid json");
+        println!("{}", json);
+        messages.push(json);
+    }
+
+    messages
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StreamMarker {
+    Begin,
+    DdlMessage(Vec<String>),
+    Relation(Vec<String>),
+    Insert,
+    Commit,
+}
+
+async fn collect_stream_markers(
+    stream: LogicalReplicationStream,
+    expected_count: usize,
+) -> Vec<StreamMarker> {
+    let mut markers = Vec::with_capacity(expected_count);
+
+    pin!(stream);
+    while markers.len() < expected_count {
+        let event = timeout(Duration::from_secs(10), stream.next())
+            .await
+            .expect("timed out while waiting for logical replication data")
+            .expect("logical replication stream ended unexpectedly")
+            .expect("failed to decode logical replication data");
+
+        let ReplicationMessage::XLogData(event) = event else {
+            continue;
+        };
+
+        match event.data() {
+            LogicalReplicationMessage::Begin(_) => markers.push(StreamMarker::Begin),
+            LogicalReplicationMessage::Commit(_) => markers.push(StreamMarker::Commit),
+            LogicalReplicationMessage::Message(message) => {
+                let prefix = message.prefix().expect("message prefix should decode");
+                if prefix != "supabase_etl_ddl" {
+                    continue;
+                }
+
+                let content = message.content().expect("message content should decode");
+                let json: JsonValue =
+                    serde_json::from_str(content).expect("ddl message should be valid json");
+                let column_names = json["columns"]
+                    .as_array()
+                    .expect("ddl message columns should be an array")
+                    .iter()
+                    .map(|column| {
+                        column["attname"]
+                            .as_str()
+                            .expect("ddl message column should have attname")
+                            .to_string()
+                    })
+                    .collect();
+
+                markers.push(StreamMarker::DdlMessage(column_names));
+            }
+            LogicalReplicationMessage::Relation(relation) => {
+                let column_names = relation
+                    .columns()
+                    .iter()
+                    .map(|column| {
+                        column
+                            .name()
+                            .expect("relation column name should decode")
+                            .to_string()
+                    })
+                    .collect();
+
+                markers.push(StreamMarker::Relation(column_names));
+            }
+            LogicalReplicationMessage::Insert(_) => markers.push(StreamMarker::Insert),
+            _ => {}
+        }
+    }
+
+    markers
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -326,6 +487,156 @@ async fn test_table_schema_copy_across_multiple_connections() {
     assert_eq!(table_2_schema.id, table_2_id);
     assert_eq!(table_2_schema.name, test_table_name("table_2"));
     assert_table_schema_columns(&table_2_schema, &[id_column_schema(), year_schema]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_table_schema_preserves_primary_key_constraint_order() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("composite_pk_order");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    database
+        .run_sql(&format!(
+            "create table {quoted_table_name} (
+                id integer not null,
+                tenant_id integer not null,
+                name text,
+                primary key (tenant_id, id)
+            )"
+        ))
+        .await
+        .unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+
+    let (transaction, _) = client
+        .create_slot_with_transaction(&test_slot_name("composite_pk_order"))
+        .await
+        .unwrap();
+
+    let table_id = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace \
+             where n.nspname = $1 and c.relname = $2",
+            &[&table_name.schema, &table_name.name],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    let table_schema = transaction.get_table_schema(table_id).await.unwrap();
+    transaction.commit().await.unwrap();
+
+    assert_eq!(table_schema.id, table_id);
+    assert_eq!(table_schema.name, table_name);
+
+    let id_column = &table_schema.column_schemas[0];
+    assert_eq!(id_column.name, "id");
+    assert_eq!(id_column.ordinal_position, 1);
+    assert_eq!(id_column.primary_key_ordinal_position, Some(2));
+
+    let tenant_id_column = &table_schema.column_schemas[1];
+    assert_eq!(tenant_id_column.name, "tenant_id");
+    assert_eq!(tenant_id_column.ordinal_position, 2);
+    assert_eq!(tenant_id_column.primary_key_ordinal_position, Some(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ddl_message_primary_key_order_matches_loaded_table_schema() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("ddl_composite_pk_order");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    database
+        .run_sql(&format!(
+            "create table {quoted_table_name} (
+                id integer not null,
+                tenant_id integer not null,
+                name text,
+                primary key (tenant_id, id)
+            )"
+        ))
+        .await
+        .unwrap();
+
+    let table_id = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace \
+             where n.nspname = $1 and c.relname = $2",
+            &[&table_name.schema, &table_name.name],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    let publication_name = "ddl_composite_pk_order_pub";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+    let slot_name = test_slot_name("ddl_composite_pk_order_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn {
+                name: "email",
+                data_type: "text",
+            }],
+        )
+        .await
+        .unwrap();
+
+    let messages = collect_ddl_messages(stream, 1).await;
+    let message = &messages[0];
+    assert_eq!(
+        message["identity"]["primary_key_attnums"],
+        serde_json::json!([2, 1])
+    );
+
+    let columns = message["columns"].as_array().unwrap();
+    let id_column = columns
+        .iter()
+        .find(|column| column["attname"] == "id")
+        .unwrap();
+    assert_eq!(id_column["attnum"], 1);
+
+    let tenant_id_column = columns
+        .iter()
+        .find(|column| column["attname"] == "tenant_id")
+        .unwrap();
+    assert_eq!(tenant_id_column["attnum"], 2);
+
+    let introspection_client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+    let (transaction, _) = introspection_client
+        .create_slot_with_transaction(&test_slot_name("ddl_composite_pk_order_read"))
+        .await
+        .unwrap();
+    let table_schema = transaction.get_table_schema(table_id).await.unwrap();
+    transaction.commit().await.unwrap();
+    let streamed_column_schemas = column_schemas_from_ddl_message(message);
+
+    assert_eq!(streamed_column_schemas, table_schema.column_schemas);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -985,6 +1296,484 @@ async fn test_start_logical_replication() {
         .unwrap();
     let counts = count_stream_components(stream, |counts| counts.insert_count == 10).await;
     assert_eq!(counts.insert_count, 10);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_schema_change_messages_emit_enriched_payload_for_multiple_alter_table_variants() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("ddl_message_payload");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("name", "text not null"),
+                ("age", "integer not null default 0"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let publication_name = "ddl_message_payload_pub";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+    let slot_name = test_slot_name("ddl_message_payload_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn {
+                name: "email",
+                data_type: "text not null default 'unknown@example.com'",
+            }],
+        )
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {quoted_table_name} (name, age, email) values ('alice', 30, 'alice@example.com')"
+        ))
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::RenameColumn {
+                old_name: "name",
+                new_name: "full_name",
+            }],
+        )
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {quoted_table_name} (full_name, age, email) values ('alice 2', 31, 'alice2@example.com')"
+        ))
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AlterColumn {
+                name: "age",
+                alteration: "type bigint",
+            }],
+        )
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {quoted_table_name} (full_name, age, email) values ('alice 3', 32, 'alice3@example.com')"
+        ))
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::ReplicaIdentity { value: "full" }],
+        )
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {quoted_table_name} (full_name, age, email) values ('alice 4', 33, 'alice4@example.com')"
+        ))
+        .await
+        .unwrap();
+
+    let messages = collect_ddl_messages(stream, 4).await;
+    assert_eq!(messages.len(), 4);
+
+    let add_column_message = &messages[0];
+    assert_eq!(add_column_message["command_tag"], "ALTER TABLE");
+    assert_eq!(add_column_message["oid"], table_id.into_inner() as u64);
+    assert_eq!(add_column_message["nspname"], table_name.schema);
+    assert_eq!(add_column_message["relname"], table_name.name);
+    assert_eq!(add_column_message["relkind"], "r");
+    assert!(
+        add_column_message["current_query"]
+            .as_str()
+            .expect("current_query should be present")
+            .contains("add column email"),
+        "statement text should mention the executed alter table statement"
+    );
+    assert_eq!(
+        add_column_message["identity"]["primary_key_attnums"],
+        serde_json::json!([1])
+    );
+    assert_eq!(add_column_message["identity"]["relreplident"], "d");
+    assert!(
+        add_column_message["commands"]
+            .as_array()
+            .expect("commands should be an array")
+            .iter()
+            .any(|command| command["command_tag"] == "ALTER TABLE"),
+        "commands should include the alter table base command"
+    );
+    let add_columns = add_column_message["columns"]
+        .as_array()
+        .expect("columns should be an array");
+    let email_column = add_columns
+        .iter()
+        .find(|column| column["attname"] == "email")
+        .expect("email column should be present after add column");
+    assert_eq!(email_column["attnum"], 4);
+    assert_eq!(email_column["atttypid"], Type::TEXT.oid() as u64);
+    assert_eq!(email_column["typname"], "text");
+    assert_eq!(email_column["formatted_type"], "text");
+    assert_eq!(email_column["attnotnull"], true);
+    assert_eq!(email_column["atthasdef"], true);
+    assert!(
+        email_column["default_expression"]
+            .as_str()
+            .expect("default expression should exist")
+            .contains("unknown@example.com"),
+        "default expression should include the added default value"
+    );
+
+    let rename_message = &messages[1];
+    let rename_columns = rename_message["columns"]
+        .as_array()
+        .expect("columns should be an array");
+    assert!(
+        rename_columns
+            .iter()
+            .any(|column| column["attname"] == "full_name" && column["attnum"] == 2),
+        "rename should preserve attnum and expose the new column name"
+    );
+    assert!(
+        rename_message["commands"]
+            .as_array()
+            .expect("commands should be an array")
+            .iter()
+            .any(|command| command["object_type"] == "table column"),
+        "rename column should emit table column command metadata"
+    );
+
+    let alter_type_message = &messages[2];
+    let alter_type_columns = alter_type_message["columns"]
+        .as_array()
+        .expect("columns should be an array");
+    let age_column = alter_type_columns
+        .iter()
+        .find(|column| column["attname"] == "age")
+        .expect("age column should still be present after type change");
+    assert_eq!(age_column["attnum"], 3);
+    assert_eq!(age_column["atttypid"], Type::INT8.oid() as u64);
+    assert_eq!(age_column["typname"], "int8");
+    assert_eq!(age_column["formatted_type"], "bigint");
+
+    let replica_identity_message = &messages[3];
+    assert_eq!(replica_identity_message["identity"]["relreplident"], "f");
+    let replica_identity_columns = replica_identity_message["columns"]
+        .as_array()
+        .expect("columns should be an array");
+    assert_eq!(replica_identity_columns.len(), 4);
+    assert!(
+        replica_identity_columns
+            .iter()
+            .any(|column| column["attname"] == "full_name"),
+        "replica identity change should keep the current post-ddl schema snapshot"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_schema_change_messages_skip_unpublished_and_temporary_tables() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let published_table = test_table_name("ddl_filter_published");
+    let unpublished_table = test_table_name("ddl_filter_unpublished");
+
+    database
+        .create_table(published_table.clone(), true, &[("name", "text not null")])
+        .await
+        .unwrap();
+    database
+        .create_table(
+            unpublished_table.clone(),
+            true,
+            &[("name", "text not null")],
+        )
+        .await
+        .unwrap();
+
+    let publication_name = "ddl_filter_pub";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&published_table))
+        .await
+        .unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+    let slot_name = test_slot_name("ddl_filter_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            unpublished_table,
+            &[TableModification::AddColumn {
+                name: "note",
+                data_type: "text",
+            }],
+        )
+        .await
+        .unwrap();
+
+    database
+        .run_sql("create temporary table temp_ddl_filter (id integer)")
+        .await
+        .unwrap();
+    database
+        .run_sql("alter table temp_ddl_filter add column note text")
+        .await
+        .unwrap();
+
+    let result = timeout(Duration::from_secs(2), collect_ddl_messages(stream, 1)).await;
+    assert!(
+        result.is_err(),
+        "ddl on unpublished or temporary tables should not emit supabase_etl_ddl messages"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_single_alter_table_statement_with_multiple_subcommands_emits_one_ddl_message() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("ddl_multi_subcommand");
+    let quoted_table_name = table_name.as_quoted_identifier();
+
+    database
+        .create_table(table_name.clone(), true, &[("name", "text not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "ddl_multi_subcommand_pub";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+    let slot_name = test_slot_name("ddl_multi_subcommand_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[
+                TableModification::AddColumn {
+                    name: "email",
+                    data_type: "text not null default 'unknown@example.com'",
+                },
+                TableModification::AddColumn {
+                    name: "status",
+                    data_type: "text not null default 'pending'",
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {quoted_table_name} (name, email, status) values ('alice', 'alice@example.com', 'active')"
+        ))
+        .await
+        .unwrap();
+
+    let counts = count_stream_components(stream, |counts| {
+        counts.insert_count == 1 && counts.relation_count == 1 && counts.ddl_message_count == 1
+    })
+    .await;
+
+    assert_eq!(counts.ddl_message_count, 1);
+    assert_eq!(counts.message_count, 1);
+    assert_eq!(counts.relation_count, 1);
+    assert_eq!(counts.insert_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_schema_change_messages_respect_skip_ddl_log_setting() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("ddl_skip_log");
+    database
+        .create_table(table_name.clone(), true, &[("name", "text not null")])
+        .await
+        .unwrap();
+
+    let publication_name = "ddl_skip_log_pub";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+    let slot_name = test_slot_name("ddl_skip_log_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    database
+        .run_sql("set supabase_etl.skip_ddl_log = 'true'")
+        .await
+        .unwrap();
+    database
+        .alter_table(
+            table_name,
+            &[TableModification::AddColumn {
+                name: "email",
+                data_type: "text",
+            }],
+        )
+        .await
+        .unwrap();
+
+    let result = timeout(Duration::from_secs(2), collect_ddl_messages(stream, 1)).await;
+    assert!(
+        result.is_err(),
+        "ddl messages should be suppressed when supabase_etl.skip_ddl_log is enabled"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_same_transaction_ddl_messages_precede_relation_and_insert_in_pgoutput() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+
+    let table_name = test_table_name("ddl_message_ordering");
+    database
+        .create_table(
+            table_name.clone(),
+            true,
+            &[
+                ("name", "text not null"),
+                ("age", "integer not null default 0"),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let publication_name = "ddl_message_ordering_pub";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+    let slot_name = test_slot_name("ddl_message_ordering_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    let transaction = database.begin_transaction().await;
+
+    transaction
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn {
+                name: "status",
+                data_type: "text not null default 'pending'",
+            }],
+        )
+        .await
+        .unwrap();
+    transaction
+        .insert_values(
+            table_name.clone(),
+            &["name", "age", "status"],
+            &[&"alice", &30, &"active"],
+        )
+        .await
+        .unwrap();
+    transaction
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::DropColumn { name: "age" }],
+        )
+        .await
+        .unwrap();
+    transaction
+        .insert_values(
+            table_name.clone(),
+            &["name", "status"],
+            &[&"bob", &"pending"],
+        )
+        .await
+        .unwrap();
+
+    transaction.commit_transaction().await;
+
+    let markers = collect_stream_markers(stream, 8).await;
+    assert_eq!(
+        markers,
+        vec![
+            StreamMarker::Begin,
+            StreamMarker::DdlMessage(vec![
+                "id".to_string(),
+                "name".to_string(),
+                "age".to_string(),
+                "status".to_string(),
+            ]),
+            StreamMarker::Relation(vec![
+                "id".to_string(),
+                "name".to_string(),
+                "age".to_string(),
+                "status".to_string(),
+            ]),
+            StreamMarker::Insert,
+            StreamMarker::DdlMessage(vec![
+                "id".to_string(),
+                "name".to_string(),
+                "status".to_string(),
+            ]),
+            StreamMarker::Relation(vec![
+                "id".to_string(),
+                "name".to_string(),
+                "status".to_string(),
+            ]),
+            StreamMarker::Insert,
+            StreamMarker::Commit,
+        ]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

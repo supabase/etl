@@ -1,12 +1,12 @@
+use crate::conversions::event::{ColumnSchemaMessage, IdentityMessage, build_column_schemas};
 use crate::error::{ErrorKind, EtlResult};
 use crate::utils::tokio::MakeRustlsConnect;
 use crate::{bail, etl_error};
 use etl_config::shared::{ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig};
+use etl_postgres::below_version;
 use etl_postgres::replication::extract_server_version;
-use etl_postgres::types::convert_type_oid_to_type;
 use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
 use etl_postgres::version::POSTGRES_15;
-use etl_postgres::{below_version, requires_version};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
 use rustls::ClientConfig;
@@ -188,15 +188,6 @@ pub enum CtidPartition {
     OpenEnd { start_tid: String },
 }
 
-/// Result of building publication filter SQL components.
-#[derive(Debug)]
-struct PublicationFilter {
-    /// CTEs to include in the WITH clause (empty string if no publication filtering).
-    ctes: String,
-    /// Predicate to include in the WHERE clause (empty string if no publication filtering).
-    predicate: String,
-}
-
 /// A transaction that operates within the context of a replication slot.
 ///
 /// This type ensures that the parent connection remains active for the duration of any
@@ -222,7 +213,7 @@ impl PgReplicationTransaction {
 
     /// Retrieves the schema information for the supplied table.
     pub async fn get_table_schema(&self, table_id: TableId) -> EtlResult<TableSchema> {
-        self.client.get_table_schema(table_id, None).await
+        self.client.get_table_schema(table_id).await
     }
 
     /// Retrieves the names of columns being replicated for a table in a publication.
@@ -1210,17 +1201,14 @@ impl PgReplicationClient {
         ))
     }
 
-    /// Retrieves the schema for a single table.
+    /// Retrieves the full schema for a single table.
     ///
-    /// If a publication is specified, only columns included in that publication
-    /// will be returned.
-    async fn get_table_schema(
-        &self,
-        table_id: TableId,
-        publication_name: Option<&str>,
-    ) -> EtlResult<TableSchema> {
+    /// This returns the source-native table schema independent of any publication
+    /// column filtering. Publication filtering is handled separately via
+    /// [`Self::get_replicated_column_names`] and represented as a [`ReplicationMask`].
+    async fn get_table_schema(&self, table_id: TableId) -> EtlResult<TableSchema> {
         let table_name = self.get_table_name(table_id).await?;
-        let column_schemas = self.get_column_schemas(table_id, publication_name).await?;
+        let column_schemas = self.get_column_schemas(table_id).await?;
 
         Ok(TableSchema::new(table_id, table_name, column_schemas))
     }
@@ -1256,147 +1244,38 @@ impl PgReplicationClient {
         );
     }
 
-    /// Builds SQL fragments for filtering columns based on publication settings.
+    /// Retrieves schema information for all visible columns in a table.
     ///
-    /// Returns CTEs and predicates that filter columns according to:
-    /// - Postgres 15+: Column-level filtering using `prattrs`
-    /// - Postgres 14 and earlier: Table-level filtering only
-    /// - No publication: No filtering (empty strings)
-    fn build_publication_filter_sql(
-        &self,
-        table_id: TableId,
-        publication_name: Option<&str>,
-    ) -> PublicationFilter {
-        let Some(publication_name) = publication_name else {
-            return PublicationFilter {
-                ctes: String::new(),
-                predicate: String::new(),
-            };
-        };
-
-        // Postgres 15+ supports column-level filtering via prattrs
-        if requires_version!(self.server_version, POSTGRES_15) {
-            return PublicationFilter {
-                ctes: format!(
-                    "pub_info as (
-                        select p.oid as puboid, p.puballtables, r.prattrs
-                        from pg_publication p
-                        left join pg_publication_rel r on r.prpubid = p.oid and r.prrelid = {table_id}
-                        where p.pubname = {publication}
-                    ),
-                    pub_attrs as (
-                        select unnest(prattrs) as attnum
-                        from pub_info
-                        where prattrs is not null
-                    ),
-                    pub_schema as (
-                        select 1 as exists_in_schema_pub
-                        from pub_info
-                        join pg_publication_namespace pn on pn.pnpubid = pub_info.puboid
-                        join pg_class c on c.relnamespace = pn.pnnspid
-                        where c.oid = {table_id}
-                    ),",
-                    publication = quote_literal(publication_name),
-                ),
-                predicate: "and (
-                        (select puballtables from pub_info) = true
-                        or (select count(*) from pub_schema) > 0
-                        or (
-                            case (select count(*) from pub_attrs)
-                                when 0 then true
-                                else (a.attnum in (select attnum from pub_attrs))
-                            end
-                        )
-                    )"
-                .to_string(),
-            };
-        }
-
-        // Postgres 14 and earlier: table-level filtering only
-        PublicationFilter {
-            ctes: format!(
-                "pub_info as (
-                    select p.puballtables
-                    from pg_publication p
-                    where p.pubname = {publication}
-                ),
-                pub_table as (
-                    select 1 as exists_in_pub
-                    from pg_publication_rel r
-                    join pg_publication p on r.prpubid = p.oid
-                    where p.pubname = {publication}
-                        and r.prrelid = {table_id}
-                ),",
-                publication = quote_literal(publication_name),
-            ),
-            predicate: "and ((select puballtables from pub_info) = true or (select count(*) from pub_table) > 0)".to_string(),
-        }
-    }
-
-    /// Retrieves schema information for all columns in a table.
+    /// This uses the same `etl.describe_table_schema` and `etl.describe_table_identity`
+    /// helpers that the DDL event trigger relies on so initial schema loading and
+    /// WAL-driven schema updates share the same source semantics.
     ///
-    /// If a publication is specified, only columns included in that publication
-    /// will be returned. Generated columns are always excluded since they are not
-    /// supported in PostgreSQL logical replication.
-    async fn get_column_schemas(
-        &self,
-        table_id: TableId,
-        publication_name: Option<&str>,
-    ) -> EtlResult<Vec<ColumnSchema>> {
-        // Build publication filter CTEs and predicates based on Postgres version.
-        let publication_filter = self.build_publication_filter_sql(table_id, publication_name);
-
+    /// Generated columns are always excluded since they are not supported in PostgreSQL
+    /// logical replication.
+    async fn get_column_schemas(&self, table_id: TableId) -> EtlResult<Vec<ColumnSchema>> {
         let column_info_query = format!(
             r#"
-            with {publication_ctes}
-            -- Find the direct parent table (for child partitions)
-            direct_parent as (
-                select i.inhparent as parent_oid
-                from pg_inherits i
-                where i.inhrelid = {table_id}
-                limit 1
-            ),
-            -- Extract primary key column names from the parent table
-            parent_pk_cols as (
-                select array_agg(a.attname order by x.n) as pk_column_names
-                from pg_constraint con
-                join unnest(con.conkey) with ordinality as x(attnum, n) on true
-                join pg_attribute a on a.attrelid = con.conrelid and a.attnum = x.attnum
-                join direct_parent dp on con.conrelid = dp.parent_oid
-                where con.contype = 'p'
-                group by con.conname
+            with schema_snapshot as (
+                select coalesce(
+                    pg_catalog.jsonb_agg(
+                        pg_catalog.jsonb_build_object(
+                            'attname', s.attname,
+                            'attnum', s.attnum,
+                            'atttypid', s.atttypid::pg_catalog.int8,
+                            'atttypmod', s.atttypmod,
+                            'attnotnull', s.attnotnull
+                        )
+                        order by s.attnum
+                    ),
+                    '[]'::pg_catalog.jsonb
+                ) as columns
+                from etl.describe_table_schema({table_id}) s
             )
             select
-                a.attname as name,
-                a.atttypid as type_oid,
-                a.atttypmod as type_modifier,
-                a.attnum::int as ordinal_position,
-                case
-                    -- Check if column has a direct primary key index
-                    when coalesce(i.indisprimary, false) = true then true
-                    -- Check if column name matches parent's primary key (for partitions)
-                    when exists (
-                        select 1
-                        from parent_pk_cols pk
-                        where a.attname = any(pk.pk_column_names)
-                    ) then true
-                    else false
-                end as is_primary,
-                not a.attnotnull as nullable
-            from pg_attribute a
-            left join pg_index i
-                on a.attrelid = i.indrelid
-                and a.attnum = any(i.indkey)
-                and i.indisprimary = true
-            where a.attnum > 0::int2
-                and not a.attisdropped
-                and a.attgenerated = ''
-                and a.attrelid = {table_id}
-                {publication_predicate}
-            order by a.attnum
+                ss.columns::pg_catalog.text as columns,
+                etl.describe_table_identity({table_id})::pg_catalog.text as identity
+            from schema_snapshot ss
             "#,
-            publication_ctes = publication_filter.ctes,
-            publication_predicate = publication_filter.predicate,
         );
 
         // Check for generated columns so we can warn if there are any.
@@ -1427,6 +1306,7 @@ impl PgReplicationClient {
                         table_id
                     );
                 }
+
                 // Explicity break for clarity; this query returns a single SimpleQueryMessage::Row.
                 break;
             }
@@ -1434,35 +1314,37 @@ impl PgReplicationClient {
 
         let mut column_schemas = vec![];
         // TODO: there's a lot of code using simple_query but only checking for SimpleQueryMessage::Row, a small optimization could be done here if we upgraded tokio-postgres to a newer version
-        // in order to use https://docs.rs/tokio-postgres/0.7.15/tokio_postgres/struct.Client.html#method.simple_query_raw to filter on SimpleQueryMessage::Row and avoid useless allocations
+        //  in order to use https://docs.rs/tokio-postgres/0.7.15/tokio_postgres/struct.Client.html#method.simple_query_raw to filter on SimpleQueryMessage::Row and avoid useless allocations
         for message in self.client.simple_query(&column_info_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
-                let name = Self::get_row_value::<String>(&row, "name", "pg_attribute")?;
-                let type_oid = Self::get_row_value::<u32>(&row, "type_oid", "pg_attribute")?;
-                let type_modifier =
-                    Self::get_row_value::<i32>(&row, "type_modifier", "pg_attribute")?;
-                let ordinal_position =
-                    Self::get_row_value::<i32>(&row, "ordinal_position", "pg_attribute")?;
-                let is_primary =
-                    Self::get_row_value::<String>(&row, "is_primary", "pg_index")? == "t";
-                let nullable =
-                    Self::get_row_value::<String>(&row, "nullable", "pg_attribute")? == "t";
+                let columns_json = Self::get_row_value::<String>(&row, "columns", "etl")?;
+                let identity_json = Self::get_row_value::<String>(&row, "identity", "etl")?;
+                let columns: Vec<ColumnSchemaMessage> = serde_json::from_str(&columns_json)
+                    .map_err(|err| {
+                        etl_error!(
+                            ErrorKind::DeserializationError,
+                            "Invalid table schema snapshot",
+                            format!(
+                                "Failed to parse describe_table_schema payload for table {}: {}",
+                                table_id, err
+                            )
+                        )
+                    })?;
+                let identity: IdentityMessage =
+                    serde_json::from_str(&identity_json).map_err(|err| {
+                        etl_error!(
+                            ErrorKind::DeserializationError,
+                            "Invalid table identity snapshot",
+                            format!(
+                                "Failed to parse describe_table_identity payload for table {}: {}",
+                                table_id, err
+                            )
+                        )
+                    })?;
 
-                let typ = convert_type_oid_to_type(type_oid);
-                let primary_key_ordinal_position = if is_primary {
-                    Some(ordinal_position)
-                } else {
-                    None
-                };
+                column_schemas = build_column_schemas(columns, identity.primary_key_attnums);
 
-                column_schemas.push(ColumnSchema::new(
-                    name,
-                    typ,
-                    type_modifier,
-                    ordinal_position,
-                    primary_key_ordinal_position,
-                    nullable,
-                ))
+                break;
             }
         }
 

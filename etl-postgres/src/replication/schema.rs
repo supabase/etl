@@ -180,9 +180,9 @@ pub async fn store_table_schema(
         sqlx::query(
             r#"
             insert into etl.table_columns
-            (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key,
+            (table_schema_id, column_name, column_type, type_modifier, nullable,
              ordinal_position, primary_key_ordinal_position)
-            values ($1, $2, $3, $4, $5, $6, $7, $8)
+            values ($1, $2, $3, $4, $5, $6, $7)
             "#,
         )
         .bind(table_schema_id)
@@ -190,7 +190,6 @@ pub async fn store_table_schema(
         .bind(postgres_type_to_string(&column_schema.typ))
         .bind(column_schema.modifier)
         .bind(column_schema.nullable)
-        .bind(column_schema.primary_key())
         .bind(column_schema.ordinal_position)
         .bind(column_schema.primary_key_ordinal_position)
         .execute(&mut *tx)
@@ -234,7 +233,6 @@ pub async fn load_table_schema_at_snapshot(
             tc.column_type,
             tc.type_modifier,
             tc.nullable,
-            tc.primary_key,
             tc.ordinal_position,
             tc.primary_key_ordinal_position
         from etl.table_schemas ts
@@ -316,7 +314,6 @@ pub async fn load_table_schemas_at_snapshot(
             tc.column_type,
             tc.type_modifier,
             tc.nullable,
-            tc.primary_key,
             tc.ordinal_position,
             tc.primary_key_ordinal_position
         from latest_schemas ls

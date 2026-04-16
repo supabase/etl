@@ -1549,7 +1549,7 @@ where
             );
         };
 
-        let table_id = TableId::new(schema_change_message.table_id as u32);
+        let table_id = schema_change_message.table_id();
 
         // Exactly one worker owns protocol interpretation for a table at a time. If this worker
         // is not the owner, it must skip the DDL so the owning worker is solely responsible for
@@ -1562,10 +1562,10 @@ where
         }
 
         info!(
-            table_id = schema_change_message.table_id,
-            table_name = %schema_change_message.table_name,
-            schema_name = %schema_change_message.schema_name,
-            event = %schema_change_message.event,
+            table_id = schema_change_message.oid,
+            table_name = %schema_change_message.relname,
+            schema_name = %schema_change_message.nspname,
+            event = %schema_change_message.command_tag,
             columns = schema_change_message.columns.len(),
             "received ddl schema change message"
         );
