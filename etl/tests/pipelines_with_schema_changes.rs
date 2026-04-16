@@ -389,6 +389,59 @@ async fn relation_message_updates_when_column_type_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn alter_table_without_dml_stores_schema_snapshot() {
+    init_test_tracing();
+
+    let (database, table_name, table_id, store, _destination, pipeline, _pipeline_id, _publication) =
+        create_database_and_pipeline_with_table(
+            "schema_add_column_no_dml",
+            &[("name", "text not null"), ("age", "integer not null")],
+        )
+        .await;
+    let schema_stored = store.notify_on_table_schema_count(table_id, 2).await;
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn {
+                name: "email",
+                data_type: "text not null default 'unknown@example.com'",
+            }],
+        )
+        .await
+        .unwrap();
+
+    schema_stored.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_schemas = store.get_table_schemas().await;
+    let snapshots = table_schemas.get(&table_id).unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert_schema_snapshots_ordering(snapshots, true);
+
+    let (_, first_schema) = &snapshots[0];
+    assert_table_schema_column_names_types(
+        first_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+        ],
+    );
+
+    let (_, second_schema) = &snapshots[1];
+    assert_table_schema_column_names_types(
+        second_schema,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+            ("email", Type::TEXT),
+        ],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     init_test_tracing();
 

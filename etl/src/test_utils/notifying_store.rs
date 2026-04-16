@@ -30,6 +30,7 @@ type TableStateCondition = (
     Arc<Notify>,
     Box<dyn Fn(&TableReplicationPhase) -> bool + Send + Sync>,
 );
+type TableSchemaCountCondition = (TableId, usize, Arc<Notify>);
 
 struct Inner {
     table_replication_states: TableReplicationStates,
@@ -38,6 +39,7 @@ struct Inner {
     destination_tables_metadata: DestinationTablesMetadata,
     table_state_type_conditions: Vec<TableStateTypeCondition>,
     table_state_conditions: Vec<TableStateCondition>,
+    table_schema_count_conditions: Vec<TableSchemaCountCondition>,
     method_call_notifiers: HashMap<StateStoreMethod, Vec<Arc<Notify>>>,
 }
 
@@ -69,6 +71,16 @@ impl Inner {
                     true
                 }
             });
+
+        self.table_schema_count_conditions
+            .retain(|(tid, expected_count, notify)| {
+                let schemas_count = self.table_schemas.get(tid).map_or(0, Vec::len);
+                let should_retain = schemas_count < *expected_count;
+                if !should_retain {
+                    notify.notify_one();
+                }
+                should_retain
+            });
     }
 
     fn dispatch_method_notification(&self, method: StateStoreMethod) {
@@ -95,6 +107,7 @@ impl NotifyingStore {
             destination_tables_metadata: Arc::new(HashMap::new()),
             table_state_type_conditions: Vec::new(),
             table_state_conditions: Vec::new(),
+            table_schema_count_conditions: Vec::new(),
             method_call_notifiers: HashMap::new(),
         };
 
@@ -194,6 +207,27 @@ impl NotifyingStore {
         inner
             .table_state_conditions
             .push((table_id, notify.clone(), Box::new(condition)));
+
+        inner.check_conditions();
+
+        TimedNotify::new(notify)
+    }
+
+    /// Registers a notification that fires when a table has stored at least the expected number
+    /// of schema snapshots.
+    ///
+    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// expected schema count is not reached. This prevents tests from hanging indefinitely.
+    pub async fn notify_on_table_schema_count(
+        &self,
+        table_id: TableId,
+        expected_count: usize,
+    ) -> TimedNotify {
+        let notify = Arc::new(Notify::new());
+        let mut inner = self.inner.write().await;
+        inner
+            .table_schema_count_conditions
+            .push((table_id, expected_count, notify.clone()));
 
         inner.check_conditions();
 
@@ -386,6 +420,7 @@ impl SchemaStore for NotifyingStore {
             .entry(table_id)
             .or_default()
             .push(table_schema.clone());
+        inner.check_conditions();
 
         Ok(table_schema)
     }
