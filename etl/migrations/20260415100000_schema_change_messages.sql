@@ -201,6 +201,7 @@ the leaf table does not expose a local primary-key constraint.$$;
 create function etl.emit_schema_change_messages()
 returns pg_catalog.event_trigger
 language plpgsql
+security definer
 set search_path = pg_catalog
 as
 $fnc$
@@ -358,7 +359,9 @@ affected published permanent table for supported ALTER TABLE statements.
 
 The payload is intentionally richer than what the application consumes today so
 it can serve as a PostgreSQL-shaped source snapshot for future evolution. This
-function intentionally avoids PL/pgSQL EXCEPTION handlers to keep
+function runs with the privileges of its owner so table owners do not need
+direct execute access to ETL helper functions when they run ALTER TABLE. It
+also intentionally avoids PL/pgSQL EXCEPTION handlers to keep
 pg_logical_emit_message() in the top-level transaction and preserve the expected
 ordering of DDL messages relative to relation and DML events.$$;
 

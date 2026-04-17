@@ -1559,6 +1559,78 @@ async fn test_schema_change_messages_skip_unpublished_and_temporary_tables() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_schema_change_messages_allow_alter_table_from_table_owner_role() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+
+    let table_name = test_table_name("ddl_table_owner_role");
+    database
+        .create_table(table_name.clone(), true, &[("name", "text not null")])
+        .await
+        .unwrap();
+
+    let role_name = "ddl_table_owner_role_user";
+    let quoted_role_name = quote_identifier(role_name);
+    database
+        .run_sql(&format!("create role {quoted_role_name}"))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "grant usage on schema {} to {quoted_role_name}",
+            quote_identifier(&table_name.schema)
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} owner to {quoted_role_name}",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let publication_name = "ddl_table_owner_role_pub";
+    database
+        .create_publication(publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let client = PgReplicationClient::connect(database.config.clone())
+        .await
+        .unwrap();
+    let slot_name = test_slot_name("ddl_table_owner_role_slot");
+    let slot = client.create_slot(&slot_name).await.unwrap();
+    let stream = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+        .await
+        .unwrap();
+
+    database
+        .run_sql(&format!("set role {quoted_role_name}"))
+        .await
+        .unwrap();
+    let alter_result = database
+        .alter_table(
+            table_name,
+            &[TableModification::AddColumn {
+                name: "note",
+                data_type: "text",
+            }],
+        )
+        .await;
+    database.run_sql("reset role").await.unwrap();
+    alter_result.unwrap();
+
+    let messages = collect_ddl_messages(stream, 1).await;
+    let columns = messages[0]["columns"].as_array().unwrap();
+    assert!(
+        columns.iter().any(|column| column["attname"] == "note"),
+        "ddl emitted by a table owner role should include the new column"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_single_alter_table_statement_with_multiple_subcommands_emits_one_ddl_message() {
     init_test_tracing();
     let database = spawn_source_database().await;
