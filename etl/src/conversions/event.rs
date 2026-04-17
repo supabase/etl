@@ -30,28 +30,28 @@ pub const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
 /// Unknown fields are ignored on purpose so the SQL payload can grow richer
 /// without forcing a synchronized rollout of every consumer.
 #[derive(Debug, Clone, Deserialize)]
-pub struct SchemaChangeMessage {
+pub(crate) struct SchemaChangeMessage {
     /// The command tag from `pg_event_trigger_ddl_commands().command_tag`.
-    pub command_tag: String,
+    pub(crate) command_tag: String,
     /// The schema name from `pg_namespace.nspname`.
-    pub nspname: String,
+    pub(crate) nspname: String,
     /// The table name from `pg_class.relname`.
-    pub relname: String,
+    pub(crate) relname: String,
     /// The table OID from `pg_class.oid`.
     ///
     /// PostgreSQL table OIDs are `u32` values, but JSON serialization from the event trigger
     /// uses `bigint` (i64) for transmission. The cast back to `u32` in [`into_table_schema`]
     /// is safe because PostgreSQL OIDs are always within the `u32` range.
-    pub oid: i64,
+    pub(crate) oid: i64,
     /// The identity metadata emitted by Postgres for this table snapshot.
-    pub identity: IdentityMessage,
+    pub(crate) identity: IdentityMessage,
     /// The columns of the table after the schema change.
-    pub columns: Vec<ColumnSchemaMessage>,
+    pub(crate) columns: Vec<ColumnSchemaMessage>,
 }
 
 impl SchemaChangeMessage {
     /// Returns the table identifier as [`TableId`].
-    pub fn table_id(&self) -> TableId {
+    pub(crate) fn table_id(&self) -> TableId {
         TableId::new(self.oid as u32)
     }
 
@@ -59,9 +59,10 @@ impl SchemaChangeMessage {
     ///
     /// This is used to update the stored table schema when a DDL change is detected.
     /// The snapshot_id should be the start_lsn of the DDL message.
-    pub fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
+    pub(crate) fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
+        let table_id = self.table_id();
         build_table_schema(
-            TableId::new(self.oid as u32),
+            table_id,
             TableName::new(self.nspname, self.relname),
             self.columns,
             self.identity.primary_key_attnums,
@@ -86,31 +87,31 @@ impl FromStr for SchemaChangeMessage {
 
 /// The identity metadata emitted by Postgres.
 #[derive(Debug, Clone, Deserialize)]
-pub struct IdentityMessage {
+pub(crate) struct IdentityMessage {
     /// The primary key columns in key order, expressed as `pg_attribute.attnum` values.
-    pub primary_key_attnums: Vec<i32>,
+    pub(crate) primary_key_attnums: Vec<i32>,
 }
 
 /// The column schema shape emitted by Postgres.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ColumnSchemaMessage {
+pub(crate) struct ColumnSchemaMessage {
     /// The column name from `pg_attribute.attname`.
-    pub attname: String,
+    pub(crate) attname: String,
     /// The type OID from `pg_attribute.atttypid`.
-    pub atttypid: u32,
+    pub(crate) atttypid: u32,
     /// The type modifier from `pg_attribute.atttypmod`.
-    pub atttypmod: i32,
+    pub(crate) atttypmod: i32,
     /// The physical column number from `pg_attribute.attnum`.
-    pub attnum: i32,
+    pub(crate) attnum: i32,
     /// Whether the column is marked `NOT NULL` in `pg_attribute.attnotnull`.
-    pub attnotnull: bool,
+    pub(crate) attnotnull: bool,
 }
 
 /// Builds [`ColumnSchema`] values from PostgreSQL-native schema and identity snapshots.
 ///
 /// The resulting columns are always sorted by `attnum`, preserving physical table order, while
 /// `primary_key_ordinal_position` stays tied to the order of `primary_key_attnums`.
-pub fn build_column_schemas(
+pub(crate) fn build_column_schemas(
     mut columns: Vec<ColumnSchemaMessage>,
     primary_key_attnums: Vec<i32>,
 ) -> Vec<ColumnSchema> {
@@ -144,7 +145,7 @@ pub fn build_column_schemas(
 ///
 /// This is shared by bootstrap schema loading and DDL message handling so both paths produce
 /// the exact same [`TableSchema`] representation.
-pub fn build_table_schema(
+pub(crate) fn build_table_schema(
     table_id: TableId,
     table_name: TableName,
     columns: Vec<ColumnSchemaMessage>,
@@ -218,17 +219,10 @@ pub fn parse_replicated_column_names(
     let column_names = relation_body
         .columns()
         .iter()
-        .map(parse_column_name_from_column)
+        .map(|column| column.name().map(|name| name.to_string()))
         .collect::<Result<HashSet<String>, _>>()?;
 
     Ok(column_names)
-}
-
-/// Extracts the column name from a [`protocol::Column`] object.
-fn parse_column_name_from_column(column: &protocol::Column) -> EtlResult<String> {
-    let column_name = column.name()?.to_string();
-
-    Ok(column_name)
 }
 
 /// Converts a Postgres insert message into an [`InsertEvent`].

@@ -1596,7 +1596,7 @@ async fn pipeline_respects_column_level_publication() {
     assert_eq!(
         initial_relation_event
             .replicated_table_schema
-            .get_inner()
+            .inner()
             .column_schemas
             .len(),
         5
@@ -1622,7 +1622,7 @@ async fn pipeline_respects_column_level_publication() {
             assert_eq!(replicated_column_names, vec!["id", "name", "age"]);
 
             // The underlying full schema has all 5 columns
-            let full_schema = replicated_table_schema.get_inner();
+            let full_schema = replicated_table_schema.inner();
             assert_eq!(full_schema.column_schemas.len(), 5);
         }
     }
@@ -1703,7 +1703,7 @@ async fn pipeline_respects_column_level_publication() {
     assert_eq!(
         relation_after_adding_email
             .replicated_table_schema
-            .get_inner()
+            .inner()
             .column_schemas
             .len(),
         5
@@ -1787,7 +1787,7 @@ async fn pipeline_respects_column_level_publication() {
     assert_eq!(
         relation_after_removing_age
             .replicated_table_schema
-            .get_inner()
+            .inner()
             .column_schemas
             .len(),
         5

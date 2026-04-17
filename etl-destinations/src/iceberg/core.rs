@@ -348,8 +348,7 @@ where
                         // Check if schema has changed - if so, error since Iceberg doesn't
                         // support schema changes yet.
                         let table_id = relation.replicated_table_schema.id();
-                        let new_snapshot_id =
-                            relation.replicated_table_schema.get_inner().snapshot_id;
+                        let new_snapshot_id = relation.replicated_table_schema.inner().snapshot_id;
                         let new_replication_mask =
                             relation.replicated_table_schema.replication_mask();
 
@@ -452,7 +451,7 @@ where
     ) -> EtlResult<(String, IcebergTableName)> {
         let table_id = replicated_table_schema.id();
         let table_name = replicated_table_schema.name();
-        let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
+        let snapshot_id = replicated_table_schema.inner().snapshot_id;
         let replication_mask = replicated_table_schema.replication_mask().clone();
         let column_schemas = Self::build_cdc_column_schemas(replicated_table_schema);
 

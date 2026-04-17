@@ -1401,7 +1401,7 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
             assert_eq!(
                 relation
                     .replicated_table_schema
-                    .get_inner()
+                    .inner()
                     .column_schemas
                     .len(),
                 4

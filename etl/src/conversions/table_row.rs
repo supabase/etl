@@ -22,6 +22,7 @@ pub fn parse_table_row_from_postgres_copy_bytes<'a>(
     row: &[u8],
     mut column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
 ) -> EtlResult<TableRow> {
+    let expected_column_count = column_schemas.len();
     let mut values = Vec::with_capacity(column_schemas.len());
 
     let row_str = str::from_utf8(row)?;
@@ -101,9 +102,14 @@ pub fn parse_table_row_from_postgres_copy_bytes<'a>(
         if !done {
             // Get the next column schema - error if we have more fields than expected
             let Some(column_schema) = column_schemas.next() else {
+                let actual_column_count = values.len() + 1;
                 bail!(
                     ErrorKind::ConversionError,
-                    "Column count mismatch between schema and row"
+                    "Column count mismatch between schema and row",
+                    format!(
+                        "Expected {} columns but row contains at least {} columns",
+                        expected_column_count, actual_column_count
+                    )
                 );
             };
 
@@ -140,9 +146,14 @@ pub fn parse_table_row_from_postgres_copy_bytes<'a>(
     // If there are still columns left in the schema iterator, it means the row
     // had fewer fields than expected, which is an error
     if column_schemas.next().is_some() {
+        let actual_column_count = values.len();
         bail!(
             ErrorKind::ConversionError,
-            "Column count mismatch between schema and row"
+            "Column count mismatch between schema and row",
+            format!(
+                "Expected {} columns but row contains {} columns",
+                expected_column_count, actual_column_count
+            )
         );
     }
 
@@ -282,6 +293,26 @@ mod tests {
         let result_empty =
             parse_table_row_from_postgres_copy_bytes(row_data, column_schemas.iter());
         assert!(result_empty.is_err());
+        let err = result_empty.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Expected 3 columns but row contains 2 columns")
+        );
+    }
+
+    #[test]
+    fn try_from_too_many_columns() {
+        let column_schemas = create_test_column_schemas(); // Expects 3 columns
+        let row_data = b"123\tJohn\tt\textra\n";
+
+        let result = parse_table_row_from_postgres_copy_bytes(row_data, column_schemas.iter());
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Expected 3 columns but row contains at least 4 columns")
+        );
     }
 
     #[test]

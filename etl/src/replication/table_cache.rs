@@ -21,6 +21,7 @@ use etl_postgres::types::{ReplicationMask, SnapshotId, TableId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 /// Shared per-table protocol state used to decode logical replication messages.
 #[derive(Debug, Clone)]
@@ -52,55 +53,43 @@ impl SharedTableCache {
         guard.get(table_id).cloned()
     }
 
-    /// Records that a newer schema snapshot is now current for the table.
+    /// Inserts or updates shared table state when the incoming snapshot is not stale.
     ///
-    /// Any cached replication mask is cleared because a post-DDL `RELATION` message
-    /// must rebuild it against the new schema snapshot.
-    pub async fn note_schema_snapshot(&self, table_id: TableId, snapshot_id: SnapshotId) {
-        let mut guard = self.inner.write().await;
-
-        match guard.get_mut(&table_id) {
-            Some(state) if state.snapshot_id > snapshot_id => {}
-            Some(state) => {
-                state.snapshot_id = snapshot_id;
-                state.replication_mask = None;
-            }
-            None => {
-                guard.insert(
-                    table_id,
-                    SharedTableState {
-                        snapshot_id,
-                        replication_mask: None,
-                    },
-                );
-            }
-        }
-    }
-
-    /// Records the replication mask for the given snapshot.
-    ///
-    /// Older snapshots never overwrite newer shared state. If the incoming snapshot
-    /// matches the cached one, the replication mask is refreshed in place.
-    pub async fn note_replication_mask(
+    /// Pass `Some(mask)` to refresh the replication mask for that snapshot, or `None`
+    /// to clear it when a newer schema snapshot invalidates the old `RELATION` state.
+    pub async fn upsert(
         &self,
         table_id: TableId,
         snapshot_id: SnapshotId,
-        replication_mask: ReplicationMask,
+        replication_mask: Option<ReplicationMask>,
     ) {
         let mut guard = self.inner.write().await;
-
         match guard.get_mut(&table_id) {
-            Some(state) if state.snapshot_id > snapshot_id => {}
+            Some(state) if state.snapshot_id > snapshot_id => {
+                warn!(
+                    table_id = %table_id,
+                    current_snapshot_id = %state.snapshot_id,
+                    requested_snapshot_id = %snapshot_id,
+                    "shared table cache received a stale snapshot update; this may indicate out-of-order protocol state"
+                );
+
+                debug_assert!(
+                    state.snapshot_id <= snapshot_id,
+                    "shared table cache received stale snapshot update for table {table_id}: current={}, requested={}",
+                    state.snapshot_id,
+                    snapshot_id
+                );
+            }
             Some(state) => {
                 state.snapshot_id = snapshot_id;
-                state.replication_mask = Some(replication_mask);
+                state.replication_mask = replication_mask;
             }
             None => {
                 guard.insert(
                     table_id,
                     SharedTableState {
                         snapshot_id,
-                        replication_mask: Some(replication_mask),
+                        replication_mask,
                     },
                 );
             }
@@ -139,7 +128,7 @@ mod tests {
         let replication_mask = create_test_mask();
 
         cache
-            .note_replication_mask(table_id, snapshot_id, replication_mask.clone())
+            .upsert(table_id, snapshot_id, Some(replication_mask.clone()))
             .await;
 
         let state = cache
@@ -163,10 +152,10 @@ mod tests {
         let replication_mask = create_test_mask();
 
         cache
-            .note_replication_mask(table_id, SnapshotId::new(10.into()), replication_mask)
+            .upsert(table_id, SnapshotId::new(10.into()), Some(replication_mask))
             .await;
         cache
-            .note_schema_snapshot(table_id, SnapshotId::new(11.into()))
+            .upsert(table_id, SnapshotId::new(11.into()), None)
             .await;
 
         let state = cache
@@ -177,35 +166,23 @@ mod tests {
         assert!(state.replication_mask.is_none());
     }
 
+    #[should_panic(expected = "shared table cache received stale snapshot update")]
     #[tokio::test]
-    async fn test_older_snapshot_does_not_overwrite_newer_state() {
+    async fn test_older_snapshot_panics() {
         let cache = SharedTableCache::new();
         let table_id = TableId::new(123);
         let replication_mask = create_test_mask();
 
         cache
-            .note_replication_mask(
+            .upsert(
                 table_id,
                 SnapshotId::new(11.into()),
-                replication_mask.clone(),
+                Some(replication_mask.clone()),
             )
             .await;
         cache
-            .note_schema_snapshot(table_id, SnapshotId::new(10.into()))
+            .upsert(table_id, SnapshotId::new(10.into()), None)
             .await;
-
-        let state = cache
-            .get(&table_id)
-            .await
-            .expect("table state should exist");
-        assert_eq!(state.snapshot_id, SnapshotId::new(11.into()));
-        assert_eq!(
-            state
-                .replication_mask
-                .expect("replication mask should still exist")
-                .as_slice(),
-            replication_mask.as_slice()
-        );
     }
 
     #[tokio::test]
@@ -217,7 +194,7 @@ mod tests {
         let replication_mask = create_test_mask();
 
         cache1
-            .note_replication_mask(table_id, snapshot_id, replication_mask.clone())
+            .upsert(table_id, snapshot_id, Some(replication_mask.clone()))
             .await;
 
         let state = cache2

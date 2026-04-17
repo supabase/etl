@@ -81,44 +81,17 @@ impl TableReplicationError {
     /// we might notice edge cases that could be manually handled.
     pub fn from_etl_error(config: &PipelineConfig, table_id: TableId, error: &EtlError) -> Self {
         let retry_duration = Duration::milliseconds(config.table_error_retry_delay_ms as i64);
-        match error.kind() {
+        let source_err = error.clone();
+        let mut result = match error.kind() {
             // Errors that can be retried automatically
-            ErrorKind::SourceConnectionFailed => Self::without_solution(
-                table_id,
-                error,
-                RetryPolicy::retry_in(retry_duration),
-            )
-            .with_source_err(error.clone()),
-            ErrorKind::DestinationConnectionFailed => Self::without_solution(
-                table_id,
-                error,
-                RetryPolicy::retry_in(retry_duration),
-            )
-            .with_source_err(error.clone()),
-            ErrorKind::SourceOperationCanceled => Self::without_solution(
-                table_id,
-                error,
-                RetryPolicy::retry_in(retry_duration),
-            )
-            .with_source_err(error.clone()),
-            ErrorKind::SourceDatabaseShutdown => Self::without_solution(
-                table_id,
-                error,
-                RetryPolicy::retry_in(retry_duration),
-            )
-            .with_source_err(error.clone()),
-            ErrorKind::SourceLockTimeout => Self::without_solution(
-                table_id,
-                error,
-                RetryPolicy::retry_in(retry_duration),
-            )
-            .with_source_err(error.clone()),
-            ErrorKind::SourceDatabaseInRecovery => Self::without_solution(
-                table_id,
-                error,
-                RetryPolicy::retry_in(retry_duration),
-            )
-            .with_source_err(error.clone()),
+            ErrorKind::SourceConnectionFailed
+            | ErrorKind::DestinationConnectionFailed
+            | ErrorKind::SourceOperationCanceled
+            | ErrorKind::SourceDatabaseShutdown
+            | ErrorKind::SourceLockTimeout
+            | ErrorKind::SourceDatabaseInRecovery => {
+                Self::without_solution(table_id, error, RetryPolicy::retry_in(retry_duration))
+            }
 
             // Errors with manual retry and explicit solution
             ErrorKind::SourceAuthenticationError => Self::with_solution(
@@ -126,71 +99,61 @@ impl TableReplicationError {
                 error,
                 "Verify database credentials and authentication token validity.",
                 RetryPolicy::ManualRetry,
-            )
-            .with_source_err(error.clone()),
+            ),
             ErrorKind::SourceSchemaError => Self::with_solution(
                 table_id,
                 error,
                 "Update the Postgres database schema to resolve compatibility issues.",
                 RetryPolicy::ManualRetry,
-            )
-            .with_source_err(error.clone()),
+            ),
             ErrorKind::ConfigError => Self::with_solution(
                 table_id,
                 error,
                 "Update the application or service configuration settings.",
                 RetryPolicy::ManualRetry,
-            )
-            .with_source_err(error.clone()),
+            ),
             ErrorKind::ReplicationSlotAlreadyExists => Self::with_solution(
                 table_id,
                 error,
                 "Remove the existing replication slot from the Postgres database.",
                 RetryPolicy::ManualRetry,
-            )
-            .with_source_err(error.clone()),
+            ),
             ErrorKind::ReplicationSlotNotCreated => Self::with_solution(
                 table_id,
                 error,
                 "Verify the Postgres database allows creation of new replication slots.",
                 RetryPolicy::ManualRetry,
-            )
-            .with_source_err(error.clone()),
+            ),
             ErrorKind::SourceConfigurationLimitExceeded => Self::with_solution(
                 table_id,
                 error,
                 "Verify the configured limits for Postgres, for example, the maximum number of replication slots.",
                 RetryPolicy::ManualRetry,
-            )
-            .with_source_err(error.clone()),
+            ),
             ErrorKind::NullValuesNotSupportedInArrayInDestination => Self::with_solution(
                 table_id,
                 error,
                 "Remove NULL values from array columns in the Postgres tables.",
                 RetryPolicy::ManualRetry,
-            )
-            .with_source_err(error.clone()),
+            ),
             ErrorKind::UnsupportedValueInDestination => Self::with_solution(
                 table_id,
                 error,
                 "Update the value in the Postgres table.",
                 RetryPolicy::ManualRetry,
-            )
-            .with_source_err(error.clone()),
+            ),
             ErrorKind::SourceSnapshotTooOld => Self::with_solution(
                 table_id,
                 error,
                 "Check replication slot status and database configuration.",
                 RetryPolicy::ManualRetry,
-            )
-            .with_source_err(error.clone()),
+            ),
             ErrorKind::CorruptedTableSchema => Self::with_solution(
                 table_id,
                 error,
                 "Reset the table state and restart the replication.",
                 RetryPolicy::ManualRetry,
-            )
-            .with_source_err(error.clone()),
+            ),
 
             // Special handling for error kinds used during failure injection.
             #[cfg(feature = "failpoints")]
@@ -199,24 +162,21 @@ impl TableReplicationError {
                 error,
                 "Cannot retry this error.",
                 RetryPolicy::NoRetry,
-            )
-            .with_source_err(error.clone()),
+            ),
             #[cfg(feature = "failpoints")]
             ErrorKind::WithManualRetry => Self::with_solution(
                 table_id,
                 error,
                 "Manually trigger retry after resolving the issue.",
                 RetryPolicy::ManualRetry,
-            )
-            .with_source_err(error.clone()),
+            ),
             #[cfg(feature = "failpoints")]
             ErrorKind::WithTimedRetry => Self::with_solution(
                 table_id,
                 error,
                 "Will automatically retry after the configured delay.",
                 RetryPolicy::retry_in(retry_duration),
-            )
-            .with_source_err(error.clone()),
+            ),
 
             // By default, all errors are retriable but without a solution. The reason for why we do
             // this is to let customers fix the system on their own, since right now we don't have
@@ -227,9 +187,11 @@ impl TableReplicationError {
                 error,
                 "There is no explicit solution for this error, if the issue persists after rollback, please contact support.",
                 RetryPolicy::ManualRetry,
-            )
-            .with_source_err(error.clone()),
-        }
+            ),
+        };
+
+        result.source_err = source_err;
+        result
     }
 
     /// Builds a [`TableReplicationError`] from a shared handling policy and worker retry policy.

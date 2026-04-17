@@ -1541,13 +1541,7 @@ where
         };
 
         let content = message.content()?;
-        let Ok(schema_change_message) = SchemaChangeMessage::from_str(content) else {
-            bail!(
-                ErrorKind::InvalidData,
-                "Failed to parse DDL schema change message",
-                "Invalid JSON format in schema change message content"
-            );
-        };
+        let schema_change_message = SchemaChangeMessage::from_str(content)?;
 
         let table_id = schema_change_message.table_id();
 
@@ -1581,7 +1575,7 @@ where
         // this table. Record the new snapshot and clear any cached mask now so relation handling
         // rebuilds it from the schema version we just stored rather than reusing pre-DDL state.
         self.shared_table_cache
-            .note_schema_snapshot(table_id, snapshot_id)
+            .upsert(table_id, snapshot_id, None)
             .await;
 
         let table_id_u32: u32 = table_id.into();
@@ -1714,17 +1708,25 @@ where
         );
 
         // Build the replication mask by validating that all replicated columns exist in the schema.
-        let table_snapshot_id = self
-            .shared_table_cache
-            .get(&table_id)
-            .await
+        let shared_table_state = self.shared_table_cache.get(&table_id).await;
+        let used_bootstrap_snapshot = shared_table_state.is_none();
+        let table_snapshot_id = shared_table_state
             .map(|state| state.snapshot_id)
             .unwrap_or_else(|| self.state.bootstrap_snapshot_id());
-        let table_schema =
-            get_table_schema(&self.schema_store, &table_id, table_snapshot_id).await?;
+        let table_schema = get_table_schema(
+            &self.schema_store,
+            &table_id,
+            table_snapshot_id,
+            used_bootstrap_snapshot,
+        )
+        .await?;
         let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
         self.shared_table_cache
-            .note_replication_mask(table_id, table_schema.snapshot_id, replication_mask.clone())
+            .upsert(
+                table_id,
+                table_schema.snapshot_id,
+                Some(replication_mask.clone()),
+            )
             .await;
 
         // Build the ReplicatedTableSchema and emit a Relation event.
@@ -2888,11 +2890,12 @@ async fn get_table_schema<S>(
     schema_store: &S,
     table_id: &TableId,
     snapshot_id: SnapshotId,
+    used_bootstrap_snapshot: bool,
 ) -> EtlResult<Arc<TableSchema>>
 where
     S: SchemaStore,
 {
-    schema_store
+    let table_schema = schema_store
         .get_table_schema(table_id, snapshot_id)
         .await?
         .ok_or_else(|| {
@@ -2904,7 +2907,29 @@ where
                     table_id, snapshot_id
                 )
             )
-        })
+        })?;
+
+    if table_schema.snapshot_id != snapshot_id {
+        if used_bootstrap_snapshot {
+            warn!(
+                table_id = %table_id,
+                requested_snapshot_id = %snapshot_id,
+                resolved_snapshot_id = %table_schema.snapshot_id,
+                "schema lookup returned an older schema because the first relation message used the bootstrap snapshot"
+            );
+        } else {
+            bail!(
+                ErrorKind::InvalidState,
+                "Table schema snapshot mismatch",
+                format!(
+                    "Table schema for table {} resolved to snapshot {} when snapshot {} was required",
+                    table_id, table_schema.snapshot_id, snapshot_id
+                )
+            );
+        }
+    }
+
+    Ok(table_schema)
 }
 
 /// Retrieves a [`ReplicatedTableSchema`] for the given table from the shared table state.
@@ -2934,7 +2959,7 @@ where
         );
     };
 
-    let table_schema = get_table_schema(schema_store, table_id, snapshot_id).await?;
+    let table_schema = get_table_schema(schema_store, table_id, snapshot_id, false).await?;
 
     Ok(ReplicatedTableSchema::from_mask(
         table_schema,

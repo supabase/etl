@@ -360,7 +360,7 @@ where
 
         // We determine the BigQuery table ID for the table together with the current sequence number.
         let bigquery_table_id = table_name_to_bigquery_table_id(replicated_table_schema.name())?;
-        let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
+        let snapshot_id = replicated_table_schema.inner().snapshot_id;
         let replication_mask = replicated_table_schema.replication_mask().clone();
 
         // Check if we have existing metadata for this table.
@@ -586,7 +586,7 @@ where
         new_replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let table_id = new_replicated_table_schema.id();
-        let new_snapshot_id = new_replicated_table_schema.get_inner().snapshot_id;
+        let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
 
         // Get current applied destination metadata. If the table is still in `Applying`, the
         // state store surfaces that as an error.
@@ -1002,7 +1002,7 @@ where
             // Update the metadata to point to the new table.
             let metadata = DestinationTableMetadata::new_applied(
                 next_sequenced_bigquery_table_id.to_string(),
-                replicated_table_schema.get_inner().snapshot_id,
+                replicated_table_schema.inner().snapshot_id,
                 replicated_table_schema.replication_mask().clone(),
             );
             self.state_store

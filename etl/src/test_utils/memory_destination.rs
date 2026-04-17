@@ -107,7 +107,7 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> DestinationTableMetadata {
         let table_id = replicated_table_schema.id();
-        let snapshot_id = replicated_table_schema.get_inner().snapshot_id;
+        let snapshot_id = replicated_table_schema.inner().snapshot_id;
         let replication_mask = replicated_table_schema.replication_mask().clone();
         let destination_table_id = format!("memory_{}", table_id.into_inner());
 

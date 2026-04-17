@@ -432,13 +432,7 @@ impl ReplicationMask {
         let mask = table_schema
             .column_schemas
             .iter()
-            .map(|cs| {
-                if replicated_column_names.contains(&cs.name) {
-                    1
-                } else {
-                    0
-                }
-            })
+            .map(|cs| u8::from(replicated_column_names.contains(&cs.name)))
             .collect();
 
         Self(Arc::new(mask))
@@ -572,7 +566,7 @@ impl ReplicatedTableSchema {
     }
 
     /// Returns the underlying table schema.
-    pub fn get_inner(&self) -> &TableSchema {
+    pub fn inner(&self) -> &TableSchema {
         &self.table_schema
     }
 
@@ -622,50 +616,30 @@ impl ReplicatedTableSchema {
             .map(|col| (col.ordinal_position, col))
             .collect();
 
-        let old_positions: HashSet<i32> = old_columns.keys().copied().collect();
-        let new_positions: HashSet<i32> = new_columns.keys().copied().collect();
-
-        // Intersection: common positions (potential renames).
-        let common_positions: HashSet<i32> = old_positions
-            .intersection(&new_positions)
-            .copied()
-            .collect();
-
-        // Columns to rename: same position, different name.
-        let mut columns_to_rename: Vec<ColumnRename> = common_positions
-            .iter()
-            .filter_map(|pos| {
-                let old_col = old_columns.get(pos).unwrap();
-                let new_col = new_columns.get(pos).unwrap();
-
-                if old_col.name != new_col.name {
-                    Some(ColumnRename {
-                        old_name: old_col.name.clone(),
-                        new_name: new_col.name.clone(),
-                        ordinal_position: *pos,
-                    })
-                } else {
-                    None
+        // Same ordinal position means the same logical column, even if the name changed.
+        let mut columns_to_rename = Vec::new();
+        let mut columns_to_remove = Vec::new();
+        for (&ordinal_position, &old_column) in &old_columns {
+            match new_columns.get(&ordinal_position) {
+                Some(&new_column) if old_column.name != new_column.name => {
+                    columns_to_rename.push(ColumnRename {
+                        old_name: old_column.name.clone(),
+                        new_name: new_column.name.clone(),
+                        ordinal_position,
+                    });
                 }
-            })
-            .collect();
+                None => columns_to_remove.push(old_column.clone()),
+                _ => {}
+            }
+        }
         columns_to_rename.sort_by_key(|c| c.ordinal_position);
-
-        // Columns to remove: positions in old but not in new.
-        let positions_to_remove: HashSet<i32> =
-            old_positions.difference(&new_positions).copied().collect();
-        let mut columns_to_remove: Vec<ColumnSchema> = positions_to_remove
-            .iter()
-            .map(|pos| (*old_columns.get(pos).unwrap()).clone())
-            .collect();
         columns_to_remove.sort_by_key(|c| c.ordinal_position);
 
-        // Columns to add: positions in new but not in old.
-        let positions_to_add: HashSet<i32> =
-            new_positions.difference(&old_positions).copied().collect();
-        let mut columns_to_add: Vec<ColumnSchema> = positions_to_add
+        // Columns to add: positions present only in the new schema.
+        let mut columns_to_add: Vec<ColumnSchema> = new_columns
             .iter()
-            .map(|pos| (*new_columns.get(pos).unwrap()).clone())
+            .filter(|(ordinal_position, _)| !old_columns.contains_key(ordinal_position))
+            .map(|(_, &column)| column.clone())
             .collect();
         columns_to_add.sort_by_key(|c| c.ordinal_position);
 

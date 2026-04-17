@@ -112,7 +112,6 @@ with initial_schema_matches as (
         tm.pipeline_id,
         tm.source_table_id,
         tm.destination_table_id,
-        count(ts.id)::pg_catalog.int4 as schema_count,
         min(ts.id) as table_schema_id
     from etl.table_mappings tm
     left join etl.table_schemas ts

@@ -746,7 +746,7 @@ where
             table_name_to_ducklake_table_name(replicated_table_schema.name())?;
         let metadata = DestinationTableMetadata::new_applying(
             ducklake_table_name.to_string(),
-            replicated_table_schema.get_inner().snapshot_id,
+            replicated_table_schema.inner().snapshot_id,
             replicated_table_schema.replication_mask().clone(),
         );
         self.store
