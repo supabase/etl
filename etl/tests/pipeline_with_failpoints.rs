@@ -550,17 +550,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         destination.clone(),
     );
 
-    let ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
-
     let events_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
         .await;
 
     pipeline.start().await.unwrap();
-
-    ready_notify.notified().await;
 
     events_notify.notified().await;
 
@@ -720,17 +714,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         destination.clone(),
     );
 
-    let ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
-
     let events_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
         .await;
 
     pipeline.start().await.unwrap();
-
-    ready_notify.notified().await;
 
     events_notify.notified().await;
 
@@ -889,17 +877,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         destination.clone(),
     );
 
-    let ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
-
     let events_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
         .await;
 
     pipeline.start().await.unwrap();
-
-    ready_notify.notified().await;
 
     events_notify.notified().await;
 
@@ -1044,17 +1026,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         destination.clone(),
     );
 
-    let ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
-
     let events_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
         .await;
 
     pipeline.start().await.unwrap();
-
-    ready_notify.notified().await;
 
     events_notify.notified().await;
 

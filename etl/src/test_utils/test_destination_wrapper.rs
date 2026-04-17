@@ -136,9 +136,10 @@ impl<D> TestDestinationWrapper<D> {
         deduplicate_events(&events)
     }
 
-    /// Registers a notification that fires when events match a specific condition.
+    /// Registers a notification that fires when events match a specific condition after this method
+    /// is called.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
     /// condition is not met. This prevents tests from hanging indefinitely.
     pub async fn notify_on_events<F>(&self, condition: F) -> TimedNotify
     where
@@ -150,15 +151,12 @@ impl<D> TestDestinationWrapper<D> {
             .event_conditions
             .push((Box::new(condition), notify.clone()));
 
-        // Check conditions immediately in case they're already satisfied
-        inner.check_conditions();
-
         TimedNotify::new(notify)
     }
 
     /// Registers a notification that fires when a specific number of events of given types are received.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
     /// expected event count is not reached. This prevents tests from hanging indefinitely.
     pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
         self.notify_on_events(move |events| check_events_count(events, conditions.clone()))
@@ -167,7 +165,7 @@ impl<D> TestDestinationWrapper<D> {
 
     /// Registers a notification that fires when a specific number of events of given types are received after de-duplicating.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
     /// expected event count is not reached. This prevents tests from hanging indefinitely.
     pub async fn wait_for_events_count_deduped(
         &self,
@@ -180,7 +178,8 @@ impl<D> TestDestinationWrapper<D> {
         .await
     }
 
-    /// Registers a notification that fires when event conditions are met.
+    /// Registers a notification that fires when event conditions are met after this method is
+    /// called.
     ///
     /// Supports two condition types:
     /// - [`EventCondition::Any`]: counts events across all tables
@@ -188,7 +187,7 @@ impl<D> TestDestinationWrapper<D> {
     ///
     /// For insert events, both streaming events and table copy rows are counted.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
     /// expected count is not reached.
     pub async fn wait_for_all_events(&self, conditions: Vec<EventCondition>) -> TimedNotify {
         let notify = Arc::new(Notify::new());
@@ -199,9 +198,6 @@ impl<D> TestDestinationWrapper<D> {
         });
 
         inner.combined_conditions.push((condition, notify.clone()));
-
-        // Check conditions immediately in case they're already satisfied.
-        inner.check_conditions();
 
         TimedNotify::new(notify)
     }

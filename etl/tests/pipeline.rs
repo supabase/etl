@@ -323,7 +323,7 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
 
     // Set up notification for when the table becomes Ready again (after resync).
     let table_ready_notify = store
-        .notify_on_future_table_state_type(
+        .notify_on_table_state_type(
             database_schema.users_schema().id,
             TableReplicationPhaseType::Ready,
         )
@@ -1190,20 +1190,6 @@ async fn table_copy_and_sync_streams_new_data() {
     )
     .await;
 
-    // Register notifications for ready state.
-    let users_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.users_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
-        .await;
-    let orders_state_notify = store
-        .notify_on_table_state_type(
-            database_schema.orders_schema().id,
-            TableReplicationPhaseType::Ready,
-        )
-        .await;
-
     // We wait for all the inserts to be received.
     let events_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 8)])
@@ -1219,8 +1205,6 @@ async fn table_copy_and_sync_streams_new_data() {
     )
     .await;
 
-    users_state_notify.notified().await;
-    orders_state_notify.notified().await;
     events_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
@@ -2003,10 +1987,9 @@ async fn table_sync_truncates_destination_after_state_reset() {
     destination.clear_events().await;
     destination.clear_table_rows().await;
 
-    // Register notify for users table ready BEFORE resetting state.
-    // Uses notify_on_future_table_state_type to avoid triggering on current Ready state.
+    // Register waits before resetting state so they observe the resync work from this point on.
     let users_ready_notify = store
-        .notify_on_future_table_state_type(
+        .notify_on_table_state_type(
             database_schema.users_schema().id,
             TableReplicationPhaseType::Ready,
         )

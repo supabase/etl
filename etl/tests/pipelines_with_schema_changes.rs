@@ -450,13 +450,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         destination.clone(),
     );
 
-    let ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
-
     pipeline.start().await.unwrap();
-
-    ready_notify.notified().await;
 
     let notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
@@ -585,13 +579,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         destination.clone(),
     );
 
-    let ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
-
     pipeline.start().await.unwrap();
-
-    ready_notify.notified().await;
 
     let notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
@@ -642,13 +630,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         destination.clone(),
     );
 
-    let ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
-
     pipeline.start().await.unwrap();
-
-    ready_notify.notified().await;
 
     let notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
@@ -685,13 +667,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         destination.clone(),
     );
 
-    let ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
-
     pipeline.start().await.unwrap();
-
-    ready_notify.notified().await;
 
     let notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])

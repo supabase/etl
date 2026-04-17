@@ -154,10 +154,10 @@ impl NotifyingStore {
             .collect()
     }
 
-    /// Registers a notification that fires when a table reaches a specific state type or if the
-    /// table already has that specific state type.
+    /// Registers a notification that fires when a table reaches a specific state type after this
+    /// method is called.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
     /// expected state is not reached. This prevents tests from hanging indefinitely.
     pub async fn notify_on_table_state_type(
         &self,
@@ -170,33 +170,13 @@ impl NotifyingStore {
             .table_state_type_conditions
             .push((table_id, expected_state, notify.clone()));
 
-        inner.check_conditions();
-
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when a table reaches a specific state type from when
-    /// this method was called.
+    /// Registers a notification that fires when a table state matches a custom condition after this
+    /// method is called.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
-    /// expected state is not reached. This prevents tests from hanging indefinitely.
-    pub async fn notify_on_future_table_state_type(
-        &self,
-        table_id: TableId,
-        expected_state: TableReplicationPhaseType,
-    ) -> TimedNotify {
-        let notify = Arc::new(Notify::new());
-        let mut inner = self.inner.write().await;
-        inner
-            .table_state_type_conditions
-            .push((table_id, expected_state, notify.clone()));
-
-        TimedNotify::new(notify)
-    }
-
-    /// Registers a notification that fires when a table state matches a custom condition.
-    ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
     /// condition is not met. This prevents tests from hanging indefinitely.
     pub async fn notify_on_table_state<F>(&self, table_id: TableId, condition: F) -> TimedNotify
     where
@@ -208,15 +188,13 @@ impl NotifyingStore {
             .table_state_conditions
             .push((table_id, notify.clone(), Box::new(condition)));
 
-        inner.check_conditions();
-
         TimedNotify::new(notify)
     }
 
     /// Registers a notification that fires when a table has stored at least the expected number
-    /// of schema snapshots.
+    /// of schema snapshots after this method is called.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after 30 seconds if the
+    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
     /// expected schema count is not reached. This prevents tests from hanging indefinitely.
     pub async fn notify_on_table_schema_count(
         &self,
@@ -229,14 +207,13 @@ impl NotifyingStore {
             .table_schema_count_conditions
             .push((table_id, expected_count, notify.clone()));
 
-        inner.check_conditions();
-
         TimedNotify::new(notify)
     }
 
     pub async fn reset_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
         inner.table_state_history.remove(&table_id);
+
         let states = Arc::make_mut(&mut inner.table_replication_states);
         states.remove(&table_id);
         states.insert(table_id, TableReplicationPhase::Init);
