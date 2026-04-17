@@ -1488,7 +1488,7 @@ const DEFAULT_IDENTITY_DELETE_SELECT: &str = concat!(
 ///
 /// # WHEN
 ///
-/// Row `id=2` is deleted in Postgres, then a new row (`id=3, value='after'`)
+/// Row `id=2` is deleted in Postgres, and a new row (`id=3, value='after'`)
 /// is inserted.
 ///
 /// # THEN
@@ -1551,7 +1551,7 @@ async fn delete_with_default_replica_identity() {
     pipeline.start().await.unwrap();
     table_ready.notified().await;
 
-    // --- WHEN: delete id=2, then insert a new row ---
+    // --- WHEN: delete id=2, and insert a new row ---
     database
         .run_sql(&format!(
             "DELETE FROM {} WHERE id = 2",
@@ -1613,6 +1613,10 @@ async fn delete_with_default_replica_identity() {
     assert_eq!(r.value, "after");
     assert_eq!(r.cdc_operation, "INSERT");
     assert!(r.cdc_lsn > 0, "pipeline must continue after the delete");
+    assert!(
+        r.cdc_lsn > rows[2].cdc_lsn,
+        "post-delete INSERT must have a higher LSN than the DELETE"
+    );
 }
 
 /// SELECT query used to verify the `large_batch` test.
