@@ -21,7 +21,7 @@ const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 pub(super) const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
 pub(super) const MAINTENANCE_TARGET_FILE_SIZE: &str = "10MB";
-pub(super) const DUCKDB_MEMORY_CACHE_LIMIT: &str = "15MB";
+pub(super) const DUCKDB_MEMORY_CACHE_LIMIT: &str = "50MB";
 
 /// One named DuckDB setup phase for a DuckLake connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
