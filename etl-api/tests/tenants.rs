@@ -408,6 +408,32 @@ async fn tenant_with_inactive_pipelines_can_be_deleted_and_uninstalls_source_sta
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn tenant_with_unreachable_source_can_still_be_deleted() {
+    init_test_tracing();
+
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    create_default_image(&app).await;
+
+    let (_source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+    let destination_id = create_destination(&app, tenant_id).await;
+    let pipeline_id = create_pipeline_for_source(&app, tenant_id, source_id, destination_id).await;
+
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
+    etl_postgres::sqlx::test_utils::drop_pg_database(&source_db_config).await;
+
+    let response = app.delete_tenant(tenant_id).await;
+    assert!(response.status().is_success());
+
+    let tenant_response = app.read_tenant(tenant_id).await;
+    assert_eq!(tenant_response.status(), StatusCode::NOT_FOUND);
+
+    let pipeline_response = app.read_pipeline(tenant_id, pipeline_id).await;
+    assert_eq!(pipeline_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn all_tenants_can_be_read() {
     init_test_tracing();
     // Arrange

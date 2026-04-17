@@ -229,10 +229,17 @@ pub async fn delete_pipeline_api_and_source_state(
     db::replicators::delete_replicator(&mut *api_connection, tenant_id, pipeline.replicator_id)
         .await?;
 
+    delete_pipeline_source_state(source_connection, pipeline.id).await
+}
+
+pub async fn delete_pipeline_source_state(
+    source_connection: &mut PgConnection,
+    pipeline_id: i64,
+) -> Result<Option<Vec<TableId>>, PipelinesDbError> {
     // Get all table IDs for this pipeline before deleting state (only if all ETL tables exist).
     let etl_present = health::etl_tables_present(&mut *source_connection).await?;
     let table_ids = if etl_present {
-        Some(state::get_pipeline_table_ids(&mut *source_connection, pipeline.id).await?)
+        Some(state::get_pipeline_table_ids(&mut *source_connection, pipeline_id).await?)
     } else {
         None
     };
@@ -240,13 +247,13 @@ pub async fn delete_pipeline_api_and_source_state(
     // Delete state, schema, and table mappings from the source database, only if ETL tables exist.
     if etl_present {
         let _ =
-            state::delete_replication_state_for_all_tables(&mut *source_connection, pipeline.id)
+            state::delete_replication_state_for_all_tables(&mut *source_connection, pipeline_id)
                 .await?;
-        let _ = schema::delete_table_schemas_for_all_tables(&mut *source_connection, pipeline.id)
+        let _ = schema::delete_table_schemas_for_all_tables(&mut *source_connection, pipeline_id)
             .await?;
         let _ = table_mappings::delete_table_mappings_for_all_tables(
             &mut *source_connection,
-            pipeline.id,
+            pipeline_id,
         )
         .await?;
     }
@@ -269,6 +276,19 @@ pub async fn delete_pipelines_api_and_source_state(
             pipeline,
         )
         .await?;
+        pipeline_slot_state.push((pipeline.id, table_ids));
+    }
+
+    Ok(pipeline_slot_state)
+}
+
+pub async fn delete_pipelines_source_state(
+    source_connection: &mut PgConnection,
+    pipelines: &[PipelineDeletion],
+) -> Result<Vec<(i64, Option<Vec<TableId>>)>, PipelinesDbError> {
+    let mut pipeline_slot_state = Vec::with_capacity(pipelines.len());
+    for pipeline in pipelines {
+        let table_ids = delete_pipeline_source_state(source_connection, pipeline.id).await?;
         pipeline_slot_state.push((pipeline.id, table_ids));
     }
 

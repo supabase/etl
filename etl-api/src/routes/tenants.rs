@@ -16,7 +16,7 @@ use crate::configs::encryption::EncryptionKey;
 use crate::db;
 use crate::db::connect_to_source_database_from_api;
 use crate::db::pipelines::{
-    PipelinesDbError, delete_pipeline_replication_slots, delete_pipelines_api_and_source_state,
+    PipelinesDbError, delete_pipeline_replication_slots, delete_pipelines_source_state,
     read_all_pipelines_for_deletion,
 };
 use crate::db::sources::SourcesDbError;
@@ -319,43 +319,42 @@ pub async fn delete_tenant(
             .push(pipeline);
     }
 
-    let mut api_txn = pool.begin().await?;
-    let mut pending_source_deletions = Vec::new();
+    // We assume each stored source points at a different physical database, so tenant teardown
+    // can process them independently without deduplicating connection configs.
     for source in sources {
-        let source_pool = connect_to_source_database_from_api(
+        let source_pipelines = pipelines_by_source.remove(&source.id).unwrap_or_default();
+        // If the source database is already unreachable during tenant teardown, we treat it as
+        // effectively deleted and keep removing the tenant's API-side state.
+        let source_pool = match connect_to_source_database_from_api(
             &source.config.into_connection_config(tls_config.clone()),
         )
-        .await?;
+        .await
+        {
+            Ok(source_pool) => source_pool,
+            Err(error) => {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    source_id = source.id,
+                    error = %error,
+                    "failed to connect to source database during tenant deletion, skipping source cleanup",
+                );
+
+                continue;
+            }
+        };
         let mut source_txn = source_pool.begin().await?;
         let source_pipeline_slot_state =
-            if let Some(source_pipelines) = pipelines_by_source.get(&source.id) {
-                delete_pipelines_api_and_source_state(
-                    api_txn.deref_mut(),
-                    source_txn.deref_mut(),
-                    &tenant_id,
-                    source_pipelines,
-                )
-                .await?
-            } else {
-                Vec::new()
-            };
+            delete_pipelines_source_state(source_txn.deref_mut(), &source_pipelines).await?;
         db::sources::uninstall_source_installation(source_txn.deref_mut()).await?;
-        pending_source_deletions.push((source_pool, source_txn, source_pipeline_slot_state));
-    }
-
-    db::tenants::delete_tenant(api_txn.deref_mut(), &tenant_id)
-        .await?
-        .ok_or(TenantError::TenantNotFound(tenant_id.clone()))?;
-    // Commit the API transaction before any source transaction. If a source transaction committed
-    // first and the API commit failed afterwards, the API database could still expose sources or
-    // pipelines whose source-side state has already been removed.
-    api_txn.commit().await?;
-    for (source_pool, source_txn, source_pipeline_slot_state) in pending_source_deletions {
         source_txn.commit().await?;
         for (pipeline_id, table_ids) in source_pipeline_slot_state {
             delete_pipeline_replication_slots(&source_pool, pipeline_id, table_ids).await?;
         }
     }
+
+    // Deleting the tenant is enough for API-side cleanup because Postgres cascades tenant-owned
+    // rows in the app schema; we only clean source databases manually above.
+    db::tenants::delete_tenant(&**pool, &tenant_id).await?;
 
     Ok(HttpResponse::Ok().finish())
 }

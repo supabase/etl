@@ -463,7 +463,7 @@ mod tests {
     use crate::configs::source::StoredSourceConfig;
     use crate::k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile};
 
-    #[derive(Debug, Default, Clone)]
+    #[derive(Debug, Clone)]
     struct RecordingK8sClient {
         calls: Arc<Mutex<Vec<String>>>,
         pod_status: PodStatus,
@@ -472,6 +472,15 @@ mod tests {
     impl RecordingK8sClient {
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Default for RecordingK8sClient {
+        fn default() -> Self {
+            Self {
+                calls: Arc::default(),
+                pod_status: PodStatus::Stopped,
+            }
         }
     }
 
