@@ -11,22 +11,22 @@ use pg_escape::quote_literal;
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::ducklake::client::{
     DuckDbBlockingOperationKind, DuckLakeConnectionManager, LazyDuckLakePool,
     format_query_error_detail, run_duckdb_blocking,
 };
 use crate::ducklake::config::{MAINTENANCE_TARGET_FILE_SIZE, TARGET_FILE_SIZE_OPTION_NAME};
-use crate::ducklake::core::flush_table_inlined_data;
 use crate::ducklake::inline_size::{
     DuckLakePendingInlineDataSizes, DuckLakePendingInlineSizeSampler,
 };
 use crate::ducklake::metrics::{
-    DuckLakeTableStorageMetrics, ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
+    DuckLakeTableStorageMetrics, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
+    ETL_DUCKLAKE_INLINE_FLUSH_ROWS, ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
     ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS, ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL,
     ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL, MAINTENANCE_OPERATION_LABEL, MAINTENANCE_OUTCOME_LABEL,
-    MAINTENANCE_REASON_LABEL, MAINTENANCE_TASK_LABEL, SMALL_FILE_SIZE_BYTES,
+    MAINTENANCE_REASON_LABEL, MAINTENANCE_TASK_LABEL, RESULT_LABEL, SMALL_FILE_SIZE_BYTES,
 };
 use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG};
 
@@ -190,6 +190,7 @@ pub(super) struct TableMetricsSample {
 pub(super) enum TableMaintenanceNotification {
     WriteActivity(TableWriteActivity),
     TableMetricsSample(TableMetricsSample),
+    FlushCompleted(TableFlushCompletion),
 }
 
 impl TableMaintenanceNotification {
@@ -198,7 +199,38 @@ impl TableMaintenanceNotification {
         match self {
             Self::WriteActivity(activity) => &activity.table_name,
             Self::TableMetricsSample(sample) => &sample.table_name,
+            Self::FlushCompleted(completion) => &completion.table_name,
         }
+    }
+}
+
+/// Completion notification for one requested inline flush.
+#[derive(Clone, Debug)]
+pub(super) struct TableFlushCompletion {
+    pub(super) table_name: DuckLakeTableName,
+    pub(super) completed_at: Instant,
+}
+
+/// Per-table inline flushes that should run at the next safe ingest pause.
+#[derive(Debug, Default)]
+pub(super) struct PendingInlineFlushRequests {
+    requests: Mutex<HashMap<DuckLakeTableName, MaintenanceReason>>,
+}
+
+impl PendingInlineFlushRequests {
+    /// Records or updates one requested inline flush.
+    fn request(&self, table_name: DuckLakeTableName, reason: MaintenanceReason) {
+        self.requests.lock().insert(table_name, reason);
+    }
+
+    /// Drains the currently requested inline flushes.
+    fn take_all(&self) -> Vec<(DuckLakeTableName, MaintenanceReason)> {
+        self.requests.lock().drain().collect()
+    }
+
+    /// Restores requested inline flushes after a skipped or failed attempt.
+    fn restore(&self, requests: impl IntoIterator<Item = (DuckLakeTableName, MaintenanceReason)>) {
+        self.requests.lock().extend(requests);
     }
 }
 
@@ -696,11 +728,37 @@ pub(super) async fn send_maintenance_notification(
     }
 }
 
+/// Tries to enqueue one maintenance notification without awaiting channel capacity.
+fn try_send_maintenance_notification(
+    notification_tx: &mpsc::Sender<TableMaintenanceNotification>,
+    notification: TableMaintenanceNotification,
+) {
+    if let Err(error) = notification_tx.try_send(notification) {
+        match error {
+            mpsc::error::TrySendError::Full(notification) => {
+                warn!(
+                    table = %notification.table_name(),
+                    "ducklake maintenance notification dropped because channel is full"
+                );
+            }
+            mpsc::error::TrySendError::Closed(notification) => {
+                warn!(
+                    table = %notification.table_name(),
+                    "ducklake maintenance notification dropped"
+                );
+            }
+        }
+    }
+}
+
 /// Starts warming the maintenance pool and spawns the periodic DuckLake worker.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_ducklake_maintenance_worker(
     manager: DuckLakeConnectionManager,
     checkpoint_gate: Arc<RwLock<()>>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    inline_flush_requested: Arc<AtomicBool>,
+    pending_inline_flush_requests: Arc<PendingInlineFlushRequests>,
     checkpoint_requested: Arc<AtomicBool>,
     merge_adjacent_files_requested: Arc<AtomicBool>,
     merge_adjacent_files_dirty: Arc<AtomicBool>,
@@ -714,6 +772,8 @@ pub(super) fn spawn_ducklake_maintenance_worker(
         pool,
         checkpoint_gate,
         table_write_slots,
+        inline_flush_requested,
+        pending_inline_flush_requests,
         checkpoint_requested,
         merge_adjacent_files_requested,
         merge_adjacent_files_dirty,
@@ -735,6 +795,8 @@ async fn run_ducklake_maintenance_worker(
     mut pool: LazyDuckLakePool,
     checkpoint_gate: Arc<RwLock<()>>,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    inline_flush_requested: Arc<AtomicBool>,
+    pending_inline_flush_requests: Arc<PendingInlineFlushRequests>,
     checkpoint_requested: Arc<AtomicBool>,
     merge_adjacent_files_requested: Arc<AtomicBool>,
     merge_adjacent_files_dirty: Arc<AtomicBool>,
@@ -772,28 +834,34 @@ async fn run_ducklake_maintenance_worker(
                 };
 
                 let now = Instant::now();
-                table_states
-                    .entry(notification.table_name().to_string())
-                    .and_modify(|state| match &notification {
-                        TableMaintenanceNotification::WriteActivity(activity) => {
-                            state.record_write_activity(activity, now);
-                        }
-                        TableMaintenanceNotification::TableMetricsSample(sample) => {
-                            state.record_metrics_sample(sample.clone());
-                        }
-                    })
-                    .or_insert_with(|| {
-                        let mut state = TableMaintenanceState::default();
-                        match notification {
-                            TableMaintenanceNotification::WriteActivity(activity) => {
+                match notification {
+                    TableMaintenanceNotification::WriteActivity(activity) => {
+                        table_states
+                            .entry(activity.table_name.clone())
+                            .and_modify(|state| state.record_write_activity(&activity, now))
+                            .or_insert_with(|| {
+                                let mut state = TableMaintenanceState::default();
                                 state.record_write_activity(&activity, now);
-                            }
-                            TableMaintenanceNotification::TableMetricsSample(sample) => {
+                                state
+                            });
+                    }
+                    TableMaintenanceNotification::TableMetricsSample(sample) => {
+                        table_states
+                            .entry(sample.table_name.clone())
+                            .and_modify(|state| state.record_metrics_sample(sample.clone()))
+                            .or_insert_with(|| {
+                                let mut state = TableMaintenanceState::default();
                                 state.record_metrics_sample(sample);
-                            }
-                        }
-                        state
-                    });
+                                state
+                            });
+                    }
+                    TableMaintenanceNotification::FlushCompleted(completion) => {
+                        let Some(state) = table_states.get_mut(&completion.table_name) else {
+                            continue;
+                        };
+                        state.clear_pending_flush(completion.completed_at);
+                    }
+                }
             }
             _ = flush_interval.tick() => {
                 let mut now = Instant::now();
@@ -818,41 +886,8 @@ async fn run_ducklake_maintenance_worker(
 
                     // If it needs to be flushed
                     if let Some(reason) = table_state.flush_reason(now) {
-                        let pool = match pool.get_or_init_pool().await {
-                            Ok(pool) => pool,
-                            Err(error) => {
-                                warn!(error = ?error, "ducklake maintenance pool initialization failed");
-                                continue;
-                            }
-                        };
-                        match flush_table_inlined_data_in_background(
-                            pool,
-                            Arc::clone(&checkpoint_gate),
-                            Arc::clone(&blocking_slots),
-                            Arc::clone(&table_write_slots),
-                            table_name.clone(),
-                            reason,
-                        )
-                        .await
-                        {
-                            Ok(outcome) => {
-                                if outcome.is_completed() {
-                                    table_state.clear_pending_flush(Instant::now());
-                                    // if outcome == MaintenanceOutcome::Applied {
-                                    //     merge_adjacent_files_dirty
-                                    //         .store(true, AtomicOrdering::Release);
-                                    // }
-                                }
-                            }
-                            Err(error) => {
-                                warn!(
-                                    table = %table_name,
-                                    reason = reason.as_str(),
-                                    error = ?error,
-                                    "ducklake background flush failed"
-                                );
-                            }
-                        }
+                        pending_inline_flush_requests.request(table_name.clone(), reason);
+                        inline_flush_requested.store(true, AtomicOrdering::Release);
                     }
                     now = Instant::now();
 
@@ -984,38 +1019,6 @@ fn try_acquire_table_write_slot(
         .ok()
 }
 
-/// Materializes one table's pending inlined rows on the maintenance pool.
-async fn flush_table_inlined_data_in_background(
-    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
-    checkpoint_gate: Arc<RwLock<()>>,
-    blocking_slots: Arc<Semaphore>,
-    table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
-    table_name: DuckLakeTableName,
-    reason: MaintenanceReason,
-) -> EtlResult<MaintenanceOutcome> {
-    let Some(table_write_permit) = try_acquire_table_write_slot(&table_write_slots, &table_name)
-    else {
-        record_ducklake_maintenance_skipped(
-            MAINTENANCE_TASK_FLUSH,
-            MaintenanceOperation::FlushInlinedData,
-            reason,
-        );
-        return Ok(MaintenanceOutcome::SkippedBusy);
-    };
-    let _checkpoint_guard = checkpoint_gate.read_owned().await;
-
-    run_duckdb_blocking(
-        pool,
-        blocking_slots,
-        DuckDbBlockingOperationKind::Maintenance,
-        move |conn| {
-            let _table_write_permit = table_write_permit;
-            flush_table_inlined_data_in_background_blocking(conn, &table_name, reason)
-        },
-    )
-    .await
-}
-
 /// Runs targeted rewrite and merge maintenance for one table.
 async fn run_targeted_table_maintenance(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
@@ -1051,6 +1054,76 @@ async fn run_targeted_table_maintenance(
             Err(error)
         }
     })
+}
+
+/// Runs requested inline flushes before foreground ingestion begins.
+pub(super) async fn maybe_run_requested_inline_flush(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    checkpoint_gate: Arc<RwLock<()>>,
+    blocking_slots: Arc<Semaphore>,
+    inline_flush_requested: &AtomicBool,
+    pending_inline_flush_requests: &PendingInlineFlushRequests,
+    notification_tx: Option<mpsc::Sender<TableMaintenanceNotification>>,
+) -> EtlResult<()> {
+    if !inline_flush_requested.swap(false, AtomicOrdering::AcqRel) {
+        return Ok(());
+    }
+
+    let requested_flushes = pending_inline_flush_requests.take_all();
+    if requested_flushes.is_empty() {
+        return Ok(());
+    }
+
+    let Ok(_checkpoint_guard) = checkpoint_gate.try_write_owned() else {
+        for (_, reason) in &requested_flushes {
+            record_ducklake_maintenance_skipped(
+                MAINTENANCE_TASK_FLUSH,
+                MaintenanceOperation::FlushInlinedData,
+                *reason,
+            );
+        }
+        pending_inline_flush_requests.restore(requested_flushes);
+        inline_flush_requested.store(true, AtomicOrdering::Release);
+        return Ok(());
+    };
+
+    let mut requested_flushes = requested_flushes.into_iter();
+    while let Some((table_name, reason)) = requested_flushes.next() {
+        let table_name_for_query = table_name.clone();
+        let outcome = run_duckdb_blocking(
+            Arc::clone(&pool),
+            Arc::clone(&blocking_slots),
+            DuckDbBlockingOperationKind::Maintenance,
+            move |conn| {
+                flush_table_inlined_data_in_background_blocking(conn, &table_name_for_query, reason)
+            },
+        )
+        .await;
+
+        match outcome {
+            Ok(outcome) => {
+                if outcome.is_completed()
+                    && let Some(notification_tx) = notification_tx.as_ref()
+                {
+                    try_send_maintenance_notification(
+                        notification_tx,
+                        TableMaintenanceNotification::FlushCompleted(TableFlushCompletion {
+                            table_name,
+                            completed_at: Instant::now(),
+                        }),
+                    );
+                }
+            }
+            Err(error) => {
+                pending_inline_flush_requests.request(table_name, reason);
+                pending_inline_flush_requests.restore(requested_flushes);
+                inline_flush_requested.store(true, AtomicOrdering::Release);
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Runs one requested tier-0 merge before foreground CDC ingestion begins.
@@ -1227,6 +1300,54 @@ fn run_targeted_table_maintenance_blocking(
     );
 
     Ok(targeted_maintenance_outcome(rewrite_outcome, merge_outcome))
+}
+
+/// Flushes inlined user data for one table after the write transaction commits.
+pub(super) fn flush_table_inlined_data(
+    conn: &duckdb::Connection,
+    table_name: &str,
+) -> EtlResult<u64> {
+    let flush_started = Instant::now();
+    let sql = format!(
+        r#"SELECT COALESCE(SUM(rows_flushed), 0)
+         FROM ducklake_flush_inlined_data({}, table_name => {});"#,
+        quote_literal(LAKE_CATALOG),
+        quote_literal(table_name),
+    );
+    let rows_flushed: i64 = conn.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake inlined data flush failed",
+            format_query_error_detail(&sql, &e),
+            source: e
+        )
+    })?;
+    let rows_flushed = rows_flushed.max(0) as u64;
+    let flush_result = if rows_flushed > 0 { "flushed" } else { "noop" };
+    histogram!(
+        ETL_DUCKLAKE_INLINE_FLUSH_ROWS,
+        RESULT_LABEL => flush_result,
+    )
+    .record(rows_flushed as f64);
+    histogram!(
+        ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
+        RESULT_LABEL => flush_result,
+    )
+    .record(flush_started.elapsed().as_secs_f64());
+
+    if rows_flushed > 0 {
+        debug!(
+            table = %table_name,
+            rows_flushed,
+            "ducklake inlined data flushed"
+        );
+    } else {
+        debug!(
+            table = %table_name,
+            "ducklake inlined data already flushed"
+        );
+    }
+    Ok(rows_flushed)
 }
 
 /// Runs one scheduled tier-0 merge pass and records the maintenance outcome.
@@ -2437,6 +2558,8 @@ mod tests {
             std::sync::Arc::new(RwLock::new(())),
             std::sync::Arc::new(Mutex::new(HashMap::new())),
             std::sync::Arc::new(AtomicBool::new(false)),
+            std::sync::Arc::new(PendingInlineFlushRequests::default()),
+            std::sync::Arc::new(AtomicBool::new(false)),
             std::sync::Arc::new(AtomicBool::new(false)),
             std::sync::Arc::new(AtomicBool::new(false)),
             None,
@@ -2520,6 +2643,80 @@ mod tests {
         assert!(
             checkpoint_requested.load(AtomicOrdering::Acquire),
             "checkpoint request should stay pending for the next safe point"
+        );
+
+        drop(mutation_guard);
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[tokio::test]
+    async fn test_requested_inline_flush_stays_pending_when_mutation_guard_is_active() {
+        let pool = Arc::new(
+            build_warm_ducklake_pool(
+                DuckLakeConnectionManager {
+                    setup_plan: Arc::new(crate::ducklake::config::DuckLakeSetupPlan::default()),
+                    disable_extension_autoload: cfg!(target_os = "linux"),
+                    open_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                },
+                1,
+                "test",
+            )
+            .await
+            .expect("failed to build inline flush test pool"),
+        );
+        let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
+        register_metrics();
+        let checkpoint_gate = Arc::new(RwLock::new(()));
+        let mutation_guard = Arc::clone(&checkpoint_gate).read_owned().await;
+        let inline_flush_requested = Arc::new(AtomicBool::new(true));
+        let pending_inline_flush_requests = PendingInlineFlushRequests::default();
+        pending_inline_flush_requests.request(
+            "public_users".to_string(),
+            MaintenanceReason::PendingBytesThreshold,
+        );
+
+        let rendered_before = handle.render();
+        let skipped_before = maintenance_skipped_counter_value(
+            &rendered_before,
+            MAINTENANCE_TASK_FLUSH,
+            MaintenanceOperation::FlushInlinedData,
+            MaintenanceReason::PendingBytesThreshold,
+        );
+
+        maybe_run_requested_inline_flush(
+            Arc::clone(&pool),
+            Arc::clone(&checkpoint_gate),
+            Arc::new(Semaphore::new(1)),
+            inline_flush_requested.as_ref(),
+            &pending_inline_flush_requests,
+            None,
+        )
+        .await
+        .expect("inline flush should be skipped while mutation work is active");
+
+        let rendered_after = handle.render();
+        let skipped_after = maintenance_skipped_counter_value(
+            &rendered_after,
+            MAINTENANCE_TASK_FLUSH,
+            MaintenanceOperation::FlushInlinedData,
+            MaintenanceReason::PendingBytesThreshold,
+        );
+
+        assert!(
+            skipped_after > skipped_before,
+            "inline flush skip count did not increase"
+        );
+        assert!(
+            inline_flush_requested.load(AtomicOrdering::Acquire),
+            "inline flush request should stay pending for the next safe point"
+        );
+        assert_eq!(
+            pending_inline_flush_requests
+                .requests
+                .lock()
+                .get("public_users"),
+            Some(&MaintenanceReason::PendingBytesThreshold),
+            "inline flush request should stay queued for the next safe point"
         );
 
         drop(mutation_guard);

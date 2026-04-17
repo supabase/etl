@@ -38,7 +38,9 @@ impl MemorySnapshot {
                 total: cgroup.total_memory,
             },
             None => MemorySnapshot {
-                used: system.used_memory(),
+                used: system
+                    .total_memory()
+                    .saturating_sub(system.available_memory()),
                 total: system.total_memory(),
             },
         }

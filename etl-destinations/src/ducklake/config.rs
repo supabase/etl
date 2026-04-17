@@ -21,6 +21,7 @@ const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 pub(super) const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
 pub(super) const MAINTENANCE_TARGET_FILE_SIZE: &str = "10MB";
+pub(super) const DUCKDB_MEMORY_CACHE_LIMIT: &str = "15MB";
 
 /// One named DuckDB setup phase for a DuckLake connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -611,7 +612,10 @@ fn build_setup_plan_with_strategy(
     let needs_postgres = matches!(catalog_url.scheme(), "postgres" | "postgresql");
     let needs_httpfs = matches!(data_path.split(':').next(), Some("s3" | "gs"));
     let lake_catalog = quote_identifier(LAKE_CATALOG);
-    let mut steps = Vec::new();
+    let mut steps = vec![DuckLakeSetupStep {
+        label: "Limit memory cache",
+        sql: format!("SET memory_limit = '{DUCKDB_MEMORY_CACHE_LIMIT}';"),
+    }];
     let mut secret_options = BTreeMap::from([
         (
             "KEY_ID",

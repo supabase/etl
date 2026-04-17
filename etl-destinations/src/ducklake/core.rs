@@ -18,14 +18,13 @@ use etl::store::state::StateStore;
 #[cfg(test)]
 use etl::types::Cell;
 use etl::types::{Event, EventSequenceKey, SizeHint, TableId, TableName, TableRow, TableSchema};
-use metrics::{gauge, histogram};
+use metrics::gauge;
 use parking_lot::Mutex;
-use pg_escape::{quote_identifier, quote_literal};
+use pg_escape::quote_identifier;
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::task::JoinSet;
-use tokio::time::Instant;
 
 use tracing::{debug, info, warn};
 use url::Url;
@@ -48,13 +47,13 @@ use crate::ducklake::config::{
 };
 use crate::ducklake::inline_size::DuckLakePendingInlineSizeSampler;
 use crate::ducklake::maintenance::{
-    DuckLakeMaintenanceWorker, ENABLE_CHECKPOINT_MAINTENANCE, TableMaintenanceNotification,
-    TableWriteActivity, maybe_run_requested_checkpoint, maybe_run_requested_merge_adjacent_files,
-    send_maintenance_notification, spawn_ducklake_maintenance_worker, table_write_slot,
+    DuckLakeMaintenanceWorker, ENABLE_CHECKPOINT_MAINTENANCE, PendingInlineFlushRequests,
+    TableMaintenanceNotification, TableWriteActivity, maybe_run_requested_checkpoint,
+    maybe_run_requested_merge_adjacent_files, send_maintenance_notification,
+    spawn_ducklake_maintenance_worker, table_write_slot,
 };
 use crate::ducklake::metrics::{
-    DuckLakeMetricsSampler, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
-    ETL_DUCKLAKE_INLINE_FLUSH_ROWS, ETL_DUCKLAKE_POOL_SIZE, RESULT_LABEL, register_metrics,
+    DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, register_metrics,
     resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
 };
 use crate::ducklake::schema::build_create_table_sql_ducklake;
@@ -81,15 +80,15 @@ pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) 
 ///
 /// All writes are wrapped in explicit transactions so that each batch of rows
 /// is committed atomically in DuckLake while file materialization can be
-/// deferred to background maintenance.
+/// deferred to coordinated maintenance.
 #[derive(Clone)]
 pub struct DuckLakeDestination<S> {
     #[cfg(feature = "test-utils")]
     manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
-    /// Shared gate that keeps the global checkpoint from overlapping active
-    /// foreground or table-scoped maintenance mutations.
+    /// Shared gate that keeps checkpoint-style maintenance from overlapping
+    /// active foreground or table-scoped maintenance mutations.
     checkpoint_gate: Arc<RwLock<()>>,
     streaming_tasks: DestinationTaskSet,
     maintenance_worker: Arc<Option<DuckLakeMaintenanceWorker>>,
@@ -107,6 +106,10 @@ pub struct DuckLakeDestination<S> {
     merge_adjacent_files_requested: Arc<AtomicBool>,
     /// Tracks whether recent writes may have produced files worth revisiting with tier-0 compaction.
     merge_adjacent_files_dirty: Arc<AtomicBool>,
+    /// Signals that one or more inline flushes should run before the next safe ingest point.
+    inline_flush_requested: Arc<AtomicBool>,
+    /// Tracks which tables need a requested inline flush before ingestion resumes.
+    inline_flush_requests: Arc<PendingInlineFlushRequests>,
     /// Signals that a checkpoint should run before the next streaming batch when safe.
     checkpoint_requested: Arc<AtomicBool>,
 }
@@ -300,6 +303,8 @@ where
         let checkpoint_gate = Arc::new(RwLock::new(()));
         let merge_adjacent_files_requested = Arc::new(AtomicBool::new(false));
         let merge_adjacent_files_dirty = Arc::new(AtomicBool::new(false));
+        let inline_flush_requested = Arc::new(AtomicBool::new(false));
+        let inline_flush_requests = Arc::new(PendingInlineFlushRequests::default());
         let checkpoint_requested = Arc::new(AtomicBool::new(false));
         let mut destination = Self {
             #[cfg(feature = "test-utils")]
@@ -318,6 +323,8 @@ where
             streaming_progress_table_created: Arc::default(),
             merge_adjacent_files_requested: Arc::clone(&merge_adjacent_files_requested),
             merge_adjacent_files_dirty: Arc::clone(&merge_adjacent_files_dirty),
+            inline_flush_requested: Arc::clone(&inline_flush_requested),
+            inline_flush_requests: Arc::clone(&inline_flush_requests),
             checkpoint_requested: Arc::clone(&checkpoint_requested),
         };
         gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
@@ -333,6 +340,8 @@ where
                 },
                 Arc::clone(&checkpoint_gate),
                 Arc::clone(&destination.table_write_slots),
+                Arc::clone(&inline_flush_requested),
+                Arc::clone(&inline_flush_requests),
                 Arc::clone(&checkpoint_requested),
                 Arc::clone(&merge_adjacent_files_requested),
                 Arc::clone(&merge_adjacent_files_dirty),
@@ -447,19 +456,20 @@ where
     /// Copy batches are recorded in the replay marker table so a retry after an
     /// ambiguous post-commit failure can detect already applied rows.
     ///
-    /// Small copy batches may stay inlined until the background maintenance
-    /// worker materializes them after we emit the maintenance notification.
+    /// Small copy batches may stay inlined until maintenance requests a safe
+    /// materialization after we emit the maintenance notification.
     async fn write_table_rows_inner(
         &self,
         table_id: TableId,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let table_name = self.ensure_table_exists(table_id).await?;
-
         if table_rows.is_empty() {
             return Ok(());
         }
 
+        self.maybe_run_requested_inline_flush().await?;
+
+        let table_name = self.ensure_table_exists(table_id).await?;
         let approx_bytes = table_rows
             .iter()
             .map(|row| row.size_hint() as u64)
@@ -503,6 +513,7 @@ where
     /// streaming replay watermark so retries can safely detect already
     /// committed work.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
+        self.maybe_run_requested_inline_flush().await?;
         let merge_adjacent_files_ran = self.maybe_run_requested_merge_adjacent_files().await?;
         if !merge_adjacent_files_ran {
             self.maybe_run_requested_checkpoint().await?;
@@ -595,7 +606,6 @@ where
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     let destination_table_name = table_name.clone();
                     let maintenance_worker = Arc::clone(&self.maintenance_worker);
-                    let merge_adjacent_files_dirty = Arc::clone(&self.merge_adjacent_files_dirty);
 
                     join_set.spawn(async move {
                         let _table_write_permit = table_write_permit;
@@ -877,10 +887,30 @@ where
         })
     }
 
-    /// Acquires shared mutation access so the global checkpoint cannot start in
-    /// the middle of a foreground write sequence.
+    /// Acquires shared mutation access so checkpoint-style maintenance cannot
+    /// start in the middle of a foreground write sequence.
     async fn acquire_mutation_guard(&self) -> OwnedRwLockReadGuard<()> {
         Arc::clone(&self.checkpoint_gate).read_owned().await
+    }
+
+    /// Runs requested inline flushes before foreground ingestion begins when safe.
+    async fn maybe_run_requested_inline_flush(&self) -> EtlResult<()> {
+        if !self.inline_flush_requested.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        crate::ducklake::maintenance::maybe_run_requested_inline_flush(
+            Arc::clone(&self.pool),
+            Arc::clone(&self.checkpoint_gate),
+            Arc::clone(&self.blocking_slots),
+            self.inline_flush_requested.as_ref(),
+            self.inline_flush_requests.as_ref(),
+            self.maintenance_worker
+                .as_ref()
+                .as_ref()
+                .map(|worker| worker.notification_tx.clone()),
+        )
+        .await
     }
 
     /// Runs one requested tier-0 merge before ingesting the next CDC batch when safe.
@@ -1099,54 +1129,6 @@ pub fn table_name_to_ducklake_table_name(table_name: &TableName) -> EtlResult<Du
     try_stringify_table_name(table_name)
 }
 
-/// Flushes inlined user data for one table after the write transaction commits.
-pub(super) fn flush_table_inlined_data(
-    conn: &duckdb::Connection,
-    table_name: &str,
-) -> EtlResult<u64> {
-    let flush_started = Instant::now();
-    let sql = format!(
-        r#"SELECT COALESCE(SUM(rows_flushed), 0)
-         FROM ducklake_flush_inlined_data({}, table_name => {});"#,
-        quote_literal(LAKE_CATALOG),
-        quote_literal(table_name),
-    );
-    let rows_flushed: i64 = conn.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake inlined data flush failed",
-            format_query_error_detail(&sql, &e),
-            source: e
-        )
-    })?;
-    let rows_flushed = rows_flushed.max(0) as u64;
-    let flush_result = if rows_flushed > 0 { "flushed" } else { "noop" };
-    histogram!(
-        ETL_DUCKLAKE_INLINE_FLUSH_ROWS,
-        RESULT_LABEL => flush_result,
-    )
-    .record(rows_flushed as f64);
-    histogram!(
-        ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
-        RESULT_LABEL => flush_result,
-    )
-    .record(flush_started.elapsed().as_secs_f64());
-
-    if rows_flushed > 0 {
-        debug!(
-            table = %table_name,
-            rows_flushed,
-            "ducklake inlined data flushed"
-        );
-    } else {
-        debug!(
-            table = %table_name,
-            "ducklake inlined data already flushed"
-        );
-    }
-    Ok(rows_flushed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1157,9 +1139,11 @@ mod tests {
     use etl::types::{ColumnSchema, Type as PgType};
     use pg_escape::{quote_identifier, quote_literal};
     use std::path::{Path, PathBuf};
+    use std::time::Instant;
     use tempfile::TempDir;
     use url::Url;
 
+    use crate::ducklake::maintenance::flush_table_inlined_data;
     use crate::ducklake::metrics::{
         query_catalog_maintenance_metrics_blocking, query_table_storage_metrics_blocking,
     };
