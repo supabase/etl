@@ -6,7 +6,7 @@ use crate::configs::serde::{
 use crate::db;
 use crate::db::destinations::Destination;
 use crate::db::images::Image;
-use crate::db::replicators::{ReplicatorsDbError, create_replicator};
+use crate::db::replicators::{Replicator, ReplicatorsDbError, create_replicator};
 use crate::db::sources::Source;
 use crate::routes::pipelines::PipelineError;
 use etl_postgres::replication::{health, schema, slots, state, table_mappings};
@@ -452,35 +452,26 @@ where
 }
 
 pub async fn read_pipeline_components(
-    txn: &mut PgTransaction<'_>,
+    connection: &mut PgConnection,
     tenant_id: &str,
     pipeline_id: i64,
     encryption_key: &EncryptionKey,
-) -> Result<
-    (
-        Pipeline,
-        db::replicators::Replicator,
-        Image,
-        Source,
-        Destination,
-    ),
-    PipelineError,
-> {
-    let pipeline = read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+) -> Result<(Pipeline, Replicator, Image, Source, Destination), PipelineError> {
+    let pipeline = read_pipeline(&mut *connection, tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
     let replicator =
-        db::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
+        db::replicators::read_replicator_by_pipeline_id(&mut *connection, tenant_id, pipeline_id)
             .await?
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
-    let image = db::images::read_image_by_replicator_id(txn.deref_mut(), replicator.id)
+    let image = db::images::read_image_by_replicator_id(&mut *connection, replicator.id)
         .await?
         .ok_or(PipelineError::ImageNotFound(replicator.id))?;
 
     let source = db::sources::read_source(
-        txn.deref_mut(),
+        &mut *connection,
         tenant_id,
         pipeline.source_id,
         encryption_key,
@@ -489,7 +480,7 @@ pub async fn read_pipeline_components(
     .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
     let destination = db::destinations::read_destination(
-        txn.deref_mut(),
+        &mut *connection,
         tenant_id,
         pipeline.destination_id,
         encryption_key,

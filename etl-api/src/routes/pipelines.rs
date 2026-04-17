@@ -833,7 +833,7 @@ pub async fn start_pipeline(
 
     let mut txn = pool.begin().await?;
     let (pipeline, replicator, image, source, destination) =
-        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+        read_pipeline_components(txn.deref_mut(), tenant_id, pipeline_id, &encryption_key).await?;
 
     let tls_config = trusted_root_certs_cache
         .get_tls_config(api_config.source.tls_enabled)
@@ -1333,7 +1333,7 @@ pub async fn update_pipeline_version(
 
     let mut txn = pool.begin().await?;
     let (pipeline, replicator, current_image, source, destination) =
-        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+        read_pipeline_components(txn.deref_mut(), tenant_id, pipeline_id, &encryption_key).await?;
 
     // Only allow updating to the current default image. The client must provide the version id and
     // it must match the default version id. If it does not, we consider this a race condition and we
