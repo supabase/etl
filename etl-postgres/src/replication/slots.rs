@@ -176,6 +176,10 @@ pub async fn delete_pipeline_replication_slots(
     const MAX_RETRIES: u32 = 3;
     const INITIAL_BACKOFF_MS: u64 = 100;
 
+    if slot_names.is_empty() {
+        return Ok(());
+    }
+
     for attempt in 0..MAX_RETRIES {
         // Phase 1: Terminate active walsender processes for these slots
         let terminate_query = String::from(
