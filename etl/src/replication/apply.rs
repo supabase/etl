@@ -2885,7 +2885,11 @@ mod table_sync_worker {
 
 /// Retrieves a table schema from the schema store by table ID and snapshot.
 ///
-/// Returns an error if the schema is not found in the store.
+/// When `used_bootstrap_snapshot` is `false`, the returned schema must match the
+/// requested snapshot exactly. When it is `true`, the lookup is allowed to
+/// resolve to an older schema version because the first `RELATION` message may
+/// arrive before shared per-table protocol state has been established, but it
+/// must never resolve to a newer schema than requested.
 async fn get_table_schema<S>(
     schema_store: &S,
     table_id: &TableId,
@@ -2909,24 +2913,35 @@ where
             )
         })?;
 
-    if table_schema.snapshot_id != snapshot_id {
-        if used_bootstrap_snapshot {
-            warn!(
+    if used_bootstrap_snapshot {
+        if table_schema.snapshot_id > snapshot_id {
+            bail!(
+                ErrorKind::InvalidState,
+                "Bootstrap table schema snapshot exceeded requested snapshot",
+                format!(
+                    "Bootstrap schema lookup for table {} resolved to snapshot {} which is newer than requested snapshot {}",
+                    table_id, table_schema.snapshot_id, snapshot_id
+                )
+            );
+        }
+
+        if table_schema.snapshot_id != snapshot_id {
+            info!(
                 table_id = %table_id,
                 requested_snapshot_id = %snapshot_id,
                 resolved_snapshot_id = %table_schema.snapshot_id,
                 "schema lookup returned an older schema because the first relation message used the bootstrap snapshot"
             );
-        } else {
-            bail!(
-                ErrorKind::InvalidState,
-                "Table schema snapshot mismatch",
-                format!(
-                    "Table schema for table {} resolved to snapshot {} when snapshot {} was required",
-                    table_id, table_schema.snapshot_id, snapshot_id
-                )
-            );
         }
+    } else if table_schema.snapshot_id != snapshot_id {
+        bail!(
+            ErrorKind::InvalidState,
+            "Table schema snapshot mismatch",
+            format!(
+                "Table schema for table {} resolved to snapshot {} when snapshot {} was required",
+                table_id, table_schema.snapshot_id, snapshot_id
+            )
+        );
     }
 
     Ok(table_schema)
