@@ -1165,6 +1165,14 @@ where
         // If there was an error in the flushing, we return it immediately.
         result?;
 
+        let metadata = metadata.ok_or_else(|| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "Async flush result metadata missing",
+                "Destination flush completed without the needed metadata"
+            )
+        })?;
+
         counter!(
             ETL_EVENTS_PROCESSED_TOTAL,
             WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),

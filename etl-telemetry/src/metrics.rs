@@ -34,7 +34,11 @@ static PROMETHEUS_HANDLE: Mutex<Option<PrometheusHandle>> = Mutex::new(None);
 /// - Control the metrics endpoint path (e.g., `/metrics`, `/v1/metrics`).
 /// - Apply middleware or authentication to the metrics endpoint.
 pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
-    let mut prometheus_handle = PROMETHEUS_HANDLE.lock().unwrap();
+    let mut prometheus_handle = PROMETHEUS_HANDLE
+        .lock()
+        // We still get the poisoned lock since we assume that a poisoned lock doesn't
+        // invalidate the handle contents.
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     if let Some(handle) = &*prometheus_handle {
         return Ok(handle.clone());

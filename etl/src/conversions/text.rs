@@ -21,7 +21,7 @@ use crate::types::{ArrayCell, Cell};
 /// For complex types like arrays, empty vectors are returned. For temporal types,
 /// minimal valid timestamps are used (year 1, month 1, day 1).
 pub fn default_value_for_type(typ: &Type) -> EtlResult<Cell> {
-    const DEFAULT_DATE: NaiveDate = NaiveDate::from_ymd_opt(1, 1, 1).unwrap();
+    const DEFAULT_DATE: NaiveDate = NaiveDate::MIN;
     const DEFAULT_TIMESTAMP: NaiveDateTime = NaiveDateTime::new(DEFAULT_DATE, NaiveTime::MIN);
     const DEFAULT_TIMESTAMPTZ: DateTime<Utc> =
         DateTime::<Utc>::from_naive_utc_and_offset(DEFAULT_TIMESTAMP, Utc);

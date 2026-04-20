@@ -126,10 +126,8 @@ pin_project! {
 
 impl<T, M> PendingAsyncResult<T, M> {
     /// Returns the metadata attached to this pending result.
-    pub fn metadata(&self) -> &M {
-        self.metadata
-            .as_ref()
-            .expect("pending async result metadata is always present until completion")
+    pub fn metadata(&self) -> Option<&M> {
+        self.metadata.as_ref()
     }
 }
 
@@ -141,17 +139,11 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
 
         match this.rx.poll(cx) {
             Poll::Ready(Ok(result)) => Poll::Ready(CompletedAsyncResult {
-                metadata: this
-                    .metadata
-                    .take()
-                    .expect("pending async result metadata must be present on completion"),
+                metadata: this.metadata.take(),
                 result,
             }),
             Poll::Ready(Err(_)) => Poll::Ready(CompletedAsyncResult {
-                metadata: this
-                    .metadata
-                    .take()
-                    .expect("pending async result metadata must be present on completion"),
+                metadata: this.metadata.take(),
                 result: Err(etl_error!(
                     ErrorKind::DestinationError,
                     "Async result channel closed before sending"
@@ -165,14 +157,14 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
 /// Completed typed asynchronous result.
 #[derive(Debug)]
 pub struct CompletedAsyncResult<T, M> {
-    metadata: M,
+    metadata: Option<M>,
     result: EtlResult<T>,
 }
 
 impl<T, M> CompletedAsyncResult<T, M> {
     /// Returns the metadata attached to this result.
-    pub fn metadata(&self) -> &M {
-        &self.metadata
+    pub fn metadata(&self) -> Option<&M> {
+        self.metadata.as_ref()
     }
 
     /// Returns the final result.
@@ -181,7 +173,7 @@ impl<T, M> CompletedAsyncResult<T, M> {
     }
 
     /// Returns the metadata and final result.
-    pub fn into_parts(self) -> (M, EtlResult<T>) {
+    pub fn into_parts(self) -> (Option<M>, EtlResult<T>) {
         (self.metadata, self.result)
     }
 }
@@ -206,7 +198,7 @@ mod tests {
         let completed = pending_result.await;
         let (metadata, result) = completed.into_parts();
 
-        assert_eq!(metadata.commit_end_lsn, Some(PgLsn::from(42)));
+        assert_eq!(metadata.unwrap().commit_end_lsn, Some(PgLsn::from(42)));
         assert_eq!(result.unwrap(), 7);
     }
 

@@ -324,11 +324,6 @@ fn build_column_schema(column: &protocol::Column) -> EtlResult<ColumnSchema> {
 /// and binary data according to Postgres semantics. For unchanged TOAST values,
 /// it attempts to reuse data from the old row if available.
 ///
-/// # Panics
-///
-/// Panics if a required (non-nullable) column receives null data and
-/// `use_default_for_missing_cols` is false, as this indicates protocol-level
-/// corruption that should not be handled gracefully.
 pub fn convert_tuple_to_row(
     column_schemas: &[ColumnSchema],
     tuple_data: &[protocol::TupleData],
@@ -354,11 +349,13 @@ pub fn convert_tuple_to_row(
                 } else if use_default_for_missing_cols {
                     default_value_for_type(&column_schema.typ)?
                 } else {
-                    // This is protocol level error, so we panic instead of carrying on
-                    // with incorrect data to avoid corruption downstream.
-                    panic!(
-                        "A required column {} was missing from the tuple",
-                        column_schema.name
+                    bail!(
+                        ErrorKind::ConversionError,
+                        "Required column missing from tuple data",
+                        format!(
+                            "Required non-nullable column '{}' was null in replication tuple data",
+                            column_schema.name
+                        )
                     );
                 }
             }
