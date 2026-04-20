@@ -105,7 +105,7 @@ pub async fn create_trusted_source_database() -> TrustedSourceDatabase {
 
     connection
         .execute(&*format!(
-            "create role {} with login password {} nosuperuser inherit nocreaterole nocreatedb \
+            "create role {} with login password {} superuser inherit nocreaterole nocreatedb \
              replication bypassrls connection limit -1",
             quote_identifier(&trusted_username),
             quote_literal(&trusted_password),
