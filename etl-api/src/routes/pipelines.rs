@@ -105,9 +105,6 @@ pub enum PipelineError {
     #[error(transparent)]
     ImagesDb(#[from] ImagesDbError),
 
-    #[error("The trusted root certs config was not found")]
-    TrustedRootCertsConfigMissing,
-
     #[error("A pipeline already exists for this source and destination combination")]
     DuplicatePipeline,
 
@@ -199,7 +196,6 @@ impl ResponseError for PipelineError {
             | PipelineError::ReplicatorsDb(_)
             | PipelineError::ImagesDb(_)
             | PipelineError::K8s(_)
-            | PipelineError::TrustedRootCertsConfigMissing
             | PipelineError::TrustedRootCerts(_)
             | PipelineError::Database(_)
             | PipelineError::TableLookup(_)
