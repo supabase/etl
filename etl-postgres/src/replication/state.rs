@@ -250,8 +250,6 @@ where
 /// Gets all table IDs that have replication state for a given pipeline.
 ///
 /// Returns a vector of table IDs that are currently being replicated for the specified pipeline.
-/// This is useful for operations that need to act on all tables in a pipeline, such as
-/// cleaning up replication slots.
 pub async fn get_pipeline_table_ids<'c, E>(
     executor: E,
     pipeline_id: i64,

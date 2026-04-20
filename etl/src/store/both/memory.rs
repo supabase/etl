@@ -1,14 +1,17 @@
-use etl_postgres::types::{TableId, TableSchema};
+use etl_postgres::types::{SnapshotId, TableId, TableSchema};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
+use crate::state::destination_metadata::{
+    AppliedDestinationTableMetadata, DestinationTableMetadata,
+};
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
-use crate::store::state::{StateStore, TableMappings, TableReplicationStates};
+use crate::store::state::{DestinationTablesMetadata, StateStore, TableReplicationStates};
 
 /// Inner state of [`MemoryStore`]
 #[derive(Debug)]
@@ -20,13 +23,10 @@ struct Inner {
     /// This is an append-only log that grows over time and provides visibility into
     /// table state evolution. Entries are chronologically ordered.
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
-    /// Cached table schema definitions, reference-counted for efficient sharing.
-    /// Schemas are expensive to fetch from Postgres, so they're cached here
-    /// once retrieved and shared via Arc across the application.
-    table_schemas: HashMap<TableId, Arc<TableSchema>>,
-    /// Mapping from table IDs to human-readable table names for easier debugging
-    /// and logging. These mappings are established during schema discovery.
-    table_mappings: TableMappings,
+    /// Cached table schemas keyed by (TableId, SnapshotId) for versioning support.
+    table_schemas: HashMap<(TableId, SnapshotId), Arc<TableSchema>>,
+    /// Cached destination table metadata indexed by table ID.
+    destination_tables_metadata: DestinationTablesMetadata,
 }
 
 /// In-memory storage for ETL pipeline state and schema information.
@@ -36,7 +36,7 @@ struct Inner {
 /// ideal for testing, development, and scenarios where persistence is not required.
 ///
 /// All state information including table replication phases, schema definitions,
-/// and table mappings are stored in memory and will be lost on process restart.
+/// and destination table metadata are stored in memory and will be lost on process restart.
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
@@ -53,7 +53,7 @@ impl MemoryStore {
             table_replication_states: Arc::new(BTreeMap::new()),
             table_state_history: HashMap::new(),
             table_schemas: HashMap::new(),
-            table_mappings: Arc::new(HashMap::new()),
+            destination_tables_metadata: Arc::new(HashMap::new()),
         };
 
         Self {
@@ -140,41 +140,68 @@ impl StateStore for MemoryStore {
         Ok(previous_state)
     }
 
-    async fn get_table_mapping(&self, source_table_id: &TableId) -> EtlResult<Option<String>> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.table_mappings.get(source_table_id).cloned())
-    }
-
-    async fn get_table_mappings(&self) -> EtlResult<TableMappings> {
-        let inner = self.inner.lock().await;
-
-        Ok(Arc::clone(&inner.table_mappings))
-    }
-
-    async fn load_table_mappings(&self) -> EtlResult<usize> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.table_mappings.len())
-    }
-
-    async fn store_table_mapping(
+    async fn get_destination_table_metadata(
         &self,
-        source_table_id: TableId,
-        destination_table_id: String,
+        table_id: TableId,
+    ) -> EtlResult<Option<DestinationTableMetadata>> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.destination_tables_metadata.get(&table_id).cloned())
+    }
+
+    async fn get_applied_destination_table_metadata(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
+        let inner = self.inner.lock().await;
+
+        inner
+            .destination_tables_metadata
+            .get(&table_id)
+            .cloned()
+            .map(DestinationTableMetadata::into_applied)
+            .transpose()
+    }
+
+    async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.destination_tables_metadata.len())
+    }
+
+    async fn store_destination_table_metadata(
+        &self,
+        table_id: TableId,
+        metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
-        Arc::make_mut(&mut inner.table_mappings).insert(source_table_id, destination_table_id);
+        Arc::make_mut(&mut inner.destination_tables_metadata).insert(table_id, metadata);
 
         Ok(())
     }
 }
 
 impl SchemaStore for MemoryStore {
-    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+    /// Returns the table schema for the given table at the specified snapshot point.
+    ///
+    /// Returns the schema version with the largest snapshot_id <= the requested snapshot_id.
+    /// For MemoryStore, this only looks in the in-memory cache.
+    async fn get_table_schema(
+        &self,
+        table_id: &TableId,
+        snapshot_id: SnapshotId,
+    ) -> EtlResult<Option<Arc<TableSchema>>> {
         let inner = self.inner.lock().await;
 
-        Ok(inner.table_schemas.get(table_id).cloned())
+        // Find the best matching schema (largest snapshot_id <= requested).
+        let best_match = inner
+            .table_schemas
+            .iter()
+            .filter(|((tid, sid), _)| *tid == *table_id && *sid <= snapshot_id)
+            .max_by_key(|((_, sid), _)| *sid)
+            .map(|(_, schema)| schema.clone());
+
+        Ok(best_match)
     }
 
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
@@ -190,12 +217,11 @@ impl SchemaStore for MemoryStore {
     }
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
-        let table_schema = Arc::new(table_schema);
         let mut inner = self.inner.lock().await;
-        inner
-            .table_schemas
-            .insert(table_schema.id, table_schema.clone());
 
+        let key = (table_schema.id, table_schema.snapshot_id);
+        let table_schema = Arc::new(table_schema);
+        inner.table_schemas.insert(key, table_schema.clone());
         Ok(table_schema)
     }
 }
@@ -206,8 +232,9 @@ impl CleanupStore for MemoryStore {
 
         Arc::make_mut(&mut inner.table_replication_states).remove(&table_id);
         inner.table_state_history.remove(&table_id);
-        inner.table_schemas.remove(&table_id);
-        Arc::make_mut(&mut inner.table_mappings).remove(&table_id);
+        // Remove all schema versions for this table
+        inner.table_schemas.retain(|(tid, _), _| *tid != table_id);
+        Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
 
         Ok(())
     }

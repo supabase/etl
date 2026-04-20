@@ -1,6 +1,7 @@
 use etl_config::Environment;
 use etl_config::shared::{ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets, TlsConfig};
 use secrecy::ExposeSecret;
+use thiserror::Error;
 
 use crate::configs::destination::{StoredDestinationConfig, StoredIcebergConfig};
 use crate::configs::log::LogLevel;
@@ -8,11 +9,23 @@ use crate::configs::pipeline::StoredPipelineConfig;
 use crate::configs::source::StoredSourceConfig;
 use crate::db::destinations::Destination;
 use crate::db::images::Image;
-use crate::db::pipelines::Pipeline;
+use crate::db::pipelines::{Pipeline, PipelineDeletion};
 use crate::db::replicators::Replicator;
 use crate::db::sources::Source;
-use crate::k8s::{DestinationType, K8sClient, PodStatus, ReplicatorConfigMapFile};
-use crate::routes::pipelines::PipelineError;
+use crate::k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile};
+
+/// Errors raised while preparing or applying Kubernetes pipeline resources.
+#[derive(Debug, Error)]
+pub enum K8sCoreError {
+    #[error("A K8s error occurred: {0}")]
+    K8s(#[from] K8sError),
+
+    #[error("invalid destination config")]
+    InvalidConfig(#[from] serde_json::Error),
+
+    #[error("Could not load app environment")]
+    MissingEnvironment,
+}
 
 /// Secret types required by different destination configurations.
 ///
@@ -68,12 +81,12 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     destination: Destination,
     supabase_api_url: Option<&str>,
     tls_config: TlsConfig,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
     let secrets = build_secrets_from_configs(&source.config, &destination.config);
 
-    let environment = Environment::load().map_err(|_| PipelineError::MissingEnvironment)?;
+    let environment = Environment::load().map_err(|_| K8sCoreError::MissingEnvironment)?;
 
     let destination_type = (&destination.config).into();
 
@@ -119,7 +132,7 @@ pub async fn delete_pipeline_resources_in_k8s(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
     replicator: Replicator,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
     delete_dynamic_replicator_secrets(k8s_client, &prefix).await?;
@@ -134,11 +147,45 @@ pub async fn is_replicator_pod_stopped(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
     replicator_id: i64,
-) -> Result<bool, PipelineError> {
+) -> Result<bool, K8sCoreError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator_id);
     let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
 
     Ok(matches!(pod_status, PodStatus::Stopped))
+}
+
+/// Returns `true` when the replicator is active in Kubernetes.
+pub async fn is_replicator_active(
+    k8s_client: &dyn K8sClient,
+    tenant_id: &str,
+    replicator_id: i64,
+) -> Result<bool, K8sCoreError> {
+    let prefix = create_k8s_object_prefix(tenant_id, replicator_id);
+    let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
+
+    Ok(matches!(
+        pod_status,
+        PodStatus::Starting
+            | PodStatus::Started
+            | PodStatus::Stopping
+            | PodStatus::Failed
+            | PodStatus::Unknown
+    ))
+}
+
+/// Returns the first active pipeline id, if any pipeline is currently active in Kubernetes.
+pub async fn first_active_pipeline_id(
+    k8s_client: &dyn K8sClient,
+    tenant_id: &str,
+    pipelines: &[PipelineDeletion],
+) -> Result<Option<i64>, K8sCoreError> {
+    for pipeline in pipelines {
+        if is_replicator_active(k8s_client, tenant_id, pipeline.replicator_id).await? {
+            return Ok(Some(pipeline.id));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Extracts and combines credentials from source and destination configurations.
@@ -239,7 +286,7 @@ async fn create_or_update_dynamic_replicator_secrets(
     k8s_client: &dyn K8sClient,
     prefix: &str,
     secrets: Secrets,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     match secrets {
         Secrets::None => {}
         Secrets::BigQuery {
@@ -308,7 +355,7 @@ async fn create_or_update_replicator_config(
     prefix: &str,
     config: ReplicatorConfigWithoutSecrets,
     environment: Environment,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     let env_config = serde_json::to_string(&config)?;
 
     let files = vec![
@@ -343,7 +390,7 @@ async fn create_or_update_replicator_stateful_set(
     environment: Environment,
     destination_type: DestinationType,
     log_level: LogLevel,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     k8s_client
         .create_or_update_replicator_stateful_set(
             prefix,
@@ -366,7 +413,7 @@ async fn create_or_update_replicator_stateful_set(
 async fn delete_dynamic_replicator_secrets(
     k8s_client: &dyn K8sClient,
     prefix: &str,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     k8s_client.delete_postgres_secret(prefix).await?;
 
     // Although it won't happen that there are both bq and iceberg secrets at the same time
@@ -386,7 +433,7 @@ async fn delete_dynamic_replicator_secrets(
 async fn delete_replicator_config(
     k8s_client: &dyn K8sClient,
     prefix: &str,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     k8s_client.delete_replicator_config_map(prefix).await?;
 
     Ok(())
@@ -396,7 +443,7 @@ async fn delete_replicator_config(
 async fn delete_replicator_stateful_set(
     k8s_client: &dyn K8sClient,
     prefix: &str,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     k8s_client.delete_replicator_stateful_set(prefix).await?;
 
     Ok(())
@@ -416,14 +463,24 @@ mod tests {
     use crate::configs::source::StoredSourceConfig;
     use crate::k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile};
 
-    #[derive(Debug, Default, Clone)]
+    #[derive(Debug, Clone)]
     struct RecordingK8sClient {
         calls: Arc<Mutex<Vec<String>>>,
+        pod_status: PodStatus,
     }
 
     impl RecordingK8sClient {
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Default for RecordingK8sClient {
+        fn default() -> Self {
+            Self {
+                calls: Arc::default(),
+                pod_status: PodStatus::Stopped,
+            }
         }
     }
 
@@ -523,8 +580,28 @@ mod tests {
         }
 
         async fn get_replicator_pod_status(&self, _prefix: &str) -> Result<PodStatus, K8sError> {
-            Ok(PodStatus::Started)
+            Ok(self.pod_status)
         }
+    }
+
+    #[tokio::test]
+    async fn test_failed_pod_is_considered_active_for_deletion_guards() {
+        let client = RecordingK8sClient {
+            pod_status: PodStatus::Failed,
+            ..Default::default()
+        };
+        let pipeline = PipelineDeletion {
+            id: 1,
+            source_id: 2,
+            destination_id: 3,
+            replicator_id: 4,
+        };
+
+        let is_active = is_replicator_active(&client, "tenant-42", pipeline.replicator_id)
+            .await
+            .expect("failed to inspect pipeline status");
+
+        assert!(is_active);
     }
 
     #[tokio::test]

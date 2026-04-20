@@ -30,6 +30,7 @@ metrics = { workspace = true }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
+rand = { workspace = true, features = ["thread_rng"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive", "alloc"] }
 serde_json = { workspace = true, features = ["std"] }
@@ -46,8 +47,6 @@ x509-cert = { workspace = true, default-features = false }
 [dev-dependencies]
 etl-postgres = { workspace = true, features = ["tokio", "replication", "test-utils"] }
 etl-telemetry = { workspace = true }
-
-rand = { workspace = true, features = ["thread_rng"] }
 
 [[test]]
 name = "main"
