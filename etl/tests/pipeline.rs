@@ -2096,7 +2096,8 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     let mut duplicate_database = database.duplicate().await;
 
     // Wait for both tables to reach Ready state.
-    // We purposefully after having started, to not drive workers behavior artificially.
+    // We purposefully register these after having started the pipeline,
+    // to avoid driving workers behavior artificially.
     let users_ready_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
