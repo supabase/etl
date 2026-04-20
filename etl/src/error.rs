@@ -11,7 +11,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::conversions::numeric::ParseNumericError;
+use crate::conversions::ParseNumericError;
 
 /// Convenient result type for ETL operations using [`EtlError`] as the error type.
 ///
@@ -975,12 +975,12 @@ impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlErro
     }
 }
 
-/// Converts [`etl_postgres::types::SchemaError`] to [`EtlError`] with [`ErrorKind::CorruptedTableSchema`].
-impl From<etl_postgres::types::SchemaError> for EtlError {
+/// Converts [`crate::types::SchemaError`] to [`EtlError`] with [`ErrorKind::CorruptedTableSchema`].
+impl From<crate::types::SchemaError> for EtlError {
     #[track_caller]
-    fn from(err: etl_postgres::types::SchemaError) -> EtlError {
+    fn from(err: crate::types::SchemaError) -> EtlError {
         match err {
-            etl_postgres::types::SchemaError::UnknownReplicatedColumns(columns) => {
+            crate::types::SchemaError::UnknownReplicatedColumns(columns) => {
                 EtlError::from_components(
                     ErrorKind::CorruptedTableSchema,
                     Cow::Borrowed(
@@ -995,16 +995,14 @@ impl From<etl_postgres::types::SchemaError> for EtlError {
                     None,
                 )
             }
-            etl_postgres::types::SchemaError::InvalidSnapshotId(lsn_str) => {
-                EtlError::from_components(
-                    ErrorKind::CorruptedTableSchema,
-                    Cow::Borrowed("Invalid snapshot id"),
-                    Some(Cow::Owned(format!(
-                        "Failed to parse snapshot '{lsn_str}' as PgLsn."
-                    ))),
-                    None,
-                )
-            }
+            crate::types::SchemaError::InvalidSnapshotId(lsn_str) => EtlError::from_components(
+                ErrorKind::CorruptedTableSchema,
+                Cow::Borrowed("Invalid snapshot id"),
+                Some(Cow::Owned(format!(
+                    "Failed to parse snapshot '{lsn_str}' as PgLsn."
+                ))),
+                None,
+            ),
         }
     }
 }

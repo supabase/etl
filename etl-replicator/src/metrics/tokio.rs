@@ -233,7 +233,7 @@ fn register_metrics() {
 ///
 /// Stable metrics are always exported. Additional metrics guarded by `tokio_unstable`
 /// are exported only when the binary is compiled with that cfg enabled.
-pub fn spawn_tokio_metrics_task() {
+pub(super) fn spawn_tokio_metrics_task() {
     register_metrics();
 
     let handle = tokio::runtime::Handle::current();

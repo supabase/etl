@@ -2,7 +2,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use uuid::Uuid;
 
 use crate::bail;
-use crate::conversions::numeric::PgNumeric;
+use crate::conversions::PgNumeric;
 use crate::error::{ErrorKind, EtlError};
 
 macro_rules! convert_array_variant {

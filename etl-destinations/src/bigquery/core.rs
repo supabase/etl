@@ -45,17 +45,17 @@ struct SequencedBigQueryTableId(BigQueryTableId, u64);
 
 impl SequencedBigQueryTableId {
     /// Creates a new sequenced table ID starting at version 0.
-    pub fn new(table_id: BigQueryTableId) -> Self {
+    fn new(table_id: BigQueryTableId) -> Self {
         Self(table_id, 0)
     }
 
     /// Returns the next version of this sequenced table ID.
-    pub fn next(&self) -> Self {
+    fn next(&self) -> Self {
         Self(self.0.clone(), self.1 + 1)
     }
 
     /// Extracts the base BigQuery table ID without the sequence number.
-    pub fn to_bigquery_table_id(&self) -> BigQueryTableId {
+    fn to_bigquery_table_id(&self) -> BigQueryTableId {
         self.0.clone()
     }
 }

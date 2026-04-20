@@ -7,7 +7,9 @@ use crate::error::{ReplicatorError, ReplicatorResult};
 ///
 /// This must run after the Tokio runtime has started because ConfigCat spins
 /// up its auto-polling task during client construction.
-pub fn init(replicator_config: &ReplicatorConfig) -> ReplicatorResult<Option<configcat::Client>> {
+pub(crate) fn init(
+    replicator_config: &ReplicatorConfig,
+) -> ReplicatorResult<Option<configcat::Client>> {
     let configcat_sdk_key = replicator_config
         .supabase
         .as_ref()

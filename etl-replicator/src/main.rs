@@ -24,14 +24,14 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(all(target_os = "linux", not(target_env = "msvc")))]
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "malloc_conf")]
-pub static malloc_conf: &[u8] =
+static malloc_conf: &[u8] =
     b"narenas:8,background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
 
 /// Jemalloc configuration for macOS (uses prefixed symbol since unprefixed not supported).
 #[cfg(all(target_os = "macos", not(target_env = "msvc")))]
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "_rjem_malloc_conf")]
-pub static malloc_conf: &[u8] =
+static malloc_conf: &[u8] =
     b"narenas:8,background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
 
 use crate::core::start_replicator_with_config;
@@ -76,22 +76,22 @@ fn try_main() -> ReplicatorResult<()> {
     // the cost of building the async runtime unless startup can actually proceed.
 
     // Install rustls crypto provider before any TLS operations.
-    init::crypto::init();
+    init::init_crypto();
 
     // Load the replicator config.
-    let replicator_config = init::config::init()?;
+    let replicator_config = init::init_config()?;
 
     // Keep the tracing and sentry guards alive until process shutdown.
-    let _log_flusher = init::tracing::init(&replicator_config)?;
-    let _sentry_guard = init::sentry::init(&replicator_config)?;
+    let _log_flusher = init::init_tracing(&replicator_config)?;
+    let _sentry_guard = init::init_sentry(&replicator_config)?;
 
     info!("replicator bootstrap initialized");
 
     // We prepare the notification client used to send errors.
-    let notification_client = init::error_notification::init(&replicator_config);
+    let notification_client = init::init_error_notification(&replicator_config);
 
     // We initialize the Prometheus recorder.
-    init::metrics::init(&replicator_config)?;
+    init::init_metrics(&replicator_config)?;
 
     debug!("starting tokio runtime");
 
@@ -119,7 +119,7 @@ async fn async_main(
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
     // Keep the feature flags client alive for the full async runtime lifetime.
-    let _feature_flags_client = init::feature_flags::init(&replicator_config)?;
+    let _feature_flags_client = init::init_feature_flags(&replicator_config)?;
 
     info!("replicator bootstrap completed");
 

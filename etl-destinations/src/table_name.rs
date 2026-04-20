@@ -8,7 +8,7 @@ use etl::{bail, etl_error};
 /// Leading or trailing underscores would make downstream parsing ambiguous, so those are rejected.
 /// For example, `schema = "a"` and `table = "_b"` would encode to `a___b`, which cannot be
 /// unambiguously distinguished from other schema/table combinations under this format.
-pub fn try_stringify_table_name(table_name: &TableName) -> EtlResult<String> {
+pub(crate) fn try_stringify_table_name(table_name: &TableName) -> EtlResult<String> {
     let escaped_schema = stringify_table_name_component(&table_name.schema, "schema name")?;
     let escaped_table = stringify_table_name_component(&table_name.name, "table name")?;
 
@@ -23,7 +23,7 @@ fn stringify_table_name_component(value: &str, component_name: &str) -> EtlResul
 }
 
 /// Validates that a table name component can be encoded with underscore escaping.
-pub fn validate_table_name_component_for_underscore_encoding(
+fn validate_table_name_component_for_underscore_encoding(
     value: &str,
     component_name: &str,
 ) -> EtlResult<()> {

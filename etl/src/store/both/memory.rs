@@ -1,4 +1,3 @@
-use etl_postgres::types::{SnapshotId, TableId, TableSchema};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -12,6 +11,7 @@ use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
 use crate::store::state::{DestinationTablesMetadata, StateStore, TableReplicationStates};
+use crate::types::{SnapshotId, TableId, TableSchema};
 
 /// Inner state of [`MemoryStore`]
 #[derive(Debug)]

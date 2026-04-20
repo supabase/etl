@@ -1,8 +1,4 @@
-use etl_config::shared::{
-    ETL_MIGRATION_OPTIONS, ETL_STATE_MANAGEMENT_OPTIONS, IntoConnectOptions, PgConnectionConfig,
-};
 use etl_postgres::replication::{destination_metadata, schema, state};
-use etl_postgres::types::{ReplicationMask, SnapshotId, TableId, TableSchema};
 use metrics::gauge;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
@@ -13,6 +9,9 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
+use crate::config::{
+    ETL_MIGRATION_OPTIONS, ETL_STATE_MANAGEMENT_OPTIONS, IntoConnectOptions, PgConnectionConfig,
+};
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 use crate::metrics::{ETL_TABLES_TOTAL, PHASE_LABEL};
@@ -23,7 +22,7 @@ use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
 use crate::store::state::{DestinationTablesMetadata, StateStore, TableReplicationStates};
-use crate::types::PipelineId;
+use crate::types::{PipelineId, ReplicationMask, SnapshotId, TableId, TableSchema};
 
 /// Maximum number of connections in the pool.
 ///

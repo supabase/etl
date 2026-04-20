@@ -30,7 +30,7 @@ use tracing::{error, info, warn};
 ///
 /// Initializes the state store, creates the appropriate destination based on
 /// configuration, and starts the pipeline.
-pub async fn start_replicator_with_config(
+pub(crate) async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
@@ -192,7 +192,7 @@ fn set_destination_scope<D: Destination>() {
     set_destination_tag(D::name());
 }
 
-pub fn create_props(
+fn create_props(
     s3_access_key_id: String,
     s3_secret_access_key: String,
     s3_endpoint: String,

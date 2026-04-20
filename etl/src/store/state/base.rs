@@ -1,4 +1,3 @@
-use etl_postgres::types::TableId;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::Arc;
@@ -8,12 +7,13 @@ use crate::state::destination_metadata::{
     AppliedDestinationTableMetadata, DestinationTableMetadata,
 };
 use crate::state::table::TableReplicationPhase;
+use crate::types::TableId;
 
 /// Arc-wrapped dictionary of table replication states.
 pub type TableReplicationStates = Arc<BTreeMap<TableId, TableReplicationPhase>>;
 
 /// Arc-wrapped dictionary of destination table metadata.
-pub type DestinationTablesMetadata = Arc<HashMap<TableId, DestinationTableMetadata>>;
+pub(crate) type DestinationTablesMetadata = Arc<HashMap<TableId, DestinationTableMetadata>>;
 
 /// Trait for storing and retrieving table replication state and destination metadata.
 ///

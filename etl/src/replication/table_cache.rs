@@ -25,30 +25,30 @@ use tracing::warn;
 
 /// Shared per-table protocol state used to decode logical replication messages.
 #[derive(Debug, Clone)]
-pub struct SharedTableState {
+pub(crate) struct SharedTableState {
     /// The latest schema snapshot known for the table.
-    pub snapshot_id: SnapshotId,
+    pub(crate) snapshot_id: SnapshotId,
     /// The replication mask for [`SharedTableState::snapshot_id`], if a `RELATION`
     /// message has already been processed for that snapshot.
-    pub replication_mask: Option<ReplicationMask>,
+    pub(crate) replication_mask: Option<ReplicationMask>,
 }
 
 /// Thread-safe container for shared per-table protocol state.
 #[derive(Debug, Clone, Default)]
-pub struct SharedTableCache {
+pub(crate) struct SharedTableCache {
     inner: Arc<RwLock<HashMap<TableId, SharedTableState>>>,
 }
 
 impl SharedTableCache {
     /// Creates a new empty [`SharedTableCache`] container.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     /// Returns the shared state for a table, if present.
-    pub async fn get(&self, table_id: &TableId) -> Option<SharedTableState> {
+    pub(crate) async fn get(&self, table_id: &TableId) -> Option<SharedTableState> {
         let guard = self.inner.read().await;
         guard.get(table_id).cloned()
     }
@@ -57,7 +57,7 @@ impl SharedTableCache {
     ///
     /// Pass `Some(mask)` to refresh the replication mask for that snapshot, or `None`
     /// to clear it when a newer schema snapshot invalidates the old `RELATION` state.
-    pub async fn upsert(
+    pub(crate) async fn upsert(
         &self,
         table_id: TableId,
         snapshot_id: SnapshotId,

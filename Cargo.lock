@@ -1880,9 +1880,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "etl",
- "etl-config",
  "etl-destinations",
- "etl-telemetry",
  "rustls",
  "tokio",
  "tracing",

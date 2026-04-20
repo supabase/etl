@@ -18,7 +18,7 @@ use crate::types::{Cell, TableRow};
 /// Returns an error if the row data is not valid UTF-8, the column count doesn't
 /// match the schema, the row is not properly terminated, or a cell value cannot
 /// be parsed according to its column type.
-pub fn parse_table_row_from_postgres_copy_bytes<'a>(
+pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
     row: &[u8],
     mut column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
 ) -> EtlResult<TableRow> {

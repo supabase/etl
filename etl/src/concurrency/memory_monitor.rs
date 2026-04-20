@@ -18,8 +18,6 @@ use crate::metrics::{
     DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
     ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
 };
-use crate::types::PipelineId;
-
 /// Represents a memory snapshot.
 #[derive(Debug, Clone, Copy)]
 struct MemorySnapshot {
@@ -75,14 +73,13 @@ struct BackpressureMonitorInner {
 /// This component owns a periodic task that samples memory usage and updates a boolean backpressure
 /// signal. Consumers can subscribe and pause polling when backpressure is active.
 #[derive(Debug, Clone)]
-pub struct MemoryMonitor {
+pub(crate) struct MemoryMonitor {
     inner: Arc<MemoryMonitorInner>,
 }
 
 impl MemoryMonitor {
     /// Creates a new memory backpressure controller and starts the refresh task.
-    pub fn new(
-        _pipeline_id: PipelineId,
+    pub(crate) fn new(
         mut shutdown_rx: ShutdownRx,
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
         memory_refresh_interval_ms: u64,
@@ -197,7 +194,7 @@ impl MemoryMonitor {
     }
 
     /// Returns `true` when memory pressure currently activates backpressure.
-    pub fn is_backpressure_active(&self) -> bool {
+    pub(crate) fn is_backpressure_active(&self) -> bool {
         self.inner
             .backpressure
             .as_ref()
@@ -208,7 +205,7 @@ impl MemoryMonitor {
     /// Creates a new subscription for polling backpressure updates.
     ///
     /// Returns [`None`] when memory backpressure is not configured.
-    pub fn subscribe(&self) -> Option<MemoryMonitorSubscription> {
+    pub(crate) fn subscribe(&self) -> Option<MemoryMonitorSubscription> {
         let backpressure = self.inner.backpressure.as_ref()?;
 
         // We snapshot the current state of the watch channel and create a stream out of it. The
@@ -224,7 +221,7 @@ impl MemoryMonitor {
     }
 
     /// Returns the shared atomic that stores total memory in bytes.
-    pub fn total_memory_bytes(&self) -> u64 {
+    pub(crate) fn total_memory_bytes(&self) -> u64 {
         self.inner.total_memory_bytes.load(Ordering::Relaxed)
     }
 
@@ -279,7 +276,7 @@ fn emit_activation_duration_metric(duration: Duration) {
 #[cfg(test)]
 impl MemoryMonitor {
     /// Creates a new memory backpressure controller without spawning a refresh task.
-    pub fn new_for_test() -> Self {
+    pub(crate) fn new_for_test() -> Self {
         Self {
             inner: Arc::new(MemoryMonitorInner {
                 backpressure: Some(BackpressureMonitorInner {
@@ -293,12 +290,12 @@ impl MemoryMonitor {
     }
 
     /// Updates the backpressure active state in tests.
-    pub fn set_backpressure_active_for_test(&self, backpressure_active: bool) {
+    pub(crate) fn set_backpressure_active_for_test(&self, backpressure_active: bool) {
         self.set_backpressure_active(backpressure_active);
     }
 
     /// Updates the total memory snapshot in bytes for tests.
-    pub fn set_total_memory_bytes_for_test(&self, total_memory_bytes: u64) {
+    pub(crate) fn set_total_memory_bytes_for_test(&self, total_memory_bytes: u64) {
         self.inner
             .total_memory_bytes
             .store(total_memory_bytes, Ordering::Relaxed);
@@ -310,14 +307,14 @@ impl MemoryMonitor {
 /// This type provides wake-safe polling semantics so streams can return `Pending` while memory is
 /// active without risking missed wakeups.
 #[derive(Debug)]
-pub struct MemoryMonitorSubscription {
+pub(crate) struct MemoryMonitorSubscription {
     current_rx: watch::Receiver<bool>,
     updates: WatchStream<bool>,
 }
 
 impl MemoryMonitorSubscription {
     /// Returns the current backpressure active flag.
-    pub fn current_backpressure_active(&self) -> bool {
+    pub(crate) fn current_backpressure_active(&self) -> bool {
         *self.current_rx.borrow()
     }
 }

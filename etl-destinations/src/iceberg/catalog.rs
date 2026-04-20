@@ -34,7 +34,7 @@ impl SupabaseCatalog {
     ///
     /// Combines a standard REST catalog with a Supabase-specific client to handle
     /// both compatible and incompatible API endpoints.
-    pub fn new(inner: RestCatalog, client: SupabaseClient) -> Self {
+    pub(super) fn new(inner: RestCatalog, client: SupabaseClient) -> Self {
         SupabaseCatalog { inner, client }
     }
 }
@@ -188,7 +188,7 @@ impl SupabaseClient {
     ///
     /// Initializes an HTTP client with the provided connection details for
     /// communicating with Supabase catalog REST endpoints.
-    pub fn new(base_uri: String, warehouse: String, auth_token: String) -> Self {
+    pub(super) fn new(base_uri: String, warehouse: String, auth_token: String) -> Self {
         let client = Client::new();
         Self {
             client,
@@ -227,7 +227,7 @@ impl SupabaseClient {
     /// Converts the standard [`TableCreation`] request to Supabase's expected format
     /// and handles the non-standard response structure. Returns a fully configured
     /// [`Table`] instance with metadata and file I/O capabilities.
-    pub async fn create_table(
+    async fn create_table(
         &self,
         namespace: &NamespaceIdent,
         creation: TableCreation,

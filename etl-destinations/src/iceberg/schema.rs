@@ -87,7 +87,7 @@ fn create_iceberg_list_type(element_type: PrimitiveType, field_id: i32) -> Icebe
 /// Field IDs are assigned following iceberg-rust's convention: all outer field IDs
 /// are assigned first, then nested field IDs (e.g., list element fields). This ensures
 /// consistency with how the Iceberg library handles schema evolution.
-pub fn postgres_to_iceberg_schema(
+pub(super) fn postgres_to_iceberg_schema(
     column_schemas: &[ColumnSchema],
 ) -> Result<IcebergSchema, iceberg::Error> {
     let mut identifier_field_ids = Vec::new();

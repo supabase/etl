@@ -5,3 +5,10 @@
 
 pub mod destination_metadata;
 pub mod table;
+
+pub use destination_metadata::{
+    AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
+};
+pub use table::{
+    RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
+};

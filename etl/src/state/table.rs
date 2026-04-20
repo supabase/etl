@@ -1,13 +1,12 @@
 use chrono::{DateTime, Duration, Utc};
-use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::state;
-use etl_postgres::types::TableId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use tokio_postgres::types::PgLsn;
 
+use crate::config::PipelineConfig;
 use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::workers::policy::ErrorHandlingPolicy;
+use crate::types::{PgLsn, TableId};
+use crate::workers::ErrorHandlingPolicy;
 use crate::{bail, etl_error};
 
 /// Represents an error that occurred during table replication.
@@ -195,7 +194,7 @@ impl TableReplicationError {
     }
 
     /// Builds a [`TableReplicationError`] from a shared handling policy and worker retry policy.
-    pub fn from_error_policy(
+    pub(crate) fn from_error_policy(
         table_id: TableId,
         error: &EtlError,
         policy: &ErrorHandlingPolicy,
@@ -509,14 +508,14 @@ mod lsn_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use tokio_postgres::types::PgLsn;
 
-    pub fn serialize<S>(lsn: &PgLsn, serializer: S) -> Result<S::Ok, S::Error>
+    pub(super) fn serialize<S>(lsn: &PgLsn, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         lsn.to_string().serialize(serializer)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<PgLsn, D::Error>
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<PgLsn, D::Error>
     where
         D: Deserializer<'de>,
     {

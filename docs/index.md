@@ -43,11 +43,53 @@ Create a pipeline:
 
 ```rust
 use etl::{
-    config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig},
+    config::{
+        BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+    },
+    destination::{Destination, TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+    error::EtlResult,
     pipeline::Pipeline,
-    store::both::memory::MemoryStore,
+    store::MemoryStore,
+    types::{Event, ReplicatedTableSchema, TableRow},
 };
-use etl_destinations::bigquery::BigQueryDestination;
+
+#[derive(Clone)]
+struct NoopDestination;
+
+impl Destination for NoopDestination {
+    fn name() -> &'static str {
+        "noop"
+    }
+
+    async fn truncate_table(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        async_result: TruncateTableResult<()>,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(()));
+        Ok(())
+    }
+
+    async fn write_table_rows(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        _table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult<()>,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(()));
+        Ok(())
+    }
+
+    async fn write_events(
+        &self,
+        _events: Vec<Event>,
+        async_result: WriteEventsResult<()>,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(()));
+        Ok(())
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,30 +100,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         username: "postgres".to_string(),
         password: Some("password".to_string().into()),
         tls: TlsConfig { enabled: false, trusted_root_certs: String::new() },
-        keepalive: None,
+        keepalive: TcpKeepaliveConfig::default(),
     };
 
     let config = PipelineConfig {
         id: 1,
         publication_name: "my_publication".to_string(),
         pg_connection: pg_config,
-        batch: BatchConfig { max_size: 1000, max_fill_ms: 5000 },
+        batch: BatchConfig {
+            max_fill_ms: 5000,
+            memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
+        },
         table_error_retry_delay_ms: 10_000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: 4,
+        max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        memory_refresh_interval_ms: 100,
+        memory_backpressure: Some(MemoryBackpressureConfig::default()),
+        table_sync_copy: TableSyncCopyConfig::default(),
+        invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
     };
 
     let store = MemoryStore::new();
-    let destination = BigQueryDestination::new_with_key_path(
-        "my-gcp-project".into(),
-        "my_dataset".into(),
-        "/path/to/service-account-key.json",
-        None,
-        1,
-        1,
-        store.clone(),
-    )
-    .await?;
+    let destination = NoopDestination;
 
     let mut pipeline = Pipeline::new(config, store, destination);
     pipeline.start().await?;
@@ -90,6 +131,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+This snippet intentionally shows ETL used as a library with your own destination implementation.
+Built-in destinations such as BigQuery and DuckLake live in `etl-destinations`, but the shared
+pipeline, config, store, and event types should come from `etl`.
 
 ## Documentation
 

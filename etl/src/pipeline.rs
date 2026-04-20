@@ -4,27 +4,25 @@
 //! with destination systems. Manages worker lifecycles, shutdown coordination, and error handling.
 
 use crate::bail;
-use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
+use crate::concurrency::{MemoryMonitor, ShutdownTx, create_shutdown_channel};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
+use crate::replication::SharedTableCache;
 use crate::replication::client::PgReplicationClient;
-use crate::replication::table_cache::SharedTableCache;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
-use crate::types::PipelineId;
-use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
-use crate::workers::pool::TableSyncWorkerPool;
-use etl_config::shared::PipelineConfig;
+use crate::types::{PipelineId, TableId};
+use crate::workers::{ApplyWorker, ApplyWorkerHandle, TableSyncWorkerPool};
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::TableId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
+
+use crate::config::PipelineConfig;
 
 /// Internal state tracking for pipeline lifecycle.
 ///
@@ -125,7 +123,6 @@ where
         );
         // We always start memory monitoring to keep total memory snapshots available.
         let memory_monitor = MemoryMonitor::new(
-            self.config.id,
             self.shutdown_tx.subscribe(),
             self.config.memory_backpressure.clone(),
             self.config.memory_refresh_interval_ms,

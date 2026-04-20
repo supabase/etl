@@ -34,11 +34,10 @@ absolute `file://` URLs before the destination is created.
 use clap::{Args, Parser};
 use etl::config::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+    PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig, parse_ducklake_url,
 };
 use etl::pipeline::Pipeline;
-use etl::store::both::postgres::PostgresStore;
-use etl_config::parse_ducklake_url;
+use etl::store::PostgresStore;
 use etl_destinations::ducklake::{DuckLakeDestination, S3Config};
 use std::error::Error;
 use std::sync::Once;
@@ -179,7 +178,6 @@ fn set_log_level() {
 async fn main_impl() -> Result<(), Box<dyn Error>> {
     set_log_level();
     init_tracing();
-    etl_telemetry::metrics::init_metrics(None, None)?;
     install_crypto_provider();
 
     let args = AppArgs::parse();

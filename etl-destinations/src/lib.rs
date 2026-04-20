@@ -4,7 +4,7 @@
 //! and analytics platforms, enabling data replication from Postgres to cloud services.
 
 #[cfg(any(feature = "bigquery", feature = "ducklake", feature = "iceberg"))]
-pub(crate) mod retry;
+mod retry;
 mod table_name;
 
 #[cfg(feature = "bigquery")]

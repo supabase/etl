@@ -50,13 +50,12 @@
 //! ```rust,no_run
 //! use etl::{
 //!     config::{BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TcpKeepaliveConfig, TlsConfig, TableSyncCopyConfig},
-//!     destination::{Destination, async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult}},
+//!     destination::{Destination, TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
 //!     error::EtlResult,
 //!     pipeline::Pipeline,
-//!     store::both::memory::MemoryStore,
-//!     types::{Event, TableRow},
+//!     store::MemoryStore,
+//!     types::{Event, ReplicatedTableSchema, TableRow},
 //! };
-//! use etl_postgres::types::ReplicatedTableSchema;
 //!
 //! #[derive(Clone)]
 //! struct NoopDestination;
@@ -135,7 +134,7 @@ pub mod egress;
 pub mod error;
 #[cfg(feature = "failpoints")]
 pub mod failpoints;
-pub mod macros;
+mod macros;
 pub mod metrics;
 pub mod pipeline;
 pub mod replication;
@@ -145,4 +144,4 @@ pub mod store;
 pub mod test_utils;
 pub mod types;
 mod utils;
-pub mod workers;
+mod workers;

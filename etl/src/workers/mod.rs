@@ -4,8 +4,14 @@
 //! replication streams, table sync workers handle initial data copying, and worker pools manage
 //! concurrent execution and lifecycle coordination.
 
-pub mod apply;
-pub mod policy;
-pub mod pool;
-pub mod table_sync;
-pub mod table_sync_copy;
+mod apply;
+mod policy;
+mod pool;
+mod table_sync;
+mod table_sync_copy;
+
+pub(crate) use apply::{ApplyWorker, ApplyWorkerHandle};
+pub(crate) use policy::ErrorHandlingPolicy;
+pub(crate) use pool::TableSyncWorkerPool;
+pub(crate) use table_sync::{TableSyncWorker, TableSyncWorkerState};
+pub(crate) use table_sync_copy::{TableCopyResult, table_copy};

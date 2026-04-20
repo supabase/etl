@@ -27,13 +27,11 @@ use tokio::sync::{Semaphore, watch};
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
 
-use crate::concurrency::batch_budget::{BatchBudgetController, CachedBatchBudget};
-use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::stream::{
-    BackpressureStream, apply_worker_apply_stream_id, table_sync_worker_apply_stream_id,
+use crate::concurrency::{
+    BackpressureStream, BatchBudgetController, CachedBatchBudget, MemoryMonitor, ShutdownResult,
+    ShutdownRx, apply_worker_apply_stream_id, table_sync_worker_apply_stream_id,
 };
-use crate::conversions::event::{
+use crate::conversions::{
     DDL_MESSAGE_PREFIX, SchemaChangeMessage, parse_event_from_begin_message,
     parse_event_from_commit_message, parse_event_from_delete_message,
     parse_event_from_insert_message, parse_event_from_truncate_message,
@@ -53,16 +51,14 @@ use crate::metrics::{
     ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, WORKER_TYPE_LABEL,
 };
 use crate::replication::client::{PgReplicationClient, PostgresConnectionUpdate};
-use crate::replication::stream::{EventsStream, StatusUpdateType};
-use crate::replication::table_cache::{SharedTableCache, SharedTableState};
+use crate::replication::{EventsStream, SharedTableCache, SharedTableState, StatusUpdateType};
 use crate::state::table::{
     TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::{Event, PipelineId, RelationEvent, SizeHint};
-use crate::workers::pool::TableSyncWorkerPool;
-use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
+use crate::workers::{TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState};
 use crate::{bail, etl_error};
 
 /// Default keep alive value if it can't be fetched from Postgres.
@@ -88,7 +84,7 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 
 /// Type of worker driving the apply loop.
 #[derive(Debug, Copy, Clone)]
-pub enum WorkerType {
+pub(crate) enum WorkerType {
     /// The main apply worker that coordinates table sync workers.
     Apply,
     /// A table sync worker that synchronizes a specific table.
@@ -100,7 +96,7 @@ pub enum WorkerType {
 
 impl WorkerType {
     /// Builds an [`EtlReplicationSlot`] for this worker type.
-    pub fn build_etl_replication_slot(&self, pipeline_id: u64) -> EtlReplicationSlot {
+    pub(crate) fn build_etl_replication_slot(&self, pipeline_id: u64) -> EtlReplicationSlot {
         match self {
             Self::Apply => EtlReplicationSlot::Apply { pipeline_id },
             Self::TableSync { table_id } => EtlReplicationSlot::TableSync {
@@ -111,7 +107,7 @@ impl WorkerType {
     }
 
     /// Returns a low-cardinality worker type label for metrics and tags.
-    pub fn to_simple_string(&self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Apply => "apply",
             Self::TableSync { .. } => "table_sync",
@@ -133,7 +129,7 @@ impl Display for WorkerType {
 /// Indicates the reason why the apply loop terminated, enabling appropriate
 /// cleanup and error handling by the caller.
 #[derive(Debug, Copy, Clone)]
-pub enum ApplyLoopResult {
+pub(crate) enum ApplyLoopResult {
     /// The apply loop was paused and could be resumed in the future.
     Paused,
     /// The apply loop was completed and will never be invoked again.
@@ -172,7 +168,7 @@ impl ExitIntent {
 /// Tracks the progress of a graceful shutdown, ensuring that PostgreSQL acknowledges
 /// our flush position before we terminate to prevent data duplication on restart.
 #[derive(Debug, Clone)]
-pub enum ShutdownState {
+pub(crate) enum ShutdownState {
     /// No shutdown requested, normal operation.
     NoShutdown,
     /// Shutdown in progress, waiting for PostgreSQL to acknowledge our flush position.
@@ -185,7 +181,7 @@ pub enum ShutdownState {
 
 impl ShutdownState {
     /// Returns `true` if a shutdown has been requested.
-    pub fn is_requested(&self) -> bool {
+    pub(crate) fn is_requested(&self) -> bool {
         !matches!(self, Self::NoShutdown)
     }
 }
@@ -195,27 +191,27 @@ impl ShutdownState {
 /// Contains all state and dependencies needed by the apply worker to coordinate
 /// with table sync workers and manage table lifecycle transitions.
 #[derive(Debug)]
-pub struct ApplyWorkerContext<S, D> {
+pub(crate) struct ApplyWorkerContext<S, D> {
     /// Unique identifier for the pipeline.
-    pub pipeline_id: PipelineId,
+    pub(crate) pipeline_id: PipelineId,
     /// Shared configuration for all coordinated operations.
-    pub config: Arc<PipelineConfig>,
+    pub(crate) config: Arc<PipelineConfig>,
     /// Pool of table sync workers that this worker coordinates.
-    pub pool: Arc<TableSyncWorkerPool>,
+    pub(crate) pool: Arc<TableSyncWorkerPool>,
     /// State store for tracking table replication progress.
-    pub store: S,
+    pub(crate) store: S,
     /// Destination where replicated data is written.
-    pub destination: D,
+    pub(crate) destination: D,
     /// Shared per-table protocol state used to decode relation and row messages.
-    pub shared_table_cache: SharedTableCache,
+    pub(crate) shared_table_cache: SharedTableCache,
     /// Shutdown signal receiver for graceful termination.
-    pub shutdown_rx: ShutdownRx,
+    pub(crate) shutdown_rx: ShutdownRx,
     /// Semaphore controlling maximum concurrent table sync workers.
-    pub table_sync_worker_permits: Arc<Semaphore>,
+    pub(crate) table_sync_worker_permits: Arc<Semaphore>,
     /// Shared memory backpressure controller.
-    pub memory_monitor: MemoryMonitor,
+    pub(crate) memory_monitor: MemoryMonitor,
     /// Shared batch budget controller.
-    pub batch_budget: BatchBudgetController,
+    pub(crate) batch_budget: BatchBudgetController,
 }
 
 /// Resources for the table sync worker during the apply loop.
@@ -223,13 +219,13 @@ pub struct ApplyWorkerContext<S, D> {
 /// Contains state and dependencies needed by a table sync worker to track
 /// its synchronization progress and coordinate with the apply worker.
 #[derive(Debug)]
-pub struct TableSyncWorkerContext<S> {
+pub(crate) struct TableSyncWorkerContext<S> {
     /// Unique identifier for the table being synchronized.
-    pub table_id: TableId,
+    pub(crate) table_id: TableId,
     /// Thread-safe state management for this worker.
-    pub table_sync_worker_state: TableSyncWorkerState,
+    pub(crate) table_sync_worker_state: TableSyncWorkerState,
     /// State store for persisting replication progress.
-    pub state_store: S,
+    pub(crate) state_store: S,
 }
 
 /// Context for the worker driving the apply loop.
@@ -238,7 +234,7 @@ pub struct TableSyncWorkerContext<S> {
 /// worker-specific resources and enabling different behavior based on the
 /// worker type at various points in the replication cycle.
 #[derive(Debug)]
-pub enum WorkerContext<S, D> {
+pub(crate) enum WorkerContext<S, D> {
     /// Context for the apply worker.
     Apply(ApplyWorkerContext<S, D>),
     /// Context for a table sync worker.
@@ -247,7 +243,7 @@ pub enum WorkerContext<S, D> {
 
 impl<S, D> WorkerContext<S, D> {
     /// Returns the [`WorkerType`] for this context.
-    pub fn worker_type(&self) -> WorkerType {
+    pub(crate) fn worker_type(&self) -> WorkerType {
         match self {
             Self::Apply(_) => WorkerType::Apply,
             Self::TableSync(ctx) => WorkerType::TableSync {
@@ -257,7 +253,7 @@ impl<S, D> WorkerContext<S, D> {
     }
 
     /// Builds the logical apply-stream id for this worker context.
-    pub fn apply_stream_id(&self) -> String {
+    pub(crate) fn apply_stream_id(&self) -> String {
         match self {
             Self::Apply(_) => apply_worker_apply_stream_id(),
             Self::TableSync(ctx) => table_sync_worker_apply_stream_id(ctx.table_id),
@@ -581,7 +577,7 @@ impl ApplyLoopState {
 ///
 /// [`ApplyLoop`] encapsulates the apply loop's immutable dependencies plus its mutable runtime
 /// state.
-pub struct ApplyLoop<S, D> {
+pub(crate) struct ApplyLoop<S, D> {
     /// Unique identifier for the pipeline.
     pipeline_id: PipelineId,
     /// Shared immutable configuration.
@@ -617,7 +613,7 @@ where
     ///
     /// This is the main entry point that creates the loop instance and runs it.
     #[expect(clippy::too_many_arguments)]
-    pub async fn start(
+    pub(crate) async fn start(
         pipeline_id: PipelineId,
         start_lsn: PgLsn,
         config: Arc<PipelineConfig>,
@@ -1196,7 +1192,7 @@ where
 
         counter!(
             ETL_EVENTS_PROCESSED_TOTAL,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
             ACTION_LABEL => "table_streaming",
             DESTINATION_LABEL => D::name(),
         )
@@ -1204,7 +1200,7 @@ where
 
         histogram!(
             ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
             ACTION_LABEL => "table_streaming",
             DESTINATION_LABEL => D::name(),
         )
@@ -1393,7 +1389,7 @@ where
     ) -> EtlResult<HandleMessageResult> {
         counter!(
             ETL_REPLICATION_MESSAGES_TOTAL,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
         )
         .increment(1);
 

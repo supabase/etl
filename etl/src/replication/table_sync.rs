@@ -6,9 +6,7 @@ use std::sync::Arc;
 use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
 
-use crate::concurrency::batch_budget::BatchBudgetController;
-use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::concurrency::shutdown::ShutdownRx;
+use crate::concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx};
 use crate::destination::Destination;
 use crate::destination::async_result::{TruncateTableResult, WriteTableRowsResult};
 use crate::error::{ErrorKind, EtlResult};
@@ -21,8 +19,7 @@ use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
-use crate::workers::table_sync::TableSyncWorkerState;
-use crate::workers::table_sync_copy::{TableCopyResult, table_copy};
+use crate::workers::{TableCopyResult, TableSyncWorkerState, table_copy};
 use crate::{bail, etl_error};
 
 /// Result type for table synchronization operations.
@@ -30,13 +27,13 @@ use crate::{bail, etl_error};
 /// [`TableSyncResult`] indicates the outcome of a table sync operation,
 /// providing context for how the table sync worker should proceed with the table.
 #[derive(Debug)]
-pub enum TableSyncResult {
+pub(crate) enum TableSyncResult {
     /// Synchronization was stopped due to shutdown or external signal.
-    SyncStopped,
+    Stopped,
     /// Synchronization was not required (table already synchronized).
-    SyncNotRequired,
+    NotRequired,
     /// Synchronization completed successfully with the starting LSN for replication.
-    SyncCompleted {
+    Completed {
         /// LSN position where continuous replication should begin for this table.
         start_lsn: PgLsn,
     },
@@ -48,7 +45,7 @@ pub enum TableSyncResult {
 /// Postgres database to the destination. It handles the complete sync process
 /// including data copying, state management, and coordination with the apply worker.
 #[expect(clippy::too_many_arguments)]
-pub async fn start_table_sync<S, D>(
+pub(crate) async fn start_table_sync<S, D>(
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     replication_client: PgReplicationClient,
@@ -84,7 +81,7 @@ where
         ) {
             warn!(table_id = table_id.0, %phase_type, "initial table sync not required");
 
-            return Ok(TableSyncResult::SyncNotRequired);
+            return Ok(TableSyncResult::NotRequired);
         }
 
         // In case the phase is different from the standard phases in which a table sync worker can perform
@@ -293,7 +290,6 @@ where
                     config.max_copy_connections_per_table,
                     config.batch.clone(),
                     shutdown_rx.clone(),
-                    pipeline_id,
                     destination.clone(),
                     memory_monitor.clone(),
                     batch_budget.clone(),
@@ -313,7 +309,7 @@ where
                             table_id = table_id.0,
                             "table copy interrupted by shutdown, terminating table sync"
                         );
-                        return Ok(TableSyncResult::SyncStopped);
+                        return Ok(TableSyncResult::Stopped);
                     }
                 }
             } else {
@@ -393,7 +389,7 @@ where
             "shutting down table sync while waiting for catchup"
         );
 
-        return Ok(TableSyncResult::SyncStopped);
+        return Ok(TableSyncResult::Stopped);
     }
 
     info!(
@@ -401,5 +397,5 @@ where
         "table sync completed, starting streaming"
     );
 
-    Ok(TableSyncResult::SyncCompleted { start_lsn })
+    Ok(TableSyncResult::Completed { start_lsn })
 }

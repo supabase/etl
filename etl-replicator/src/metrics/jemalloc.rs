@@ -191,7 +191,7 @@ fn register_metrics() {
 ///
 /// This function should be called after [`etl_telemetry::metrics::init_metrics`]
 /// to ensure the metrics recorder is installed.
-pub fn spawn_jemalloc_metrics_task() {
+pub(super) fn spawn_jemalloc_metrics_task() {
     register_metrics();
     log_jemalloc_config();
 

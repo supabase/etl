@@ -7,4 +7,5 @@ pub mod async_result;
 mod base;
 pub mod task_set;
 
+pub use async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult};
 pub use base::Destination;

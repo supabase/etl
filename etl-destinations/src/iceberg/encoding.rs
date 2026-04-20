@@ -30,7 +30,10 @@ const UUID_BYTE_WIDTH: i32 = 16;
 ///
 /// Returns a [`RecordBatch`] containing the converted data, or an [`ArrowError`]
 /// if the conversion fails due to schema mismatches or other Arrow-related issues.
-pub fn rows_to_record_batch(rows: &[TableRow], schema: Schema) -> Result<RecordBatch, ArrowError> {
+pub(super) fn rows_to_record_batch(
+    rows: &[TableRow],
+    schema: Schema,
+) -> Result<RecordBatch, ArrowError> {
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
     for (field_idx, field) in schema.fields().iter().enumerate() {

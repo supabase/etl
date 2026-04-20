@@ -37,7 +37,7 @@ use etl::config::{
     PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
 };
 use etl::pipeline::Pipeline;
-use etl::store::both::memory::MemoryStore;
+use etl::store::MemoryStore;
 use etl_destinations::bigquery::BigQueryDestination;
 use std::error::Error;
 use std::sync::Once;

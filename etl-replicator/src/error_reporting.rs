@@ -17,7 +17,7 @@ use crate::sentry;
 /// reports each [`TableReplicationPhase::Errored`] update to Sentry and, when
 /// configured, to the Supabase error-notification endpoint.
 #[derive(Debug, Clone)]
-pub struct ErrorReportingStateStore<S> {
+pub(crate) struct ErrorReportingStateStore<S> {
     inner: S,
     notification_client: Option<Arc<ErrorNotificationClient>>,
 }
@@ -33,7 +33,7 @@ struct ReportableTableError {
 
 impl<S> ErrorReportingStateStore<S> {
     /// Creates a reporting wrapper around `inner`.
-    pub fn new(inner: S, notification_client: Option<ErrorNotificationClient>) -> Self {
+    pub(crate) fn new(inner: S, notification_client: Option<ErrorNotificationClient>) -> Self {
         Self {
             inner,
             notification_client: notification_client.map(Arc::new),

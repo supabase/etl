@@ -9,24 +9,22 @@ use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, error, info, warn};
 
 use crate::bail;
-use crate::concurrency::batch_budget::BatchBudgetController;
-use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::concurrency::shutdown::ShutdownRx;
+use crate::concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::etl_error;
 use crate::metrics::{
     ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL,
 };
-use crate::replication::apply::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext};
+use crate::replication::SharedTableCache;
 use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState};
-use crate::replication::table_cache::SharedTableCache;
+use crate::replication::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext};
 use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
+use crate::workers::TableSyncWorkerPool;
 use crate::workers::policy::{RetryDirective, build_error_handling_policy};
-use crate::workers::pool::TableSyncWorkerPool;
 
 /// Handle for monitoring and controlling the apply worker.
 ///
@@ -34,7 +32,7 @@ use crate::workers::pool::TableSyncWorkerPool;
 /// replication stream events and coordinates with table sync workers. The handle
 /// enables waiting for worker completion and checking final results.
 #[derive(Debug)]
-pub struct ApplyWorkerHandle {
+pub(crate) struct ApplyWorkerHandle {
     handle: Option<JoinHandle<EtlResult<()>>>,
 }
 
@@ -44,7 +42,7 @@ impl ApplyWorkerHandle {
     /// This method blocks until the apply worker finishes processing, either
     /// due to successful completion, shutdown signal, or error. It properly
     /// handles panics that might occur within the worker task.
-    pub async fn wait(mut self) -> EtlResult<()> {
+    pub(crate) async fn wait(mut self) -> EtlResult<()> {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
@@ -75,7 +73,7 @@ impl ApplyWorkerHandle {
 /// The worker manages transaction boundaries, coordinates table synchronization,
 /// and ensures data consistency throughout the replication process.
 #[derive(Debug)]
-pub struct ApplyWorker<S, D> {
+pub(crate) struct ApplyWorker<S, D> {
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     pool: Arc<TableSyncWorkerPool>,
@@ -94,7 +92,7 @@ impl<S, D> ApplyWorker<S, D> {
     /// The worker creates a fresh replication connection for each run attempt and
     /// coordinates with the table sync worker pool for initial synchronization operations.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
         pool: Arc<TableSyncWorkerPool>,
@@ -138,7 +136,6 @@ where
     ///
     /// Errors that happen while handling the worker error in this function are immediately propagated.
     async fn handle_apply_worker_error(
-        _pipeline_id: PipelineId,
         config: &PipelineConfig,
         shutdown_rx: &mut ShutdownRx,
         retry_attempts: &mut u32,
@@ -204,7 +201,7 @@ where
     /// This method initializes the apply worker by determining the starting LSN,
     /// creating coordination signals, and launching the main apply loop. The worker
     /// runs asynchronously and can be monitored through the returned handle.
-    pub fn spawn(self) -> EtlResult<ApplyWorkerHandle> {
+    pub(crate) fn spawn(self) -> EtlResult<ApplyWorkerHandle> {
         info!("starting apply worker");
 
         let apply_worker_span = tracing::info_span!(
@@ -258,7 +255,6 @@ where
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     let should_shutdown = Self::handle_apply_worker_error(
-                        pipeline_id,
                         config.as_ref(),
                         &mut shutdown_rx,
                         &mut retry_attempts,

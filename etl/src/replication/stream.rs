@@ -14,7 +14,7 @@ use tracing::debug;
 #[cfg(feature = "failpoints")]
 use tracing::warn;
 
-use crate::conversions::table_row::parse_table_row_from_postgres_copy_bytes;
+use crate::conversions::parse_table_row_from_postgres_copy_bytes;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 #[cfg(feature = "failpoints")]
@@ -37,7 +37,7 @@ pin_project! {
     /// using the provided column schemas. The conversion process handles both text and
     /// binary format data.
     #[must_use = "streams do nothing unless polled"]
-    pub struct TableCopyStream<I> {
+    pub(crate) struct TableCopyStream<I> {
         #[pin]
         stream: CopyOutStream,
         column_schemas: I,
@@ -48,7 +48,7 @@ impl<I> TableCopyStream<I> {
     /// Creates a new [`TableCopyStream`] from a [`CopyOutStream`] and column schemas.
     ///
     /// The column schemas are used to convert the raw Postgres data into [`TableRow`]s.
-    pub fn wrap(stream: CopyOutStream, column_schemas: I) -> Self {
+    pub(crate) fn wrap(stream: CopyOutStream, column_schemas: I) -> Self {
         Self {
             stream,
             column_schemas,
@@ -97,7 +97,7 @@ where
 
 /// The status update type when sending a status update message back to Postgres.
 #[derive(Debug)]
-pub enum StatusUpdateType {
+pub(crate) enum StatusUpdateType {
     /// Represents an update in response to a keep alive from Postgres.
     KeepAlive,
     /// Represents a periodic heartbeat sent while the apply loop is otherwise idle.
@@ -130,7 +130,7 @@ impl Display for StatusUpdateType {
 pin_project! {
     /// A stream that yields replication events from a Postgres logical replication stream and keeps
     /// track of last sent status updates.
-pub struct EventsStream {
+pub(crate) struct EventsStream {
         #[pin]
         stream: LogicalReplicationStream,
         last_update: Option<Instant>,
@@ -141,7 +141,7 @@ pub struct EventsStream {
 
 impl EventsStream {
     /// Creates a new [`EventsStream`] from a [`LogicalReplicationStream`].
-    pub fn wrap(stream: LogicalReplicationStream) -> Self {
+    pub(crate) fn wrap(stream: LogicalReplicationStream) -> Self {
         Self {
             stream,
             last_update: None,
@@ -155,7 +155,7 @@ impl EventsStream {
     /// This method implements a status update logic that balances Postgres's need for
     /// progress information with network efficiency and system performance. It handles multiple
     /// error scenarios and edge cases related to time synchronization and network communication.
-    pub async fn send_status_update(
+    pub(crate) async fn send_status_update(
         self: Pin<&mut Self>,
         mut write_lsn: PgLsn,
         mut flush_lsn: PgLsn,

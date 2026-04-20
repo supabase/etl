@@ -27,14 +27,14 @@ use x509_cert::{TbsCertificate, der::Decode};
 ///
 /// That way you can connect to Postgres using `rustls` as the TLS stack.
 #[derive(Clone)]
-pub struct MakeRustlsConnect {
+pub(crate) struct MakeRustlsConnect {
     config: Arc<ClientConfig>,
 }
 
 impl MakeRustlsConnect {
     /// Creates a new `MakeRustlsConnect` from the provided `ClientConfig`.
     #[must_use]
-    pub fn new(config: ClientConfig) -> Self {
+    pub(crate) fn new(config: ClientConfig) -> Self {
         Self {
             config: Arc::new(config),
         }
@@ -59,8 +59,8 @@ where
     }
 }
 
-pub struct TlsConnectFuture<S> {
-    pub inner: tokio_rustls::Connect<S>,
+pub(crate) struct TlsConnectFuture<S> {
+    inner: tokio_rustls::Connect<S>,
 }
 
 impl<S> Future for TlsConnectFuture<S>
@@ -74,11 +74,11 @@ where
     }
 }
 
-pub struct RustlsConnect(pub RustlsConnectData);
+pub(crate) struct RustlsConnect(RustlsConnectData);
 
-pub struct RustlsConnectData {
-    pub hostname: ServerName<'static>,
-    pub connector: TlsConnector,
+pub(crate) struct RustlsConnectData {
+    hostname: ServerName<'static>,
+    connector: TlsConnector,
 }
 
 impl<S> TlsConnect<S> for RustlsConnect
@@ -96,13 +96,13 @@ where
     }
 }
 
-pub struct RustlsStream<S>(TlsStream<S>);
+pub(crate) struct RustlsStream<S>(TlsStream<S>);
 
 impl<S> RustlsStream<S>
 where
     S: Unpin,
 {
-    pub fn project_stream(self: Pin<&mut Self>) -> Pin<&mut TlsStream<S>> {
+    fn project_stream(self: Pin<&mut Self>) -> Pin<&mut TlsStream<S>> {
         Pin::new(&mut self.get_mut().0)
     }
 }

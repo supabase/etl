@@ -12,7 +12,7 @@ use prost::bytes;
 /// Wraps a vector of [`CellNonOptional`] values and implements the [`prost::Message`]
 /// trait to enable Protocol Buffer serialization for BigQuery streaming inserts.
 #[derive(Debug)]
-pub struct BigQueryTableRow(Vec<CellNonOptional>);
+pub(super) struct BigQueryTableRow(Vec<CellNonOptional>);
 
 impl TryFrom<TableRow> for BigQueryTableRow {
     type Error = EtlError;
@@ -122,7 +122,7 @@ impl prost::Message for BigQueryTableRow {
 /// Each cell type is encoded using the appropriate prost encoding method. Temporal types
 /// and UUIDs are formatted as strings, while numeric types use their native encoding.
 /// Null cells produce no encoded output.
-pub fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes::BufMut) {
+fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes::BufMut) {
     match cell {
         CellNonOptional::Null => {}
         CellNonOptional::Bool(b) => {
@@ -192,7 +192,7 @@ pub fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes:
 /// Returns the number of bytes that would be produced when encoding this cell in Protocol
 /// Buffer format. Null cells return zero length, while other types calculate their
 /// encoded size using the corresponding prost length functions.
-pub fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
+fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
     match cell {
         CellNonOptional::Null => 0,
         CellNonOptional::Bool(b) => prost::encoding::bool::encoded_len(tag, b),
@@ -244,7 +244,7 @@ pub fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
 /// Array cells are encoded using either packed encoding for numeric types or repeated
 /// encoding for string-based types. Temporal arrays are converted to string arrays
 /// with appropriate formatting before encoding.
-pub fn array_cell_encode_prost(
+fn array_cell_encode_prost(
     array_cell: &ArrayCellNonOptional,
     tag: u32,
     buf: &mut impl bytes::BufMut,
@@ -326,10 +326,7 @@ pub fn array_cell_encode_prost(
 /// Returns the number of bytes that would be produced when encoding this array cell in
 /// Protocol Buffer format. Uses packed length calculation for numeric arrays and repeated
 /// length calculation for string-based arrays.
-pub fn array_cell_non_optional_encoded_len_prost(
-    array_cell: &ArrayCellNonOptional,
-    tag: u32,
-) -> usize {
+fn array_cell_non_optional_encoded_len_prost(array_cell: &ArrayCellNonOptional, tag: u32) -> usize {
     match array_cell {
         ArrayCellNonOptional::Bool(vec) => prost::encoding::bool::encoded_len_packed(tag, vec),
         ArrayCellNonOptional::String(vec) => {

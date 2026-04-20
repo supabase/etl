@@ -20,7 +20,7 @@ use crate::{bail, etl_error};
 
 /// The prefix used for DDL schema change messages emitted by the `etl.emit_schema_change_messages`
 /// event trigger. Messages with this prefix contain JSON-encoded schema information.
-pub const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
+pub(crate) const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
 
 /// Represents a schema change message emitted by Postgres event trigger.
 ///
@@ -177,7 +177,7 @@ fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
 ///
 /// This method parses the replication protocol begin message and extracts
 /// transaction metadata for use in the ETL pipeline.
-pub fn parse_event_from_begin_message(
+pub(crate) fn parse_event_from_begin_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
@@ -196,7 +196,7 @@ pub fn parse_event_from_begin_message(
 ///
 /// This method parses the replication protocol commit message and extracts
 /// transaction completion metadata for use in the ETL pipeline.
-pub fn parse_event_from_commit_message(
+pub(crate) fn parse_event_from_commit_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
@@ -213,7 +213,7 @@ pub fn parse_event_from_commit_message(
 }
 
 /// Returns the set of column names to replicate from a relation message.
-pub fn parse_replicated_column_names(
+pub(crate) fn parse_replicated_column_names(
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<HashSet<String>> {
     let column_names = relation_body
@@ -229,7 +229,7 @@ pub fn parse_replicated_column_names(
 ///
 /// This function processes an insert operation from the replication stream
 /// and constructs an insert event with the new row data ready for ETL processing.
-pub fn parse_event_from_insert_message(
+pub(crate) fn parse_event_from_insert_message(
     replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
@@ -265,7 +265,7 @@ pub fn parse_event_from_insert_message(
 /// handling both the old and new row data. The old row data may be either
 /// the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
-pub fn parse_event_from_update_message(
+pub(crate) fn parse_event_from_update_message(
     replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
@@ -323,7 +323,7 @@ pub fn parse_event_from_update_message(
 /// extracting the old row data that was deleted. The old row data may be
 /// either the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
-pub fn parse_event_from_delete_message(
+pub(crate) fn parse_event_from_delete_message(
     replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
@@ -367,7 +367,7 @@ pub fn parse_event_from_delete_message(
 ///
 /// This method parses the replication protocol truncate message and extracts
 /// information about which tables were truncated and with what options.
-pub fn parse_event_from_truncate_message(
+pub(crate) fn parse_event_from_truncate_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
@@ -393,7 +393,7 @@ pub fn parse_event_from_truncate_message(
 /// Returns an error with [`ErrorKind::InvalidData`] if a non-nullable column
 /// receives NULL data and `use_default_for_missing_cols` is false, indicating
 /// protocol-level corruption.
-pub fn convert_tuple_to_row<'a>(
+pub(crate) fn convert_tuple_to_row<'a>(
     column_schemas: impl Iterator<Item = &'a ColumnSchema>,
     tuple_data: &[protocol::TupleData],
     old_table_row: &mut Option<TableRow>,

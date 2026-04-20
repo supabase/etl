@@ -1,5 +1,5 @@
-pub(crate) mod install;
-pub(crate) mod scenario;
+mod install;
+mod scenario;
 
 use std::collections::BTreeMap;
 use std::time::Duration;

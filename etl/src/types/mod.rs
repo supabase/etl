@@ -9,13 +9,16 @@ mod pipeline;
 mod sized;
 mod table_row;
 
-pub use cell::*;
-pub use event::*;
-pub use pipeline::*;
-pub use sized::*;
-pub use table_row::*;
+pub use cell::{ArrayCell, ArrayCellNonOptional, Cell, CellNonOptional};
+pub use event::{
+    BeginEvent, CommitEvent, DeleteEvent, Event, EventSequenceKey, EventType, InsertEvent,
+    RelationEvent, TruncateEvent, UpdateEvent,
+};
+pub use pipeline::PipelineId;
+pub use sized::SizeHint;
+pub use table_row::TableRow;
 
-pub use crate::conversions::numeric::{PgNumeric, Sign};
+pub use crate::conversions::{InvalidSign, ParseNumericError, PgNumeric, Sign};
 
 // Re-exports.
 pub use etl_postgres::types::*;

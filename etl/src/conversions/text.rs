@@ -7,7 +7,7 @@ use tokio_postgres::types::Type;
 use uuid::Uuid;
 
 use crate::bail;
-use crate::conversions::numeric::PgNumeric;
+use crate::conversions::PgNumeric;
 use crate::conversions::{bool::parse_bool, hex};
 use crate::error::{ErrorKind, EtlResult};
 use crate::types::{ArrayCell, Cell};
@@ -20,7 +20,7 @@ use crate::types::{ArrayCell, Cell};
 ///
 /// For complex types like arrays, empty vectors are returned. For temporal types,
 /// minimal valid timestamps are used (year 1, month 1, day 1).
-pub fn default_value_for_type(typ: &Type) -> EtlResult<Cell> {
+pub(crate) fn default_value_for_type(typ: &Type) -> EtlResult<Cell> {
     const DEFAULT_DATE: NaiveDate = NaiveDate::from_ymd_opt(1, 1, 1).unwrap();
     const DEFAULT_TIMESTAMP: NaiveDateTime = NaiveDateTime::new(DEFAULT_DATE, NaiveTime::MIN);
     const DEFAULT_TIMESTAMPTZ: DateTime<Utc> =
@@ -77,7 +77,7 @@ pub fn default_value_for_type(typ: &Type) -> EtlResult<Cell> {
 ///
 /// For array types, it delegates to [`parse_cell_from_postgres_text_array`] which handles Postgres's
 /// array literal syntax with proper escaping and null value support.
-pub fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<Cell> {
+pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<Cell> {
     match *typ {
         Type::BOOL => Ok(Cell::Bool(parse_bool(str)?)),
         Type::BOOL_ARRAY => parse_cell_from_postgres_text_array(

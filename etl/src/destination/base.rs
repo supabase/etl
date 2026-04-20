@@ -1,11 +1,10 @@
-use etl_postgres::types::ReplicatedTableSchema;
 use std::future::Future;
 
 use crate::destination::async_result::{
     TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
 };
 use crate::error::EtlResult;
-use crate::types::{Event, TableRow};
+use crate::types::{Event, ReplicatedTableSchema, TableRow};
 
 /// Trait for systems that can receive replicated data from ETL pipelines.
 ///

@@ -65,14 +65,14 @@ pub type BigQueryTableId = String;
 
 /// Change Data Capture operation types for BigQuery streaming.
 #[derive(Debug)]
-pub enum BigQueryOperationType {
+pub(super) enum BigQueryOperationType {
     Upsert,
     Delete,
 }
 
 impl BigQueryOperationType {
     /// Converts the operation type into a [`Cell`] for streaming.
-    pub fn into_cell(self) -> Cell {
+    pub(super) fn into_cell(self) -> Cell {
         Cell::String(self.to_string())
     }
 }
@@ -939,7 +939,7 @@ impl BigQueryClient {
     /// underlying Storage Write API library. This method also retries the narrow class of
     /// schema propagation failures that can happen after DDL, then converts final failures
     /// into ETL errors.
-    pub async fn append_table_batches(
+    pub(super) async fn append_table_batches(
         &self,
         append_requests: Vec<BatchAppendRequest<BigQueryTableRow>>,
     ) -> EtlResult<(usize, usize)> {
@@ -1155,7 +1155,7 @@ impl BigQueryClient {
     ///
     /// Converts TableRow instances to BigQueryTableRow and creates a properly configured
     /// [`BatchAppendRequest`] for efficient append retries.
-    pub fn create_batch_append_request(
+    pub(super) fn create_batch_append_request(
         &self,
         pipeline_id: PipelineId,
         batch_index: usize,

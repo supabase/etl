@@ -9,7 +9,7 @@ use crate::APP_VERSION_ENV_NAME;
 use crate::error::{ReplicatorError, ReplicatorResult};
 
 /// Initializes Sentry error tracking for the replicator service.
-pub fn init(config: &ReplicatorConfig) -> ReplicatorResult<Option<ClientInitGuard>> {
+pub(crate) fn init(config: &ReplicatorConfig) -> ReplicatorResult<Option<ClientInitGuard>> {
     let Some(sentry_config) = &config.sentry else {
         debug!("sentry not configured for replicator, skipping initialization");
 

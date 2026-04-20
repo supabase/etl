@@ -7,7 +7,7 @@ use crate::error::EtlResult;
 /// Postgres represents boolean values in text format as single characters:
 /// - `"t"` → `true` (exactly one lowercase 't')
 /// - `"f"` → `false` (exactly one lowercase 'f')
-pub fn parse_bool(s: &str) -> EtlResult<bool> {
+pub(crate) fn parse_bool(s: &str) -> EtlResult<bool> {
     if s == "t" {
         Ok(true)
     } else if s == "f" {

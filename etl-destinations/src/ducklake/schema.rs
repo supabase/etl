@@ -54,7 +54,7 @@ fn postgres_array_type_to_ducklake_sql(typ: &Type) -> &'static str {
 }
 
 /// Returns the DuckLake SQL type string for a Postgres column type.
-pub fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
+fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
     if is_array_type(typ) {
         postgres_array_type_to_ducklake_sql(typ)
     } else {
@@ -67,7 +67,7 @@ pub fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
 /// CDC columns (`cdc_operation` and `cdc_lsn`) are appended at the end and must already
 /// be included in `column_schemas` (added by `modify_schema_with_cdc_columns` before calling
 /// this function).
-pub fn build_create_table_sql_ducklake(
+pub(super) fn build_create_table_sql_ducklake(
     table_name: &str,
     column_schemas: &[ColumnSchema],
 ) -> String {

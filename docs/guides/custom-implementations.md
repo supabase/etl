@@ -54,21 +54,17 @@ Create `src/custom_store.rs`. A store must implement three traits (see [Extensio
 - `CleanupStore` - Metadata cleanup when tables leave the publication
 
 ```rust
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
 use etl::error::EtlResult;
-use etl::state::destination_metadata::{
-    AppliedDestinationTableMetadata, DestinationTableMetadata,
+use etl::state::{
+    AppliedDestinationTableMetadata, DestinationTableMetadata, TableReplicationPhase,
 };
-use etl::state::table::TableReplicationPhase;
-use etl::store::cleanup::CleanupStore;
-use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
-use etl::types::TableId;
-use etl_postgres::types::{SnapshotId, TableSchema};
+use etl::store::{CleanupStore, SchemaStore, StateStore, TableReplicationStates};
+use etl::types::{SnapshotId, TableId, TableSchema};
 
 #[derive(Debug, Clone, Default)]
 struct TableEntry {
@@ -145,12 +141,14 @@ impl StateStore for CustomStore {
 
     async fn get_table_replication_states(
         &self,
-    ) -> EtlResult<HashMap<TableId, TableReplicationPhase>> {
+    ) -> EtlResult<TableReplicationStates> {
         let tables = self.tables.lock().await;
-        Ok(tables
-            .iter()
-            .filter_map(|(id, e)| e.state.clone().map(|s| (*id, s)))
-            .collect())
+        Ok(Arc::new(
+            tables
+                .iter()
+                .filter_map(|(id, e)| e.state.clone().map(|s| (*id, s)))
+                .collect::<BTreeMap<_, _>>(),
+        ))
     }
 
     async fn load_table_replication_states(&self) -> EtlResult<usize> {
@@ -239,11 +237,12 @@ use serde_json::json;
 use std::time::Duration;
 use tracing::{info, warn};
 
-use etl::destination::Destination;
+use etl::destination::{
+    Destination, TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
 use etl::error::{ErrorKind, EtlResult};
-use etl::types::{Event, TableRow};
+use etl::types::{Event, ReplicatedTableSchema, TableRow};
 use etl::{bail, etl_error};
-use etl_postgres::types::ReplicatedTableSchema;
 
 #[derive(Debug, Clone)]
 pub struct HttpDestination {
@@ -368,7 +367,10 @@ mod custom_store;
 mod http_destination;
 
 use custom_store::CustomStore;
-use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
+use etl::config::{
+    BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+    PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+};
 use etl::pipeline::Pipeline;
 use http_destination::HttpDestination;
 use std::error::Error;
@@ -393,15 +395,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 enabled: false,
                 trusted_root_certs: String::new(),
             },
-            keepalive: None,
+            keepalive: TcpKeepaliveConfig::default(),
         },
         batch: BatchConfig {
-            max_size: 1000,
             max_fill_ms: 5000,
+            memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: 4,
+        max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        memory_refresh_interval_ms: 100,
+        memory_backpressure: Some(MemoryBackpressureConfig::default()),
+        table_sync_copy: TableSyncCopyConfig::default(),
+        invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
     };
 
     println!("Starting pipeline...");

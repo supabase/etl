@@ -1,11 +1,11 @@
-use crate::conversions::event::{ColumnSchemaMessage, IdentityMessage, build_table_schema};
+use crate::config::{ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig};
+use crate::conversions::{ColumnSchemaMessage, IdentityMessage, build_table_schema};
 use crate::error::{ErrorKind, EtlResult};
-use crate::utils::tokio::MakeRustlsConnect;
+use crate::types::{ColumnSchema, PgLsn, SnapshotId, TableId, TableName, TableSchema};
+use crate::utils::MakeRustlsConnect;
 use crate::{bail, etl_error};
-use etl_config::shared::{ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig};
 use etl_postgres::below_version;
 use etl_postgres::replication::extract_server_version;
-use etl_postgres::types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
 use etl_postgres::version::POSTGRES_15;
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
@@ -22,7 +22,7 @@ use tokio_postgres::error::SqlState;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
     Client, Config, Connection, CopyOutStream, NoTls, SimpleQueryMessage, SimpleQueryRow, Socket,
-    config::ReplicationMode, types::PgLsn,
+    config::ReplicationMode,
 };
 use tracing::{Instrument, error, info, warn};
 
@@ -84,15 +84,10 @@ pub enum PostgresConnectionUpdate {
 
 impl PostgresConnectionUpdate {
     /// Creates an error update from an error message.
-    pub fn errored(error: impl Into<Arc<str>>) -> Self {
+    pub(crate) fn errored(error: impl Into<Arc<str>>) -> Self {
         Self::Errored {
             error: error.into(),
         }
-    }
-
-    /// Returns `true` when this update indicates that the connection has been closed.
-    pub fn signals_connection_closed(&self) -> bool {
-        matches!(self, Self::Terminated | Self::Errored { .. })
     }
 }
 
@@ -163,7 +158,7 @@ pub enum GetOrCreateSlotResult {
 
 impl GetOrCreateSlotResult {
     /// Returns the lsn that should be used as starting LSN during events replication.
-    pub fn get_start_lsn(&self) -> PgLsn {
+    pub(crate) fn get_start_lsn(&self) -> PgLsn {
         match self {
             GetOrCreateSlotResult::CreateSlot(result) => result.consistent_point,
             GetOrCreateSlotResult::GetSlot(result) => result.confirmed_flush_lsn,
@@ -544,13 +539,8 @@ impl PgReplicationClient {
     }
 
     /// Returns a receiver for background connection task updates.
-    pub fn connection_updates_rx(&self) -> watch::Receiver<PostgresConnectionUpdate> {
+    pub(crate) fn connection_updates_rx(&self) -> watch::Receiver<PostgresConnectionUpdate> {
         self.connection_updates_rx.clone()
-    }
-
-    /// Executes a simple query on the underlying connection and returns all result messages.
-    pub async fn simple_query(&self, query: &str) -> EtlResult<Vec<SimpleQueryMessage>> {
-        Ok(self.client.simple_query(query).await?)
     }
 
     /// Returns the configured `wal_sender_timeout`, if PostgreSQL has it enabled.
@@ -865,7 +855,7 @@ impl PgReplicationClient {
     ///
     /// A partitioned table is one where `relkind = 'p'` in `pg_class`.
     /// Returns `true` if at least one table is partitioned, `false` otherwise.
-    pub async fn has_partitioned_tables(&self, table_ids: &[TableId]) -> EtlResult<bool> {
+    pub(crate) async fn has_partitioned_tables(&self, table_ids: &[TableId]) -> EtlResult<bool> {
         if table_ids.is_empty() {
             return Ok(false);
         }
@@ -1385,7 +1375,7 @@ impl PgReplicationClient {
 
     /// Retrieves the publication row filter for a table.
     /// If no publication is specified, we will always return None
-    pub async fn get_row_filter(
+    async fn get_row_filter(
         &self,
         table_id: TableId,
         publication_name: Option<&str>,

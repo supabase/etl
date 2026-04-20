@@ -10,31 +10,27 @@ use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
 use tokio::task::AbortHandle;
 use tracing::{Instrument, debug, error, info, warn};
 
-use crate::concurrency::batch_budget::BatchBudgetController;
-use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
+use crate::concurrency::{BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx};
 use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlError, EtlResult};
 use crate::metrics::{ERROR_TYPE_LABEL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL};
-use crate::replication::apply::{
-    ApplyLoop, ApplyLoopResult, TableSyncWorkerContext, WorkerContext,
-};
 use crate::replication::client::PgReplicationClient;
-use crate::replication::table_cache::SharedTableCache;
-use crate::replication::table_sync::{TableSyncResult, start_table_sync};
+use crate::replication::{ApplyLoop, ApplyLoopResult, TableSyncWorkerContext, WorkerContext};
+use crate::replication::{SharedTableCache, TableSyncResult, start_table_sync};
 use crate::state::table::{
     RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
 };
 use crate::store::schema::SchemaStore;
 use crate::store::state::StateStore;
 use crate::types::PipelineId;
+use crate::workers::TableSyncWorkerPool;
 use crate::workers::policy::{RetryDirective, build_error_handling_policy};
-use crate::workers::pool::{TableSyncWorkerId, TableSyncWorkerPool};
+use crate::workers::pool::TableSyncWorkerId;
 use crate::{bail, etl_error};
 
 /// Result for a table sync worker task.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum TableSyncWorkerResult {
+pub(crate) enum TableSyncWorkerResult {
     /// The worker completed the sync flow successfully.
     Completed,
     /// The worker stopped because shutdown was requested.
@@ -45,7 +41,7 @@ pub enum TableSyncWorkerResult {
 
 /// Internal state of [`TableSyncWorkerState`].
 #[derive(Debug)]
-pub struct TableSyncWorkerStateInner {
+pub(crate) struct TableSyncWorkerStateInner {
     /// Unique identifier for the table whose state this structure tracks.
     table_id: TableId,
     /// Current replication phase, this is the authoritative in-memory state.
@@ -62,7 +58,7 @@ impl TableSyncWorkerStateInner {
     /// This method provides the core state transition mechanism for table synchronization.
     /// It atomically updates the in-memory state and broadcasts the change to any workers
     /// that may be waiting for state transitions.
-    pub fn set(&mut self, phase: TableReplicationPhase) {
+    pub(crate) fn set(&mut self, phase: TableReplicationPhase) {
         info!(
             table_id = self.table_id.0,
             from_phase = %self.table_replication_phase,
@@ -80,18 +76,18 @@ impl TableSyncWorkerStateInner {
     }
 
     /// Returns the number of consecutive automatic retry attempts.
-    pub fn retry_attempts(&self) -> u32 {
+    pub(crate) fn retry_attempts(&self) -> u32 {
         self.retry_attempts
     }
 
     /// Increments the retry attempt counter and returns the updated value.
-    pub fn increment_retry_attempts(&mut self) -> u32 {
+    pub(crate) fn increment_retry_attempts(&mut self) -> u32 {
         self.retry_attempts = self.retry_attempts.saturating_add(1);
         self.retry_attempts
     }
 
     /// Resets the automatic retry attempt counter to zero.
-    pub fn reset_retry_attempts(&mut self) {
+    pub(crate) fn reset_retry_attempts(&mut self) {
         self.retry_attempts = 0;
     }
 
@@ -101,7 +97,7 @@ impl TableSyncWorkerStateInner {
     /// ensuring that important state transitions survive process restarts and failures.
     ///
     /// The persistence behavior is controlled by the phase type's storage requirements.
-    pub async fn set_and_store<S: StateStore>(
+    pub(crate) async fn set_and_store<S: StateStore>(
         &mut self,
         phase: TableReplicationPhase,
         state_store: &S,
@@ -132,7 +128,7 @@ impl TableSyncWorkerStateInner {
     /// in-memory state. It first queries the state store to retrieve the previous
     /// state, then applies that state to the in-memory representation and notifies
     /// any waiting workers of the change.
-    pub async fn rollback<S: StateStore>(&mut self, state_store: &S) -> EtlResult<()> {
+    pub(crate) async fn rollback<S: StateStore>(&mut self, state_store: &S) -> EtlResult<()> {
         // We rollback the state in the store and then also set the rolled back state in memory.
         let previous_phase = state_store
             .rollback_table_replication_state(self.table_id)
@@ -147,7 +143,7 @@ impl TableSyncWorkerStateInner {
     /// This method provides access to the authoritative in-memory state without
     /// requiring coordination with external storage. The returned phase represents
     /// the most current state as seen by the local worker.
-    pub fn replication_phase(&self) -> TableReplicationPhase {
+    pub(crate) fn replication_phase(&self) -> TableReplicationPhase {
         self.table_replication_phase.clone()
     }
 }
@@ -161,7 +157,7 @@ impl TableSyncWorkerStateInner {
 /// The state handle supports atomic updates, notifications, and blocking waits for
 /// specific phase transitions, making it suitable for complex multi-worker scenarios.
 #[derive(Debug, Clone)]
-pub struct TableSyncWorkerState {
+pub(crate) struct TableSyncWorkerState {
     inner: Arc<Mutex<TableSyncWorkerStateInner>>,
 }
 
@@ -188,7 +184,7 @@ impl TableSyncWorkerState {
     ///
     /// This static method provides a unified interface for updating table state
     /// regardless of whether the table has an active worker in the pool.
-    pub async fn set_and_store<S>(
+    pub(crate) async fn set_and_store<S>(
         pool: &TableSyncWorkerPool,
         state_store: &S,
         table_id: TableId,
@@ -228,7 +224,7 @@ impl TableSyncWorkerState {
     /// This method blocks until either the table reaches one of the desired phases or
     /// a shutdown signal is received. It uses an efficient notification system
     /// to avoid polling and provides immediate response to state changes.
-    pub async fn wait_for_phase_type(
+    pub(crate) async fn wait_for_phase_type(
         &self,
         phase_types: &[TableReplicationPhaseType],
         mut shutdown_rx: ShutdownRx,
@@ -294,7 +290,7 @@ impl Deref for TableSyncWorkerState {
 /// synchronization workers. It exposes both the worker's state and completion
 /// status, enabling coordination with other parts of the system.
 #[derive(Debug)]
-pub struct TableSyncWorkerHandle {
+pub(crate) struct TableSyncWorkerHandle {
     worker_id: TableSyncWorkerId,
     state: TableSyncWorkerState,
     abort_handle: AbortHandle,
@@ -302,7 +298,7 @@ pub struct TableSyncWorkerHandle {
 
 impl TableSyncWorkerHandle {
     /// Creates a new handle with the given worker ID, state, and abort handle.
-    pub fn new(
+    pub(crate) fn new(
         worker_id: TableSyncWorkerId,
         state: TableSyncWorkerState,
         abort_handle: AbortHandle,
@@ -315,17 +311,17 @@ impl TableSyncWorkerHandle {
     }
 
     /// Returns the unique identifier for this worker run.
-    pub fn worker_id(&self) -> TableSyncWorkerId {
+    pub(crate) fn worker_id(&self) -> TableSyncWorkerId {
         self.worker_id
     }
 
     /// Returns the worker's state.
-    pub fn state(&self) -> TableSyncWorkerState {
+    pub(crate) fn state(&self) -> TableSyncWorkerState {
         self.state.clone()
     }
 
     /// Checks if the worker task has finished.
-    pub fn is_finished(&self) -> bool {
+    pub(crate) fn is_finished(&self) -> bool {
         self.abort_handle.is_finished()
     }
 }
@@ -339,7 +335,7 @@ impl TableSyncWorkerHandle {
 /// The worker coordinates with the apply worker through shared state and implements
 /// sophisticated retry and error handling logic to ensure robust operation.
 #[derive(Debug)]
-pub struct TableSyncWorker<S, D> {
+pub(crate) struct TableSyncWorker<S, D> {
     pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     pool: Arc<TableSyncWorkerPool>,
@@ -360,7 +356,7 @@ impl<S, D> TableSyncWorker<S, D> {
     /// including coordination channels, resource permits, and storage interfaces.
     /// The worker is ready to start synchronization upon creation.
     #[expect(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
         pool: Arc<TableSyncWorkerPool>,
@@ -387,15 +383,6 @@ impl<S, D> TableSyncWorker<S, D> {
             batch_budget,
         }
     }
-
-    /// Returns the ID of the table this worker is responsible for synchronizing.
-    ///
-    /// This method provides access to the table identifier, which is used for
-    /// logging, coordination, and state management throughout the synchronization
-    /// process.
-    pub fn table_id(&self) -> TableId {
-        self.table_id
-    }
 }
 
 impl<S, D> TableSyncWorker<S, D>
@@ -412,7 +399,6 @@ where
     /// Any errors encountered while persisting error state or preparing a retry are propagated
     /// immediately.
     async fn handle_table_sync_worker_error(
-        _pipeline_id: PipelineId,
         table_id: TableId,
         config: &PipelineConfig,
         state: &TableSyncWorkerState,
@@ -558,7 +544,7 @@ where
     /// This method initializes the worker by loading its replication state from
     /// storage, creating the state management structure, and spawning the
     /// synchronization process into the pool.
-    pub async fn spawn_into_pool(self, pool: &TableSyncWorkerPool) -> EtlResult<()> {
+    pub(crate) async fn spawn_into_pool(self, pool: &TableSyncWorkerPool) -> EtlResult<()> {
         info!(table_id = self.table_id.0, "starting table sync worker");
 
         let Some(table_replication_phase) = self
@@ -643,7 +629,6 @@ where
                 }
                 Err(err) => {
                     let result = Self::handle_table_sync_worker_error(
-                        pipeline_id,
                         table_id,
                         config.as_ref(),
                         &state,
@@ -733,13 +718,13 @@ where
         .await;
 
         let start_lsn = match table_sync_result {
-            Ok(TableSyncResult::SyncCompleted { start_lsn }) => start_lsn,
-            Ok(TableSyncResult::SyncStopped) => {
+            Ok(TableSyncResult::Completed { start_lsn }) => start_lsn,
+            Ok(TableSyncResult::Stopped) => {
                 info!(table_id = self.table_id.0, "table sync was stopped");
 
                 return Ok(TableSyncWorkerResult::Shutdown);
             }
-            Ok(TableSyncResult::SyncNotRequired) => {
+            Ok(TableSyncResult::NotRequired) => {
                 info!(table_id = self.table_id.0, "table sync was not required");
 
                 return Ok(TableSyncWorkerResult::Completed);

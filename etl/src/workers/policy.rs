@@ -2,7 +2,7 @@ use crate::error::{ErrorKind, EtlError};
 
 /// Retry behavior for a classified error.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum RetryDirective {
+pub(crate) enum RetryDirective {
     /// The operation can be retried automatically with worker-defined timing.
     Timed,
     /// The operation should only be retried after manual intervention.
@@ -13,7 +13,7 @@ pub enum RetryDirective {
 
 /// Policy describing how an [`EtlError`] should be handled by workers.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct ErrorHandlingPolicy {
+pub(crate) struct ErrorHandlingPolicy {
     retry_directive: RetryDirective,
     solution: Option<&'static str>,
 }
@@ -28,24 +28,24 @@ impl ErrorHandlingPolicy {
     }
 
     /// Returns `true` if this policy involves a retry.
-    pub fn should_retry(&self) -> bool {
+    pub(crate) fn should_retry(&self) -> bool {
         self.retry_directive == RetryDirective::Timed
     }
 
     /// Returns the retry directive for this policy.
-    pub fn retry_directive(&self) -> RetryDirective {
+    pub(crate) fn retry_directive(&self) -> RetryDirective {
         self.retry_directive
     }
 
     /// Returns an optional operator-facing solution message.
-    pub fn solution(&self) -> Option<&'static str> {
+    pub(crate) fn solution(&self) -> Option<&'static str> {
         self.solution
     }
 }
 
 /// Builds an [`ErrorHandlingPolicy`] from an [`EtlError`] to determine in a unified way how errors
 /// should be handled.
-pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
+pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
     match error.kind() {
         // Automatically retriable errors. Keep this list narrow and limited to transient source or destination
         // connectivity/capacity failures that are expected to recover without operator intervention.

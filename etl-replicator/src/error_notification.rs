@@ -10,17 +10,17 @@ use tracing::{info, warn};
 /// Contains error information to be sent to the Supabase API for tracking
 /// and monitoring purposes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NotificationRequest {
+struct NotificationRequest {
     /// Unique identifier for the pipeline that encountered the error.
-    pub pipeline_id: String,
+    pipeline_id: String,
     /// Human-readable error message describing the failure.
-    pub error_message: String,
+    error_message: String,
     /// Stable hash of the error for grouping and deduplication.
     ///
     /// The hash is computed from error kind, description, and detail to
     /// provide a consistent identifier across multiple occurrences of the
     /// same error type.
-    pub error_hash: String,
+    error_hash: String,
 }
 
 /// Response from the error notification API.
@@ -28,11 +28,11 @@ pub struct NotificationRequest {
 /// Contains information about whether the notification was successfully
 /// processed and if it was deduplicated based on the error hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NotificationResponse {
+struct NotificationResponse {
     /// Success message from the API.
-    pub message: String,
+    message: String,
     /// Whether the notification was deduplicated based on the error hash.
-    pub deduplicated: bool,
+    deduplicated: bool,
 }
 
 /// Client for sending error notifications to Supabase API.
@@ -41,7 +41,7 @@ pub struct NotificationResponse {
 /// during replication. Uses reqwest for HTTP communication and handles
 /// errors gracefully without blocking pipeline operations.
 #[derive(Debug, Clone)]
-pub struct ErrorNotificationClient {
+pub(crate) struct ErrorNotificationClient {
     /// HTTP client for making requests.
     client: reqwest::Client,
     /// Supabase API URL for error notifications.
@@ -59,7 +59,12 @@ impl ErrorNotificationClient {
     ///
     /// The client is configured with the necessary credentials and endpoints
     /// to send error notifications to the Supabase API.
-    pub fn new(api_url: String, api_key: String, project_ref: String, pipeline_id: String) -> Self {
+    pub(crate) fn new(
+        api_url: String,
+        api_key: String,
+        project_ref: String,
+        pipeline_id: String,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -79,7 +84,7 @@ impl ErrorNotificationClient {
     /// This method is fire-and-forget - it logs any failures but does not
     /// propagate them to avoid disrupting the pipeline. The notification is
     /// sent asynchronously without blocking pipeline operations.
-    pub async fn notify_error<H: Hash>(&self, error_message: String, error_hash: H) {
+    pub(crate) async fn notify_error<H: Hash>(&self, error_message: String, error_hash: H) {
         let error_hash = compute_error_hash(error_hash);
 
         let notification = NotificationRequest {
@@ -150,7 +155,7 @@ impl ErrorNotificationClient {
 ///
 /// This provides a consistent identifier across multiple occurrences of the
 /// same error type, enabling grouping and deduplication in monitoring systems.
-pub fn compute_error_hash<H: Hash>(error_hash: H) -> String {
+fn compute_error_hash<H: Hash>(error_hash: H) -> String {
     let mut hasher = DefaultHasher::new();
     error_hash.hash(&mut hasher);
     let hash_value = hasher.finish();

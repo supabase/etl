@@ -29,8 +29,8 @@ pub(crate) fn apply_worker_apply_stream_id() -> String {
 pin_project! {
     /// A stream adapter that pauses polling when memory monitor reports pressure.
     #[must_use = "streams do nothing unless polled"]
-    #[derive(Debug)]
-pub struct BackpressureStream<S: Stream> {
+#[derive(Debug)]
+pub(crate) struct BackpressureStream<S: Stream> {
         #[pin]
         stream: S,
         stream_id: String,
@@ -41,7 +41,7 @@ pub struct BackpressureStream<S: Stream> {
 
 impl<S: Stream> BackpressureStream<S> {
     /// Creates a new [`BackpressureStream`] wrapping `stream`.
-    pub fn wrap(
+    pub(crate) fn wrap(
         stream: S,
         stream_id: impl Into<String>,
         memory_subscription: Option<MemoryMonitorSubscription>,
@@ -55,7 +55,7 @@ impl<S: Stream> BackpressureStream<S> {
     }
 
     /// Returns a pinned mutable reference to the wrapped stream.
-    pub fn stream_mut(self: Pin<&mut Self>) -> Pin<&mut S> {
+    pub(crate) fn stream_mut(self: Pin<&mut Self>) -> Pin<&mut S> {
         self.project().stream
     }
 }
@@ -120,8 +120,8 @@ pin_project! {
     /// It avoids buffering `Result<B, E>` values and then allocating a second vector to extract
     /// successful entries.
     #[must_use = "streams do nothing unless polled"]
-    #[derive(Debug)]
-pub struct TryBatchBackpressureStream<B, E, S: Stream<Item = Result<B, E>>> {
+#[derive(Debug)]
+pub(crate) struct TryBatchBackpressureStream<B, E, S: Stream<Item = Result<B, E>>> {
         #[pin]
         stream: S,
         stream_id: String,
@@ -143,7 +143,7 @@ where
     B: SizeHint,
 {
     /// Creates a new [`TryBatchBackpressureStream`].
-    pub fn wrap(
+    pub(crate) fn wrap(
         stream: S,
         stream_id: impl Into<String>,
         batch_config: BatchConfig,

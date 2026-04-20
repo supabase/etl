@@ -1,7 +1,7 @@
-use etl_postgres::types::TableId;
 use std::future::Future;
 
 use crate::error::EtlResult;
+use crate::types::TableId;
 
 /// Combined maintenance operations across state and schema stores.
 ///

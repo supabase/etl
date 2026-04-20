@@ -18,11 +18,11 @@ use crate::workers::table_sync::{
 /// increasing run ID. This allows tracking all worker runs across restarts
 /// for the same table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TableSyncWorkerId {
+pub(crate) struct TableSyncWorkerId {
     /// Identifier of the table being synchronized by this worker.
-    pub table_id: TableId,
+    pub(crate) table_id: TableId,
     /// Monotonically increasing identifier distinguishing individual worker runs for the same table.
-    pub run_id: u64,
+    pub(crate) run_id: u64,
 }
 
 impl std::fmt::Display for TableSyncWorkerId {
@@ -46,7 +46,7 @@ impl std::fmt::Display for TableSyncWorkerId {
 /// that [`wait_all`] (which holds the workers_join_set lock) blocks any new spawns until
 /// all existing workers have completed.
 #[derive(Debug)]
-pub struct TableSyncWorkerPool {
+pub(crate) struct TableSyncWorkerPool {
     /// Monotonically increasing counter for generating unique run IDs.
     next_run_id: AtomicU64,
     /// Owns all spawned worker tasks. Locked first during spawn operations.
@@ -57,7 +57,7 @@ pub struct TableSyncWorkerPool {
 
 impl TableSyncWorkerPool {
     /// Creates a new empty table sync worker pool.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             next_run_id: AtomicU64::new(0),
             workers_join_set: Mutex::new(JoinSet::new()),
@@ -73,7 +73,7 @@ impl TableSyncWorkerPool {
     ///
     /// The locking order is: workers_join_set -> workers (write). This ensures that if
     /// [`wait_all`] is in progress, this method blocks until it completes.
-    pub async fn spawn<F>(&self, table_id: TableId, state: TableSyncWorkerState, future: F)
+    pub(crate) async fn spawn<F>(&self, table_id: TableId, state: TableSyncWorkerState, future: F)
     where
         F: Future<Output = EtlResult<TableSyncWorkerResult>> + Send + 'static,
     {
@@ -114,7 +114,10 @@ impl TableSyncWorkerPool {
     ///
     /// Returns `None` if no worker exists for the table or if the worker has finished.
     /// This method only acquires a read lock on the workers map.
-    pub async fn get_active_worker_state(&self, table_id: TableId) -> Option<TableSyncWorkerState> {
+    pub(crate) async fn get_active_worker_state(
+        &self,
+        table_id: TableId,
+    ) -> Option<TableSyncWorkerState> {
         let workers = self.workers.read().await;
         let handle = workers.get(&table_id)?;
 
@@ -131,16 +134,6 @@ impl TableSyncWorkerPool {
         Some(handle.state())
     }
 
-    /// Checks if an active worker exists for the given table.
-    ///
-    /// This method only acquires a read lock on the workers map.
-    pub async fn has_active_worker(&self, table_id: TableId) -> bool {
-        let workers = self.workers.read().await;
-        workers
-            .get(&table_id)
-            .is_some_and(|handle| !handle.is_finished())
-    }
-
     /// Waits for all workers in the pool to complete.
     ///
     /// This method holds the workers_join_set lock while draining all tasks, which blocks
@@ -148,7 +141,7 @@ impl TableSyncWorkerPool {
     /// lock on the workers map to remove the entry only if the worker_id matches.
     ///
     /// If any workers encounter supervision errors, those errors are collected and returned.
-    pub async fn wait_all(&self) -> EtlResult<()> {
+    pub(crate) async fn wait_all(&self) -> EtlResult<()> {
         let mut errors = Vec::new();
         let mut workers_join_set = self.workers_join_set.lock().await;
 

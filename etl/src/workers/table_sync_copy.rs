@@ -12,10 +12,10 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::info;
 
-use crate::concurrency::batch_budget::BatchBudgetController;
-use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::stream::{TryBatchBackpressureStream, table_sync_worker_copy_stream_id};
+use crate::concurrency::{
+    BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx, TryBatchBackpressureStream,
+    table_sync_worker_copy_stream_id,
+};
 use crate::destination::Destination;
 use crate::destination::async_result::WriteTableRowsResult;
 use crate::error::{ErrorKind, EtlResult};
@@ -28,12 +28,12 @@ use crate::metrics::{
     ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE, ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL,
     WORKER_TYPE_LABEL,
 };
+use crate::replication::TableCopyStream;
 use crate::replication::client::{
     CtidPartition, PgReplicationChildTransaction, PgReplicationTransaction,
     PostgresConnectionUpdate,
 };
-use crate::replication::stream::TableCopyStream;
-use crate::types::{PipelineId, ReplicatedTableSchema, TableRow};
+use crate::types::{ReplicatedTableSchema, TableRow};
 
 /// Calculates Load Imbalance Factor (LIF) for a set of values.
 ///
@@ -67,7 +67,7 @@ fn calculate_skew_metrics(values: &[f64]) -> f64 {
 
 /// Result of a table copy operation.
 #[derive(Debug)]
-pub enum TableCopyResult {
+pub(crate) enum TableCopyResult {
     /// All rows copied successfully.
     Completed {
         total_rows: u64,
@@ -83,7 +83,6 @@ async fn copy_table_rows_from_stream<D, S>(
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     replicated_table_schema: ReplicatedTableSchema,
-    _pipeline_id: PipelineId,
     partitioning: &'static str,
     destination: D,
 ) -> EtlResult<ShutdownResult<u64, u64>>
@@ -195,7 +194,7 @@ enum CopyPartition {
 /// partitioning (for regular tables) or per-leaf-partition parallelism (for partitioned
 /// tables) across multiple child connections that share the same exported snapshot.
 #[expect(clippy::too_many_arguments)]
-pub async fn table_copy<D: Destination + Clone + Send + 'static>(
+pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
@@ -203,7 +202,6 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
     max_copy_connections: u16,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
-    pipeline_id: PipelineId,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -217,7 +215,6 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
             max_copy_connections,
             batch_config,
             shutdown_rx,
-            pipeline_id,
             destination,
             memory_monitor,
             batch_budget,
@@ -231,7 +228,6 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
             publication_name,
             batch_config,
             shutdown_rx,
-            pipeline_id,
             destination,
             memory_monitor,
             batch_budget,
@@ -249,7 +245,6 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     publication_name: Option<&str>,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
-    pipeline_id: PipelineId,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -285,7 +280,6 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         shutdown_rx,
         connection_updates_rx,
         replicated_table_schema,
-        pipeline_id,
         "false",
         destination,
     )
@@ -336,7 +330,6 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     max_copy_connections: u16,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
-    pipeline_id: PipelineId,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -436,7 +429,6 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 partition,
                 batch_config,
                 shutdown_rx,
-                pipeline_id,
                 destination,
                 memory_monitor,
                 batch_budget,
@@ -545,7 +537,6 @@ async fn copy_partition<D>(
     partition: CopyPartition,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
-    pipeline_id: PipelineId,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -636,7 +627,6 @@ where
         shutdown_rx,
         connection_updates_rx,
         replicated_table_schema,
-        pipeline_id,
         "true",
         destination,
     )

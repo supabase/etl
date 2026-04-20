@@ -11,20 +11,20 @@ use crate::error::ReplicatorError;
 ///
 /// This tag is applied at the scope level so all captured errors inherit
 /// the configured destination type.
-pub fn set_destination_tag(destination: &'static str) {
+pub(crate) fn set_destination_tag(destination: &'static str) {
     sentry::configure_scope(|scope| {
         scope.set_tag("destination", destination);
     });
 }
 
 /// Captures a [`ReplicatorError`] to Sentry and returns the event ID.
-pub fn capture_error(err: &ReplicatorError) -> Uuid {
+pub(crate) fn capture_error(err: &ReplicatorError) -> Uuid {
     let event = event_from_replicator_error(err);
     sentry::capture_event(event)
 }
 
 /// Captures a stored table replication [`EtlError`] to Sentry.
-pub fn capture_table_error(table_id: TableId, err: &EtlError) {
+pub(crate) fn capture_table_error(table_id: TableId, err: &EtlError) {
     sentry::with_scope(
         |scope| {
             scope.set_tag("table_id", table_id.0.to_string());
