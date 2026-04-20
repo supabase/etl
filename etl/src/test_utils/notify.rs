@@ -1,3 +1,4 @@
+use std::panic::Location;
 use std::time::Duration;
 use std::{fmt, sync::Arc};
 
@@ -40,16 +41,24 @@ impl TimedNotify {
     ///
     /// Panics if the timeout duration elapses before the notification is received.
     /// This is intentional behavior for tests to fail fast rather than hang.
-    pub async fn notified(&self) {
-        match timeout(self.timeout_duration, self.notify.notified()).await {
-            Ok(()) => {}
-            Err(_) => {
-                panic!(
-                    "Test notification timed out after {:?}. \
-                     This likely indicates the expected state was never reached. \
-                     Check if the pipeline is running correctly or if the condition is reachable.",
-                    self.timeout_duration
-                );
+    #[track_caller]
+    pub fn notified(&self) -> impl Future<Output = ()> + '_ {
+        let caller = Location::caller();
+
+        async move {
+            match timeout(self.timeout_duration, self.notify.notified()).await {
+                Ok(()) => {}
+                Err(_) => {
+                    panic!(
+                        "Test notification timed out after {:?} at {}:{}:{}. \
+                         This likely indicates the expected state was never reached. \
+                         Check if the condition is reachable.",
+                        self.timeout_duration,
+                        caller.file(),
+                        caller.line(),
+                        caller.column(),
+                    );
+                }
             }
         }
     }
