@@ -105,9 +105,7 @@ impl Application {
 
         // Try to create Kubernetes client, but continue without it if unavailable
         let kube_client_result = match Environment::load() {
-            Ok(Environment::Staging) | Ok(Environment::Prod) => {
-                kube::Client::try_default().await.ok()
-            }
+            Ok(Environment::Staging | Environment::Prod) => kube::Client::try_default().await.ok(),
             Ok(Environment::Dev) => {
                 async {
                     let options = KubeConfigOptions {
