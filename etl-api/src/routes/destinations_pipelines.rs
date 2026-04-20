@@ -149,8 +149,8 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::PipelineDestinationMismatch(_, _) => {
                 StatusCode::BAD_REQUEST
             }
-            DestinationPipelineError::DuplicatePipeline => StatusCode::CONFLICT,
-            DestinationPipelineError::ActivePipeline(_) => StatusCode::CONFLICT,
+            DestinationPipelineError::DuplicatePipeline
+            | DestinationPipelineError::ActivePipeline(_) => StatusCode::CONFLICT,
             DestinationPipelineError::PipelineLimitReached { .. } => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }

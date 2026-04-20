@@ -78,14 +78,14 @@ impl TenantError {
 impl ResponseError for TenantError {
     fn status_code(&self) -> StatusCode {
         match self {
-            TenantError::TenantsDb(TenantsDbError::Conflict(_)) => StatusCode::CONFLICT,
+            TenantError::TenantsDb(TenantsDbError::Conflict(_))
+            | TenantError::ActivePipeline(_) => StatusCode::CONFLICT,
             TenantError::TenantsDb(_)
             | TenantError::SourcesDb(_)
             | TenantError::PipelinesDb(_)
             | TenantError::Database(_)
             | TenantError::TrustedRootCerts(_)
             | TenantError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            TenantError::ActivePipeline(_) => StatusCode::CONFLICT,
             TenantError::TenantNotFound(_) => StatusCode::NOT_FOUND,
         }
     }

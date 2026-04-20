@@ -80,11 +80,11 @@ impl ResponseError for SourceError {
         match self {
             SourceError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             SourceError::TenantId(_) => StatusCode::BAD_REQUEST,
-            SourceError::SourcesDb(_) | SourceError::Database(_) | SourceError::Validation(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            SourceError::SourcesDb(_)
+            | SourceError::PipelinesDb(_)
+            | SourceError::Validation(_)
+            | SourceError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SourceError::ValidationFailed(_) => StatusCode::FORBIDDEN,
-            SourceError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SourceError::ActivePipeline(_) | SourceError::SourceInUse(_) => StatusCode::CONFLICT,
         }
     }

@@ -203,7 +203,9 @@ impl ResponseError for PipelineError {
             | PipelineError::MissingEnvironment
             | PipelineError::MissingTableReplicationState
             | PipelineError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            PipelineError::ActivePipeline(_) => StatusCode::CONFLICT,
+            PipelineError::ActivePipeline(_) | PipelineError::DuplicatePipeline => {
+                StatusCode::CONFLICT
+            }
             PipelineError::PipelineNotFound(_)
             | PipelineError::EtlStateNotInitialized
             | PipelineError::ImageIdNotDefault(_)
@@ -212,7 +214,6 @@ impl ResponseError for PipelineError {
             PipelineError::TenantId(_) | PipelineError::NotRollbackable(_) => {
                 StatusCode::BAD_REQUEST
             }
-            PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             PipelineError::PipelineLimitReached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
