@@ -224,10 +224,9 @@ fn run_lane(lane: &Lane, mode: Mode, extra: &[String], pg_env: &PgEnv) -> Result
         }
     });
 
-    let prefix_err = prefix.clone();
     let err_thread = thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            eprintln!("{prefix_err} {line}");
+            eprintln!("{prefix} {line}");
         }
     });
 

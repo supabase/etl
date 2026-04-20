@@ -348,7 +348,7 @@ pub fn run(
         let tracing_logger = TracingLogger::<ApiRootSpanBuilder>::new();
         let authentication = HttpAuthentication::bearer(auth_validator);
         let app = App::new()
-            .wrap(actix_metrics.clone())
+            .wrap(actix_metrics)
             .wrap(tracing_logger)
             .wrap(
                 sentry::integrations::actix::Sentry::builder()
