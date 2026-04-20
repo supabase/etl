@@ -216,6 +216,7 @@ pub async fn start_replicator_with_config(
                 password.as_ref().map(|p| p.expose_secret().to_string()),
                 database,
                 inserter_config,
+                state_store.clone(),
             )?;
 
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);

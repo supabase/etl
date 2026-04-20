@@ -219,6 +219,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         ClickHouseInserterConfig {
             max_bytes_per_insert,
         },
+        store.clone(),
     )?;
 
     let mut pipeline = Pipeline::new(pipeline_config, store, clickhouse_destination);

@@ -71,9 +71,28 @@ pub fn table_name_to_clickhouse_table_name(schema: &str, table: &str) -> String 
     format!("{escaped_schema}_{escaped_table}")
 }
 
+/// Returns the full ClickHouse type string for a column, including Nullable
+/// wrapping for scalar columns and Array(Nullable(T)) for array columns.
+///
+/// New columns added via ALTER TABLE are always Nullable regardless of the
+/// Postgres NOT NULL constraint, since ClickHouse cannot backfill existing rows.
+pub fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -> String {
+    if is_array_type(&col.typ) {
+        let elem = postgres_array_element_clickhouse_sql(&col.typ);
+        format!("Array(Nullable({elem}))")
+    } else {
+        let base = postgres_column_type_to_clickhouse_sql(&col.typ);
+        if col.nullable || force_nullable {
+            format!("Nullable({base})")
+        } else {
+            base.to_string()
+        }
+    }
+}
+
 /// Generates a `CREATE TABLE IF NOT EXISTS` SQL statement for the given columns.
 ///
-/// - Non-nullable columns use the bare ClickHouse type (`Int32`, `String`, …).
+/// - Non-nullable columns use the bare ClickHouse type (`Int32`, `String`, ...).
 /// - Nullable columns use `Nullable(T)`.
 /// - Array columns always use `Array(Nullable(T))` (Postgres array elements are nullable).
 /// - Two CDC trailing columns are always appended as non-nullable:
@@ -83,17 +102,7 @@ pub fn build_create_table_sql(table_name: &str, column_schemas: &[ColumnSchema])
     let mut cols = Vec::with_capacity(column_schemas.len() + 2);
 
     for col in column_schemas {
-        let col_type = if is_array_type(&col.typ) {
-            let elem = postgres_array_element_clickhouse_sql(&col.typ);
-            format!("Array(Nullable({elem}))")
-        } else {
-            let base = postgres_column_type_to_clickhouse_sql(&col.typ);
-            if col.nullable {
-                format!("Nullable({base})")
-            } else {
-                base.to_string()
-            }
-        };
+        let col_type = clickhouse_column_type(col, false);
         cols.push(format!("  \"{}\" {}", col.name, col_type));
     }
 

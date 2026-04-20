@@ -8,16 +8,20 @@ use etl::destination::async_result::{
     TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
 };
 use etl::error::{ErrorKind, EtlResult};
-use etl::etl_error;
-use etl::types::{Cell, Event, ReplicatedTableSchema, TableId, TableRow, is_array_type};
-use etl::{destination::Destination, types::PgLsn};
+use etl::state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus};
+use etl::store::schema::SchemaStore;
+use etl::store::state::StateStore;
+use etl::types::{
+    Cell, Event, ReplicatedTableSchema, SchemaDiff, TableId, TableRow, is_array_type,
+};
+use etl::{bail, destination::Destination, etl_error, types::PgLsn};
 use parking_lot::RwLock;
 use std::time::Instant;
 use tokio::task::JoinSet;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use url::Url;
 
-// ── CDC operation type ────────────────────────────────────────────────────────
+// -- CDC operation type --
 
 #[derive(Copy, Clone)]
 enum CdcOperation {
@@ -43,7 +47,7 @@ struct PendingRow {
     cells: Vec<Cell>,
 }
 
-// ── Inserter configuration ────────────────────────────────────────────────────
+// -- Inserter configuration --
 
 /// Controls intermediate flushing inside a single `write_table_rows` / `write_events` call.
 ///
@@ -52,12 +56,12 @@ struct PendingRow {
 pub struct ClickHouseInserterConfig {
     /// Start a new INSERT after this many uncompressed bytes.
     ///
-    /// Derive this from `BatchConfig::memory_budget_ratio × total_memory / max_table_sync_workers`
+    /// Derive this from `BatchConfig::memory_budget_ratio * total_memory / max_table_sync_workers`
     /// (the same formula used by `BatchBudget::ideal_batch_size_bytes`).
     pub max_bytes_per_insert: u64,
 }
 
-// ── Destination struct ────────────────────────────────────────────────────────
+// -- Destination struct --
 
 /// CDC-capable ClickHouse destination that replicates Postgres tables.
 ///
@@ -68,20 +72,19 @@ pub struct ClickHouseInserterConfig {
 /// The struct is cheaply cloneable: `client` wraps an `Arc` internally, and
 /// `table_cache` is wrapped in `Arc<RwLock<...>>`.
 #[derive(Clone)]
-pub struct ClickHouseDestination {
+pub struct ClickHouseDestination<S> {
     client: ClickHouseClient,
     inserter_config: Arc<ClickHouseInserterConfig>,
+    store: Arc<S>,
     /// Cache: ClickHouse table name -> `Arc<[bool]>` (nullable flags per column,
     /// including the two trailing CDC columns which are always `false`).
-    ///
-    /// `std::sync::RwLock` is appropriate here: both reads (hot path) and writes (rare,
-    /// only on first encounter of a new table) are brief in-memory operations. The lock
-    /// is always released before any `.await` point (DDL is executed with no lock held),
-    /// so the async `tokio::sync::RwLock` would be unnecessary overhead.
     table_cache: Arc<RwLock<HashMap<String, Arc<[bool]>>>>,
 }
 
-impl ClickHouseDestination {
+impl<S> ClickHouseDestination<S>
+where
+    S: StateStore + SchemaStore + Send + Sync,
+{
     /// Creates a new `ClickHouseDestination`.
     ///
     /// When using an `https://` URL, TLS is handled automatically by the `rustls-tls`
@@ -92,11 +95,13 @@ impl ClickHouseDestination {
         password: Option<String>,
         database: impl Into<String>,
         inserter_config: ClickHouseInserterConfig,
+        store: S,
     ) -> EtlResult<Self> {
         register_metrics();
         Ok(Self {
             client: ClickHouseClient::new(url, user, password, database),
             inserter_config: Arc::new(inserter_config),
+            store: Arc::new(store),
             table_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -104,10 +109,9 @@ impl ClickHouseDestination {
     /// Ensures the ClickHouse table for the given schema exists, returning
     /// `(ch_table_name, nullable_flags)`.
     ///
-    /// Uses a two-phase locking strategy:
-    /// 1. Fast-path read (no await) -- return cached entry if present.
-    /// 2. Slow-path: compute DDL, run `CREATE TABLE IF NOT EXISTS` (await, no lock held),
-    ///    then write-lock to insert (using `or_insert` for the concurrent first-writer race).
+    /// On first encounter, executes `CREATE TABLE IF NOT EXISTS` and stores
+    /// destination metadata with `Applied` status. Subsequent calls return
+    /// the cached result.
     async fn ensure_table_exists(
         &self,
         schema: &ReplicatedTableSchema,
@@ -123,14 +127,25 @@ impl ClickHouseDestination {
             }
         }
 
+        let table_id = schema.id();
+        let snapshot_id = schema.inner().snapshot_id;
+        let replication_mask = schema.replication_mask().clone();
+
+        // Store metadata as Applying before DDL.
+        let metadata = DestinationTableMetadata::new_applying(
+            ch_table_name.clone(),
+            snapshot_id,
+            replication_mask,
+        );
+        self.store
+            .store_destination_table_metadata(table_id, metadata.clone())
+            .await?;
+
         // Compute nullable flags (user columns + 2 CDC columns always non-nullable).
         //
-        // Array columns are NEVER marked nullable here, even if the Postgres column is nullable.
-        // The DDL always emits `Array(Nullable(T))` (no outer `Nullable` wrapper), so ClickHouse
-        // does not expect a null-indicator byte before the array. If we mistakenly set
-        // `nullable_flags[i] = true` for an array column, `rb_encode_nullable` would prepend a
-        // spurious `0x00` byte that ClickHouse reads as `varint(0)` (empty array), causing every
-        // subsequent column to be read from the wrong offset and ultimately "Cannot read all data".
+        // Array columns are NEVER marked nullable here, even if the Postgres column
+        // is nullable. The DDL always emits `Array(Nullable(T))` (no outer `Nullable`
+        // wrapper), so ClickHouse does not expect a null-indicator byte before the array.
         let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
         let mut nullable_flags_vec: Vec<bool> = column_schemas
             .iter()
@@ -146,6 +161,11 @@ impl ClickHouseDestination {
         self.client.execute_ddl(&ddl).await?;
         metrics::histogram!(ETL_CH_DDL_DURATION_SECONDS, "table" => ch_table_name.clone())
             .record(ddl_start.elapsed().as_secs_f64());
+
+        // Mark as Applied after successful DDL.
+        self.store
+            .store_destination_table_metadata(table_id, metadata.to_applied())
+            .await?;
 
         // Write-lock: insert, using or_insert to handle concurrent first-writer race.
         let stored_flags = {
@@ -197,33 +217,166 @@ impl ClickHouseDestination {
             .await
     }
 
-    /// Processes events in passes driven by an outer loop that runs until the iterator
-    /// is exhausted. Each pass:
-    /// 1. Accumulates Insert/Update/Delete rows per table until a Truncate (or end).
+    // -- Schema change handling --
+
+    /// Handles a schema change event (Relation) by computing the diff and applying
+    /// ALTER TABLE statements.
+    async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
+        let table_id = new_schema.id();
+        let new_snapshot_id = new_schema.inner().snapshot_id;
+        let new_replication_mask = new_schema.replication_mask().clone();
+
+        let Some(metadata) = self
+            .store
+            .get_applied_destination_table_metadata(table_id)
+            .await?
+        else {
+            bail!(
+                ErrorKind::CorruptedTableSchema,
+                "Missing destination table metadata",
+                format!(
+                    "No destination table metadata found for table {} when processing \
+                     schema change. The metadata should have been recorded during initial \
+                     table synchronization.",
+                    table_id
+                )
+            );
+        };
+
+        let current_snapshot_id = metadata.snapshot_id;
+        let current_replication_mask = metadata.replication_mask.clone();
+
+        if current_snapshot_id == new_snapshot_id
+            && current_replication_mask == new_replication_mask
+        {
+            info!(
+                "schema for table {} unchanged (snapshot_id: {})",
+                table_id, new_snapshot_id
+            );
+            return Ok(());
+        }
+
+        info!(
+            "schema change detected for table {}: snapshot_id {} -> {}",
+            table_id, current_snapshot_id, new_snapshot_id
+        );
+
+        // Retrieve the old schema to compute the diff.
+        let current_table_schema = self
+            .store
+            .get_table_schema(&table_id, current_snapshot_id)
+            .await?
+            .ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "Old schema not found",
+                    format!(
+                        "Could not find schema for table {} at snapshot_id {}",
+                        table_id, current_snapshot_id
+                    )
+                )
+            })?;
+
+        let current_schema = ReplicatedTableSchema::from_mask(
+            current_table_schema,
+            current_replication_mask.clone(),
+        );
+
+        let ch_table_name = &metadata.destination_table_id;
+
+        // Mark as Applying before DDL changes.
+        let updated_metadata = DestinationTableMetadata::new_applied(
+            ch_table_name.clone(),
+            current_snapshot_id,
+            current_replication_mask,
+        )
+        .with_schema_change(
+            new_snapshot_id,
+            new_replication_mask,
+            DestinationTableSchemaStatus::Applying,
+        );
+        self.store
+            .store_destination_table_metadata(table_id, updated_metadata.clone())
+            .await?;
+
+        // Compute and apply the diff.
+        let diff = current_schema.diff(new_schema);
+        if let Err(err) = self.apply_schema_diff(ch_table_name, &diff).await {
+            warn!(
+                "schema change failed for table {}: {}. Manual intervention may be required.",
+                table_id, err
+            );
+            return Err(err);
+        }
+
+        // Mark as Applied.
+        self.store
+            .store_destination_table_metadata(table_id, updated_metadata.to_applied())
+            .await?;
+
+        // Invalidate cached nullable flags so the next write recomputes them.
+        {
+            let mut guard = self.table_cache.write();
+            guard.remove(ch_table_name);
+        }
+
+        info!(
+            "schema change completed for table {}: snapshot_id {} applied",
+            table_id, new_snapshot_id
+        );
+
+        Ok(())
+    }
+
+    /// Applies a schema diff to a ClickHouse table: add columns, rename columns,
+    /// then drop columns (in that order for safety).
+    async fn apply_schema_diff(&self, ch_table_name: &str, diff: &SchemaDiff) -> EtlResult<()> {
+        if diff.is_empty() {
+            return Ok(());
+        }
+
+        for column in &diff.columns_to_add {
+            self.client.add_column(ch_table_name, column).await?;
+        }
+
+        for rename in &diff.columns_to_rename {
+            self.client
+                .rename_column(ch_table_name, &rename.old_name, &rename.new_name)
+                .await?;
+        }
+
+        for column in &diff.columns_to_remove {
+            self.client.drop_column(ch_table_name, &column.name).await?;
+        }
+
+        Ok(())
+    }
+
+    // -- Event processing --
+
+    /// Processes events in passes driven by an outer loop that runs until the
+    /// iterator is exhausted. Each pass:
+    /// 1. Accumulates Insert/Update/Delete rows per table until a Truncate,
+    ///    Relation, or end of events.
     /// 2. Writes those rows concurrently.
-    /// 3. Drains consecutive Truncate events (deduplicated) and executes them.
-    ///
-    /// Breaking at a Truncate never skips events -- the outer loop resumes from that
-    /// position, so rows accumulated before the Truncate are flushed first, then the
-    /// Truncate fires, then subsequent events (including inserts on the same table)
-    /// are processed in the next pass.
+    /// 3. Processes any Relation events (schema changes) sequentially.
+    /// 4. Drains consecutive Truncate events (deduplicated) and executes them.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
-            // Accumulate non-truncate events grouped by table_id.
-            // We also track the ReplicatedTableSchema per table for ensure_table_exists.
             let mut table_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
             let mut table_id_to_rows: HashMap<TableId, Vec<PendingRow>> = HashMap::new();
 
+            // Accumulate data events until we hit a Truncate or Relation boundary.
             while let Some(event) = event_iter.peek() {
-                if matches!(event, Event::Truncate(_)) {
+                if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                     break;
                 }
 
                 let event = event_iter
                     .next()
-                    .expect("event iterator should not be empty, we peeked at the next event; qed");
+                    .expect("peeked event must be present; qed");
                 match event {
                     Event::Insert(insert) => {
                         let table_id = insert.replicated_table_schema.id();
@@ -280,18 +433,14 @@ impl ClickHouseDestination {
                 }
             }
 
-            // Write accumulated rows concurrently, one JoinSet task per table.
+            // Flush accumulated rows concurrently, one JoinSet task per table.
             if !table_id_to_rows.is_empty() {
-                // Phase 1: ensure all tables exist (must happen outside JoinSet spawns
-                // since ensure_table_exists holds &self which is not 'static).
                 let mut table_meta: HashMap<TableId, (String, Arc<[bool]>)> = HashMap::new();
                 for (&table_id, schema) in &table_schemas {
                     let (name, flags) = self.ensure_table_exists(schema).await?;
                     table_meta.insert(table_id, (name, flags));
                 }
 
-                // Phase 2: spawn concurrent writers with pre-resolved metadata.
-                // Only the ClickHouseClient (cheaply cloneable, 'static) goes into spawn.
                 let mut join_set: JoinSet<EtlResult<()>> = JoinSet::new();
                 for (table_id, row_data) in table_id_to_rows {
                     let (ch_table_name, nullable_flags) =
@@ -340,6 +489,14 @@ impl ClickHouseDestination {
                 }
             }
 
+            // Process Relation events (schema changes) sequentially.
+            while let Some(Event::Relation(_)) = event_iter.peek() {
+                if let Some(Event::Relation(relation)) = event_iter.next() {
+                    self.handle_relation_event(&relation.replicated_table_schema)
+                        .await?;
+                }
+            }
+
             // Collect and deduplicate truncate events.
             let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
             while let Some(Event::Truncate(_)) = event_iter.peek() {
@@ -362,7 +519,10 @@ impl ClickHouseDestination {
     }
 }
 
-impl Destination for ClickHouseDestination {
+impl<S> Destination for ClickHouseDestination<S>
+where
+    S: StateStore + SchemaStore + Send + Sync,
+{
     fn name() -> &'static str {
         "clickhouse"
     }
@@ -400,8 +560,6 @@ impl Destination for ClickHouseDestination {
         Ok(())
     }
 }
-
-// ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

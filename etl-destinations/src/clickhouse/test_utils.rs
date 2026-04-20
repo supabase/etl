@@ -1,6 +1,8 @@
 //! Test utilities for ClickHouse destinations.
 
 use clickhouse::Client;
+use etl::store::schema::SchemaStore;
+use etl::store::state::StateStore;
 use tokio::runtime::Handle;
 use url::Url;
 use uuid::Uuid;
@@ -109,24 +111,35 @@ impl ClickHouseTestDatabase {
     /// Builds a [`ClickHouseDestination`] scoped to this test database with
     /// default inserter config (100 MiB per INSERT -- large enough that tests
     /// never hit an intermediate flush).
-    pub fn build_destination(&self) -> ClickHouseDestination {
-        self.build_destination_with_config(ClickHouseInserterConfig {
-            max_bytes_per_insert: 100 * 1024 * 1024,
-        })
+    pub fn build_destination<S>(&self, store: S) -> ClickHouseDestination<S>
+    where
+        S: StateStore + SchemaStore + Send + Sync,
+    {
+        self.build_destination_with_config(
+            store,
+            ClickHouseInserterConfig {
+                max_bytes_per_insert: 100 * 1024 * 1024,
+            },
+        )
     }
 
     /// Builds a [`ClickHouseDestination`] scoped to this test database with
     /// a caller-supplied [`ClickHouseInserterConfig`].
-    pub fn build_destination_with_config(
+    pub fn build_destination_with_config<S>(
         &self,
+        store: S,
         config: ClickHouseInserterConfig,
-    ) -> ClickHouseDestination {
+    ) -> ClickHouseDestination<S>
+    where
+        S: StateStore + SchemaStore + Send + Sync,
+    {
         ClickHouseDestination::new(
             self.url.clone(),
             &self.user,
             self.password.clone(),
             &self.database,
             config,
+            store,
         )
         .expect("Failed to create ClickHouseDestination for test")
     }

@@ -347,7 +347,7 @@ async fn all_types_table_copy() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination();
+    let destination = ch_db.build_destination(store.clone());
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -491,7 +491,7 @@ async fn updates_are_streamed_to_clickhouse() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination();
+    let destination = ch_db.build_destination(store.clone());
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -650,7 +650,7 @@ async fn boundary_values_table_copy() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination();
+    let destination = ch_db.build_destination(store.clone());
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -790,7 +790,7 @@ async fn deletes_are_streamed_to_clickhouse() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination();
+    let destination = ch_db.build_destination(store.clone());
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -904,7 +904,7 @@ async fn pipeline_restart_resumes_streaming() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination();
+    let destination = ch_db.build_destination(store.clone());
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -929,7 +929,7 @@ async fn pipeline_restart_resumes_streaming() {
     assert_eq!(rows[0].value, "before_restart");
 
     // --- WHEN: rebuild destination and pipeline, then stream a new insert ---
-    let destination = ch_db.build_destination();
+    let destination = ch_db.build_destination(store.clone());
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1027,7 +1027,7 @@ async fn truncate_clears_table_and_accepts_new_inserts() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination();
+    let destination = ch_db.build_destination(store.clone());
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -1141,7 +1141,9 @@ async fn intermediate_flush_preserves_all_rows() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination_with_config(ClickHouseInserterConfig {
+    let destination = ch_db.build_destination_with_config(
+        store.clone(),
+        ClickHouseInserterConfig {
             // 1 byte -- forces a new INSERT after every row.
             max_bytes_per_insert: 1,
         },
@@ -1247,7 +1249,7 @@ async fn multiple_tables_receive_independent_writes() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination();
+    let destination = ch_db.build_destination(store.clone());
 
     let table_a_ready = store
         .notify_on_table_state_type(table_a_id, TableReplicationPhaseType::Ready)
@@ -1394,7 +1396,7 @@ async fn sequential_transactions_preserve_commit_order() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination();
+    let destination = ch_db.build_destination(store.clone());
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -1528,7 +1530,7 @@ async fn delete_with_default_replica_identity() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination();
+    let destination = ch_db.build_destination(store.clone());
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -1674,7 +1676,7 @@ async fn large_batch_table_copy() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination();
+    let destination = ch_db.build_destination(store.clone());
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)

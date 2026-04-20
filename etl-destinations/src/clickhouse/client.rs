@@ -8,6 +8,7 @@ use url::Url;
 
 use crate::clickhouse::encoding::{ClickHouseValue, rb_encode_row};
 use crate::clickhouse::metrics::ETL_CH_INSERT_DURATION_SECONDS;
+use crate::clickhouse::schema::clickhouse_column_type;
 
 /// Capacity of the internal write buffer used per INSERT statement.
 ///
@@ -75,6 +76,41 @@ impl ClickHouseClient {
                 format!("DDL execution failed: {e}")
             )
         })
+    }
+
+    /// Adds a column to an existing ClickHouse table.
+    ///
+    /// New columns are always Nullable since ClickHouse cannot backfill
+    /// existing rows with a NOT NULL default.
+    pub(crate) async fn add_column(
+        &self,
+        table_name: &str,
+        column: &etl::types::ColumnSchema,
+    ) -> EtlResult<()> {
+        let col_type = clickhouse_column_type(column, true);
+        let sql = format!(
+            "ALTER TABLE \"{table_name}\" ADD COLUMN \"{}\" {col_type}",
+            column.name
+        );
+        self.execute_ddl(&sql).await
+    }
+
+    /// Drops a column from an existing ClickHouse table.
+    pub(crate) async fn drop_column(&self, table_name: &str, column_name: &str) -> EtlResult<()> {
+        let sql = format!("ALTER TABLE \"{table_name}\" DROP COLUMN \"{column_name}\"");
+        self.execute_ddl(&sql).await
+    }
+
+    /// Renames a column in an existing ClickHouse table.
+    pub(crate) async fn rename_column(
+        &self,
+        table_name: &str,
+        old_name: &str,
+        new_name: &str,
+    ) -> EtlResult<()> {
+        let sql =
+            format!("ALTER TABLE \"{table_name}\" RENAME COLUMN \"{old_name}\" TO \"{new_name}\"");
+        self.execute_ddl(&sql).await
     }
 
     /// Executes `TRUNCATE TABLE IF EXISTS "<table_name>"`.
