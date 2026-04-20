@@ -236,15 +236,17 @@ mod tests {
                 name: "id".to_string(),
                 typ: Type::INT4,
                 modifier: -1,
+                ordinal_position: 1,
+                primary_key_ordinal_position: Some(1),
                 nullable: false,
-                primary: true,
             },
             ColumnSchema {
                 name: "name".to_string(),
                 typ: Type::TEXT,
                 modifier: -1,
+                ordinal_position: 2,
+                primary_key_ordinal_position: None,
                 nullable: true,
-                primary: false,
             },
         ];
         let sql = build_create_table_sql("public_users", &schemas);
@@ -264,8 +266,9 @@ mod tests {
             name: "id".to_string(),
             typ: Type::INT4,
             modifier: -1,
+            ordinal_position: 1,
+            primary_key_ordinal_position: Some(1),
             nullable: false,
-            primary: true,
         }];
         let sql = build_create_table_sql("public_t", &schemas);
         assert!(
@@ -286,8 +289,9 @@ mod tests {
             name: "tags".to_string(),
             typ: Type::TEXT_ARRAY,
             modifier: -1,
+            ordinal_position: 1,
+            primary_key_ordinal_position: None,
             nullable: false,
-            primary: false,
         }];
         let sql = build_create_table_sql("public_t", &schemas);
         assert!(
