@@ -402,7 +402,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_replication_options_string_format() {
+    fn replication_options_string_format() {
         let options_string = ETL_REPLICATION_OPTIONS.to_options_string();
 
         assert_eq!(
@@ -415,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn test_state_management_options_key_value_pairs() {
+    fn state_management_options_key_value_pairs() {
         let pairs = ETL_STATE_MANAGEMENT_OPTIONS.to_key_value_pairs();
 
         assert_eq!(pairs.len(), 9);
@@ -439,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn test_api_options_application_name() {
+    fn api_options_application_name() {
         assert_eq!(ETL_API_OPTIONS.application_name, "supabase_etl_api");
     }
 }

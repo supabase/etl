@@ -251,7 +251,7 @@ fn checkpoint_lake(catalog: &Url, data: &Url) {
 /// `write_table_rows` inserts rows that can be queried back through the
 /// DuckLake catalog using a separate DuckDB connection.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_table_rows_basic() {
+async fn write_table_rows_basic() {
     let dir = make_test_dir("write_table_rows_basic");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -303,7 +303,7 @@ async fn test_write_table_rows_basic() {
 
 /// Small copy batches should remain inlined after the caller returns.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_table_rows_small_batch_stays_inlined_after_return() {
+async fn write_table_rows_small_batch_stays_inlined_after_return() {
     let dir = make_test_dir("write_table_rows_small_batch_stays_inlined_after_return");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -344,7 +344,7 @@ async fn test_write_table_rows_small_batch_stays_inlined_after_return() {
 
 /// `pool_size = 0` should fail fast with a configuration error.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_ducklake_rejects_zero_pool_size() {
+async fn ducklake_rejects_zero_pool_size() {
     let dir = make_test_dir("ducklake_rejects_zero_pool_size");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -368,7 +368,7 @@ async fn test_ducklake_rejects_zero_pool_size() {
 /// Repeated writes should reuse the warm pooled DuckDB connection.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_table_rows_reuses_warm_pooled_connection() {
+async fn write_table_rows_reuses_warm_pooled_connection() {
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
 
@@ -420,7 +420,7 @@ async fn test_write_table_rows_reuses_warm_pooled_connection() {
 /// replace it.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_table_rows_replaces_broken_pooled_connection_after_retry() {
+async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
 
@@ -474,7 +474,7 @@ async fn test_write_table_rows_replaces_broken_pooled_connection_after_retry() {
 /// A post-commit retry should not duplicate table-copy rows.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_table_rows_retry_after_post_commit_failure_is_idempotent() {
+async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
 
@@ -520,7 +520,7 @@ async fn test_write_table_rows_retry_after_post_commit_failure_is_idempotent() {
 /// Concurrent same-table copy batches should serialize cleanly and remain
 /// exact.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_concurrent_same_table_copy_batches_complete() {
+async fn concurrent_same_table_copy_batches_complete() {
     let dir = make_test_dir("concurrent_same_table_copy_batches_complete");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -589,7 +589,7 @@ async fn test_concurrent_same_table_copy_batches_complete() {
 
 /// `write_table_rows` with an empty slice still creates the table schema.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_table_rows_empty_creates_table() {
+async fn write_table_rows_empty_creates_table() {
     let dir = make_test_dir("write_table_rows_empty");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -617,7 +617,7 @@ async fn test_write_table_rows_empty_creates_table() {
 
 /// `truncate_table` deletes all rows while leaving the table schema intact.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_truncate_clears_rows() {
+async fn truncate_clears_rows() {
     let dir = make_test_dir("truncate_clears_rows");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -672,7 +672,7 @@ async fn test_truncate_clears_rows() {
 
 /// Truncation should clear copy markers so the same rows can be copied again.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_truncate_clears_copy_markers_for_recopy() {
+async fn truncate_clears_copy_markers_for_recopy() {
     let dir = make_test_dir("truncate_clears_copy_markers_for_recopy");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -710,7 +710,7 @@ async fn test_truncate_clears_copy_markers_for_recopy() {
 /// `write_events` applies inserts, updates, and deletes to the current table
 /// state.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_events() {
+async fn write_events() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
 
     let dir = make_test_dir("write_events");
@@ -792,7 +792,7 @@ async fn test_write_events() {
 
 /// Small CDC batches should remain inlined after the caller returns.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_events_small_batch_stays_inlined_after_return() {
+async fn write_events_small_batch_stays_inlined_after_return() {
     use etl::types::{InsertEvent, PgLsn};
 
     let dir = make_test_dir("write_events_small_batch_stays_inlined_after_return");
@@ -839,7 +839,7 @@ async fn test_write_events_small_batch_stays_inlined_after_return() {
 
 /// `write_events` keeps update events with old rows on the current-state path.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_events_with_old_row_update() {
+async fn write_events_with_old_row_update() {
     use etl::types::{InsertEvent, PgLsn, UpdateEvent};
 
     let dir = make_test_dir("write_events_with_old_row_update");
@@ -908,7 +908,7 @@ async fn test_write_events_with_old_row_update() {
 /// Replaying the same CDC batch should be a no-op after the marker row is
 /// committed.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_events_replay_is_idempotent() {
+async fn write_events_replay_is_idempotent() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
 
     let dir = make_test_dir("write_events_replay_is_idempotent");
@@ -995,7 +995,7 @@ async fn test_write_events_replay_is_idempotent() {
 /// Marker-table rows should stay in the DuckLake catalog instead of creating
 /// Parquet files.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_applied_batches_table_uses_data_inlining() {
+async fn applied_batches_table_uses_data_inlining() {
     use etl::types::{InsertEvent, PgLsn};
 
     let dir = make_test_dir("applied_batches_table_uses_data_inlining");
@@ -1038,7 +1038,7 @@ async fn test_applied_batches_table_uses_data_inlining() {
 
 /// Shutdown should materialize copy rows that were still inlined.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_shutdown_flushes_inlined_copy_rows() {
+async fn shutdown_flushes_inlined_copy_rows() {
     let dir = make_test_dir("shutdown_flushes_inlined_copy_rows");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -1099,7 +1099,7 @@ async fn test_shutdown_flushes_inlined_copy_rows() {
 
 /// Shutdown should flush inlined CDC rows for all known tables.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
+async fn shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
     use etl::types::{InsertEvent, PgLsn};
 
     let dir = make_test_dir("shutdown_flushes_inlined_cdc_rows_for_all_known_tables");
@@ -1200,7 +1200,7 @@ async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
 /// Mixed table batches remain correct when multiple tables are written in one
 /// flush.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_events_mixed_multi_table_batches() {
+async fn write_events_mixed_multi_table_batches() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
 
     let dir = make_test_dir("write_events_mixed_multi_table_batches");
@@ -1325,7 +1325,7 @@ async fn test_write_events_mixed_multi_table_batches() {
 /// rows.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
+async fn write_events_retry_after_post_commit_failure_is_idempotent() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
@@ -1417,7 +1417,7 @@ async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
 
 /// Concurrent async callers should serialize cleanly behind one DuckDB slot.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_concurrent_writes_with_single_slot_complete() {
+async fn concurrent_writes_with_single_slot_complete() {
     let dir = make_test_dir("concurrent_writes_single_slot");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -1479,7 +1479,7 @@ async fn test_concurrent_writes_with_single_slot_complete() {
 
 /// Verifies that common Postgres types survive the write → read cycle.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_type_mapping_round_trip() {
+async fn type_mapping_round_trip() {
     let dir = make_test_dir("type_mapping");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");

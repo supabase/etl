@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_note_replication_mask_and_get() {
+    async fn note_replication_mask_and_get() {
         let cache = SharedTableCache::new();
         let table_id = TableId::new(123);
         let snapshot_id = SnapshotId::new(10.into());
@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_note_schema_snapshot_invalidates_replication_mask() {
+    async fn note_schema_snapshot_invalidates_replication_mask() {
         let cache = SharedTableCache::new();
         let table_id = TableId::new(123);
         let replication_mask = create_test_mask();
@@ -151,7 +151,7 @@ mod tests {
 
     #[should_panic(expected = "shared table cache received stale snapshot update")]
     #[tokio::test]
-    async fn test_older_snapshot_panics() {
+    async fn older_snapshot_panics() {
         let cache = SharedTableCache::new();
         let table_id = TableId::new(123);
         let replication_mask = create_test_mask();
@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_clone_shares_state() {
+    async fn clone_shares_state() {
         let cache1 = SharedTableCache::new();
         let cache2 = cache1.clone();
         let table_id = TableId::new(123);

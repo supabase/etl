@@ -415,7 +415,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cell_to_value_primitives() {
+    fn cell_to_value_primitives() {
         assert_eq!(cell_to_value(Cell::Null), Value::Null);
         assert_eq!(cell_to_value(Cell::Bool(true)), Value::Boolean(true));
         assert_eq!(
@@ -428,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_cell_to_sql_literal_preserves_nulls() {
+    fn array_cell_to_sql_literal_preserves_nulls() {
         assert_eq!(
             array_cell_to_sql_literal(ArrayCell::I32(vec![Some(1), None, Some(3)])),
             "[1, NULL, 3]"
@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_rows_uses_sql_literals_for_arrays() {
+    fn prepare_rows_uses_sql_literals_for_arrays() {
         let prepared = prepare_rows(vec![TableRow::new(vec![
             Cell::I32(1),
             Cell::Array(ArrayCell::I32(vec![Some(1), None, Some(3)])),

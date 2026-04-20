@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn test_postgres_to_iceberg_scalar_types() {
+    fn postgres_to_iceberg_scalar_types() {
         // Boolean types
         assert_eq!(
             postgres_to_iceberg_type(&Type::BOOL),
@@ -272,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn test_postgres_to_iceberg_array_types() {
+    fn postgres_to_iceberg_array_types() {
         // Boolean array
         let bool_array_type = postgres_to_iceberg_type(&Type::BOOL_ARRAY);
         assert!(matches!(bool_array_type, IcebergType::List(_)));
@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_iceberg_list_type() {
+    fn create_iceberg_list_type_works() {
         let list_type = create_iceberg_list_type(PrimitiveType::String, 1);
 
         assert!(matches!(list_type, IcebergType::List(_)));
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn test_postgres_scalar_type_fallback() {
+    fn postgres_scalar_type_fallback() {
         // Test fallback for unknown scalar types
         // Using a type that should fall through to the default case
         let result = postgres_scalar_type_to_iceberg_type(&Type::UNKNOWN);
@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn test_postgres_array_type_fallback() {
+    fn postgres_array_type_fallback() {
         // Test that non-array types passed to array function still get handled
         // This tests the fallback case in the array function
         let array_type = postgres_array_type_to_iceberg_type(&Type::BOOL, 1); // Not an array type
@@ -381,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_type_element_field_properties() {
+    fn list_type_element_field_properties() {
         let list_type = create_iceberg_list_type(PrimitiveType::Boolean, 2);
         assert!(matches!(list_type, IcebergType::List(_)));
 
@@ -416,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn test_identifier_fields_single_primary_key() {
+    fn identifier_fields_single_primary_key() {
         let columns = vec![
             test_column("id", Type::INT4, 1, false, Some(1)),
             test_column("name", Type::TEXT, 2, true, None),
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn test_identifier_fields_composite_primary_key() {
+    fn identifier_fields_composite_primary_key() {
         let columns = vec![
             test_column("tenant_id", Type::INT4, 1, false, Some(1)),
             test_column("id", Type::INT4, 2, false, Some(2)),
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn test_identifier_fields_no_primary_key() {
+    fn identifier_fields_no_primary_key() {
         let columns = vec![
             test_column("name", Type::TEXT, 1, true, None),
             test_column("age", Type::INT4, 2, true, None),

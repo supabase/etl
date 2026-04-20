@@ -1446,21 +1446,51 @@ mod tests {
     }
 
     #[test]
-    fn test_postgres_to_bigquery_type_basic_types() {
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL), "bool");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TEXT), "string");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4), "int64");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8), "float64");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP), "timestamp");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::JSON), "json");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BYTEA), "bytes");
+    fn postgres_to_bigquery_type_basic_types() {
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::BOOL),
+            "bool"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::TEXT),
+            "string"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::INT4),
+            "int64"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8),
+            "float64"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP),
+            "timestamp"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::JSON),
+            "json"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::BYTEA),
+            "bytes"
+        );
     }
 
     #[test]
-    fn test_postgres_to_bigquery_type_array_types() {
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL_ARRAY), "array<bool>");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TEXT_ARRAY), "array<string>");
-        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4_ARRAY), "array<int64>");
+    fn postgres_to_bigquery_type_array_types() {
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::BOOL_ARRAY),
+            "array<bool>"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::TEXT_ARRAY),
+            "array<string>"
+        );
+        assert_eq!(
+            BigQueryClient::postgres_to_bigquery_type(&Type::INT4_ARRAY),
+            "array<int64>"
+        );
         assert_eq!(
             BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8_ARRAY),
             "array<float64>"
@@ -1472,7 +1502,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_spec() {
+    fn column_spec() {
         let column_schema = test_column("test_col", Type::TEXT, 1, true, None);
         let spec = BigQueryClient::column_spec(&column_schema).expect("column spec generation");
         assert_eq!(spec, "`test_col` string");
@@ -1488,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_spec_escapes_backticks() {
+    fn column_spec_escapes_backticks() {
         let column_schema = test_column("pwn`name", Type::TEXT, 1, true, None);
 
         let spec = BigQueryClient::column_spec(&column_schema).expect("escaped column spec");
@@ -1497,7 +1527,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_identifier_rejects_control_chars() {
+    fn sanitize_identifier_rejects_control_chars() {
         let result = BigQueryClient::sanitize_identifier("bad\nname", "column");
 
         assert!(matches!(
@@ -1507,7 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_primary_key_clause() {
+    fn add_primary_key_clause() {
         let columns_with_pk = vec![
             test_column("id", Type::INT4, 1, false, Some(1)),
             test_column("name", Type::TEXT, 2, true, None),
@@ -1554,7 +1584,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_columns_spec() {
+    fn create_columns_spec() {
         let columns = vec![
             test_column("id", Type::INT4, 1, false, Some(1)),
             test_column("name", Type::TEXT, 2, true, None),
@@ -1570,13 +1600,13 @@ mod tests {
     }
 
     #[test]
-    fn test_max_staleness_option() {
+    fn max_staleness_option() {
         let option = BigQueryClient::max_staleness_option(15);
         assert_eq!(option, "options (max_staleness = interval 15 minute)");
     }
 
     #[test]
-    fn test_column_schemas_to_table_descriptor() {
+    fn column_schemas_to_table_descriptor() {
         let columns = vec![
             test_column("id", Type::INT4, 1, false, Some(1)),
             test_column("name", Type::TEXT, 2, true, None),
@@ -1618,7 +1648,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_schemas_to_table_descriptor_complex_types() {
+    fn column_schemas_to_table_descriptor_complex_types() {
         let columns = vec![
             test_column("uuid_col", Type::UUID, 1, true, None),
             test_column("json_col", Type::JSON, 2, true, None),
@@ -1643,7 +1673,7 @@ mod tests {
     }
 
     #[test]
-    fn test_full_table_name_formatting() {
+    fn full_table_name_formatting() {
         let project_id = "test-project";
         let dataset_id = "test_dataset";
         let table_id = "test_table";
@@ -1659,7 +1689,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_or_replace_table_query_generation() {
+    fn create_or_replace_table_query_generation() {
         let project_id = "test-project";
         let dataset_id = "test_dataset";
         let table_id = "test_table";
@@ -1686,7 +1716,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_or_replace_table_query_with_staleness() {
+    fn create_or_replace_table_query_with_staleness() {
         let project_id = "test-project";
         let dataset_id = "test_dataset";
         let table_id = "test_table";
@@ -1715,7 +1745,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_single_batch_append_result_retries_pure_schema_propagation_errors() {
+    fn process_single_batch_append_result_retries_pure_schema_propagation_errors() {
         let result = process_single_batch_append_result(BatchAppendResult {
             batch_index: 0,
             responses: vec![Err(tonic::Status::invalid_argument("schema_mismatch_extra_fields"))],
@@ -1726,7 +1756,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_single_batch_append_result_retries_partial_success_schema_propagation() {
+    fn process_single_batch_append_result_retries_partial_success_schema_propagation() {
         let result = process_single_batch_append_result(BatchAppendResult {
             batch_index: 0,
             responses: vec![
@@ -1740,7 +1770,7 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_propagation_timeout_error_is_worker_retryable() {
+    fn schema_propagation_timeout_error_is_worker_retryable() {
         let error = schema_propagation_timeout_error("schema lag");
 
         assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);

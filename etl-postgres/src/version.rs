@@ -54,7 +54,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_version_constants() {
+    fn version_constants() {
         assert_eq!(POSTGRES_14, 140000);
         assert_eq!(POSTGRES_15, 150000);
         assert_eq!(POSTGRES_16, 160000);
@@ -63,7 +63,7 @@ mod tests {
     }
 
     #[test]
-    fn test_meets_version_with_some() {
+    fn meets_version_with_some() {
         let version = NonZeroI32::new(150500);
         assert!(meets_version(version, POSTGRES_14));
         assert!(meets_version(version, POSTGRES_15));
@@ -73,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn test_meets_version_with_none() {
+    fn meets_version_with_none() {
         assert!(!meets_version(None, POSTGRES_14));
         assert!(!meets_version(None, POSTGRES_15));
         assert!(!meets_version(None, POSTGRES_16));
@@ -82,13 +82,13 @@ mod tests {
     }
 
     #[test]
-    fn test_meets_version_exact_match() {
+    fn meets_version_exact_match() {
         let version = NonZeroI32::new(POSTGRES_15);
         assert!(meets_version(version, POSTGRES_15));
     }
 
     #[test]
-    fn test_requires_version_macro() {
+    fn requires_version_macro() {
         let version = NonZeroI32::new(160200);
         assert!(requires_version!(version, POSTGRES_14));
         assert!(requires_version!(version, POSTGRES_15));
@@ -98,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn test_below_version_macro() {
+    fn below_version_macro() {
         let version = NonZeroI32::new(140800);
         assert!(!below_version!(version, POSTGRES_14));
         assert!(below_version!(version, POSTGRES_15));
@@ -108,7 +108,7 @@ mod tests {
     }
 
     #[test]
-    fn test_requires_version_with_none() {
+    fn requires_version_with_none() {
         let version: Option<NonZeroI32> = None;
         assert!(!requires_version!(version, POSTGRES_14));
         assert!(!requires_version!(version, POSTGRES_18));

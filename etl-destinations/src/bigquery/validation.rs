@@ -418,13 +418,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_validate_numeric_within_bounds() {
+    fn validate_numeric_within_bounds() {
         let numeric = PgNumeric::from_str("123.456").unwrap();
         assert!(validate_numeric_for_bigquery(&numeric).is_ok());
     }
 
     #[test]
-    fn test_validate_numeric_nan_fails() {
+    fn validate_numeric_nan_fails() {
         let result = validate_numeric_for_bigquery(&PgNumeric::NaN);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_numeric_positive_infinity_fails() {
+    fn validate_numeric_positive_infinity_fails() {
         let result = validate_numeric_for_bigquery(&PgNumeric::PositiveInfinity);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_numeric_negative_infinity_fails() {
+    fn validate_numeric_negative_infinity_fails() {
         let result = validate_numeric_for_bigquery(&PgNumeric::NegativeInfinity);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -451,14 +451,17 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_date_within_bounds() {
+    fn validate_date_within_bounds() {
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         assert!(validate_date_for_bigquery(&date).is_ok());
     }
 
     #[test]
-    fn test_validate_date_before_min_fails() {
-        let date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap();
+    fn validate_date_before_min_fails() {
+        let date = NaiveDate::from_ymd_opt(1, 1, 1)
+            .unwrap()
+            .pred_opt()
+            .unwrap();
         let result = validate_date_for_bigquery(&date);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -467,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_date_after_max_fails() {
+    fn validate_date_after_max_fails() {
         let date = NaiveDate::from_ymd_opt(10000, 1, 1).unwrap();
         let result = validate_date_for_bigquery(&date);
         assert!(result.is_err());
@@ -477,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cell_for_bigquery_valid_types() {
+    fn validate_cell_for_bigquery_valid_types() {
         assert!(validate_cell_for_bigquery(&CellNonOptional::Null).is_ok());
         assert!(validate_cell_for_bigquery(&CellNonOptional::Bool(true)).is_ok());
         assert!(validate_cell_for_bigquery(&CellNonOptional::String("test".to_string())).is_ok());
@@ -485,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cell_for_bigquery_invalid_numeric() {
+    fn validate_cell_for_bigquery_invalid_numeric() {
         let cell = CellNonOptional::Numeric(PgNumeric::NaN);
         let result = validate_cell_for_bigquery(&cell);
         assert!(result.is_err());
@@ -493,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_array_cell_with_invalid_numeric() {
+    fn validate_array_cell_with_invalid_numeric() {
         let array_cell = ArrayCellNonOptional::Numeric(vec![
             PgNumeric::from_str("123.456").unwrap(),
             PgNumeric::NaN,

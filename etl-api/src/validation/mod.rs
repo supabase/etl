@@ -249,7 +249,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_validation_failure_display() {
+    async fn validation_failure_display() {
         let critical = ValidationFailure::critical("test_error", "Something wrong");
         assert_eq!(critical.to_string(), "test_error: Something wrong");
         assert_eq!(critical.failure_type, FailureType::Critical);

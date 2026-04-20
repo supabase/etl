@@ -996,15 +996,18 @@ mod tests {
     use crate::{bail, etl_error};
 
     #[test]
-    fn test_simple_error_creation() {
-        let err = EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
+    fn simple_error_creation() {
+        let err = EtlError::from((
+            ErrorKind::SourceConnectionFailed,
+            "Database connection failed",
+        ));
         assert_eq!(err.kind(), ErrorKind::SourceConnectionFailed);
         assert_eq!(err.detail(), None);
         assert_eq!(err.kinds(), vec![ErrorKind::SourceConnectionFailed]);
     }
 
     #[test]
-    fn test_error_with_detail() {
+    fn error_with_detail() {
         let err = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "SQL query execution failed",
@@ -1016,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_errors() {
+    fn multiple_errors() {
         let errors = vec![
             EtlError::from((ErrorKind::ValidationError, "Invalid schema")),
             EtlError::from((ErrorKind::ConversionError, "Type mismatch")),
@@ -1033,7 +1036,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_errors_with_detail() {
+    fn multiple_errors_with_detail() {
         let errors = vec![
             EtlError::from((
                 ErrorKind::ValidationError,
@@ -1048,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_vector() {
+    fn from_vector() {
         let errors = vec![
             EtlError::from((ErrorKind::ValidationError, "Error 1")),
             EtlError::from((ErrorKind::ConversionError, "Error 2")),
@@ -1058,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn test_from_vector_single_error_not_wrapped() {
+    fn from_vector_single_error_not_wrapped() {
         let error = EtlError::from((ErrorKind::ValidationError, "Single error"));
         let errors = vec![error];
         let result = EtlError::from(errors);
@@ -1069,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn test_error_equality() {
+    fn error_equality() {
         let err1 = EtlError::from((ErrorKind::SourceConnectionFailed, "Connection failed"));
         let err2 = EtlError::from((ErrorKind::SourceConnectionFailed, "Connection failed"));
         let err3 = EtlError::from((ErrorKind::SourceQueryFailed, "Query failed"));
@@ -1079,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn test_error_source_preserved() {
+    fn error_source_preserved() {
         let io_err = std::io::Error::other("boom");
         let err = EtlError::from(io_err);
         let source = err.source().expect("missing source");
@@ -1087,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn test_many_forwards_source() {
+    fn many_forwards_source() {
         let inner = EtlError::from(std::io::Error::other("inner failure"));
         let outer: EtlError = vec![inner.clone(), EtlError::from((ErrorKind::Unknown, "x"))].into();
         let source = outer.source().expect("missing aggregate source");
@@ -1095,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn test_macro_usage() {
+    fn macro_usage() {
         let err = etl_error!(ErrorKind::ValidationError, "Invalid data format");
         assert_eq!(err.kind(), ErrorKind::ValidationError);
         assert_eq!(err.detail(), None);
@@ -1115,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn test_macro_with_source() {
+    fn macro_with_source() {
         let err = etl_error!(
             ErrorKind::IoError,
             "I/O failure",
@@ -1127,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bail_macro() {
+    fn bail_macro() {
         fn test_function() -> EtlResult<i32> {
             bail!(ErrorKind::ValidationError, "Test error");
         }
@@ -1174,7 +1177,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_multiple_errors() {
+    fn nested_multiple_errors() {
         let inner_errors = vec![
             EtlError::from((ErrorKind::ConversionError, "Inner error 1")),
             EtlError::from((ErrorKind::ValidationError, "Inner error 2")),
@@ -1192,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn test_json_error_classification() {
+    fn json_error_classification() {
         // Test syntax error during deserialization
         let json_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
         let etl_err = EtlError::from(json_err);
@@ -1207,11 +1210,9 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_stability() {
-        use std::{
-            collections::hash_map::DefaultHasher,
-            hash::{Hash, Hasher},
-        };
+    fn hash_stability() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
 
         // Same error kind and description should produce same hash.
         let err1 =
@@ -1231,11 +1232,9 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_ignores_detail() {
-        use std::{
-            collections::hash_map::DefaultHasher,
-            hash::{Hash, Hasher},
-        };
+    fn hash_ignores_detail() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
 
         // Same kind and description with different details should produce same hash.
         let err1 = EtlError::from((
@@ -1261,11 +1260,9 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_distinguishes_different_errors() {
-        use std::{
-            collections::hash_map::DefaultHasher,
-            hash::{Hash, Hasher},
-        };
+    fn hash_distinguishes_different_errors() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
 
         // Different error kinds should produce different hashes.
         let err1 = EtlError::from((ErrorKind::SourceConnectionFailed, "Connection failed"));
@@ -1283,11 +1280,9 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_aggregated_errors() {
-        use std::{
-            collections::hash_map::DefaultHasher,
-            hash::{Hash, Hasher},
-        };
+    fn hash_aggregated_errors() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
 
         // Aggregated errors should hash all contained errors.
         let errors1 = vec![

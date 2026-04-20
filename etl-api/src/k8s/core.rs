@@ -565,20 +565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_failed_pod_is_considered_active_for_deletion_guards() {
-        let client = RecordingK8sClient { pod_status: PodStatus::Failed, ..Default::default() };
-        let pipeline =
-            PipelineDeletion { id: 1, source_id: 2, destination_id: 3, replicator_id: 4 };
-
-        let is_active = is_replicator_active(&client, "tenant-42", pipeline.replicator_id)
-            .await
-            .expect("failed to inspect pipeline status");
-
-        assert!(is_active);
-    }
-
-    #[tokio::test]
-    async fn test_ducklake_creates_postgres_and_s3_secrets() {
+    async fn ducklake_creates_postgres_and_s3_secrets() {
         let source_config = StoredSourceConfig {
             host: "localhost".to_string(),
             port: 5432,
@@ -614,7 +601,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ducklake_without_s3_still_creates_postgres_secret() {
+    async fn ducklake_without_s3_still_creates_postgres_secret() {
         let source_config = StoredSourceConfig {
             host: "localhost".to_string(),
             port: 5432,

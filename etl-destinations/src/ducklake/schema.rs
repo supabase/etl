@@ -94,7 +94,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_scalar_type_mapping() {
+    fn scalar_type_mapping() {
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::BOOL), "BOOLEAN");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::TEXT), "VARCHAR");
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::INT2), "SMALLINT");
@@ -115,16 +115,31 @@ mod tests {
     }
 
     #[test]
-    fn test_array_type_mapping() {
-        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::BOOL_ARRAY), "BOOLEAN[]");
-        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::TEXT_ARRAY), "VARCHAR[]");
-        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::INT4_ARRAY), "INTEGER[]");
-        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::FLOAT8_ARRAY), "DOUBLE[]");
-        assert_eq!(postgres_array_type_to_ducklake_sql(&Type::UUID_ARRAY), "UUID[]");
+    fn array_type_mapping() {
+        assert_eq!(
+            postgres_array_type_to_ducklake_sql(&Type::BOOL_ARRAY),
+            "BOOLEAN[]"
+        );
+        assert_eq!(
+            postgres_array_type_to_ducklake_sql(&Type::TEXT_ARRAY),
+            "VARCHAR[]"
+        );
+        assert_eq!(
+            postgres_array_type_to_ducklake_sql(&Type::INT4_ARRAY),
+            "INTEGER[]"
+        );
+        assert_eq!(
+            postgres_array_type_to_ducklake_sql(&Type::FLOAT8_ARRAY),
+            "DOUBLE[]"
+        );
+        assert_eq!(
+            postgres_array_type_to_ducklake_sql(&Type::UUID_ARRAY),
+            "UUID[]"
+        );
     }
 
     #[test]
-    fn test_build_create_table_sql_quotes_identifiers() {
+    fn build_create_table_sql_quotes_identifiers() {
         let sql = build_create_table_sql_ducklake(
             "odd\"table",
             &[ColumnSchema::new("select".to_string(), Type::INT4, -1, 1, Some(1), false)],

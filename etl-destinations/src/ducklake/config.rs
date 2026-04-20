@@ -627,19 +627,25 @@ mod tests {
     }
 
     #[test]
-    fn test_catalog_conninfo_from_file_url() {
+    fn catalog_conninfo_from_file_url() {
         let catalog_url = Url::from_file_path("/tmp/catalog.ducklake").unwrap();
         assert_eq!(catalog_attach_target(&catalog_url).unwrap(), catalog_url.as_str());
     }
 
     #[test]
-    fn test_quote_libpq_conninfo_value() {
-        assert_eq!(quote_libpq_conninfo_value("pa'ss\\word"), "'pa\\'ss\\\\word'");
-        assert_eq!(quote_libpq_conninfo_value("value with spaces"), "'value with spaces'");
+    fn quote_libpq_conninfo_value_fn() {
+        assert_eq!(
+            quote_libpq_conninfo_value("pa'ss\\word"),
+            "'pa\\'ss\\\\word'"
+        );
+        assert_eq!(
+            quote_libpq_conninfo_value("value with spaces"),
+            "'value with spaces'"
+        );
     }
 
     #[test]
-    fn test_catalog_conninfo_from_postgres_url_round_trip() {
+    fn catalog_conninfo_from_postgres_url_round_trip() {
         let url = Url::parse("postgres://bnj@localhost:5432/ducklake_catalog").unwrap();
         let conninfo = catalog_conninfo_from_url(&url).unwrap();
         let parsed = PgConfig::from_str(conninfo.strip_prefix("postgres:").unwrap()).unwrap();
@@ -656,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn test_catalog_conninfo_from_postgres_url_with_password_and_query_params_round_trip() {
+    fn catalog_conninfo_from_postgres_url_with_password_and_query_params_round_trip() {
         let url = Url::parse(
             "postgres://user:pa%27ss%5Cword@localhost:5433/mydb?sslmode=disable&\
              connect_timeout=10&tcp_user_timeout=1500&application_name=myapp",
@@ -676,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn test_catalog_conninfo_rejects_explicit_unsupported_query_parameters() {
+    fn catalog_conninfo_rejects_explicit_unsupported_query_parameters() {
         for parameter in [
             "channel_binding=require",
             "load_balance_hosts=random",
@@ -692,14 +698,14 @@ mod tests {
     }
 
     #[test]
-    fn test_catalog_conninfo_rejects_unsupported_catalog_scheme() {
+    fn catalog_conninfo_rejects_unsupported_catalog_scheme() {
         let err =
             catalog_attach_target(&Url::parse("https://example.com/catalog").unwrap()).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ConfigError);
     }
 
     #[test]
-    fn test_validate_data_path_rejects_unsupported_scheme() {
+    fn validate_data_path_rejects_unsupported_scheme() {
         let err = build_setup_sql(
             &Url::from_file_path("/tmp/catalog.ducklake").unwrap(),
             &Url::parse("https://example.com/lake").unwrap(),
@@ -720,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duckdb_extension_strategy_linux_amd64_uses_install_flow_without_vendored_extensions() {
+    fn duckdb_extension_strategy_linux_amd64_uses_install_flow_without_vendored_extensions() {
         let tempdir = TempDir::new().unwrap();
 
         assert_eq!(
@@ -731,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duckdb_extension_strategy_linux_arm64_uses_vendored_extensions_when_present() {
+    fn duckdb_extension_strategy_linux_arm64_uses_vendored_extensions_when_present() {
         let repo_root = vendored_root_with_files("linux_arm64");
         let container_root = TempDir::new().unwrap();
 
@@ -749,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duckdb_extension_strategy_macos_uses_install_flow_without_vendored_extensions() {
+    fn duckdb_extension_strategy_macos_uses_install_flow_without_vendored_extensions() {
         let tempdir = TempDir::new().unwrap();
 
         assert_eq!(
@@ -760,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duckdb_extension_strategy_macos_arm64_uses_vendored_extensions_when_present() {
+    fn duckdb_extension_strategy_macos_arm64_uses_vendored_extensions_when_present() {
         let repo_root = vendored_root_with_files("osx_arm64");
         let container_root = TempDir::new().unwrap();
 
@@ -778,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duckdb_extension_strategy_windows_uses_install_flow() {
+    fn duckdb_extension_strategy_windows_uses_install_flow() {
         let tempdir = TempDir::new().unwrap();
 
         assert_eq!(
@@ -789,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duckdb_extension_strategy_rejects_unsupported_linux_architecture() {
+    fn duckdb_extension_strategy_rejects_unsupported_linux_architecture() {
         let tempdir = TempDir::new().unwrap();
         let err =
             duckdb_extension_strategy("linux", "riscv64", None, tempdir.path(), tempdir.path())
@@ -798,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vendored_extension_dir_uses_env_override_first() {
+    fn vendored_extension_dir_uses_env_override_first() {
         let env_root = vendored_root_with_files("linux_amd64");
         let fallback_root = TempDir::new().unwrap();
 
@@ -817,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vendored_extension_dir_falls_back_to_repo_root() {
+    fn vendored_extension_dir_falls_back_to_repo_root() {
         let repo_root = vendored_root_with_files("linux_arm64");
         let container_root = TempDir::new().unwrap();
 
@@ -832,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vendored_extension_dir_falls_back_to_container_root() {
+    fn vendored_extension_dir_falls_back_to_container_root() {
         let container_root = vendored_root_with_files("linux_amd64");
         let repo_root = TempDir::new().unwrap();
 
@@ -847,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vendored_extension_dir_rejects_missing_extensions() {
+    fn vendored_extension_dir_rejects_missing_extensions() {
         let tempdir = TempDir::new().unwrap();
         let err = vendored_extension_dir(
             "linux_amd64",
@@ -860,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vendored_extension_dir_returns_none_when_not_present() {
+    fn vendored_extension_dir_returns_none_when_not_present() {
         let tempdir = TempDir::new().unwrap();
         let resolved =
             vendored_extension_dir("linux_amd64", None, tempdir.path(), tempdir.path()).unwrap();
@@ -869,7 +875,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_setup_sql_linux_vendored_local() {
+    fn build_setup_sql_linux_vendored_local() {
         let vendored_root = vendored_root_with_files("linux_amd64");
         let catalog_url = Url::from_file_path("/tmp/catalog.ducklake").unwrap();
         let data_url = Url::from_file_path("/tmp/lake_data").unwrap();
@@ -900,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_setup_sql_macos_vendored_local() {
+    fn build_setup_sql_macos_vendored_local() {
         let vendored_root = vendored_root_with_files("osx_arm64");
         let catalog_url = Url::from_file_path("/tmp/catalog.ducklake").unwrap();
         let data_url = Url::from_file_path("/tmp/lake_data").unwrap();
@@ -925,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_setup_sql_legacy_install_postgres_local_data() {
+    fn build_setup_sql_legacy_install_postgres_local_data() {
         let catalog_url = Url::parse("postgres://bnj@localhost:5432/ducklake_catalog").unwrap();
         let data_url = Url::from_file_path("/tmp/lake_data").unwrap();
         let sql = build_setup_sql_with_strategy(
@@ -956,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_setup_sql_linux_vendored_postgres_s3_data() {
+    fn build_setup_sql_linux_vendored_postgres_s3_data() {
         let vendored_root = vendored_root_with_files("linux_arm64");
         let catalog_url = Url::parse("postgres://user:pass@host/db").unwrap();
         let data_url = Url::parse("s3://my-bucket/lake/").unwrap();
@@ -987,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vendored_extension_strategy_disables_autoload() {
+    fn vendored_extension_strategy_disables_autoload() {
         assert!(
             DuckDbExtensionStrategy::VendoredLocal { platform_dir: "osx_arm64" }
                 .disables_autoload()
@@ -996,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_setup_sql_uses_pg_escape_for_literals() {
+    fn build_setup_sql_uses_pg_escape_for_literals() {
         let catalog_url = Url::parse("postgres://user:pa%27ss%5Cword@localhost:5432/mydb").unwrap();
         let data_url = Url::parse("s3://bucket/path").unwrap();
         let s3 = S3Config {
