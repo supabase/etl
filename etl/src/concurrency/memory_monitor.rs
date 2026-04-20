@@ -11,7 +11,7 @@ use metrics::{counter, gauge, histogram};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 use tokio_stream::wrappers::WatchStream;
-use tracing::{debug, info};
+use tracing::{info, trace};
 
 use crate::concurrency::shutdown::ShutdownRx;
 use crate::metrics::{
@@ -152,7 +152,7 @@ impl MemoryMonitor {
                                 backpressure.config.resume_threshold,
                             );
 
-                            debug!(
+                            trace!(
                                 used_memory_bytes = snapshot.used,
                                 total_memory_bytes = snapshot.total,
                                 used_percent,
@@ -162,7 +162,7 @@ impl MemoryMonitor {
                             );
 
                             if next_backpressure_active != currently_backpressure_active {
-                                debug!(
+                                trace!(
                                     backpressure_active = currently_backpressure_active,
                                     next_backpressure_active,
                                     used_percent,
@@ -182,7 +182,7 @@ impl MemoryMonitor {
                             currently_backpressure_active = next_backpressure_active;
                             this_clone.set_backpressure_active(next_backpressure_active);
                         } else {
-                            debug!(
+                            trace!(
                                 used_memory_bytes = snapshot.used,
                                 total_memory_bytes = snapshot.total,
                                 "memory monitor refreshed memory snapshot without backpressure"

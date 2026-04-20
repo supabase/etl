@@ -12,8 +12,8 @@ Receives replicated data. This is the primary extension point for sending data t
 pub trait Destination {
     fn name() -> &'static str;
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send { async { Ok(()) } }
-    fn truncate_table(&self, table_id: TableId, async_result: TruncateTableResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
-    fn write_table_rows(&self, table_id: TableId, table_rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn truncate_table(&self, replicated_table_schema: &ReplicatedTableSchema, async_result: TruncateTableResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
+    fn write_table_rows(&self, replicated_table_schema: &ReplicatedTableSchema, table_rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
     fn write_events(&self, events: Vec<Event>, async_result: WriteEventsResult<()>) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
@@ -24,8 +24,8 @@ pub trait Destination {
 |--------|---------|
 | `name()` | Returns identifier for logging and diagnostics |
 | `shutdown()` | Called when the pipeline shuts down. Default is a no-op. Override for cleanup or bookkeeping |
-| `truncate_table()` | Clears table data before initial sync. Called unconditionally, even if the table does not exist |
-| `write_table_rows()` | Writes rows during initial table copy. May receive an empty vector for tables with no data |
+| `truncate_table()` | Clears table data before initial sync. Receives the current replicated schema for the table |
+| `write_table_rows()` | Writes rows during initial table copy. Receives the current replicated schema and may get an empty vector for tables with no data |
 | `write_events()` | Processes streaming replication events (inserts, updates, deletes). Batches may span multiple tables |
 
 ### Implementation Notes
@@ -46,10 +46,10 @@ Stores table schema information (column names, types, primary keys).
 
 ```rust
 pub trait SchemaStore {
-    fn get_table_schema(&self, table_id: &TableId) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
+    fn get_table_schema(&self, table_id: &TableId, snapshot_id: SnapshotId) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
     fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
     fn load_table_schemas(&self) -> impl Future<Output = EtlResult<usize>> + Send;
-    fn store_table_schema(&self, table_schema: TableSchema) -> impl Future<Output = EtlResult<()>> + Send;
+    fn store_table_schema(&self, table_schema: TableSchema) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send;
 }
 ```
 
@@ -57,14 +57,14 @@ pub trait SchemaStore {
 
 | Method | Purpose |
 |--------|---------|
-| `get_table_schema()` | Returns schema for a table from cache. Does not load from persistent storage |
+| `get_table_schema()` | Returns the schema version with the largest `snapshot_id <= requested_snapshot_id` |
 | `get_table_schemas()` | Returns all cached schemas |
 | `load_table_schemas()` | Loads schemas from persistent storage into cache. Call once at startup. Returns the number of schemas loaded |
-| `store_table_schema()` | Saves schema to both cache and persistent storage |
+| `store_table_schema()` | Saves a schema version to both cache and persistent storage and returns the cached `Arc` |
 
 ## StateStore
 
-Tracks replication progress and table mappings.
+Tracks replication progress and destination table metadata.
 
 ```rust
 pub trait StateStore {
@@ -72,14 +72,15 @@ pub trait StateStore {
     fn get_table_replication_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<TableReplicationPhase>>> + Send;
     fn get_table_replication_states(&self) -> impl Future<Output = EtlResult<HashMap<TableId, TableReplicationPhase>>> + Send;
     fn load_table_replication_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+    fn update_table_replication_states(&self, updates: Vec<(TableId, TableReplicationPhase)>) -> impl Future<Output = EtlResult<()>> + Send;
     fn update_table_replication_state(&self, table_id: TableId, state: TableReplicationPhase) -> impl Future<Output = EtlResult<()>> + Send;
     fn rollback_table_replication_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<TableReplicationPhase>> + Send;
 
-    // Table mappings
-    fn get_table_mapping(&self, source_table_id: &TableId) -> impl Future<Output = EtlResult<Option<String>>> + Send;
-    fn get_table_mappings(&self) -> impl Future<Output = EtlResult<HashMap<TableId, String>>> + Send;
-    fn load_table_mappings(&self) -> impl Future<Output = EtlResult<usize>> + Send;
-    fn store_table_mapping(&self, source_table_id: TableId, destination_table_id: String) -> impl Future<Output = EtlResult<()>> + Send;
+    // Destination table metadata
+    fn get_destination_table_metadata(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<DestinationTableMetadata>>> + Send;
+    fn get_applied_destination_table_metadata(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<AppliedDestinationTableMetadata>>> + Send;
+    fn load_destination_tables_metadata(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+    fn store_destination_table_metadata(&self, table_id: TableId, metadata: DestinationTableMetadata) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
@@ -90,19 +91,20 @@ pub trait StateStore {
 | `get_table_replication_state()` | Returns current phase for a table from cache |
 | `get_table_replication_states()` | Returns phases for all tables from cache |
 | `load_table_replication_states()` | Loads phases from persistent storage into cache. Call once at startup. Returns the number of states loaded |
+| `update_table_replication_states()` | Atomically updates multiple table phases in both cache and persistent storage |
 | `update_table_replication_state()` | Updates phase in both cache and persistent storage |
 | `rollback_table_replication_state()` | Reverts table to previous phase. Returns the phase after rollback |
 
-### Table Mapping Methods
+### Destination Metadata Methods
 
-Table mappings connect source table IDs to destination table names.
+Destination table metadata connects source table IDs to destination state, including the destination table identifier, the currently applied schema snapshot, and the replication mask.
 
 | Method | Purpose |
 |--------|---------|
-| `get_table_mapping()` | Returns destination table name for a source table from cache |
-| `get_table_mappings()` | Returns all mappings from cache |
-| `load_table_mappings()` | Loads mappings from persistent storage into cache. Can be called lazily when needed |
-| `store_table_mapping()` | Saves mapping to both cache and persistent storage |
+| `get_destination_table_metadata()` | Returns destination metadata for a source table from cache |
+| `get_applied_destination_table_metadata()` | Returns destination metadata only when the destination schema is fully applied |
+| `load_destination_tables_metadata()` | Loads destination metadata from persistent storage into cache |
+| `store_destination_table_metadata()` | Saves destination metadata to both cache and persistent storage |
 
 ### Table Replication Phases
 
@@ -131,7 +133,7 @@ pub trait CleanupStore {
 
 | Method | Purpose |
 |--------|---------|
-| `cleanup_table_state()` | Deletes all stored state for a table: replication state, schema, and mappings. Does not modify destination tables |
+| `cleanup_table_state()` | Deletes all stored state for a table: replication state, schema versions, and destination metadata. Does not modify destination tables |
 
 ## Combining Traits
 

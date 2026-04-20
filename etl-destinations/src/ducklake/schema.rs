@@ -160,8 +160,9 @@ mod tests {
                 "select".to_string(),
                 Type::INT4,
                 -1,
+                1,
+                Some(1),
                 false,
-                true,
             )],
         );
 

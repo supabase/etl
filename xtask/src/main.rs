@@ -15,7 +15,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run chaos testing scenarios against the Kubernetes cluster
+    /// Run chaos testing scenarios against the Kubernetes cluster.
     Chaos(ChaosArgs),
     /// Run tests via nextest, sharded across multiple Postgres clusters
     Nextest(NextestArgs),

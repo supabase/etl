@@ -1,4 +1,4 @@
-use etl_postgres::types::TableId;
+use etl_postgres::types::ReplicatedTableSchema;
 use std::future::Future;
 
 use crate::destination::async_result::{
@@ -37,9 +37,7 @@ pub trait Destination {
     /// Truncates all data in the specified table.
     ///
     /// This operation is called during initial table synchronization to ensure the
-    /// destination table starts from a clean state before bulk loading. Truncation is
-    /// best-effort and may be skipped if table metadata is missing, and callers may continue
-    /// after a truncation error.
+    /// destination table starts from a clean state before bulk loading.
     ///
     /// Implementations complete `async_result` when truncation is actually done. ETL still waits
     /// for that result immediately before continuing. The asynchronous result exists mainly to
@@ -47,7 +45,7 @@ pub trait Destination {
     /// with truncation.
     fn truncate_table(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         async_result: TruncateTableResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 
@@ -76,7 +74,7 @@ pub trait Destination {
     /// many in-flight row batches in memory.
     fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> impl Future<Output = EtlResult<()>> + Send;
@@ -110,6 +108,9 @@ pub trait Destination {
     /// destinations should rely on per-table event ordering and not assume that `begin`/`commit`
     /// boundaries always describe a complete all-tables transaction until initial copy has fully
     /// finished.
+    ///
+    /// Each data-bearing [`Event`] also carries its own [`ReplicatedTableSchema`], so destinations
+    /// can react to the correct schema version for that specific change.
     fn write_events(
         &self,
         events: Vec<Event>,
