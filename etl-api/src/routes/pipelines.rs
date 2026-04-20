@@ -154,7 +154,7 @@ impl From<crate::k8s::core::K8sCoreError> for PipelineError {
 }
 
 impl PipelineError {
-    fn to_message(&self) -> String {
+    pub fn to_message(&self) -> String {
         #[allow(clippy::match_same_arms)]
         match self {
             // Do not expose internal database details in error messages.
@@ -174,15 +174,15 @@ impl PipelineError {
             PipelineError::Validation(ValidationError::Database(_)) => {
                 "database validation failed".to_string()
             }
-            PipelineError::Validation(
-                ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
-            ) => "internal server error".to_string(),
+            PipelineError::Validation(ValidationError::TrustedRootCerts(_))
+            | PipelineError::Validation(ValidationError::Environment(_)) => {
+                "internal server error".to_string()
+            }
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
     }
 }
-
 impl ResponseError for PipelineError {
     fn status_code(&self) -> StatusCode {
         match self {
