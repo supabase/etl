@@ -1104,8 +1104,8 @@ impl BigQueryClient {
     ) -> EtlResult<BatchAppendRequest<BigQueryTableRow>> {
         let stream_name = StreamName::new_default(
             self.project_id.clone(),
-            dataset_id.to_string(),
-            table_id.to_string(),
+            dataset_id.clone(),
+            table_id.clone(),
         );
 
         let table_batch = TableBatch::new(stream_name, table_descriptor, validated_rows);

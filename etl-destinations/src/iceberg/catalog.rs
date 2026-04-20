@@ -277,7 +277,7 @@ impl SupabaseClient {
 
         let file_io = self.load_file_io(Some(metadata_location), Some(config))?;
 
-        let table_ident = TableIdent::new(namespace.clone(), creation.name.to_string());
+        let table_ident = TableIdent::new(namespace.clone(), creation.name.clone());
 
         let table_builder = Table::builder()
             .identifier(table_ident.clone())

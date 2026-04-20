@@ -184,13 +184,23 @@ async fn create_table_if_missing() {
     ];
 
     // table doesn't exist yet
-    assert!(!client.table_exists(namespace, table_name.to_string()).await.unwrap());
+    assert!(
+        !client
+            .table_exists(namespace, table_name.clone())
+            .await
+            .unwrap()
+    );
 
     // Create table for the first time
     client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     // table should exist now
-    assert!(client.table_exists(namespace, table_name.to_string()).await.unwrap());
+    assert!(
+        client
+            .table_exists(namespace, table_name.clone())
+            .await
+            .unwrap()
+    );
 
     // Verify identifier fields are set correctly.
     let table = client.load_table(namespace.to_string(), table_name.clone()).await.unwrap();
@@ -204,7 +214,12 @@ async fn create_table_if_missing() {
     client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     // table should still exist
-    assert!(client.table_exists(namespace, table_name.to_string()).await.unwrap());
+    assert!(
+        client
+            .table_exists(namespace, table_name.clone())
+            .await
+            .unwrap()
+    );
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
     // warehouse level This feature is planned for future releases. We'll start
