@@ -100,7 +100,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
 
     let supabase_config = SupabaseConfigWithoutSecrets {
         project_ref: tenant_id.to_owned(),
-        api_url: supabase_api_url.map(|url| url.to_owned()),
+        api_url: supabase_api_url.map(ToOwned::to_owned),
     };
 
     let log_level = pipeline.config.log_level.clone().unwrap_or_default();

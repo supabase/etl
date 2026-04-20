@@ -167,9 +167,9 @@ impl EtlError {
     pub fn kind(&self) -> ErrorKind {
         match self.repr {
             ErrorRepr::Single(ref payload) => payload.kind,
-            ErrorRepr::Many { ref errors, .. } => errors
-                .first()
-                .map_or(ErrorKind::Unknown, |err| err.kind()),
+            ErrorRepr::Many { ref errors, .. } => {
+                errors.first().map_or(ErrorKind::Unknown, EtlError::kind)
+            }
         }
     }
 
@@ -181,7 +181,7 @@ impl EtlError {
         match self.repr {
             ErrorRepr::Single(ref payload) => vec![payload.kind],
             ErrorRepr::Many { ref errors, .. } => {
-                errors.iter().flat_map(|err| err.kinds()).collect::<Vec<_>>()
+                errors.iter().flat_map(EtlError::kinds).collect::<Vec<_>>()
             }
         }
     }

@@ -323,7 +323,7 @@ impl TableSchema {
     /// This method checks if any column in the table is marked as part of the
     /// primary key.
     pub fn has_primary_keys(&self) -> bool {
-        self.column_schemas.iter().any(|cs| cs.primary_key())
+        self.column_schemas.iter().any(ColumnSchema::primary_key)
     }
 }
 

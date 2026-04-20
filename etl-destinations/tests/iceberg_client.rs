@@ -732,21 +732,27 @@ async fn insert_nullable_array() {
 
     // numeric_array_col (index 12): NUMERIC_ARRAY maps to String in Iceberg
     if let Cell::Array(ArrayCell::Numeric(vec)) = &values[12] {
-        let converted: Vec<Option<String>> =
-            vec.iter().map(|opt| opt.as_ref().map(|n| n.to_string())).collect();
+        let converted: Vec<Option<String>> = vec
+            .iter()
+            .map(|opt| opt.as_ref().map(ToString::to_string))
+            .collect();
         values[12] = Cell::Array(ArrayCell::String(converted));
     }
 
     // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to
     // String in Iceberg
     if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
-        let converted: Vec<Option<String>> =
-            vec.iter().map(|opt| opt.as_ref().map(|j| j.to_string())).collect();
+        let converted: Vec<Option<String>> = vec
+            .iter()
+            .map(|opt| opt.as_ref().map(ToString::to_string))
+            .collect();
         values[18] = Cell::Array(ArrayCell::String(converted));
     }
     if let Cell::Array(ArrayCell::Json(vec)) = &values[19] {
-        let converted: Vec<Option<String>> =
-            vec.iter().map(|opt| opt.as_ref().map(|j| j.to_string())).collect();
+        let converted: Vec<Option<String>> = vec
+            .iter()
+            .map(|opt| opt.as_ref().map(ToString::to_string))
+            .collect();
         values[19] = Cell::Array(ArrayCell::String(converted));
     }
 
@@ -915,21 +921,27 @@ async fn insert_non_nullable_array() {
 
     // numeric_array_col (index 12): NUMERIC_ARRAY maps to String in Iceberg
     if let Cell::Array(ArrayCell::Numeric(vec)) = &values[12] {
-        let converted: Vec<Option<String>> =
-            vec.iter().map(|opt| opt.as_ref().map(|n| n.to_string())).collect();
+        let converted: Vec<Option<String>> = vec
+            .iter()
+            .map(|opt| opt.as_ref().map(ToString::to_string))
+            .collect();
         values[12] = Cell::Array(ArrayCell::String(converted));
     }
 
     // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to
     // String in Iceberg
     if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
-        let converted: Vec<Option<String>> =
-            vec.iter().map(|opt| opt.as_ref().map(|j| j.to_string())).collect();
+        let converted: Vec<Option<String>> = vec
+            .iter()
+            .map(|opt| opt.as_ref().map(ToString::to_string))
+            .collect();
         values[18] = Cell::Array(ArrayCell::String(converted));
     }
     if let Cell::Array(ArrayCell::Json(vec)) = &values[19] {
-        let converted: Vec<Option<String>> =
-            vec.iter().map(|opt| opt.as_ref().map(|j| j.to_string())).collect();
+        let converted: Vec<Option<String>> = vec
+            .iter()
+            .map(|opt| opt.as_ref().map(ToString::to_string))
+            .collect();
         values[19] = Cell::Array(ArrayCell::String(converted));
     }
 

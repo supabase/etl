@@ -283,7 +283,7 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
     let table_rows = destination.get_table_rows().await;
     let users_table_copied_rows = table_rows
         .get(&database_schema.users_schema().id)
-        .map_or(0, |r| r.len());
+        .map_or(0, Vec::len);
     assert_eq!(users_table_copied_rows, 5);
 
     // Wait for the slot to become inactive.
@@ -325,7 +325,7 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
     let table_rows = destination.get_table_rows().await;
     let users_table_copied_rows = table_rows
         .get(&database_schema.users_schema().id)
-        .map_or(0, |r| r.len());
+        .map_or(0, Vec::len);
     assert_eq!(users_table_copied_rows, 5);
 
     // Verify the slot was recreated and is active.
@@ -391,7 +391,7 @@ async fn table_copy_replicates_many_rows_with_parallel_connections() {
 
     // Verify that all 100k rows were copied.
     let table_rows = destination.get_table_rows().await;
-    let copied_rows = table_rows.get(&table_id).map_or(0, |r| r.len());
+    let copied_rows = table_rows.get(&table_id).map_or(0, Vec::len);
     assert_eq!(copied_rows, total_rows as usize);
 }
 
@@ -462,7 +462,7 @@ async fn table_copy_with_row_filter_and_parallel_connections() {
 
     // Verify that only rows matching the filter were copied.
     let table_rows = destination.get_table_rows().await;
-    let copied_rows = table_rows.get(&table_id).map_or(0, |r| r.len());
+    let copied_rows = table_rows.get(&table_id).map_or(0, Vec::len);
     assert_eq!(copied_rows, expected_rows);
 }
 
@@ -867,12 +867,8 @@ async fn run_table_sync_copy_case<F>(
 
     // We validate that the table rows are correct.
     let table_rows = destination.get_table_rows().await;
-    let users_table_copied_rows = table_rows
-        .get(&users_table_id)
-        .map_or(0, |r| r.len());
-    let orders_table_copied_rows = table_rows
-        .get(&orders_table_id)
-        .map_or(0, |r| r.len());
+    let users_table_copied_rows = table_rows.get(&users_table_id).map_or(0, Vec::len);
+    let orders_table_copied_rows = table_rows.get(&orders_table_id).map_or(0, Vec::len);
     assert_eq!(users_table_copied_rows, expected_users_copied_rows);
     assert_eq!(orders_table_copied_rows, expected_orders_copied_rows);
     // We always expect the method to be called since the downstream table should be
@@ -1785,7 +1781,7 @@ async fn table_sync_truncates_destination_after_state_reset() {
     let users_rows = table_rows_after.get(&database_schema.users_schema().id).unwrap().len();
     let users_events = grouped_events_after
         .get(&(EventType::Insert, database_schema.users_schema().id))
-        .map_or(0, |v| v.len());
+        .map_or(0, Vec::len);
     assert_eq!(users_rows + users_events, total_expected_users);
 
     // Orders: no data, since we cleared it before restart and nothing should happen
@@ -1886,18 +1882,18 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
 
     let users_copied_rows = table_rows
         .get(&database_schema.users_schema().id)
-        .map_or(0, |r| r.len());
+        .map_or(0, Vec::len);
     let users_insert_events = grouped_events
         .get(&(EventType::Insert, database_schema.users_schema().id))
-        .map_or(0, |e| e.len());
+        .map_or(0, Vec::len);
     let total_users = users_copied_rows + users_insert_events;
 
     let orders_copied_rows = table_rows
         .get(&database_schema.orders_schema().id)
-        .map_or(0, |r| r.len());
+        .map_or(0, Vec::len);
     let orders_insert_events = grouped_events
         .get(&(EventType::Insert, database_schema.orders_schema().id))
-        .map_or(0, |e| e.len());
+        .map_or(0, Vec::len);
     let total_orders = orders_copied_rows + orders_insert_events;
 
     assert_eq!(total_users, rows_to_insert);
@@ -1992,17 +1988,17 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
 
     let users_updates = grouped_events
         .get(&(EventType::Update, database_schema.users_schema().id))
-        .map_or(0, |e| e.len());
+        .map_or(0, Vec::len);
     let users_deletes = grouped_events
         .get(&(EventType::Delete, database_schema.users_schema().id))
-        .map_or(0, |e| e.len());
+        .map_or(0, Vec::len);
 
     let orders_updates = grouped_events
         .get(&(EventType::Update, database_schema.orders_schema().id))
-        .map_or(0, |e| e.len());
+        .map_or(0, Vec::len);
     let orders_deletes = grouped_events
         .get(&(EventType::Delete, database_schema.orders_schema().id))
-        .map_or(0, |e| e.len());
+        .map_or(0, Vec::len);
 
     assert_eq!(users_updates, rows_to_update);
     assert_eq!(users_deletes, rows_to_delete);

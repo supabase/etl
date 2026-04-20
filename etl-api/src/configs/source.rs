@@ -82,7 +82,7 @@ impl StoredSourceConfig {
             port: self.port,
             name: self.name,
             username: self.username,
-            password: self.password.map(|p| p.into()),
+            password: self.password.map(Into::into),
             tls: tls_config,
             keepalive: TcpKeepaliveConfig::default(),
         }

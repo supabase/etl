@@ -1,3 +1,5 @@
+use crate::types::{Event, EventType, TableRow};
+use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use std::collections::HashMap;
 
 use etl_postgres::types::TableId;
@@ -35,9 +37,11 @@ pub fn group_events_by_type_and_table_id(
             Event::Insert(event) => vec![event.replicated_table_schema.id()],
             Event::Update(event) => vec![event.replicated_table_schema.id()],
             Event::Delete(event) => vec![event.replicated_table_schema.id()],
-            Event::Truncate(event) => {
-                event.truncated_tables.iter().map(|schema| schema.id()).collect()
-            }
+            Event::Truncate(event) => event
+                .truncated_tables
+                .iter()
+                .map(ReplicatedTableSchema::id)
+                .collect(),
             _ => vec![],
         };
         for table_id in table_ids {
@@ -75,8 +79,16 @@ fn events_equal(a: &Event, b: &Event) -> bool {
             }
 
             // Compare table IDs of truncated tables
-            let a_ids: Vec<_> = a.truncated_tables.iter().map(|s| s.id()).collect();
-            let b_ids: Vec<_> = b.truncated_tables.iter().map(|s| s.id()).collect();
+            let a_ids: Vec<_> = a
+                .truncated_tables
+                .iter()
+                .map(ReplicatedTableSchema::id)
+                .collect();
+            let b_ids: Vec<_> = b
+                .truncated_tables
+                .iter()
+                .map(ReplicatedTableSchema::id)
+                .collect();
 
             a_ids == b_ids
         }
@@ -135,9 +147,7 @@ pub fn check_all_events_count(
                 .map_or(0, |events| events.len() as u64);
 
             let table_row_count = if *event_type == EventType::Insert {
-                table_rows
-                    .get(table_id)
-                    .map_or(0, |rows| rows.len() as u64)
+                table_rows.get(table_id).map_or(0, |rows| rows.len() as u64)
             } else {
                 0
             };

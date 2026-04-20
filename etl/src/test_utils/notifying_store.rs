@@ -290,7 +290,7 @@ impl StateStore for NotifyingStore {
         let previous_state = inner
             .table_state_history
             .get_mut(&table_id)
-            .and_then(|history| history.pop())
+            .and_then(Vec::pop)
             .ok_or_else(|| {
                 etl_error!(
                     ErrorKind::StateRollbackError,
@@ -374,7 +374,7 @@ impl SchemaStore for NotifyingStore {
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         let inner = self.inner.read().await;
 
-        Ok(inner.table_schemas.values().map(|v| v.len()).sum())
+        Ok(inner.table_schemas.values().map(Vec::len).sum())
     }
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {

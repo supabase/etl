@@ -390,7 +390,7 @@ fn is_numeric_within_bigquery_bignumeric_limits(pg_numeric: &PgNumeric) -> bool 
     let numeric_str = pg_numeric.to_string();
 
     // Count actual digits (excluding sign, decimal point)
-    let digit_count: usize = numeric_str.chars().filter(|c| c.is_ascii_digit()).count();
+    let digit_count: usize = numeric_str.chars().filter(char::is_ascii_digit).count();
 
     // BigQuery BIGNUMERIC supports up to ~77 digits of total precision
     if digit_count > BIGQUERY_BIGNUMERIC_MAX_PRACTICAL_DIGITS {
@@ -400,7 +400,7 @@ fn is_numeric_within_bigquery_bignumeric_limits(pg_numeric: &PgNumeric) -> bool 
     // Check decimal places if there's a decimal point
     if let Some(decimal_pos) = numeric_str.find('.') {
         let decimal_part = &numeric_str[decimal_pos + 1..];
-        let decimal_digits = decimal_part.chars().filter(|c| c.is_ascii_digit()).count();
+        let decimal_digits = decimal_part.chars().filter(char::is_ascii_digit).count();
 
         // BigQuery BIGNUMERIC supports up to 38 decimal places
         if decimal_digits > BIGQUERY_BIGNUMERIC_MAX_SCALE {

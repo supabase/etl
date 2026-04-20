@@ -289,7 +289,7 @@ fn array_cell_encode_prost(
             prost::encoding::double::encode_packed(tag, vec, buf);
         }
         ArrayCellNonOptional::Numeric(vec) => {
-            let values: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Date(vec) => {
@@ -313,11 +313,11 @@ fn array_cell_encode_prost(
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Uuid(vec) => {
-            let values: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Json(vec) => {
-            let values: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Bytes(vec) => {
@@ -348,7 +348,7 @@ fn array_cell_non_optional_encoded_len_prost(array_cell: &ArrayCellNonOptional, 
         ArrayCellNonOptional::F32(vec) => prost::encoding::float::encoded_len_packed(tag, vec),
         ArrayCellNonOptional::F64(vec) => prost::encoding::double::encoded_len_packed(tag, vec),
         ArrayCellNonOptional::Numeric(vec) => {
-            let values: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Date(vec) => {
@@ -372,11 +372,11 @@ fn array_cell_non_optional_encoded_len_prost(array_cell: &ArrayCellNonOptional, 
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Uuid(vec) => {
-            let values: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Json(vec) => {
-            let values: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Bytes(vec) => prost::encoding::bytes::encoded_len_repeated(tag, vec),

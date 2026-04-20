@@ -1517,7 +1517,7 @@ mod tests {
         assert_eq!(result.len(), 4);
 
         // Verify all rows are accounted for
-        let total_rows: usize = result.iter().map(|batch| batch.len()).sum();
+        let total_rows: usize = result.iter().map(Vec::len).sum();
         assert_eq!(total_rows, 10);
 
         // Verify approximately equal distribution

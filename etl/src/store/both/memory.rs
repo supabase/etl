@@ -136,7 +136,7 @@ impl StateStore for MemoryStore {
         let previous_state = inner
             .table_state_history
             .get_mut(&table_id)
-            .and_then(|history| history.pop())
+            .and_then(Vec::pop)
             .ok_or_else(|| {
                 etl_error!(
                     ErrorKind::StateRollbackError,

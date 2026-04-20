@@ -234,7 +234,7 @@ pub(crate) fn parse_replicated_column_names(
     let column_names = relation_body
         .columns()
         .iter()
-        .map(|column| column.name().map(|name| name.to_string()))
+        .map(|column| column.name().map(ToString::to_string))
         .collect::<Result<HashSet<String>, _>>()?;
 
     Ok(column_names)

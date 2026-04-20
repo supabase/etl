@@ -139,92 +139,107 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
             .collect(),
         ArrayCell::String(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| quote_literal(&value))
-            })
+            .map(|o| o.map_or_else(|| "NULL".to_string(), |value| quote_literal(&value)))
             .collect(),
         ArrayCell::I16(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| value.to_string())
-            })
+            .map(|o| o.map_or_else(|| "NULL".to_string(), |value| value.to_string()))
             .collect(),
         ArrayCell::I32(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| value.to_string())
-            })
+            .map(|o| o.map_or_else(|| "NULL".to_string(), |value| value.to_string()))
             .collect(),
         ArrayCell::U32(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| value.to_string())
-            })
+            .map(|o| o.map_or_else(|| "NULL".to_string(), |value| value.to_string()))
             .collect(),
         ArrayCell::I64(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| value.to_string())
-            })
+            .map(|o| o.map_or_else(|| "NULL".to_string(), |value| value.to_string()))
             .collect(),
         ArrayCell::F32(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| float_literal(value as f64, false))
+                o.map_or_else(
+                    || "NULL".to_string(),
+                    |value| float_literal(value as f64, false),
+                )
             })
             .collect(),
         ArrayCell::F64(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| float_literal(value, true))
-            })
+            .map(|o| o.map_or_else(|| "NULL".to_string(), |value| float_literal(value, true)))
             .collect(),
         ArrayCell::Numeric(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| quote_literal(&value.to_string()))
+                o.map_or_else(
+                    || "NULL".to_string(),
+                    |value| quote_literal(&value.to_string()),
+                )
             })
             .collect(),
         ArrayCell::Date(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| format!("DATE '{}'", value.format("%Y-%m-%d")))
+                o.map_or_else(
+                    || "NULL".to_string(),
+                    |value| format!("DATE '{}'", value.format("%Y-%m-%d")),
+                )
             })
             .collect(),
         ArrayCell::Time(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| format!("TIME '{}'", value.format("%H:%M:%S%.6f")))
+                o.map_or_else(
+                    || "NULL".to_string(),
+                    |value| format!("TIME '{}'", value.format("%H:%M:%S%.6f")),
+                )
             })
             .collect(),
         ArrayCell::Timestamp(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| format!("TIMESTAMP '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f")))
+                o.map_or_else(
+                    || "NULL".to_string(),
+                    |value| format!("TIMESTAMP '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f")),
+                )
             })
             .collect(),
         ArrayCell::TimestampTz(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| format!("TIMESTAMPTZ '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f%:z")))
+                o.map_or_else(
+                    || "NULL".to_string(),
+                    |value| format!("TIMESTAMPTZ '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f%:z")),
+                )
             })
             .collect(),
         ArrayCell::Uuid(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| format!("CAST({} AS UUID)", quote_literal(&value.to_string())))
+                o.map_or_else(
+                    || "NULL".to_string(),
+                    |value| format!("CAST({} AS UUID)", quote_literal(&value.to_string())),
+                )
             })
             .collect(),
         ArrayCell::Json(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| format!("CAST({} AS JSON)", quote_literal(&value.to_string())))
+                o.map_or_else(
+                    || "NULL".to_string(),
+                    |value| format!("CAST({} AS JSON)", quote_literal(&value.to_string())),
+                )
             })
             .collect(),
         ArrayCell::Bytes(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(|| "NULL".to_string(), |value| format!("from_hex('{}')", encode_hex(&value)))
+                o.map_or_else(
+                    || "NULL".to_string(),
+                    |value| format!("from_hex('{}')", encode_hex(&value)),
+                )
             })
             .collect(),
     };
@@ -343,7 +358,9 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
             let epoch_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
             v.into_iter()
                 .map(|o| {
-                    o.map_or(Value::Null, |d| Value::Date32(d.signed_duration_since(epoch_date).num_days() as i32))
+                    o.map_or(Value::Null, |d| {
+                        Value::Date32(d.signed_duration_since(epoch_date).num_days() as i32)
+                    })
                 })
                 .collect()
         }
@@ -364,13 +381,17 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
         ArrayCell::Timestamp(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or(Value::Null, |dt| Value::Timestamp(TimeUnit::Microsecond, dt.and_utc().timestamp_micros()))
+                o.map_or(Value::Null, |dt| {
+                    Value::Timestamp(TimeUnit::Microsecond, dt.and_utc().timestamp_micros())
+                })
             })
             .collect(),
         ArrayCell::TimestampTz(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or(Value::Null, |dt| Value::Timestamp(TimeUnit::Microsecond, dt.timestamp_micros()))
+                o.map_or(Value::Null, |dt| {
+                    Value::Timestamp(TimeUnit::Microsecond, dt.timestamp_micros())
+                })
             })
             .collect(),
         ArrayCell::Uuid(v) => v
