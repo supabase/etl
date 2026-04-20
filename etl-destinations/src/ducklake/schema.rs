@@ -30,7 +30,6 @@ fn postgres_scalar_type_to_ducklake_sql(typ: &Type) -> &'static str {
 
 /// Returns the DuckDB SQL type string for a given Postgres array type.
 fn postgres_array_type_to_ducklake_sql(typ: &Type) -> &'static str {
-    #[allow(clippy::match_same_arms)]
     match typ {
         &Type::BOOL_ARRAY => "BOOLEAN[]",
         &Type::CHAR_ARRAY

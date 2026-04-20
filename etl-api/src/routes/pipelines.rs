@@ -174,10 +174,9 @@ impl PipelineError {
             PipelineError::Validation(ValidationError::Database(_)) => {
                 "database validation failed".to_string()
             }
-            PipelineError::Validation(ValidationError::TrustedRootCerts(_))
-            | PipelineError::Validation(ValidationError::Environment(_)) => {
-                "internal server error".to_string()
-            }
+            PipelineError::Validation(
+                ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
+            ) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
