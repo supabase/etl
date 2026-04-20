@@ -4,6 +4,7 @@ use std::time::Instant;
 use clickhouse::Client;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
+use url::Url;
 
 use crate::clickhouse::encoding::{ClickHouseValue, rb_encode_row};
 use crate::clickhouse::metrics::ETL_CH_INSERT_DURATION_SECONDS;
@@ -31,13 +32,13 @@ impl ClickHouseClient {
     /// When `url` starts with `https://`, TLS is handled automatically by the
     /// `rustls-tls` feature using webpki root certificates.
     pub fn new(
-        url: impl Into<String>,
+        url: Url,
         user: impl Into<String>,
         password: Option<String>,
         database: impl Into<String>,
     ) -> Self {
         let mut client = Client::default()
-            .with_url(url)
+            .with_url(url.to_string())
             .with_user(user)
             .with_database(database);
 

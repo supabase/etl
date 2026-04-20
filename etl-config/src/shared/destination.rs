@@ -1,5 +1,6 @@
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
@@ -47,8 +48,8 @@ pub enum DestinationConfig {
         connection_pool_size: usize,
     },
     ClickHouse {
-        /// ClickHouse HTTP(S) endpoint URL
-        url: String, //TODO: use url instead
+        /// ClickHouse HTTP(S) endpoint URL.
+        url: Url,
         /// ClickHouse user name
         user: String,
         /// ClickHouse password (omit for passwordless access)
@@ -235,8 +236,8 @@ pub enum DestinationConfigWithoutSecrets {
         connection_pool_size: usize,
     },
     ClickHouse {
-        /// ClickHouse HTTP(S) endpoint URL
-        url: String, //TODO: use url instead
+        /// ClickHouse HTTP(S) endpoint URL.
+        url: Url,
         /// ClickHouse user name
         user: String,
         /// ClickHouse target database

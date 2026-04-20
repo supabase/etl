@@ -20,6 +20,7 @@ use parking_lot::RwLock;
 use std::time::Instant;
 use tokio::task::JoinSet;
 use tracing::{debug, info};
+use url::Url;
 
 // ── CDC operation type ────────────────────────────────────────────────────────
 
@@ -95,7 +96,7 @@ where
     /// When using an `https://` URL, TLS is handled automatically by the `rustls-tls`
     /// feature using webpki root certificates.
     pub fn new(
-        url: impl Into<String>,
+        url: Url,
         user: impl Into<String>,
         password: Option<String>,
         database: impl Into<String>,

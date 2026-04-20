@@ -211,7 +211,7 @@ pub async fn start_replicator_with_config(
                 max_bytes_per_insert,
             };
             let destination = ClickHouseDestination::new(
-                url,
+                url.clone(),
                 user,
                 password.as_ref().map(|p| p.expose_secret().to_string()),
                 database,

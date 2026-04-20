@@ -1,6 +1,8 @@
 use etl_config::SerializableSecretString;
 use rand::Rng;
+use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
+use url::Url;
 
 /// Deserializes a string and trims leading and trailing whitespace.
 pub fn trim_string<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -29,6 +31,22 @@ where
 {
     let opt = Option::<String>::deserialize(deserializer)?;
     Ok(opt.map(|s| SerializableSecretString::from(s.trim().to_string())))
+}
+
+/// Deserializes an HTTP(S) URL string and trims leading and trailing whitespace.
+pub fn trim_http_url<'de, D>(deserializer: D) -> Result<Url, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    let url = Url::parse(s.trim()).map_err(D::Error::custom)?;
+
+    match url.scheme() {
+        "http" | "https" => Ok(url),
+        scheme => Err(D::Error::custom(format!(
+            "url must use http or https scheme, got {scheme}"
+        ))),
+    }
 }
 
 /// Generates a random alphabetic string of length `len`.
@@ -295,5 +313,35 @@ mod tests {
         let json = r#"{"value": "   "}"#;
         let result: TestStruct = serde_json::from_str(json).unwrap();
         assert_eq!(result.value, Some("".to_string()));
+    }
+
+    #[test]
+    fn test_trim_http_url_trims_and_parses() {
+        #[derive(Debug, Deserialize)]
+        struct TestStruct {
+            #[serde(rename = "value", deserialize_with = "trim_http_url")]
+            _value: Url,
+        }
+
+        let json = r#"{"value": "  https://example.com:8443/path  "}"#;
+        let result: TestStruct = serde_json::from_str(json).unwrap();
+        assert_eq!(result._value.as_str(), "https://example.com:8443/path");
+    }
+
+    #[test]
+    fn test_trim_http_url_rejects_non_http_scheme() {
+        #[derive(Debug, Deserialize)]
+        struct TestStruct {
+            #[serde(rename = "value", deserialize_with = "trim_http_url")]
+            _value: Url,
+        }
+
+        let json = r#"{"value": "ftp://example.com/data"}"#;
+        let error = serde_json::from_str::<TestStruct>(json).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("url must use http or https scheme")
+        );
     }
 }

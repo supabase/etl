@@ -13,6 +13,7 @@ use etl_destinations::iceberg::{
 };
 use secrecy::ExposeSecret;
 use sqlx::FromRow;
+use url::Url;
 
 use crate::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
 use crate::configs::pipeline::FullApiPipelineConfig;
@@ -656,19 +657,14 @@ impl Validator for BigQueryValidator {
 /// Validates Clickhouse destination connectivity and dataset accessibility.
 #[derive(Debug)]
 struct ClickHouseValidator {
-    url: String, //TODO: use url type instead
+    url: Url,
     user: String,
     password: Option<String>,
     database: String,
 }
 
 impl ClickHouseValidator {
-    fn new(
-        url: String, //TODO: use url type instead
-        user: String,
-        password: Option<String>,
-        database: String,
-    ) -> Self {
+    fn new(url: Url, user: String, password: Option<String>, database: String) -> Self {
         Self {
             url,
             user,

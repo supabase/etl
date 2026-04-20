@@ -52,6 +52,7 @@ clickhouse = [
     "dep:serde",
     "dep:futures",
     "dep:parking_lot",
+    "dep:url",
 ]
 egress = ["etl/egress"]
 # We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only

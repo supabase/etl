@@ -16,6 +16,7 @@ use rand::random;
 use std::sync::Once;
 use std::time::Duration;
 use tokio::time::sleep;
+use url::Url;
 
 use crate::support::clickhouse::{AllTypesRow, BoundaryValuesRow};
 
@@ -1727,7 +1728,7 @@ async fn large_batch_table_copy() {
 #[tokio::test(flavor = "multi_thread")]
 async fn ping_succeeds_against_running_clickhouse() {
     let client = ClickHouseClient::new(
-        get_clickhouse_url(),
+        Url::parse(&get_clickhouse_url()).unwrap(),
         get_clickhouse_user(),
         get_clickhouse_password(),
         "default",
@@ -1745,6 +1746,11 @@ async fn ping_succeeds_against_running_clickhouse() {
 /// It returns Err.
 #[tokio::test(flavor = "multi_thread")]
 async fn ping_fails_against_unreachable_clickhouse() {
-    let client = ClickHouseClient::new("http://localhost:1", "nobody", None::<String>, "default");
+    let client = ClickHouseClient::new(
+        Url::parse("http://localhost:1").unwrap(),
+        "nobody",
+        None::<String>,
+        "default",
+    );
     assert!(client.ping().await.is_err());
 }

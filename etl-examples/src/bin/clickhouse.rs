@@ -50,6 +50,7 @@ use std::sync::Once;
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use url::Url;
 
 /// Ensures crypto provider is only initialized once.
 static INIT_CRYPTO: Once = Once::new();
@@ -211,7 +212,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // Initialize the ClickHouse destination.
     // Tables are created automatically as append-only MergeTree tables.
     let clickhouse_destination = ClickHouseDestination::new(
-        args.ch_args.ch_url,
+        Url::parse(&args.ch_args.ch_url)?,
         args.ch_args.ch_user,
         args.ch_args.ch_password,
         args.ch_args.ch_database,

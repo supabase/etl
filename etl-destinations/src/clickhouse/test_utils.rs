@@ -5,6 +5,7 @@ use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 use etl::types::PipelineId;
 use tokio::runtime::Handle;
+use url::Url;
 use uuid::Uuid;
 
 use crate::clickhouse::{ClickHouseDestination, ClickHouseInserterConfig};
@@ -137,7 +138,7 @@ impl ClickHouseTestDatabase {
         S: StateStore + SchemaStore + Send + Sync,
     {
         ClickHouseDestination::new(
-            &self.url,
+            Url::parse(&self.url).expect("failed to parse test ClickHouse URL"),
             &self.user,
             self.password.clone(),
             &self.database,
