@@ -1,3 +1,5 @@
+use std::ops::DerefMut;
+
 use actix_web::{
     HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
@@ -10,7 +12,25 @@ use thiserror::Error;
 use tracing_actix_web::RootSpan;
 use utoipa::ToSchema;
 
-use crate::{db, db::tenants::TenantsDbError, routes::ErrorMessage};
+use crate::{
+    config::ApiConfig,
+    configs::encryption::EncryptionKey,
+    db,
+    db::{
+        connect_to_source_database_from_api,
+        pipelines::{
+            PipelinesDbError, delete_pipeline_replication_slots, delete_pipelines_source_state,
+            read_all_pipelines_for_deletion,
+        },
+        sources::SourcesDbError,
+        tenants::TenantsDbError,
+    },
+    k8s::{
+        K8sClient, TrustedRootCertsCache, TrustedRootCertsError,
+        core::{K8sCoreError, first_active_pipeline_id},
+    },
+    routes::ErrorMessage,
+};
 
 #[derive(Debug, Error)]
 pub enum TenantError {
@@ -19,15 +39,36 @@ pub enum TenantError {
 
     #[error(transparent)]
     TenantsDb(#[from] TenantsDbError),
+
+    #[error(transparent)]
+    SourcesDb(#[from] SourcesDbError),
+
+    #[error(transparent)]
+    PipelinesDb(#[from] PipelinesDbError),
+
+    #[error("Database error: {0}")]
+    Database(#[from] sqlx::Error),
+
+    #[error(transparent)]
+    TrustedRootCerts(#[from] TrustedRootCertsError),
+
+    #[error(transparent)]
+    K8sCore(#[from] K8sCoreError),
+
+    #[error("The pipeline with id {0} is active. Stop it before deleting it.")]
+    ActivePipeline(i64),
 }
 
 impl TenantError {
     pub fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            TenantError::TenantsDb(TenantsDbError::Database(_)) => {
-                "internal server error".to_string()
-            }
+            TenantError::TenantsDb(TenantsDbError::Database(_))
+            | TenantError::SourcesDb(SourcesDbError::Database(_))
+            | TenantError::PipelinesDb(PipelinesDbError::Database(_))
+            | TenantError::Database(_)
+            | TenantError::TrustedRootCerts(_)
+            | TenantError::K8sCore(_) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -38,7 +79,13 @@ impl ResponseError for TenantError {
     fn status_code(&self) -> StatusCode {
         match self {
             TenantError::TenantsDb(TenantsDbError::Conflict(_)) => StatusCode::CONFLICT,
-            TenantError::TenantsDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            TenantError::TenantsDb(_)
+            | TenantError::SourcesDb(_)
+            | TenantError::PipelinesDb(_)
+            | TenantError::Database(_)
+            | TenantError::TrustedRootCerts(_)
+            | TenantError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            TenantError::ActivePipeline(_) => StatusCode::CONFLICT,
             TenantError::TenantNotFound(_) => StatusCode::NOT_FOUND,
         }
     }
@@ -232,6 +279,7 @@ pub async fn update_tenant(
     ),
     responses(
         (status = 200, description = "Tenant deleted successfully"),
+        (status = 409, description = "Tenant has active pipelines or pipelines still defined", body = ErrorMessage),
         (status = 404, description = "Tenant not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -240,13 +288,71 @@ pub async fn update_tenant(
 #[delete("/tenants/{tenant_id}")]
 pub async fn delete_tenant(
     pool: Data<PgPool>,
+    api_config: Data<ApiConfig>,
+    encryption_key: Data<EncryptionKey>,
+    k8s_client: Data<dyn K8sClient>,
     tenant_id: Path<String>,
+    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     root_span: RootSpan,
 ) -> Result<impl Responder, TenantError> {
     let tenant_id = tenant_id.into_inner();
 
     root_span.record("project", &tenant_id);
 
+    let pipelines = read_all_pipelines_for_deletion(&**pool, &tenant_id).await?;
+    if let Some(pipeline_id) =
+        first_active_pipeline_id(k8s_client.as_ref(), &tenant_id, &pipelines).await?
+    {
+        return Err(TenantError::ActivePipeline(pipeline_id));
+    }
+
+    let sources =
+        db::sources::read_all_source_connections(&**pool, &tenant_id, &encryption_key).await?;
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let mut pipelines_by_source = std::collections::BTreeMap::new();
+    for pipeline in pipelines {
+        pipelines_by_source.entry(pipeline.source_id).or_insert_with(Vec::new).push(pipeline);
+    }
+
+    // We intentionally visit every stored source connection. If multiple source
+    // records happen to target the same physical database, the source-side
+    // cleanup stays idempotent, so repeated passes are still safe without
+    // deduplicating connection configs.
+    for source in sources {
+        let source_pipelines = pipelines_by_source.remove(&source.id).unwrap_or_default();
+        // If the source database is already unreachable during tenant teardown, we
+        // treat it as effectively deleted and keep removing the tenant's
+        // API-side state.
+        let source_pool = match connect_to_source_database_from_api(
+            &source.config.into_connection_config(tls_config.clone()),
+        )
+        .await
+        {
+            Ok(source_pool) => source_pool,
+            Err(error) => {
+                tracing::warn!(
+                    tenant_id = %tenant_id,
+                    source_id = source.id,
+                    error = %error,
+                    "failed to connect to source database during tenant deletion, skipping source cleanup",
+                );
+
+                continue;
+            }
+        };
+        let mut source_txn = source_pool.begin().await?;
+        let deleted_pipeline_ids =
+            delete_pipelines_source_state(source_txn.deref_mut(), &source_pipelines).await?;
+        db::sources::uninstall_source_installation(source_txn.deref_mut()).await?;
+        source_txn.commit().await?;
+        for pipeline_id in deleted_pipeline_ids {
+            delete_pipeline_replication_slots(&source_pool, pipeline_id).await?;
+        }
+    }
+
+    // Deleting the tenant is enough for API-side cleanup because Postgres cascades
+    // tenant-owned rows in the app schema; we only clean source databases
+    // manually above.
     db::tenants::delete_tenant(&**pool, &tenant_id).await?;
 
     Ok(HttpResponse::Ok().finish())

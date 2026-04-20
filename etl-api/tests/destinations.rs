@@ -1,14 +1,19 @@
-use etl_api::routes::{
-    destinations::{
-        CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
-        ReadDestinationsResponse, UpdateDestinationRequest,
+use etl_api::{
+    k8s::PodStatus,
+    routes::{
+        destinations::{
+            CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
+            ReadDestinationsResponse, UpdateDestinationRequest,
+        },
+        pipelines::{CreatePipelineRequest, CreatePipelineResponse},
     },
-    pipelines::{CreatePipelineRequest, CreatePipelineResponse},
 };
+use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
 use crate::support::{
+    database::{create_test_source_database, run_etl_migrations_on_source_database},
     mocks::{
         create_default_image,
         destinations::{
@@ -20,8 +25,24 @@ use crate::support::{
         sources::create_source,
         tenants::create_tenant,
     },
-    test_app::spawn_test_app,
+    test_app::{TestApp, spawn_test_app},
 };
+
+async fn create_destination_pipeline_for_source(
+    app: &TestApp,
+    tenant_id: &str,
+    source_id: i64,
+) -> (i64, i64) {
+    let destination_id = create_destination(app, tenant_id).await;
+    let pipeline =
+        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
+    let pipeline_response = app.create_pipeline(tenant_id, &pipeline).await;
+    assert!(pipeline_response.status().is_success());
+    let pipeline_response: CreatePipelineResponse =
+        pipeline_response.json().await.expect("failed to deserialize response");
+
+    (destination_id, pipeline_response.id)
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn bigquery_destination_can_be_created() {
@@ -274,24 +295,44 @@ async fn destination_with_active_pipeline_cannot_be_deleted() {
 
     // Create source and destination
     let source_id = create_source(&app, tenant_id).await;
-    let destination_id = create_destination(&app, tenant_id).await;
-
-    // Create a pipeline that uses this destination
-    let pipeline =
-        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
-    let pipeline_response = app.create_pipeline(tenant_id, &pipeline).await;
-    assert!(pipeline_response.status().is_success());
-    let pipeline_response: CreatePipelineResponse =
-        pipeline_response.json().await.expect("failed to deserialize response");
-    let _pipeline_id = pipeline_response.id;
+    let (destination_id, _pipeline_id) =
+        create_destination_pipeline_for_source(&app, tenant_id, source_id).await;
 
     // Act - Try to delete the destination
     let response = app.delete_destination(tenant_id, destination_id).await;
 
-    // Assert - Should fail due to foreign key constraint
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // Assert
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 
     // Verify destination still exists
     let destination_response = app.read_destination(tenant_id, destination_id).await;
     assert!(destination_response.status().is_success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_with_inactive_pipeline_cannot_be_deleted() {
+    init_test_tracing();
+
+    let app = spawn_test_app().await;
+    let tenant_id = &create_tenant(&app).await;
+    create_default_image(&app).await;
+
+    let (_source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
+    run_etl_migrations_on_source_database(&source_db_config).await;
+    let (destination_id, pipeline_id) =
+        create_destination_pipeline_for_source(&app, tenant_id, source_id).await;
+
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
+
+    let response = app.delete_destination(tenant_id, destination_id).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let destination_response = app.read_destination(tenant_id, destination_id).await;
+    assert!(destination_response.status().is_success());
+
+    let pipeline_response = app.read_pipeline(tenant_id, pipeline_id).await;
+    assert!(pipeline_response.status().is_success());
+
+    drop_pg_database(&source_db_config).await;
 }

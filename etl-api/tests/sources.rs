@@ -1,5 +1,6 @@
 use etl_api::{
     configs::source::FullApiSourceConfig,
+    k8s::PodStatus,
     routes::{
         pipelines::{CreatePipelineRequest, CreatePipelineResponse},
         sources::{
@@ -13,10 +14,14 @@ use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 use secrecy::ExposeSecret;
+use sqlx::Executor;
 use uuid::Uuid;
 
 use crate::support::{
-    database::{create_trusted_source_database, drop_trusted_source_database, get_test_db_config},
+    database::{
+        create_test_source_database, create_trusted_source_database, drop_trusted_source_database,
+        get_test_db_config, run_etl_migrations_on_source_database,
+    },
     mocks::{
         create_default_image,
         destinations::create_destination,
@@ -27,7 +32,7 @@ use crate::support::{
         },
         tenants::create_tenant,
     },
-    test_app::{spawn_test_app, spawn_test_app_with_trusted_username},
+    test_app::{TestApp, spawn_test_app, spawn_test_app_with_trusted_username},
 };
 
 fn source_config_from_db_config(source_db_config: &PgConnectionConfig) -> FullApiSourceConfig {
@@ -41,6 +46,18 @@ fn source_config_from_db_config(source_db_config: &PgConnectionConfig) -> FullAp
             .as_ref()
             .map(|password| SerializableSecretString::from(password.expose_secret().to_string())),
     }
+}
+
+async fn create_pipeline_for_source(app: &TestApp, tenant_id: &str, source_id: i64) -> i64 {
+    let destination_id = create_destination(app, tenant_id).await;
+    let pipeline =
+        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
+    let pipeline_response = app.create_pipeline(tenant_id, &pipeline).await;
+    assert!(pipeline_response.status().is_success());
+    let pipeline_response: CreatePipelineResponse =
+        pipeline_response.json().await.expect("failed to deserialize response");
+
+    pipeline_response.id
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -153,11 +170,8 @@ async fn an_existing_source_can_be_deleted() {
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
 
-    let source = CreateSourceRequest { name: new_name(), config: new_source_config() };
-    let response = app.create_source(tenant_id, &source).await;
-    let response: CreateSourceResponse =
-        response.json().await.expect("failed to deserialize response");
-    let source_id = response.id;
+    let (_source_pool, source_id, source_db_config) =
+        create_test_source_database(&app, tenant_id).await;
 
     // Act
     let response = app.delete_source(tenant_id, source_id).await;
@@ -166,6 +180,8 @@ async fn an_existing_source_can_be_deleted() {
     assert!(response.status().is_success());
     let response = app.read_source(tenant_id, source_id).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -225,22 +241,13 @@ async fn source_with_active_pipeline_cannot_be_deleted() {
 
     // Create source and destination
     let source_id = create_source(&app, tenant_id).await;
-    let destination_id = create_destination(&app, tenant_id).await;
-
-    // Create a pipeline that uses this source
-    let pipeline =
-        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
-    let pipeline_response = app.create_pipeline(tenant_id, &pipeline).await;
-    assert!(pipeline_response.status().is_success());
-    let pipeline_response: CreatePipelineResponse =
-        pipeline_response.json().await.expect("failed to deserialize response");
-    let _pipeline_id = pipeline_response.id;
+    let _pipeline_id = create_pipeline_for_source(&app, tenant_id, source_id).await;
 
     // Act - Try to delete the source
     let response = app.delete_source(tenant_id, source_id).await;
 
-    // Assert - Should fail due to foreign key constraint
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    // Assert
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 
     // Verify source still exists
     let source_response = app.read_source(tenant_id, source_id).await;
@@ -386,6 +393,68 @@ async fn source_update_with_matching_trusted_username_succeeds() {
         response.status()
     );
 
+    drop_trusted_source_database(trusted_source).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_with_inactive_pipeline_cannot_be_deleted() {
+    init_test_tracing();
+
+    let trusted_source = create_trusted_source_database().await;
+    let app =
+        spawn_test_app_with_trusted_username(Some(trusted_source.trusted_username.clone())).await;
+    let tenant_id = &create_tenant(&app).await;
+    let source_config = source_config_from_db_config(&trusted_source.trusted_config);
+    let source = CreateSourceRequest { name: new_name(), config: source_config };
+
+    let response = app.create_source(tenant_id, &source).await;
+    assert!(response.status().is_success());
+    let response: CreateSourceResponse =
+        response.json().await.expect("failed to deserialize response");
+    let source_id = response.id;
+
+    run_etl_migrations_on_source_database(&trusted_source.trusted_config).await;
+
+    create_default_image(&app).await;
+    let pipeline_id = create_pipeline_for_source(&app, tenant_id, source_id).await;
+
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
+
+    trusted_source
+        .admin_pool
+        .execute("create table public.uninstall_test_users (id bigint primary key)")
+        .await
+        .expect("failed to create test table");
+    trusted_source
+        .admin_pool
+        .execute("create publication uninstall_pub for table public.uninstall_test_users")
+        .await
+        .expect("failed to create publication");
+
+    let response = app.delete_source(tenant_id, source_id).await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let source_response = app.read_source(tenant_id, source_id).await;
+    assert!(source_response.status().is_success());
+
+    let pipeline_response = app.read_pipeline(tenant_id, pipeline_id).await;
+    assert!(pipeline_response.status().is_success());
+
+    let etl_schema_exists: bool =
+        sqlx::query_scalar("select exists(select 1 from pg_namespace where nspname = 'etl')")
+            .fetch_one(&trusted_source.admin_pool)
+            .await
+            .expect("failed to check etl schema");
+    assert!(etl_schema_exists);
+
+    let publication_exists: bool = sqlx::query_scalar(
+        "select exists(select 1 from pg_publication where pubname = 'uninstall_pub')",
+    )
+    .fetch_one(&trusted_source.admin_pool)
+    .await
+    .expect("failed to check publication");
+    assert!(publication_exists);
     drop_trusted_source_database(trusted_source).await;
 }
 

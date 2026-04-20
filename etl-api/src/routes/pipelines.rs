@@ -19,11 +19,16 @@ use utoipa::ToSchema;
 use crate::{
     config::ApiConfig,
     configs::{encryption::EncryptionKey, pipeline::FullApiPipelineConfig},
+    db,
     db::{
-        self, connect_to_source_database_from_api,
+        connect_to_source_database_from_api,
         destinations::{DestinationsDbError, destination_exists},
         images::ImagesDbError,
-        pipelines::{MAX_PIPELINES_PER_TENANT, PipelinesDbError, read_pipeline_components},
+        pipelines::{
+            MAX_PIPELINES_PER_TENANT, PipelinesDbError, delete_pipeline_api_and_source_state,
+            delete_pipeline_replication_slots, read_pipeline_components,
+            read_pipeline_for_deletion,
+        },
         replicators::ReplicatorsDbError,
         sources::SourcesDbError,
     },
@@ -32,18 +37,22 @@ use crate::{
         K8sClient, K8sError, PodStatus, TrustedRootCertsCache, TrustedRootCertsError,
         core::{
             create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
-            delete_pipeline_resources_in_k8s, is_replicator_pod_stopped,
+            delete_pipeline_resources_in_k8s, is_replicator_active, is_replicator_pod_stopped,
         },
     },
     routes::{ErrorMessage, TenantIdError, extract_tenant_id},
     utils::parse_docker_image_tag,
-    validation::{self, FailureType, ValidationContext, ValidationError, ValidationFailure},
+    validation,
+    validation::{FailureType, ValidationContext, ValidationError, ValidationFailure},
 };
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
     #[error("The pipeline with id {0} was not found")]
     PipelineNotFound(i64),
+
+    #[error("The pipeline with id {0} is active. Stop it before deleting it.")]
+    ActivePipeline(i64),
 
     #[error("The source with id {0} was not found")]
     SourceNotFound(i64),
@@ -137,6 +146,16 @@ impl From<PipelinesDbError> for PipelineError {
     }
 }
 
+impl From<crate::k8s::core::K8sCoreError> for PipelineError {
+    fn from(error: crate::k8s::core::K8sCoreError) -> Self {
+        match error {
+            crate::k8s::core::K8sCoreError::K8s(error) => Self::K8s(error),
+            crate::k8s::core::K8sCoreError::InvalidConfig(error) => Self::InvalidConfig(error),
+            crate::k8s::core::K8sCoreError::MissingEnvironment => Self::MissingEnvironment,
+        }
+    }
+}
+
 impl PipelineError {
     fn to_message(&self) -> String {
         match self {
@@ -188,6 +207,7 @@ impl ResponseError for PipelineError {
             | PipelineError::MissingEnvironment
             | PipelineError::MissingTableReplicationState
             | PipelineError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            PipelineError::ActivePipeline(_) => StatusCode::CONFLICT,
             PipelineError::PipelineNotFound(_)
             | PipelineError::EtlStateNotInitialized
             | PipelineError::ImageIdNotDefault(_)
@@ -684,26 +704,45 @@ pub async fn delete_pipeline(
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
+    k8s_client: Data<dyn K8sClient>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     pipeline_id: Path<i64>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    let mut txn = pool.begin().await?;
-
-    let pipeline = db::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+    let pipeline = read_pipeline_for_deletion(&**pool, tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
-
-    let source =
-        db::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
-            .await?
-            .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+    if is_replicator_active(k8s_client.as_ref(), tenant_id, pipeline.replicator_id).await? {
+        return Err(PipelineError::ActivePipeline(pipeline.id));
+    }
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
-    db::pipelines::delete_pipeline_cascading(txn, tenant_id, &pipeline, &source, None, tls_config)
-        .await?;
+    let source = db::sources::read_source_connection(
+        &**pool,
+        tenant_id,
+        pipeline.source_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+
+    let source_pool =
+        connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
+            .await?;
+    let mut api_txn = pool.begin().await?;
+    let mut source_txn = source_pool.begin().await?;
+    delete_pipeline_api_and_source_state(
+        api_txn.deref_mut(),
+        source_txn.deref_mut(),
+        tenant_id,
+        &pipeline,
+    )
+    .await?;
+    api_txn.commit().await?;
+    source_txn.commit().await?;
+    delete_pipeline_replication_slots(&source_pool, pipeline.id).await?;
 
     Ok(HttpResponse::Ok().finish())
 }

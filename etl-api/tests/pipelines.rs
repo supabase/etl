@@ -505,15 +505,38 @@ async fn non_existing_pipeline_cannot_be_deleted() {
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_a_pipeline_succeeds() {
     init_test_tracing();
-    let (app, tenant_id, pipeline_id, _, source_db_config) = setup_pipeline_with_source_db().await;
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
 
-    // The deletion should fail.
+    // The deletion should succeed.
     let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    // The pipeline should still be there.
+    // The pipeline should no longer be there.
     let response = app.read_pipeline(&tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let etl_schema_exists: bool =
+        sqlx::query_scalar("select exists(select 1 from pg_namespace where nspname = 'etl')")
+            .fetch_one(&source_db_pool)
+            .await
+            .expect("failed to check etl schema");
+    assert!(etl_schema_exists);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_active_pipeline_fails() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, _, source_db_config) = setup_pipeline_with_source_db().await;
+
+    let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
 
     drop_pg_database(&source_db_config).await;
 }
@@ -1239,6 +1262,7 @@ async fn deleting_pipeline_removes_replication_state_from_source_database() {
             .unwrap();
     assert_eq!(count_before, 2);
 
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
     let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -1323,6 +1347,7 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
     assert_eq!(schema_count, 2);
     assert_eq!(column_count, 4);
 
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
     let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::OK);
 

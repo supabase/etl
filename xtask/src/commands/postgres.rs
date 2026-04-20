@@ -114,11 +114,14 @@ impl StartArgs {
         project_and_port: Option<(&str, u16)>,
         services: &[&str],
     ) -> Result<()> {
+        let postgres_image =
+            std::env::var("POSTGRES_IMAGE").unwrap_or_else(|_| format!("postgres:{pg_version}"));
         let (program, compose_args) = docker_compose_command();
         let mut cmd = Command::new(program);
         cmd.args(compose_args);
         cmd.args(["-f", COMPOSE_FILE]);
         cmd.env("POSTGRES_VERSION", pg_version);
+        cmd.env("POSTGRES_IMAGE", &postgres_image);
 
         if let Some((project, port)) = project_and_port {
             cmd.args(["-p", project]);

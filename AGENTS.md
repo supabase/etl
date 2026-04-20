@@ -41,6 +41,7 @@
 - Before adding new patterns, inspect nearby code and follow the local style first.
 - Do not add dependencies unless they are justified by the task.
 - If you change workflow assumptions, build or test the smallest relevant target and report what actually ran.
+- Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
 - Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `./scripts/fmt` and `./scripts/fmt-check`.
 
 ## Rust Style

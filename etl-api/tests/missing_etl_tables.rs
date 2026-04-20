@@ -93,6 +93,7 @@ async fn deleting_pipeline_succeeds_when_etl_tables_missing() {
     let (pipeline_id, _source_pool, source_db_config) =
         create_pipeline_with_unmigrated_source_db(&app, &tenant_id).await;
 
+    app.k8s_state.set_pod_status(etl_api::k8s::PodStatus::Stopped).await;
     let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::OK);
 
