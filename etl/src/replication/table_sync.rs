@@ -31,16 +31,19 @@ use crate::{
 /// Result type for table synchronization operations.
 ///
 /// [`TableSyncResult`] indicates the outcome of a table sync operation,
-/// providing context for how the table sync worker should proceed with the table.
+/// providing context for how the table sync worker should proceed with the
+/// table.
 #[derive(Debug)]
 pub(crate) enum TableSyncResult {
     /// Synchronization was stopped due to shutdown or external signal.
     Stopped,
     /// Synchronization was not required (table already synchronized).
     NotRequired,
-    /// Synchronization completed successfully with the starting LSN for replication.
+    /// Synchronization completed successfully with the starting LSN for
+    /// replication.
     Completed {
-        /// LSN position where continuous replication should begin for this table.
+        /// LSN position where continuous replication should begin for this
+        /// table.
         start_lsn: PgLsn,
     },
 }
@@ -49,7 +52,8 @@ pub(crate) enum TableSyncResult {
 ///
 /// This function performs the initial data copy for a table from the source
 /// Postgres database to the destination. It handles the complete sync process
-/// including data copying, state management, and coordination with the apply worker.
+/// including data copying, state management, and coordination with the apply
+/// worker.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn start_table_sync<S, D>(
     pipeline_id: PipelineId,
@@ -70,15 +74,16 @@ where
 {
     info!(table_id = table_id.0, "starting initial table sync");
 
-    // We are safe to keep the lock only for this section, since we know that the state will be changed by the
-    // apply worker only if `SyncWait` is set, which is not the case if we arrive here, so we are
-    // good to reduce the length of the critical section.
+    // We are safe to keep the lock only for this section, since we know that the
+    // state will be changed by the apply worker only if `SyncWait` is set,
+    // which is not the case if we arrive here, so we are good to reduce the
+    // length of the critical section.
     let phase_type = {
         let inner = table_sync_worker_state.lock().await;
         let phase_type = inner.replication_phase().as_type();
 
-        // In case the work for this table has been already done, we don't want to continue and we
-        // successfully return.
+        // In case the work for this table has been already done, we don't want to
+        // continue and we successfully return.
         if matches!(
             phase_type,
             TableReplicationPhaseType::SyncDone
@@ -90,8 +95,8 @@ where
             return Ok(TableSyncResult::NotRequired);
         }
 
-        // In case the phase is different from the standard phases in which a table sync worker can perform
-        // table syncing, we want to return an error.
+        // In case the phase is different from the standard phases in which a table sync
+        // worker can perform table syncing, we want to return an error.
         if !matches!(
             phase_type,
             TableReplicationPhaseType::Init
@@ -104,7 +109,8 @@ where
                 ErrorKind::InvalidState,
                 "Invalid replication phase",
                 format!(
-                    "Invalid replication phase '{:?}': expected 'Init', 'DataSync', or 'FinishedCopy'",
+                    "Invalid replication phase '{:?}': expected 'Init', 'DataSync', or \
+                     'FinishedCopy'",
                     phase_type
                 )
             );
@@ -117,43 +123,54 @@ where
         EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_id).try_into()?;
 
     // There are three phases in which the table can be in:
-    // - `Init` -> this means that the table sync was never done, so we just perform it.
-    // - `DataSync` -> this means that there was a failure during data sync, and we have to restart
+    // - `Init` -> this means that the table sync was never done, so we just perform
+    //   it.
+    // - `DataSync` -> this means that there was a failure during data sync, and we
+    //   have to restart
     //  copying all the table data and delete the slot.
-    // - `FinishedCopy` -> this means that the table was successfully copied, but we didn't manage to
-    //  complete the table sync function, so we just want to continue the cdc stream from the slot's
-    // confirmed_flush_lsn value.
+    // - `FinishedCopy` -> this means that the table was successfully copied, but we
+    //   didn't manage to
+    //  complete the table sync function, so we just want to continue the cdc stream
+    // from the slot's confirmed_flush_lsn value.
     //
     // In case the phase is any other phase, we will return an error.
     let start_lsn = match phase_type {
         TableReplicationPhaseType::Init | TableReplicationPhaseType::DataSync => {
             // When we are in these states, it could be for the following reasons:
-            // - `Init` -> we can be in this state because we just started replicating the table or the state
-            //  was reset. In this case we don't want to make assumptions about the previous state, so we
-            //  just try to delete the slot and truncate the table.
-            // - `DataSync` -> we can be in this state because we failed during data sync, meaning that table
-            //  copy failed. In this case, we want to delete the slot and truncate the table.
+            // - `Init` -> we can be in this state because we just started replicating the
+            //   table or the state
+            //  was reset. In this case we don't want to make assumptions about the previous
+            // state, so we  just try to delete the slot and truncate the table.
+            // - `DataSync` -> we can be in this state because we failed during data sync,
+            //   meaning that table
+            //  copy failed. In this case, we want to delete the slot and truncate the
+            // table.
             //
-            // We try to delete the slot also during `Init` because we support state rollback and a
-            // slot might be there from the previous run.
+            // We try to delete the slot also during `Init` because we support state
+            // rollback and a slot might be there from the previous run.
             replication_client.delete_slot_if_exists(&slot_name).await?;
 
-            // We must truncate the destination table before starting a copy to avoid data inconsistencies.
+            // We must truncate the destination table before starting a copy to avoid data
+            // inconsistencies.
             //
             // Example scenario:
-            // 1. The source table has a single row (id = 1) that is copied to the destination during the initial copy.
+            // 1. The source table has a single row (id = 1) that is copied to the
+            //    destination during the initial copy.
             // 2. Before the table’s phase is set to `FinishedCopy`, the process crashes.
             // 3. While down, the source deletes row id = 1 and inserts row id = 2.
-            // 4. When restarted, the process sees the table in the ` DataSync ` state, deletes the slot, and copies again.
-            // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the destination.
-            // Result: the destination has two rows (id = 1 and id = 2) instead of only one (id = 2).
-            // Fix: Always truncate the destination table before starting a copy.
+            // 4. When restarted, the process sees the table in the ` DataSync ` state,
+            //    deletes the slot, and copies again.
+            // 5. This time, only row id = 2 is copied, but row id = 1 still exists in the
+            //    destination.
+            // Result: the destination has two rows (id = 1 and id = 2) instead of only one
+            // (id = 2). Fix: Always truncate the destination table before
+            // starting a copy.
             //
             // Try to load the previously stored destination table metadata, which contains
             // both the snapshot_id and replication_mask. If available, we can load the
-            // corresponding table schema and truncate the destination table before starting a copy.
-            // If the metadata is not present, we can safely assume that no data is there in the
-            // table; thus a truncate won't be issued.
+            // corresponding table schema and truncate the destination table before starting
+            // a copy. If the metadata is not present, we can safely assume that
+            // no data is there in the table; thus a truncate won't be issued.
             if let Some(current_metadata) = store.get_destination_table_metadata(table_id).await? {
                 match current_metadata.into_applied() {
                     Err(err) => {
@@ -197,14 +214,16 @@ where
                         } else {
                             bail!(
                                 ErrorKind::InvalidState,
-                                "Destination table metadata found, but not corresponding table schema exists"
+                                "Destination table metadata found, but not corresponding table \
+                                 schema exists"
                             );
                         }
                     }
                 }
             }
 
-            // We are ready to start copying table data, and we update the state accordingly.
+            // We are ready to start copying table data, and we update the state
+            // accordingly.
             info!(table_id = table_id.0, "starting data copy");
             {
                 let mut inner = table_sync_worker_state.lock().await;
@@ -215,20 +234,25 @@ where
             #[cfg(feature = "failpoints")]
             etl_fail_point(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP)?;
 
-            // We create the slot with a transaction, since we need to have a consistent snapshot of the database
-            // before copying the schema and tables.
+            // We create the slot with a transaction, since we need to have a consistent
+            // snapshot of the database before copying the schema and tables.
             //
-            // If a slot already exists at this point, we could delete it and try to recover, but it means
-            // that the state was somehow reset without the slot being deleted, and we want to surface this.
+            // If a slot already exists at this point, we could delete it and try to
+            // recover, but it means that the state was somehow reset without
+            // the slot being deleted, and we want to surface this.
             let (transaction, slot) =
                 replication_client.create_slot_with_transaction(&slot_name).await?;
 
-            // We copy the table schema and write it both to the state store and destination.
+            // We copy the table schema and write it both to the state store and
+            // destination.
             //
             // Note that we write the schema in both places:
-            // - State store -> we write here because the table schema is used across table copying and cdc
-            //  for correct decoding, thus we rely on our own state store to preserve this information.
-            // - Destination -> we write here because some consumers might want to have the schema of incoming
+            // - State store -> we write here because the table schema is used across table
+            //   copying and cdc
+            //  for correct decoding, thus we rely on our own state store to preserve this
+            // information.
+            // - Destination -> we write here because some consumers might want to have the
+            //   schema of incoming
             //  data.
             info!(%table_id, "fetching table schema");
             let table_schema = transaction.get_table_schema(table_id).await?;
@@ -241,19 +265,22 @@ where
                 );
             }
 
-            // We store the table schema in the schema store to be able to retrieve it even when the
-            // pipeline is restarted, since it's outside the lifecycle of the pipeline.
+            // We store the table schema in the schema store to be able to retrieve it even
+            // when the pipeline is restarted, since it's outside the lifecycle
+            // of the pipeline.
             let table_schema = store.store_table_schema(table_schema).await?;
 
-            // Get the names of columns being replicated based on the publication's column filter.
-            // This must be done in the same transaction as `get_table_schema` for consistency.
+            // Get the names of columns being replicated based on the publication's column
+            // filter. This must be done in the same transaction as
+            // `get_table_schema` for consistency.
             let replicated_column_names = transaction
                 .get_replicated_column_names(table_id, &table_schema, &config.publication_name)
                 .await?;
 
             // Build and store the per-table protocol state for use during CDC.
             // We use `try_build` here because the schema was just loaded and should match
-            // the publication's column filter. Any mismatch indicates a schema inconsistency.
+            // the publication's column filter. Any mismatch indicates a schema
+            // inconsistency.
             let replication_mask =
                 ReplicationMask::try_build(&table_schema, &replicated_column_names).map_err(
                     |err: SchemaError| {
@@ -308,12 +335,13 @@ where
                 info!(table_id = table_id.0, "skipping table copy");
             }
 
-            // We commit the transaction before starting the apply loop, otherwise it will fail
-            // since no transactions can be running while replication is started.
+            // We commit the transaction before starting the apply loop, otherwise it will
+            // fail since no transactions can be running while replication is
+            // started.
             transaction.commit().await?;
 
-            // If no table rows were written, we call the method nonetheless with no rows, to kickstart
-            // table creation.
+            // If no table rows were written, we call the method nonetheless with no rows,
+            // to kickstart table creation.
             if total_table_copy_rows == 0 {
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
                 destination
@@ -353,21 +381,23 @@ where
         _ => unreachable!("phase type already validated above"),
     };
 
-    // We mark this worker as `SyncWait` (in memory only) to signal the apply worker that we are
-    // ready to start catchup. We pass the snapshot LSN so the apply worker can use
-    // max(snapshot_lsn, current_lsn) when setting the Catchup LSN.
+    // We mark this worker as `SyncWait` (in memory only) to signal the apply worker
+    // that we are ready to start catchup. We pass the snapshot LSN so the apply
+    // worker can use max(snapshot_lsn, current_lsn) when setting the Catchup
+    // LSN.
     {
         let mut inner = table_sync_worker_state.lock().await;
         inner.set_and_store(TableReplicationPhase::SyncWait { lsn: start_lsn }, &store).await?;
     }
 
-    // We also wait to be signaled to catch up with the main apply worker up to a specific lsn.
+    // We also wait to be signaled to catch up with the main apply worker up to a
+    // specific lsn.
     let result = table_sync_worker_state
         .wait_for_phase_type(&[TableReplicationPhaseType::Catchup], shutdown_rx.clone())
         .await;
 
-    // If we are told to shut down while waiting for a phase change, we will signal this to
-    // the caller.
+    // If we are told to shut down while waiting for a phase change, we will signal
+    // this to the caller.
     if result.should_shutdown() {
         info!(table_id = table_id.0, "shutting down table sync while waiting for catchup");
 

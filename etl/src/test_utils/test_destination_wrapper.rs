@@ -81,12 +81,13 @@ impl<D> Inner<D> {
 
 /// Test wrapper for [`Destination`] implementations that tracks all operations.
 ///
-/// [`TestDestinationWrapper`] wraps any destination implementation and records all
-/// method calls and data flowing through it. This enables test assertions on the
-/// behavior of ETL pipelines without requiring complex destination setup.
+/// [`TestDestinationWrapper`] wraps any destination implementation and records
+/// all method calls and data flowing through it. This enables test assertions
+/// on the behavior of ETL pipelines without requiring complex destination
+/// setup.
 ///
-/// The wrapper supports waiting for specific conditions to be met, making it ideal
-/// for testing asynchronous ETL operations with deterministic assertions.
+/// The wrapper supports waiting for specific conditions to be met, making it
+/// ideal for testing asynchronous ETL operations with deterministic assertions.
 #[derive(Clone)]
 pub struct TestDestinationWrapper<D> {
     inner: Arc<RwLock<Inner<D>>>,
@@ -136,17 +137,19 @@ impl<D> TestDestinationWrapper<D> {
         self.inner.read().await.events.clone()
     }
 
-    /// Get all events that have been written, de-duplicated by full event equality.
+    /// Get all events that have been written, de-duplicated by full event
+    /// equality.
     pub async fn get_events_deduped(&self) -> Vec<Event> {
         let events = self.inner.read().await.events.clone();
         deduplicate_events(&events)
     }
 
-    /// Registers a notification that fires when events match a specific condition after this method
-    /// is called.
+    /// Registers a notification that fires when events match a specific
+    /// condition after this method is called.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
-    /// condition is not met. This prevents tests from hanging indefinitely.
+    /// Returns a [`TimedNotify`] that will automatically timeout after the
+    /// specified timeout if the condition is not met. This prevents tests
+    /// from hanging indefinitely.
     pub async fn notify_on_events<F>(&self, condition: F) -> TimedNotify
     where
         F: Fn(&[Event]) -> bool + Send + Sync + 'static,
@@ -158,18 +161,22 @@ impl<D> TestDestinationWrapper<D> {
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when a specific number of events of given types are received.
+    /// Registers a notification that fires when a specific number of events of
+    /// given types are received.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
-    /// expected event count is not reached. This prevents tests from hanging indefinitely.
+    /// Returns a [`TimedNotify`] that will automatically timeout after the
+    /// specified timeout if the expected event count is not reached. This
+    /// prevents tests from hanging indefinitely.
     pub async fn wait_for_events_count(&self, conditions: Vec<(EventType, u64)>) -> TimedNotify {
         self.notify_on_events(move |events| check_events_count(events, conditions.clone())).await
     }
 
-    /// Registers a notification that fires when a specific number of events of given types are received after de-duplicating.
+    /// Registers a notification that fires when a specific number of events of
+    /// given types are received after de-duplicating.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
-    /// expected event count is not reached. This prevents tests from hanging indefinitely.
+    /// Returns a [`TimedNotify`] that will automatically timeout after the
+    /// specified timeout if the expected event count is not reached. This
+    /// prevents tests from hanging indefinitely.
     pub async fn wait_for_events_count_deduped(
         &self,
         conditions: Vec<(EventType, u64)>,
@@ -181,17 +188,18 @@ impl<D> TestDestinationWrapper<D> {
         .await
     }
 
-    /// Registers a notification that fires when event conditions are met after this method is
-    /// called.
+    /// Registers a notification that fires when event conditions are met after
+    /// this method is called.
     ///
     /// Supports two condition types:
     /// - [`EventCondition::Any`]: counts events across all tables
     /// - [`EventCondition::Table`]: counts events for a specific table only
     ///
-    /// For insert events, both streaming events and table copy rows are counted.
+    /// For insert events, both streaming events and table copy rows are
+    /// counted.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
-    /// expected count is not reached.
+    /// Returns a [`TimedNotify`] that will automatically timeout after the
+    /// specified timeout if the expected count is not reached.
     pub async fn wait_for_all_events(&self, conditions: Vec<EventCondition>) -> TimedNotify {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
@@ -332,14 +340,15 @@ where
             });
         destination.write_events(events.clone(), wrapped_flush_result).await?;
 
-        // We spawn a task to handle the result, this way the wrapper behaves like a transparent
-        // layer that doesn't block on the result of the inner destination, effectively exhibiting
-        // the fully asynchronous behavior that a destination could have.
+        // We spawn a task to handle the result, this way the wrapper behaves like a
+        // transparent layer that doesn't block on the result of the inner
+        // destination, effectively exhibiting the fully asynchronous behavior
+        // that a destination could have.
         //
-        // For the other destination methods with async result this is not needed since the methods
-        // on the outside block on the result right after calling the method, so it's not needed to
-        // simulate asynchronous work to make the code continue and do something else in the
-        // meanwhile.
+        // For the other destination methods with async result this is not needed since
+        // the methods on the outside block on the result right after calling
+        // the method, so it's not needed to simulate asynchronous work to make
+        // the code continue and do something else in the meanwhile.
         let inner = self.inner.clone();
         tokio::spawn(async move {
             let result = pending_result.await.into_result();

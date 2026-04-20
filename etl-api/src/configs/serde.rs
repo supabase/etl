@@ -6,7 +6,8 @@ use crate::configs::{
     store::Store,
 };
 
-/// Errors that can occur during serialization or encryption for database storage.
+/// Errors that can occur during serialization or encryption for database
+/// storage.
 #[derive(Debug, Error)]
 pub enum DbSerializationError {
     /// Error occurred while serializing data to JSON for the database.
@@ -18,7 +19,8 @@ pub enum DbSerializationError {
     Encryption(#[from] EncryptionError),
 }
 
-/// Errors that can occur during deserialization or decryption from database values.
+/// Errors that can occur during deserialization or decryption from database
+/// values.
 #[derive(Debug, Error)]
 pub enum DbDeserializationError {
     /// Error occurred while deserializing data from JSON from the database.
@@ -42,10 +44,11 @@ where
     Ok(serialized_value)
 }
 
-/// Encrypts a value and serializes it to a [`serde_json::Value`] for database storage.
+/// Encrypts a value and serializes it to a [`serde_json::Value`] for database
+/// storage.
 ///
-/// The value is first encrypted using the provided [`EncryptionKey`], then serialized.
-/// Returns an error if encryption or serialization fails.
+/// The value is first encrypted using the provided [`EncryptionKey`], then
+/// serialized. Returns an error if encryption or serialization fails.
 pub fn encrypt_and_serialize<T, S>(
     value: T,
     encryption_key: &EncryptionKey,
@@ -74,8 +77,8 @@ where
 
 /// Deserializes and decrypts a [`serde_json::Value`] into a value of type `S`.
 ///
-/// The value is first deserialized into a type implementing [`Decrypt`], then decrypted using
-/// the provided [`EncryptionKey`].
+/// The value is first deserialized into a type implementing [`Decrypt`], then
+/// decrypted using the provided [`EncryptionKey`].
 ///
 /// Returns an error if deserialization or decryption fails.
 pub fn decrypt_and_deserialize_from_value<T, S>(

@@ -32,9 +32,11 @@ pub const ETL_IDEAL_BATCH_SIZE_BYTES: &str = "etl_ideal_batch_size_bytes";
 pub const PHASE_LABEL: &str = "phase";
 /// Label key for the ETL worker type ("table_sync" or "apply").
 pub const WORKER_TYPE_LABEL: &str = "worker_type";
-/// Label key for the action performed by the worker ("table_copy" or "table_streaming").
+/// Label key for the action performed by the worker ("table_copy" or
+/// "table_streaming").
 pub const ACTION_LABEL: &str = "action";
-/// Label key used to tag metrics by destination implementation (e.g., "big_query").
+/// Label key used to tag metrics by destination implementation (e.g.,
+/// "big_query").
 pub const DESTINATION_LABEL: &str = "destination";
 /// Label to tag the table copy metric if it was using partitioning.
 pub const PARTITIONING_LABEL: &str = "partitioning";
@@ -49,21 +51,18 @@ pub const ERROR_TYPE_LABEL: &str = "error_type";
 /// Label key for transition direction ("activate" or "resume").
 pub const DIRECTION_LABEL: &str = "direction";
 
-/// Register metrics emitted by etl. This should be called before starting a pipeline.
-/// It is safe to call this method multiple times. It is guaranteed to register the
-/// metrics only once.
+/// Register metrics emitted by etl. This should be called before starting a
+/// pipeline. It is safe to call this method multiple times. It is guaranteed to
+/// register the metrics only once.
 pub(crate) fn register_metrics() {
     REGISTER_METRICS.call_once(|| {
-        describe_gauge!(
-            ETL_TABLES_TOTAL,
-            Unit::Count,
-            "Total number of tables being copied"
-        );
+        describe_gauge!(ETL_TABLES_TOTAL, Unit::Count, "Total number of tables being copied");
 
         describe_histogram!(
             ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
             Unit::Seconds,
-            "Time taken in seconds to send a batch of items to the destination, labeled by worker_type and action"
+            "Time taken in seconds to send a batch of items to the destination, labeled by \
+             worker_type and action"
         );
 
         describe_histogram!(
@@ -78,44 +77,48 @@ pub(crate) fn register_metrics() {
             "Total number of transactions seen."
         );
 
-        describe_histogram!(
-            ETL_TRANSACTION_SIZE,
-            Unit::Count,
-            "Number of events per transaction."
-        );
+        describe_histogram!(ETL_TRANSACTION_SIZE, Unit::Count, "Number of events per transaction.");
 
         describe_histogram!(
             ETL_TABLE_COPY_DURATION_SECONDS,
             Unit::Seconds,
-            "Duration in seconds to complete initial table copy from DataSync to FinishedCopy phase"
+            "Duration in seconds to complete initial table copy from DataSync to FinishedCopy \
+             phase"
         );
 
         describe_histogram!(
             ETL_TABLE_COPY_ROWS,
             Unit::Count,
-            "Number of rows copied per table copy partition, labeled by destination and partitioning."
+            "Number of rows copied per table copy partition, labeled by destination and \
+             partitioning."
         );
 
         describe_histogram!(
             ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE,
-            "Load imbalance factor for parallel table copy duration (max_time / avg_time), labeled by destination. Value of 1.0 indicates perfect balance, higher values indicate more imbalance."
+            "Load imbalance factor for parallel table copy duration (max_time / avg_time), \
+             labeled by destination. Value of 1.0 indicates perfect balance, higher values \
+             indicate more imbalance."
         );
 
         describe_histogram!(
             ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
-            "Load imbalance factor for parallel table copy row distribution (max_rows / avg_rows), labeled by destination. Value of 1.0 indicates perfect balance, higher values indicate more imbalance."
+            "Load imbalance factor for parallel table copy row distribution (max_rows / \
+             avg_rows), labeled by destination. Value of 1.0 indicates perfect balance, higher \
+             values indicate more imbalance."
         );
 
         describe_counter!(
             ETL_EVENTS_PROCESSED_TOTAL,
             Unit::Count,
-            "Total number of events successfully processed, labeled by worker_type, action, and destination."
+            "Total number of events successfully processed, labeled by worker_type, action, and \
+             destination."
         );
 
         describe_counter!(
             ETL_REPLICATION_MESSAGES_TOTAL,
             Unit::Count,
-            "Total number of logical replication messages received by the apply loop, labeled by worker_type."
+            "Total number of logical replication messages received by the apply loop, labeled by \
+             worker_type."
         );
 
         describe_counter!(
@@ -127,13 +130,15 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             ETL_STATUS_UPDATES_TOTAL,
             Unit::Count,
-            "Total number of status updates sent to Postgres, labeled by forced and status_update_type."
+            "Total number of status updates sent to Postgres, labeled by forced and \
+             status_update_type."
         );
 
         describe_counter!(
             ETL_STATUS_UPDATES_SKIPPED_TOTAL,
             Unit::Count,
-            "Total number of status updates skipped due to throttling, labeled by status_update_type."
+            "Total number of status updates skipped due to throttling, labeled by \
+             status_update_type."
         );
 
         describe_histogram!(

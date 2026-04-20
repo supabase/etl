@@ -609,7 +609,8 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     // - After changing years type to bigint
     // - After dropping status
     // - After adding created_at
-    // - After renaming email -> contact_email (this is the final schema for the insert)
+    // - After renaming email -> contact_email (this is the final schema for the
+    //   insert)
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
     assert_eq!(snapshots.len(), 7);

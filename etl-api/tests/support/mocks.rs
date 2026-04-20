@@ -111,7 +111,8 @@ pub mod destinations {
         }
     }
 
-    /// Creates a destination with the provided name and config and returns its id.
+    /// Creates a destination with the provided name and config and returns its
+    /// id.
     pub async fn create_destination_with_config(
         app: &TestApp,
         tenant_id: &str,

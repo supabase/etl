@@ -9,9 +9,9 @@ use crate::types::{
 
 /// Represents a complete row of data from a database table.
 ///
-/// [`TableRow`] contains a vector of [`Cell`] values corresponding to the columns
-/// of a database table. The values are ordered to match the table's column order
-/// and include proper type information for each cell.
+/// [`TableRow`] contains a vector of [`Cell`] values corresponding to the
+/// columns of a database table. The values are ordered to match the table's
+/// column order and include proper type information for each cell.
 #[derive(Debug, PartialEq)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct TableRow {
@@ -25,7 +25,8 @@ impl TableRow {
     /// Creates a new table row with the given cell values.
     ///
     /// The values should be ordered to match the target table's column schema.
-    /// Each [`Cell`] should contain properly typed data for its corresponding column.
+    /// Each [`Cell`] should contain properly typed data for its corresponding
+    /// column.
     pub fn new(values: Vec<Cell>) -> Self {
         let size_hint_bytes = estimate_table_row_allocated_bytes(&values, values.capacity());
 

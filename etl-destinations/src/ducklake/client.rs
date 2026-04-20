@@ -59,7 +59,8 @@ impl DuckDbBlockingOperationKind {
     }
 }
 
-/// Async watchdog that interrupts one timed DuckDB query when its deadline expires.
+/// Async watchdog that interrupts one timed DuckDB query when its deadline
+/// expires.
 pub(super) struct DuckDbQueryWatchdog {
     timed_out: Arc<AtomicBool>,
     interrupt_tx: Option<oneshot::Sender<Arc<duckdb::InterruptHandle>>>,
@@ -150,7 +151,8 @@ impl DuckDbQueryWatchdog {
 /// attaches the DuckLake catalog on every `connect()` call.
 ///
 /// Each opened connection is independent and attaches the same catalog, which
-/// is safe: DuckLake (backed by a PostgreSQL catalog) supports concurrent writers.
+/// is safe: DuckLake (backed by a PostgreSQL catalog) supports concurrent
+/// writers.
 #[derive(Clone)]
 pub(super) struct DuckLakeConnectionManager {
     /// SQL executed immediately after a new connection is opened.
@@ -171,7 +173,8 @@ pub(super) struct ManagedDuckLakeConnection {
 }
 
 impl DuckLakeConnectionManager {
-    /// Opens one fully initialized DuckDB connection and attaches the lake catalog.
+    /// Opens one fully initialized DuckDB connection and attaches the lake
+    /// catalog.
     pub(super) fn open_duckdb_connection(&self) -> Result<duckdb::Connection, duckdb::Error> {
         let conn = if self.disable_extension_autoload {
             duckdb::Connection::open_in_memory_with_flags(
@@ -338,7 +341,9 @@ where
         "wait for ducklake blocking slot"
     );
 
-    // This is needed to make sure we properly interrupt the blocking operation if it exceeds the timeout, we don't just cancel the task and leave the connection active.
+    // This is needed to make sure we properly interrupt the blocking operation if
+    // it exceeds the timeout, we don't just cancel the task and leave the
+    // connection active.
     let mut watchdog = DuckDbQueryWatchdog::spawn(deadline);
     let watchdog_task = watchdog.async_task_handle()?;
 
@@ -532,7 +537,8 @@ mod tests {
 
         assert!(
             watchdog.timed_out(),
-            "watchdog should remain timed out when the interrupt handle is published after the deadline"
+            "watchdog should remain timed out when the interrupt handle is published after the \
+             deadline"
         );
     }
 }

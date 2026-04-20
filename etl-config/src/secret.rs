@@ -7,8 +7,9 @@ use utoipa::ToSchema;
 
 /// Serializable wrapper around [`SecretString`].
 ///
-/// Provides serde support for [`SecretString`] while maintaining its security properties.
-/// The secret value is only exposed during serialization and deserialization operations.
+/// Provides serde support for [`SecretString`] while maintaining its security
+/// properties. The secret value is only exposed during serialization and
+/// deserialization operations.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema), schema(value_type = String, example = "secret123"))]
 pub struct SerializableSecretString(SecretString);

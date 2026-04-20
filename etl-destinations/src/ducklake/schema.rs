@@ -62,11 +62,12 @@ fn postgres_column_type_to_ducklake_sql(typ: &Type) -> &'static str {
     }
 }
 
-/// Builds a `CREATE TABLE IF NOT EXISTS` DDL statement for the given table name and schema.
+/// Builds a `CREATE TABLE IF NOT EXISTS` DDL statement for the given table name
+/// and schema.
 ///
-/// CDC columns (`cdc_operation` and `cdc_lsn`) are appended at the end and must already
-/// be included in `column_schemas` (added by `modify_schema_with_cdc_columns` before calling
-/// this function).
+/// CDC columns (`cdc_operation` and `cdc_lsn`) are appended at the end and must
+/// already be included in `column_schemas` (added by
+/// `modify_schema_with_cdc_columns` before calling this function).
 pub(super) fn build_create_table_sql_ducklake(
     table_name: &str,
     column_schemas: &[ColumnSchema],

@@ -69,7 +69,7 @@ fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
         publication_name: publication_name.to_string(),
         batch: Some(BatchConfig {
             max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
-            memory_budget_ratio: 0.2,
+            memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
         }),
         log_level: None,
         table_error_retry_delay_ms: None,

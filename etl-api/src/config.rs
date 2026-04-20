@@ -148,7 +148,8 @@ pub enum ApiKeyConversionError {
 
 /// Validated API key as a 32-byte array.
 ///
-/// Ensures API keys meet length requirements and are properly decoded from base64.
+/// Ensures API keys meet length requirements and are properly decoded from
+/// base64.
 #[derive(Debug)]
 pub struct ApiKey {
     /// The 32-byte decoded API key.
@@ -160,7 +161,8 @@ impl TryFrom<&str> for ApiKey {
 
     /// Creates an [`ApiKey`] from a base64-encoded string.
     ///
-    /// Validates that the string is valid base64 and decodes to exactly 32 bytes.
+    /// Validates that the string is valid base64 and decodes to exactly 32
+    /// bytes.
     ///
     /// # Panics
     /// Panics if the decoded key cannot be converted to a 32-byte array.
@@ -179,7 +181,8 @@ impl TryFrom<&str> for ApiKey {
 impl<'de> Deserialize<'de> for ApiKey {
     /// Deserializes an [`ApiKey`] from configuration.
     ///
-    /// Expects a struct with a base64-encoded `key` field that decodes to 32 bytes.
+    /// Expects a struct with a base64-encoded `key` field that decodes to 32
+    /// bytes.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,

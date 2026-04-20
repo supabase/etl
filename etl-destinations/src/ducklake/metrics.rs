@@ -31,7 +31,8 @@ use crate::ducklake::{
 
 static REGISTER_METRICS: Once = Once::new();
 
-/// Files smaller than this are usually too small to be efficient in object storage.
+/// Files smaller than this are usually too small to be efficient in object
+/// storage.
 pub(super) const SMALL_FILE_SIZE_BYTES: i64 = 5_000_000; // 5MB
 /// Dedicated pool size for background DuckLake metrics sampling.
 const METRICS_POOL_SIZE: u32 = 1;
@@ -125,7 +126,8 @@ impl DuckLakeTableStorageMetrics {
         }
     }
 
-    /// Returns the ratio of active data files smaller than the shared 5 MiB floor.
+    /// Returns the ratio of active data files smaller than the shared 5 MiB
+    /// floor.
     pub(super) fn small_file_ratio(&self) -> f64 {
         if self.active_data_files > 0 {
             self.small_data_files.max(0) as f64 / self.active_data_files as f64
@@ -181,22 +183,26 @@ pub(crate) fn register_metrics() {
         describe_histogram!(
             ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS,
             Unit::Seconds,
-            "End-to-end duration of a committed DuckLake atomic batch, labeled by batch_kind and sub_batch_kind."
+            "End-to-end duration of a committed DuckLake atomic batch, labeled by batch_kind and \
+             sub_batch_kind."
         );
         describe_histogram!(
             ETL_DUCKLAKE_BATCH_PREPARED_MUTATIONS,
             Unit::Count,
-            "Prepared mutation statements per committed DuckLake atomic batch, labeled by batch_kind and sub_batch_kind."
+            "Prepared mutation statements per committed DuckLake atomic batch, labeled by \
+             batch_kind and sub_batch_kind."
         );
         describe_histogram!(
             ETL_DUCKLAKE_UPSERT_ROWS,
             Unit::Count,
-            "Rows included in one DuckLake upsert statement, labeled by batch_kind and prepared_rows_kind."
+            "Rows included in one DuckLake upsert statement, labeled by batch_kind and \
+             prepared_rows_kind."
         );
         describe_histogram!(
             ETL_DUCKLAKE_DELETE_PREDICATES,
             Unit::Count,
-            "Predicates included in one DuckLake delete statement, labeled by batch_kind and delete_origin."
+            "Predicates included in one DuckLake delete statement, labeled by batch_kind and \
+             delete_origin."
         );
         describe_histogram!(
             ETL_DUCKLAKE_INLINE_FLUSH_ROWS,
@@ -216,28 +222,34 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
             Unit::Count,
-            "DuckLake batch executions that still failed after retries, labeled by batch_kind and retry_scope."
+            "DuckLake batch executions that still failed after retries, labeled by batch_kind and \
+             retry_scope."
         );
         describe_counter!(
             ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL,
             Unit::Count,
-            "DuckLake batches skipped because an applied marker already existed, labeled by batch_kind."
+            "DuckLake batches skipped because an applied marker already existed, labeled by \
+             batch_kind."
         );
         describe_histogram!(
             ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
             Unit::Seconds,
-            "Duration of DuckLake background maintenance operations, labeled by task, operation, reason, and outcome. Use the histogram count as the event count for non-skipped outcomes."
+            "Duration of DuckLake background maintenance operations, labeled by task, operation, \
+             reason, and outcome. Use the histogram count as the event count for non-skipped \
+             outcomes."
         );
         describe_counter!(
             ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL,
             Unit::Count,
-            "DuckLake background maintenance operations skipped because execution was deferred, labeled by task, operation, and reason."
+            "DuckLake background maintenance operations skipped because execution was deferred, \
+             labeled by task, operation, and reason."
         );
 
         describe_histogram!(
             ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILES,
             Unit::Count,
-            "Sampled active data-file count for one DuckLake table from the background metrics task."
+            "Sampled active data-file count for one DuckLake table from the background metrics \
+             task."
         );
         describe_histogram!(
             ETL_DUCKLAKE_TABLE_ACTIVE_DATA_BYTES,
@@ -247,25 +259,30 @@ pub(crate) fn register_metrics() {
         describe_histogram!(
             ETL_DUCKLAKE_TABLE_ACTIVE_DATA_FILE_AVG_SIZE_BYTES,
             Unit::Bytes,
-            "Sampled average active data-file size for one DuckLake table from the background metrics task."
+            "Sampled average active data-file size for one DuckLake table from the background \
+             metrics task."
         );
         describe_histogram!(
             ETL_DUCKLAKE_TABLE_SMALL_FILE_RATIO,
-            "Sampled ratio of active data files smaller than 5 MiB for one DuckLake table from the background metrics task."
+            "Sampled ratio of active data files smaller than 5 MiB for one DuckLake table from \
+             the background metrics task."
         );
         describe_histogram!(
             ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_FILES,
             Unit::Count,
-            "Sampled active delete-file count for one DuckLake table from the background metrics task."
+            "Sampled active delete-file count for one DuckLake table from the background metrics \
+             task."
         );
         describe_histogram!(
             ETL_DUCKLAKE_TABLE_ACTIVE_DELETE_BYTES,
             Unit::Bytes,
-            "Sampled active delete-file bytes for one DuckLake table from the background metrics task."
+            "Sampled active delete-file bytes for one DuckLake table from the background metrics \
+             task."
         );
         describe_histogram!(
             ETL_DUCKLAKE_TABLE_DELETED_ROW_RATIO,
-            "Sampled ratio of active deleted rows to active data-file rows for one DuckLake table from the background metrics task."
+            "Sampled ratio of active deleted rows to active data-file rows for one DuckLake table \
+             from the background metrics task."
         );
 
         describe_gauge!(
@@ -301,7 +318,8 @@ pub(crate) fn register_metrics() {
     });
 }
 
-/// Builds the dedicated metrics pool and spawns the periodic DuckLake sampler task.
+/// Builds the dedicated metrics pool and spawns the periodic DuckLake sampler
+/// task.
 pub(super) async fn spawn_ducklake_metrics_sampler(
     manager: DuckLakeConnectionManager,
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
@@ -511,7 +529,8 @@ pub(super) fn query_table_storage_metrics_blocking(
     })
 }
 
-/// Returns global maintenance backlog metrics from the DuckLake metadata tables.
+/// Returns global maintenance backlog metrics from the DuckLake metadata
+/// tables.
 async fn query_catalog_maintenance_metrics(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
@@ -525,7 +544,8 @@ async fn query_catalog_maintenance_metrics(
     .await
 }
 
-/// Returns global maintenance backlog metrics from the DuckLake metadata tables.
+/// Returns global maintenance backlog metrics from the DuckLake metadata
+/// tables.
 pub(super) fn query_catalog_maintenance_metrics_blocking(
     conn: &duckdb::Connection,
 ) -> EtlResult<DuckLakeCatalogMaintenanceMetrics> {

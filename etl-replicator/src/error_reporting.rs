@@ -59,7 +59,8 @@ impl<S> ErrorReportingStateStore<S> {
         }
     }
 
-    /// Extracts only the errored state updates that need post-persistence reporting.
+    /// Extracts only the errored state updates that need post-persistence
+    /// reporting.
     fn collect_reportable_errors(
         updates: &[(TableId, TableReplicationPhase)],
     ) -> Vec<ReportableTableError> {
@@ -104,9 +105,10 @@ where
 
         self.inner.update_table_replication_states(updates).await?;
 
-        // This operation must be infallible or at least not propagate failures, otherwise the
-        // error thrown here, will be caught and handled by the core of etl itself. There is no
-        // infinite recursion problem, but it might make the system harder to understand.
+        // This operation must be infallible or at least not propagate failures,
+        // otherwise the error thrown here, will be caught and handled by the
+        // core of etl itself. There is no infinite recursion problem, but it
+        // might make the system harder to understand.
         self.report_errored_updates(reportable_errors).await;
 
         Ok(())

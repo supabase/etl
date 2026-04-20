@@ -352,7 +352,8 @@ pub struct SlotLagMetricsResponse {
     /// Bytes between the current WAL location and the confirmed flush LSN.
     #[schema(example = 2048)]
     pub confirmed_flush_lsn_bytes: i64,
-    /// How many bytes of WAL are still safe to build up before the limit of the slot is reached.
+    /// How many bytes of WAL are still safe to build up before the limit of the
+    /// slot is reached.
     #[schema(example = 8192)]
     pub safe_wal_size_bytes: i64,
     /// Write lag expressed in milliseconds.
@@ -1237,9 +1238,9 @@ pub async fn update_pipeline_version(
     let (pipeline, replicator, current_image, source, destination) =
         read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
-    // Only allow updating to the current default image. The client must provide the version id and
-    // it must match the default version id. If it does not, we consider this a race condition and we
-    // fail the update.
+    // Only allow updating to the current default image. The client must provide the
+    // version id and it must match the default version id. If it does not, we
+    // consider this a race condition and we fail the update.
     let default_image = db::images::read_default_image(txn.deref_mut())
         .await?
         .ok_or(PipelineError::NoDefaultImageFound)?;
@@ -1262,16 +1263,16 @@ pub async fn update_pipeline_version(
         .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
     }
 
-    // If the images have equal name, we don't care about their id from the K8S perspective, so we
-    // won't update any resources.
+    // If the images have equal name, we don't care about their id from the K8S
+    // perspective, so we won't update any resources.
     if target_image.name == current_image.name {
         txn.commit().await?;
 
         return Ok(HttpResponse::Ok().finish());
     }
 
-    // If a replicator is not running, we don't want to create/update k8s resources. It's fine to just
-    // update the image version in the db.
+    // If a replicator is not running, we don't want to create/update k8s resources.
+    // It's fine to just update the image version in the db.
     if is_replicator_pod_stopped(k8s_client.as_ref(), tenant_id, replicator.id).await? {
         txn.commit().await?;
 

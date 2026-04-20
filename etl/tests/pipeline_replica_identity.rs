@@ -65,9 +65,9 @@ impl FromTableRow for ToastTable {
     }
 }
 
-/// Generates a string of random ASCII printable characters of the specified length.
-/// This is useful for creating large text values that won't compress well,
-/// ensuring they trigger Postgres's TOAST storage mechanism.
+/// Generates a string of random ASCII printable characters of the specified
+/// length. This is useful for creating large text values that won't compress
+/// well, ensuring they trigger Postgres's TOAST storage mechanism.
 fn generate_random_ascii_string(length: usize) -> String {
     let rng = rand::rng();
     rng.sample_iter(Alphanumeric).take(length).map(char::from).collect()
@@ -75,10 +75,11 @@ fn generate_random_ascii_string(length: usize) -> String {
 
 const LARGE_TEXT_SIZE_BYTES: usize = 8192;
 
-/// Tests that TOAST values are replaced with default values when updating non-TOAST columns
-/// with default replica identity. When a table uses default replica identity (primary key)
-/// and non-TOAST columns are updated, Postgres sends UnchangedToast for TOAST values.
-/// We send a default to the destination for the missing values .
+/// Tests that TOAST values are replaced with default values when updating
+/// non-TOAST columns with default replica identity. When a table uses default
+/// replica identity (primary key) and non-TOAST columns are updated, Postgres
+/// sends UnchangedToast for TOAST values. We send a default to the destination
+/// for the missing values .
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_default_replica_identity() {
     init_test_tracing();
@@ -100,10 +101,10 @@ async fn update_non_toast_values_with_default_replica_identity() {
         .await
         .unwrap();
 
-    // Forcing storage to be set to external so that unchanged TOAST columns are not sent
-    // in update events. Ideally, large values would automatically trigger the storage
-    // to external but couldn't force Postgres in the tests even with very large
-    // values, hence this workaround.
+    // Forcing storage to be set to external so that unchanged TOAST columns are not
+    // sent in update events. Ideally, large values would automatically trigger
+    // the storage to external but couldn't force Postgres in the tests even
+    // with very large values, hence this workaround.
     database
         .alter_table(
             table_name.clone(),
@@ -192,9 +193,10 @@ async fn update_non_toast_values_with_default_replica_identity() {
     assert_eq!(parsed_table_rows_after_update, vec![expected_updated_row]);
 }
 
-/// Tests that TOAST values are preserved when updating non-TOAST columns with full replica identity.
-/// When a table uses full replica identity and non-TOAST columns are updated, Postgres includes
-/// all column values in the update event. We send these values to the destination.
+/// Tests that TOAST values are preserved when updating non-TOAST columns with
+/// full replica identity. When a table uses full replica identity and non-TOAST
+/// columns are updated, Postgres includes all column values in the update
+/// event. We send these values to the destination.
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_full_replica_identity() {
     init_test_tracing();
@@ -216,10 +218,10 @@ async fn update_non_toast_values_with_full_replica_identity() {
         .await
         .unwrap();
 
-    // Forcing storage to be set to external so that unchanged TOAST columns are not sent
-    // in update events. Ideally, large values would automatically trigger the storage
-    // to external but couldn't force Postgres in the tests even with very large
-    // values, hence this workaround.
+    // Forcing storage to be set to external so that unchanged TOAST columns are not
+    // sent in update events. Ideally, large values would automatically trigger
+    // the storage to external but couldn't force Postgres in the tests even
+    // with very large values, hence this workaround.
     database
         .alter_table(
             table_name.clone(),
@@ -315,10 +317,11 @@ async fn update_non_toast_values_with_full_replica_identity() {
     assert_eq!(parsed_table_rows_after_update, vec![expected_updated_row]);
 }
 
-/// Tests that TOAST values are correctly updated when directly modifying TOAST columns
-/// with default replica identity. When updating the TOAST column itself, Postgres
-/// sends the new value regardless of replica identity settings, ensuring the destination
-/// receives and applies the updated TOAST data correctly.
+/// Tests that TOAST values are correctly updated when directly modifying TOAST
+/// columns with default replica identity. When updating the TOAST column
+/// itself, Postgres sends the new value regardless of replica identity
+/// settings, ensuring the destination receives and applies the updated TOAST
+/// data correctly.
 #[tokio::test(flavor = "multi_thread")]
 async fn update_toast_values_with_default_replica_identity() {
     init_test_tracing();
@@ -340,10 +343,10 @@ async fn update_toast_values_with_default_replica_identity() {
         .await
         .unwrap();
 
-    // Forcing size to be set to external so that unchanged TOAST columns are not sent
-    // in update events. Ideally, large values would automatically trigger the storage
-    // to external but couldn't force Postgres in the tests even with very large
-    // values, hence this workaround.
+    // Forcing size to be set to external so that unchanged TOAST columns are not
+    // sent in update events. Ideally, large values would automatically trigger
+    // the storage to external but couldn't force Postgres in the tests even
+    // with very large values, hence this workaround.
     database
         .alter_table(
             table_name.clone(),
@@ -428,10 +431,11 @@ async fn update_toast_values_with_default_replica_identity() {
     assert_eq!(parsed_table_rows_after_update, vec![expected_updated_row]);
 }
 
-/// Tests that Postgres rejects update operations when replica identity is set to none.
-/// When a table has replica identity none and is part of a publication that publishes updates,
-/// Postgres will reject update operations because it cannot identify which row to update
-/// without sufficient replica identity information.
+/// Tests that Postgres rejects update operations when replica identity is set
+/// to none. When a table has replica identity none and is part of a publication
+/// that publishes updates, Postgres will reject update operations because it
+/// cannot identify which row to update without sufficient replica identity
+/// information.
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_none_replica_identity() {
     init_test_tracing();
@@ -453,10 +457,10 @@ async fn update_non_toast_values_with_none_replica_identity() {
         .await
         .unwrap();
 
-    // Forcing storage to be set to external so that unchanged TOAST columns are not sent
-    // in update events. Ideally, large values would automatically trigger the storage
-    // to external but couldn't force Postgres in the tests even with very large
-    // values, hence this workaround.
+    // Forcing storage to be set to external so that unchanged TOAST columns are not
+    // sent in update events. Ideally, large values would automatically trigger
+    // the storage to external but couldn't force Postgres in the tests even
+    // with very large values, hence this workaround.
     database
         .alter_table(
             table_name.clone(),
@@ -530,7 +534,8 @@ async fn update_non_toast_values_with_none_replica_identity() {
 
     // Now attempt to update only the small_int column
     // With replica identity NONE, Postgres should reject the update operation
-    // because the table does not have sufficient replica identity information for updates
+    // because the table does not have sufficient replica identity information for
+    // updates
     let updated_int_value = 200;
 
     let result =
@@ -548,16 +553,17 @@ async fn update_non_toast_values_with_none_replica_identity() {
     let error_message = db_err.message();
     assert_eq!(
         error_message,
-        "cannot update table \"toast_values_test\" because it does not have a replica identity and publishes updates",
+        "cannot update table \"toast_values_test\" because it does not have a replica identity \
+         and publishes updates",
         "Expected replica identity error, got: {error_message}"
     );
 }
 
 /// Tests that TOAST values are replaced with default values when the table uses
 /// replica identity with a unique index that includes columns being updated.
-/// When updating columns that are part of the replica identity index, Postgres sends
-/// UnchangedToast for large TOAST values. We send a default to the destination for the
-/// missing values .
+/// When updating columns that are part of the replica identity index, Postgres
+/// sends UnchangedToast for large TOAST values. We send a default to the
+/// destination for the missing values .
 #[tokio::test(flavor = "multi_thread")]
 async fn update_non_toast_values_with_unique_index_replica_identity() {
     init_test_tracing();
@@ -579,10 +585,10 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
         .await
         .unwrap();
 
-    // Forcing storage to be set to external so that unchanged TOAST columns are not sent
-    // in update events. Ideally, large values would automatically trigger the storage
-    // to external but couldn't force Postgres in the tests even with very large
-    // values, hence this workaround.
+    // Forcing storage to be set to external so that unchanged TOAST columns are not
+    // sent in update events. Ideally, large values would automatically trigger
+    // the storage to external but couldn't force Postgres in the tests even
+    // with very large values, hence this workaround.
     database
         .alter_table(
             table_name.clone(),
@@ -663,9 +669,10 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
     let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
     assert_eq!(parsed_table_rows[0], expected_initial_row);
 
-    // Now update the small_int column, which is part of the unique index used for replica identity
-    // This should trigger TOAST behavior where Postgres sends UnchangedToast
-    // for the large_text column, since the replica identity includes the column being updated
+    // Now update the small_int column, which is part of the unique index used for
+    // replica identity This should trigger TOAST behavior where Postgres sends
+    // UnchangedToast for the large_text column, since the replica identity
+    // includes the column being updated
     let updated_int_value = 200;
 
     let update_event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;

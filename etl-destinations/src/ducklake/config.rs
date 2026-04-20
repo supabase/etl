@@ -67,7 +67,8 @@ fn duckdb_extension_strategy(
                         ErrorKind::ConfigError,
                         "Unsupported DuckDB extension platform",
                         format!(
-                            "linux architecture `{arch}` is not supported for vendored DuckDB extensions"
+                            "linux architecture `{arch}` is not supported for vendored DuckDB \
+                             extensions"
                         )
                     ));
                 }
@@ -90,7 +91,8 @@ fn duckdb_extension_strategy(
                         ErrorKind::ConfigError,
                         "Unsupported DuckDB extension platform",
                         format!(
-                            "macos architecture `{arch}` is not supported for vendored DuckDB extensions"
+                            "macos architecture `{arch}` is not supported for vendored DuckDB \
+                             extensions"
                         )
                     ));
                 }
@@ -212,7 +214,8 @@ pub struct S3Config {
     /// Host, host:port, or host:port/path of the S3-compatible endpoint.
     /// Defaults to AWS S3 if not set.
     pub endpoint: Option<String>,
-    /// `"path"` (default for MinIO / Supabase Storage) or `"vhost"` (AWS S3 default).
+    /// `"path"` (default for MinIO / Supabase Storage) or `"vhost"` (AWS S3
+    /// default).
     pub url_style: String,
     /// Whether to use HTTPS. Set to `false` for local S3-compatible services.
     pub use_ssl: bool,
@@ -552,7 +555,8 @@ fn build_setup_sql_with_strategy(
         }
         DuckDbExtensionStrategy::InstallFromRepository => {
             let mut sql = String::from(
-                "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD parquet;",
+                "INSTALL ducklake; LOAD ducklake; INSTALL json; LOAD json; INSTALL parquet; LOAD \
+                 parquet;",
             );
             if needs_postgres {
                 sql.push_str(" INSTALL postgres; LOAD postgres;");
@@ -577,7 +581,8 @@ fn build_setup_sql_with_strategy(
             .join(", ");
 
         sql.push_str(&format!(
-            " SET enable_http_metadata_cache = true; SET parquet_metadata_cache = true; CREATE OR REPLACE SECRET {secret_name} (TYPE S3, {secret_body}, USE_SSL {});",
+            " SET enable_http_metadata_cache = true; SET parquet_metadata_cache = true; CREATE OR \
+             REPLACE SECRET {secret_name} (TYPE S3, {secret_body}, USE_SSL {});",
             if s3.use_ssl { "true" } else { "false" }
         ));
     }
@@ -586,7 +591,8 @@ fn build_setup_sql_with_strategy(
         .unwrap_or_default();
 
     sql.push_str(&format!(
-        " ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}, AUTOMATIC_MIGRATION true{metadata_schema_clause});",
+        " ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}, \
+         AUTOMATIC_MIGRATION true{metadata_schema_clause});",
         quote_literal(&format!("ducklake:{catalog_target}")),
         quote_literal(data_path),
         super::ATTACH_DATA_INLINING_ROW_LIMIT
@@ -652,7 +658,8 @@ mod tests {
     #[test]
     fn test_catalog_conninfo_from_postgres_url_with_password_and_query_params_round_trip() {
         let url = Url::parse(
-            "postgres://user:pa%27ss%5Cword@localhost:5433/mydb?sslmode=disable&connect_timeout=10&tcp_user_timeout=1500&application_name=myapp",
+            "postgres://user:pa%27ss%5Cword@localhost:5433/mydb?sslmode=disable&\
+             connect_timeout=10&tcp_user_timeout=1500&application_name=myapp",
         )
         .unwrap();
         let conninfo = catalog_conninfo_from_url(&url).unwrap();

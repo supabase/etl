@@ -18,8 +18,8 @@ pub enum DestinationTableSchemaStatus {
 
 /// Parses snapshot IDs from PG LSN strings.
 ///
-/// Converts a required snapshot_id string and optional previous_snapshot_id string
-/// into their corresponding [`SnapshotId`] values.
+/// Converts a required snapshot_id string and optional previous_snapshot_id
+/// string into their corresponding [`SnapshotId`] values.
 fn parse_snapshot_ids(
     snapshot_id_str: &str,
     previous_snapshot_id_str: Option<String>,

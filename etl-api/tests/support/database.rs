@@ -16,7 +16,8 @@ use uuid::Uuid;
 
 use crate::support::test_app::TestApp;
 
-/// Creates a database configuration from TESTS_DATABASE_* environment variables.
+/// Creates a database configuration from TESTS_DATABASE_* environment
+/// variables.
 ///
 /// Generates a unique database name using a UUID suffix to avoid conflicts
 /// between concurrent test runs.
@@ -38,10 +39,10 @@ pub fn get_test_db_config() -> PgConnectionConfig {
 
 /// Creates and configures a new Postgres database for the API.
 ///
-/// Similar to [`create_pg_database`], but additionally runs all database migrations
-/// from the "./migrations" directory after creation. Returns a [`PgPool`]
-/// connected to the newly created and migrated database. Panics if database
-/// creation or migration fails.
+/// Similar to [`create_pg_database`], but additionally runs all database
+/// migrations from the "./migrations" directory after creation. Returns a
+/// [`PgPool`] connected to the newly created and migrated database. Panics if
+/// database creation or migration fails.
 pub async fn create_etl_api_database(config: &PgConnectionConfig) -> PgPool {
     let connection_pool = create_pg_database(config).await;
 
@@ -104,7 +105,8 @@ pub async fn create_trusted_source_database() -> TrustedSourceDatabase {
 
     connection
         .execute(&*format!(
-            "create role {} with login password {} nosuperuser inherit nocreaterole nocreatedb replication bypassrls connection limit -1",
+            "create role {} with login password {} nosuperuser inherit nocreaterole nocreatedb \
+             replication bypassrls connection limit -1",
             quote_identifier(&trusted_username),
             quote_literal(&trusted_password),
         ))
@@ -149,11 +151,13 @@ pub async fn drop_trusted_source_database(database: TrustedSourceDatabase) {
 
 /// Runs ETL migrations on the source database.
 ///
-/// Sets up the `etl` schema and runs Postgres state store migrations to create the
-/// tables ETL uses to persist the replication state needed for ETL operations.
+/// Sets up the `etl` schema and runs Postgres state store migrations to create
+/// the tables ETL uses to persist the replication state needed for ETL
+/// operations.
 ///
 /// # Panics
-/// Panics if database connection fails, schema creation fails, or migrations fail.
+/// Panics if database connection fails, schema creation fails, or migrations
+/// fail.
 pub async fn run_etl_migrations_on_source_database(source_db_config: &PgConnectionConfig) {
     // We create a pool just for the migrations.
     let source_pool = connect_to_source_database(source_db_config, 1, 1, None)
@@ -166,8 +170,8 @@ pub async fn run_etl_migrations_on_source_database(source_db_config: &PgConnecti
         .await
         .expect("failed to create etl schema");
 
-    // Set the `etl` schema as search path (this is done to have the migrations metadata table created
-    // by sqlx within the `etl` schema).
+    // Set the `etl` schema as search path (this is done to have the migrations
+    // metadata table created by sqlx within the `etl` schema).
     sqlx::query("set search_path = 'etl';")
         .execute(&source_pool)
         .await

@@ -22,13 +22,14 @@ struct Inner {
 
 /// In-memory destination for testing and development purposes.
 ///
-/// [`MemoryDestination`] stores all replicated data in memory, making it ideal for
-/// testing ETL pipelines, debugging replication behavior, and development workflows.
-/// All data is held in memory and will be lost when the process terminates.
+/// [`MemoryDestination`] stores all replicated data in memory, making it ideal
+/// for testing ETL pipelines, debugging replication behavior, and development
+/// workflows. All data is held in memory and will be lost when the process
+/// terminates.
 ///
-/// Like real destinations (BigQuery, Iceberg), this destination tracks table metadata
-/// (snapshot IDs and replication masks) in a state store to support features like
-/// table truncation during state resets.
+/// Like real destinations (BigQuery, Iceberg), this destination tracks table
+/// metadata (snapshot IDs and replication masks) in a state store to support
+/// features like table truncation during state resets.
 #[derive(Clone)]
 pub struct MemoryDestination<S> {
     inner: Arc<Mutex<Inner>>,
@@ -41,8 +42,9 @@ where
 {
     /// Creates a new memory destination with a state store.
     ///
-    /// The state store is used to track table metadata (snapshot IDs and replication masks),
-    /// mirroring the behavior of real destinations like BigQuery and Iceberg.
+    /// The state store is used to track table metadata (snapshot IDs and
+    /// replication masks), mirroring the behavior of real destinations like
+    /// BigQuery and Iceberg.
     pub fn new(store: S) -> Self {
         let inner = Inner { events: Vec::new(), table_rows: HashMap::new() };
 
@@ -122,8 +124,8 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
-        // For truncation, we simulate removing all table rows for a specific table and also the events
-        // of that table.
+        // For truncation, we simulate removing all table rows for a specific table and
+        // also the events of that table.
         let mut inner = self.inner.lock().await;
 
         let table_id = replicated_table_schema.id();
@@ -159,7 +161,8 @@ where
     ) -> EtlResult<()> {
         let table_id = replicated_table_schema.id();
 
-        // Store destination metadata on first write, like real destinations (BigQuery, Iceberg) do.
+        // Store destination metadata on first write, like real destinations (BigQuery,
+        // Iceberg) do.
         self.ensure_destination_table_metadata(replicated_table_schema).await?;
 
         let mut inner = self.inner.lock().await;

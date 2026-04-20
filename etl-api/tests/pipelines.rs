@@ -45,7 +45,8 @@ async fn setup_basic_pipeline() -> (TestApp, String, i64, i64, i64) {
     (app, tenant_id, source_id, destination_id, pipeline_id)
 }
 
-/// Creates a pipeline setup with a real source database for replication state tests.
+/// Creates a pipeline setup with a real source database for replication state
+/// tests.
 async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgConnectionConfig) {
     let app = spawn_test_app().await;
     create_default_image(&app).await;
@@ -82,7 +83,8 @@ async fn create_table_with_state_chain(
     for (i, (state, metadata)) in state_chain.iter().enumerate() {
         let is_current = i == state_chain.len() - 1;
         let id = sqlx::query_scalar::<_, i64>(
-            "insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current) values ($1, $2, $3::etl.table_state, $4::jsonb, $5, $6) returning id"
+            "insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, \
+             is_current) values ($1, $2, $3::etl.table_state, $4::jsonb, $5, $6) returning id",
         )
         .bind(pipeline_id)
         .bind(table_oid)
@@ -114,7 +116,8 @@ async fn create_tables_with_states(
         let table_oid = create_test_table(source_db_pool, table_name).await;
 
         sqlx::query(
-            "insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current) values ($1, $2, $3::etl.table_state, $4::jsonb, NULL, true)"
+            "insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, \
+             is_current) values ($1, $2, $3::etl.table_state, $4::jsonb, NULL, true)",
         )
         .bind(pipeline_id)
         .bind(table_oid)
@@ -131,7 +134,8 @@ async fn create_tables_with_states(
 }
 
 /// Tests rollback functionality and returns response if successful.
-/// Asserts the expected status code and returns the response for successful calls.
+/// Asserts the expected status code and returns the response for successful
+/// calls.
 async fn test_rollback(
     app: &TestApp,
     tenant_id: &str,
@@ -168,7 +172,8 @@ async fn create_test_table(source_db_pool: &PgPool, table_name: &str) -> Oid {
     .expect("Failed to create test table");
 
     sqlx::query_scalar::<_, Oid>(
-        "select c.oid from pg_class c join pg_namespace n on c.relnamespace = n.oid where c.relname = $1 and n.nspname = $2"
+        "select c.oid from pg_class c join pg_namespace n on c.relnamespace = n.oid where \
+         c.relname = $1 and n.nspname = $2",
     )
     .bind(table_name)
     .bind("test")
@@ -570,8 +575,8 @@ async fn all_pipelines_can_be_read() {
 //     let response = app.create_pipeline(tenant_id, &pipeline).await;
 //     assert!(response.status().is_success());
 //
-//     // Act - Try to create duplicate pipeline with same source and destination
-//     let duplicate_pipeline = CreatePipelineRequest {
+//     // Act - Try to create duplicate pipeline with same source and
+// destination     let duplicate_pipeline = CreatePipelineRequest {
 //         source_id,
 //         destination_id,
 //         config: updated_pipeline_config(),
@@ -860,7 +865,8 @@ async fn rollback_tables_succeeds_for_any_error_type() {
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
-    // Create a state chain with a previous state so rollback has something to rollback to
+    // Create a state chain with a previous state so rollback has something to
+    // rollback to
     let table_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
@@ -917,7 +923,8 @@ async fn rollback_tables_with_full_reset_succeeds() {
 
     // Insert a table schema for this table
     let table_schema_id: i64 = sqlx::query_scalar(
-        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'test', 'test_users') returning id"
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
+         ($1, $2, 'test', 'test_users') returning id",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -925,19 +932,27 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .await
     .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1)")
-        .bind(table_schema_id)
-        .execute(&source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, \
+         nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, \
+         false, 1, 1)",
+    )
+    .bind(table_schema_id)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
     // Insert destination metadata for this table
-    sqlx::query("insert into etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
-        .bind(pipeline_id)
-        .bind(table_oid)
-        .execute(&source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into etl.destination_tables_metadata (pipeline_id, table_id, \
+         destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, \
+         'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
     // Verify table schema and metadata exist before reset
     let schema_count_before: i64 = sqlx::query_scalar(
@@ -951,7 +966,8 @@ async fn rollback_tables_with_full_reset_succeeds() {
     assert_eq!(schema_count_before, 1);
 
     let metadata_count_before: i64 = sqlx::query_scalar(
-        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
+         = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -981,7 +997,8 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .unwrap();
     assert_eq!(count, 1);
 
-    // Verify table schema was preserved (schemas are no longer deleted during reset)
+    // Verify table schema was preserved (schemas are no longer deleted during
+    // reset)
     let schema_count_after: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
     )
@@ -994,7 +1011,8 @@ async fn rollback_tables_with_full_reset_succeeds() {
 
     // Verify destination metadata was not deleted.
     let metadata_count_after: i64 = sqlx::query_scalar(
-        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
+         = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1029,7 +1047,8 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
 
     // Insert table schema and mapping
     let table_schema_id: i64 = sqlx::query_scalar(
-        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'test', 'test_users') returning id"
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
+         ($1, $2, 'test', 'test_users') returning id",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1037,18 +1056,26 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
     .await
     .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1)")
-        .bind(table_schema_id)
-        .execute(&source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, \
+         nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, \
+         false, 1, 1)",
+    )
+    .bind(table_schema_id)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
-    sqlx::query("insert into etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
-        .bind(pipeline_id)
-        .bind(table_oid)
-        .execute(&source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into etl.destination_tables_metadata (pipeline_id, table_id, \
+         destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, \
+         'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
     // Do individual rollback (not full reset)
     let response = test_rollback(
@@ -1065,7 +1092,8 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
     assert_eq!(response.tables.len(), 1);
     assert!(matches!(response.tables[0].new_state, SimpleTableReplicationState::Queued));
 
-    // Verify table schema was preserved (schemas are no longer deleted during rollback)
+    // Verify table schema was preserved (schemas are no longer deleted during
+    // rollback)
     let schema_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
     )
@@ -1078,7 +1106,8 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
 
     // Verify destination metadata was not deleted.
     let metadata_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
+         = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1096,7 +1125,8 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
-    // Create state chain: ready -> errored (rollback target is ready, not a starting state)
+    // Create state chain: ready -> errored (rollback target is ready, not a
+    // starting state)
     let table_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
@@ -1113,7 +1143,8 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
 
     // Insert table schema and mapping
     let table_schema_id: i64 = sqlx::query_scalar(
-        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'test', 'test_users') returning id"
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
+         ($1, $2, 'test', 'test_users') returning id",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1121,18 +1152,26 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     .await
     .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1)")
-        .bind(table_schema_id)
-        .execute(&source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, \
+         nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, \
+         false, 1, 1)",
+    )
+    .bind(table_schema_id)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
-    sqlx::query("insert into etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
-        .bind(pipeline_id)
-        .bind(table_oid)
-        .execute(&source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into etl.destination_tables_metadata (pipeline_id, table_id, \
+         destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, \
+         'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
     // Do individual rollback (not full reset)
     let response = test_rollback(
@@ -1149,7 +1188,8 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     assert_eq!(response.tables.len(), 1);
     assert!(matches!(response.tables[0].new_state, SimpleTableReplicationState::FollowingWal));
 
-    // Verify table schema was NOT deleted (because we rolled back to ready, not a starting state)
+    // Verify table schema was NOT deleted (because we rolled back to ready, not a
+    // starting state)
     let schema_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
     )
@@ -1162,7 +1202,8 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
 
     // Verify destination metadata was NOT deleted
     let metadata_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
+         = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1224,19 +1265,45 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
 
     // Insert table schemas using production schema
     let table_schema_id_1 = sqlx::query_scalar::<_, i64>(
-        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'public', 'test_users') returning id"
-    ).bind(pipeline_id).bind(table1_oid).fetch_one(&source_db_pool).await.unwrap();
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
+         ($1, $2, 'public', 'test_users') returning id",
+    )
+    .bind(pipeline_id)
+    .bind(table1_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
 
     let table_schema_id_2 = sqlx::query_scalar::<_, i64>(
-        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'public', 'test_orders') returning id"
-    ).bind(pipeline_id).bind(table2_oid).fetch_one(&source_db_pool).await.unwrap();
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
+         ($1, $2, 'public', 'test_orders') returning id",
+    )
+    .bind(pipeline_id)
+    .bind(table2_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
 
     // Insert multiple columns for each table to test CASCADE behavior
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1), ($1, 'name', 'TEXT', -1, true, 2, NULL)")
-        .bind(table_schema_id_1).execute(&source_db_pool).await.unwrap();
+    sqlx::query(
+        "insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, \
+         nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, \
+         false, 1, 1), ($1, 'name', 'TEXT', -1, true, 2, NULL)",
+    )
+    .bind(table_schema_id_1)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'order_id', 'INT8', -1, false, 1, 1), ($1, 'amount', 'NUMERIC', -1, false, 2, NULL)")
-        .bind(table_schema_id_2).execute(&source_db_pool).await.unwrap();
+    sqlx::query(
+        "insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, \
+         nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'order_id', \
+         'INT8', -1, false, 1, 1), ($1, 'amount', 'NUMERIC', -1, false, 2, NULL)",
+    )
+    .bind(table_schema_id_2)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
     // Verify data exists before deletion
     let schema_count: i64 =
@@ -1401,7 +1468,8 @@ async fn rollback_tables_all_errored_succeeds() {
     )
     .await;
 
-    // table4: errored with no_retry (should be rolled back - all errored tables are now included)
+    // table4: errored with no_retry (should be rolled back - all errored tables are
+    // now included)
     let table4_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
@@ -1538,7 +1606,8 @@ async fn rollback_tables_all_tables_succeeds() {
     )
     .await;
 
-    // Call rollback with all_tables - all tables should be rolled back regardless of state
+    // Call rollback with all_tables - all tables should be rolled back regardless
+    // of state
     let response = app
         .rollback_tables(
             &tenant_id,

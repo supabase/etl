@@ -38,9 +38,11 @@ const PARQUET_COMPRESSION_RATIO_ESTIMATE: u64 = 4;
 /// Pending bytes threshold that triggers a background inline flush.
 const MAINTENANCE_PENDING_BYTES_THRESHOLD: u64 =
     SMALL_FILE_SIZE_BYTES as u64 * PARQUET_COMPRESSION_RATIO_ESTIMATE;
-/// Optional pending inserted-rows threshold that triggers a background inline flush.
+/// Optional pending inserted-rows threshold that triggers a background inline
+/// flush.
 const MAINTENANCE_PENDING_ROWS_THRESHOLD: Option<u64> = None;
-/// Minimum idle window before targeted table maintenance runs, to not have maintenances ran too frequently.
+/// Minimum idle window before targeted table maintenance runs, to not have
+/// maintenances ran too frequently.
 const MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD: Duration = Duration::from_secs(90);
 /// Minimum delay between targeted maintenance runs for the same table.
 const MAINTENANCE_TABLE_COMPACTION_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -396,7 +398,8 @@ fn record_ducklake_maintenance_skipped(
     .increment(1);
 }
 
-/// Records all selected targeted-maintenance operations as skipped because the table is busy.
+/// Records all selected targeted-maintenance operations as skipped because the
+/// table is busy.
 fn record_skipped_targeted_maintenance(plan: TargetedMaintenancePlan) {
     if let Some(reason) = plan.rewrite_reason {
         record_ducklake_maintenance_skipped(
@@ -415,7 +418,8 @@ fn record_skipped_targeted_maintenance(plan: TargetedMaintenancePlan) {
     }
 }
 
-/// Returns the targeted-maintenance cycle outcome from successful per-operation outcomes.
+/// Returns the targeted-maintenance cycle outcome from successful per-operation
+/// outcomes.
 fn targeted_maintenance_outcome(
     rewrite_outcome: Option<MaintenanceOutcome>,
     merge_outcome: Option<MaintenanceOutcome>,
@@ -432,14 +436,16 @@ fn targeted_maintenance_outcome(
     }
 }
 
-/// Returns whether this maintenance failure matches a known DuckLake compaction bug.
+/// Returns whether this maintenance failure matches a known DuckLake compaction
+/// bug.
 fn is_known_ducklake_compaction_single_output_file_error(error: &EtlError) -> bool {
     error.detail().is_some_and(|detail| {
         detail.contains("INTERNAL Error: DuckLakeCompaction - expected a single output file")
     })
 }
 
-/// Returns the failing maintenance operation and reason for one known compaction bug.
+/// Returns the failing maintenance operation and reason for one known
+/// compaction bug.
 fn known_ducklake_compaction_error_context(
     plan: TargetedMaintenancePlan,
     error: &EtlError,
@@ -461,11 +467,11 @@ fn known_ducklake_compaction_error_context(
 
 /// Logs and suppresses one known DuckLake compaction internal error.
 ///
-/// Connection recycling is handled generically in [`run_duckdb_blocking`], which
-/// marks any failing DuckDB connection as broken before it returns the error to
-/// this layer. This helper stays intentionally narrow: it only decides which
-/// maintenance-only failures are safe to downgrade after the pool has already
-/// recycled the invalidated connection.
+/// Connection recycling is handled generically in [`run_duckdb_blocking`],
+/// which marks any failing DuckDB connection as broken before it returns the
+/// error to this layer. This helper stays intentionally narrow: it only decides
+/// which maintenance-only failures are safe to downgrade after the pool has
+/// already recycled the invalidated connection.
 fn suppress_known_ducklake_compaction_error(
     table_name: &str,
     plan: TargetedMaintenancePlan,
@@ -559,7 +565,8 @@ pub(super) async fn send_maintenance_notification(
     }
 }
 
-/// Builds the dedicated maintenance pool and spawns the periodic DuckLake worker.
+/// Builds the dedicated maintenance pool and spawns the periodic DuckLake
+/// worker.
 pub(super) async fn spawn_ducklake_maintenance_worker(
     manager: DuckLakeConnectionManager,
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
@@ -762,7 +769,8 @@ async fn run_ducklake_maintenance_worker(
     }
 }
 
-/// Returns the table-local semaphore shared by writes and background maintenance.
+/// Returns the table-local semaphore shared by writes and background
+/// maintenance.
 pub(super) fn table_write_slot(
     table_write_slots: &Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     table_name: &str,
@@ -771,7 +779,8 @@ pub(super) fn table_write_slot(
     slots.entry(table_name.to_string()).or_insert_with(|| Arc::new(Semaphore::new(1))).clone()
 }
 
-/// Tries to acquire the table-local semaphore without blocking the maintenance worker.
+/// Tries to acquire the table-local semaphore without blocking the maintenance
+/// worker.
 fn try_acquire_table_write_slot(
     table_write_slots: &Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     table_name: &str,
@@ -859,7 +868,8 @@ async fn run_background_checkpoint(
     .await
 }
 
-/// Materializes one table's pending inlined rows and records the maintenance outcome.
+/// Materializes one table's pending inlined rows and records the maintenance
+/// outcome.
 fn flush_table_inlined_data_in_background_blocking(
     conn: &duckdb::Connection,
     table_name: &str,

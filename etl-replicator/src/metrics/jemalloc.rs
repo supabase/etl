@@ -1,13 +1,14 @@
 //! Jemalloc allocator metrics for Prometheus monitoring.
 //!
-//! Exposes jemalloc statistics as Prometheus gauges, enabling monitoring of memory
-//! allocation patterns, fragmentation, and overall allocator health. Uses MIB-based
-//! access for efficient repeated polling.
+//! Exposes jemalloc statistics as Prometheus gauges, enabling monitoring of
+//! memory allocation patterns, fragmentation, and overall allocator health.
+//! Uses MIB-based access for efficient repeated polling.
 //!
-//! Interpreting the metrics: a healthy state has `allocated` close to `active` and
-//! `active` close to `resident`. A large gap between `allocated` and `resident` indicates
-//! fragmentation from page alignment, dirty pages, or metadata. High `retained` is normal
-//! on 64-bit Linux (virtual address space only, no physical memory cost).
+//! Interpreting the metrics: a healthy state has `allocated` close to `active`
+//! and `active` close to `resident`. A large gap between `allocated` and
+//! `resident` indicates fragmentation from page alignment, dirty pages, or
+//! metadata. High `retained` is normal on 64-bit Linux (virtual address space
+//! only, no physical memory cost).
 
 use std::time::Duration;
 
@@ -19,18 +20,21 @@ use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE};
 
 /// Total bytes allocated by the application and currently in use.
 ///
-/// This is the sum of all active allocations made via `malloc`, `Box::new`, `Vec`, etc.
-/// It represents the actual memory your application has requested and is using.
+/// This is the sum of all active allocations made via `malloc`, `Box::new`,
+/// `Vec`, etc. It represents the actual memory your application has requested
+/// and is using.
 ///
-/// This is the most accurate measure of your application's memory footprint from the
-/// application's perspective. Compare with `resident` to understand overhead.
+/// This is the most accurate measure of your application's memory footprint
+/// from the application's perspective. Compare with `resident` to understand
+/// overhead.
 const JEMALLOC_ALLOCATED_BYTES: &str = "jemalloc_allocated_bytes";
 
 /// Total bytes in active pages allocated by the application.
 ///
-/// Active pages are memory pages that jemalloc has dedicated to serving application
-/// allocations. This is a multiple of the page size and includes both currently
-/// allocated bytes and freed-but-not-returned bytes within those pages.
+/// Active pages are memory pages that jemalloc has dedicated to serving
+/// application allocations. This is a multiple of the page size and includes
+/// both currently allocated bytes and freed-but-not-returned bytes within those
+/// pages.
 ///
 /// `active >= allocated` always (per jemalloc docs). The gap represents:
 /// - Page alignment overhead (allocations rounded up to page boundaries).
@@ -47,44 +51,49 @@ const JEMALLOC_ACTIVE_BYTES: &str = "jemalloc_active_bytes";
 /// - Pages backing active allocations.
 /// - Unused dirty pages (freed but not yet returned to OS).
 ///
-/// This is the physical RAM footprint that counts against container memory limits.
-/// Note: This is a "maximum" because pages may not actually be resident if they
-/// correspond to demand-zeroed virtual memory not yet touched.
+/// This is the physical RAM footprint that counts against container memory
+/// limits. Note: This is a "maximum" because pages may not actually be resident
+/// if they correspond to demand-zeroed virtual memory not yet touched.
 ///
-/// **Important**: There is no guaranteed ordering between `resident` and `mapped`.
-/// Resident can exceed mapped (due to dirty pages) or be less (unmaterialized pages).
+/// **Important**: There is no guaranteed ordering between `resident` and
+/// `mapped`. Resident can exceed mapped (due to dirty pages) or be less
+/// (unmaterialized pages).
 ///
-/// Monitor this metric against your container memory limits to prevent OOMKilled.
+/// Monitor this metric against your container memory limits to prevent
+/// OOMKilled.
 const JEMALLOC_RESIDENT_BYTES: &str = "jemalloc_resident_bytes";
 
 /// Total bytes in active extents mapped by the allocator.
 ///
-/// This is virtual memory mapped via `mmap()` for active extents. Per jemalloc docs,
-/// `mapped > active` always, but there is **no strict ordering with `resident`**.
+/// This is virtual memory mapped via `mmap()` for active extents. Per jemalloc
+/// docs, `mapped > active` always, but there is **no strict ordering with
+/// `resident`**.
 ///
 /// Why no ordering with resident:
 /// - `mapped` excludes inactive extents (even those with dirty pages).
 /// - `resident` includes dirty pages but only counts physically-backed memory.
 ///
-/// This metric helps understand virtual memory usage patterns. For container memory
-/// limits, focus on `resident` instead since only physical memory is enforced.
+/// This metric helps understand virtual memory usage patterns. For container
+/// memory limits, focus on `resident` instead since only physical memory is
+/// enforced.
 const JEMALLOC_MAPPED_BYTES: &str = "jemalloc_mapped_bytes";
 
 /// Total bytes in virtual memory mappings retained for future reuse.
 ///
-/// When jemalloc returns memory to the OS, it can retain the virtual address mapping
-/// (without physical pages) for faster reallocation later. This is controlled by
-/// `opt.retain` (enabled by default on 64-bit Linux).
+/// When jemalloc returns memory to the OS, it can retain the virtual address
+/// mapping (without physical pages) for faster reallocation later. This is
+/// controlled by `opt.retain` (enabled by default on 64-bit Linux).
 ///
-/// High `retained` values are normal and don't consume physical memory. This metric
-/// helps understand jemalloc's virtual memory management but rarely requires action.
+/// High `retained` values are normal and don't consume physical memory. This
+/// metric helps understand jemalloc's virtual memory management but rarely
+/// requires action.
 const JEMALLOC_RETAINED_BYTES: &str = "jemalloc_retained_bytes";
 
 /// Total bytes dedicated to jemalloc metadata.
 ///
-/// jemalloc maintains internal data structures for tracking allocations, arenas,
-/// thread caches, extent maps, etc. This overhead scales with allocation count
-/// and arena count, not allocation size.
+/// jemalloc maintains internal data structures for tracking allocations,
+/// arenas, thread caches, extent maps, etc. This overhead scales with
+/// allocation count and arena count, not allocation size.
 ///
 /// Typical overhead is 1-3% of allocated memory. Higher ratios may indicate too
 /// many small allocations or too many arenas (`narenas` setting).
@@ -93,19 +102,22 @@ const JEMALLOC_METADATA_BYTES: &str = "jemalloc_metadata_bytes";
 /// Memory fragmentation ratio: `(resident - allocated) / resident`.
 ///
 /// Measures how efficiently physical memory is being used:
-/// - **0.0**: Perfect efficiency (all resident memory is allocated). Rare in practice.
+/// - **0.0**: Perfect efficiency (all resident memory is allocated). Rare in
+///   practice.
 /// - **0.1-0.3**: Healthy range for most workloads.
-/// - **0.3-0.5**: Moderate fragmentation. Consider investigating if memory-constrained.
-/// - **>0.5**: Significant fragmentation. May indicate allocation pattern issues or
-///   need for decay tuning.
+/// - **0.3-0.5**: Moderate fragmentation. Consider investigating if
+///   memory-constrained.
+/// - **>0.5**: Significant fragmentation. May indicate allocation pattern
+///   issues or need for decay tuning.
 ///
 /// High fragmentation can occur from:
 /// - Bursty allocation patterns (memory freed but decay hasn't run).
 /// - Many small allocations with varying lifetimes.
-/// - Size class mismatches (allocations don't fit jemalloc's size buckets well).
+/// - Size class mismatches (allocations don't fit jemalloc's size buckets
+///   well).
 ///
-/// To reduce fragmentation: lower decay times, reduce `tcache_max`, or investigate
-/// allocation patterns with jemalloc's heap profiling.
+/// To reduce fragmentation: lower decay times, reduce `tcache_max`, or
+/// investigate allocation patterns with jemalloc's heap profiling.
 const JEMALLOC_FRAGMENTATION_RATIO: &str = "jemalloc_fragmentation_ratio";
 
 /// Polling interval for jemalloc statistics.
@@ -124,7 +136,8 @@ fn log_jemalloc_config() {
 
     // Read values not exposed in typed API via raw mallctl.
     // SAFETY: These are read-only queries to jemalloc's opt.* configuration values.
-    // The keys are valid null-terminated strings and the return types match jemalloc's types.
+    // The keys are valid null-terminated strings and the return types match
+    // jemalloc's types.
     let dirty_decay_ms: Option<isize> = unsafe { raw::read(b"opt.dirty_decay_ms\0") }.ok();
     let muzzy_decay_ms: Option<isize> = unsafe { raw::read(b"opt.muzzy_decay_ms\0") }.ok();
     let abort_conf: Option<bool> = unsafe { raw::read(b"opt.abort_conf\0") }.ok();
@@ -180,7 +193,8 @@ fn register_metrics() {
     describe_gauge!(
         JEMALLOC_FRAGMENTATION_RATIO,
         Unit::Count,
-        "Memory fragmentation ratio: (resident - allocated) / resident. Lower is better, >0.5 indicates significant fragmentation"
+        "Memory fragmentation ratio: (resident - allocated) / resident. Lower is better, >0.5 \
+         indicates significant fragmentation"
     );
 }
 
@@ -189,15 +203,17 @@ fn register_metrics() {
 /// The task runs every 10 seconds and updates Prometheus gauges with current
 /// allocator statistics. Uses MIB-based access for efficient repeated polling.
 ///
-/// This function should be called after [`etl_telemetry::metrics::init_metrics`]
-/// to ensure the metrics recorder is installed.
+/// This function should be called after
+/// [`etl_telemetry::metrics::init_metrics`] to ensure the metrics recorder is
+/// installed.
 pub(super) fn spawn_jemalloc_metrics_task() {
     register_metrics();
     log_jemalloc_config();
 
     tokio::spawn(async move {
         // Initialize MIBs once for efficient repeated lookups.
-        // MIBs translate string keys to numeric indices, avoiding string parsing on each read.
+        // MIBs translate string keys to numeric indices, avoiding string parsing on
+        // each read.
         let epoch_mib = match epoch::mib() {
             Ok(mib) => mib,
             Err(err) => {
@@ -273,7 +289,8 @@ pub(super) fn spawn_jemalloc_metrics_task() {
             gauge!(JEMALLOC_METADATA_BYTES, APP_TYPE_LABEL => APP_TYPE_VALUE).set(metadata);
 
             // Calculate fragmentation ratio: (resident - allocated) / resident.
-            // A ratio of 0 means no fragmentation, >0.5 indicates significant fragmentation.
+            // A ratio of 0 means no fragmentation, >0.5 indicates significant
+            // fragmentation.
             let fragmentation =
                 if resident > 0.0 { (resident - allocated) / resident } else { 0.0 };
             gauge!(JEMALLOC_FRAGMENTATION_RATIO, APP_TYPE_LABEL => APP_TYPE_VALUE)

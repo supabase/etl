@@ -1,21 +1,22 @@
 //! Shared per-table protocol state for logical replication workers.
 //!
-//! PostgreSQL 15+ supports column-level publication filtering, where only specific
-//! columns are replicated rather than all columns. The worker that currently owns a
-//! table therefore needs two pieces of protocol state to decode row changes:
-//! the schema snapshot to decode against, and the replication mask built from the
-//! latest `RELATION` message for that snapshot.
+//! PostgreSQL 15+ supports column-level publication filtering, where only
+//! specific columns are replicated rather than all columns. The worker that
+//! currently owns a table therefore needs two pieces of protocol state to
+//! decode row changes: the schema snapshot to decode against, and the
+//! replication mask built from the latest `RELATION` message for that snapshot.
 //!
-//! The apply worker and table sync workers share this state because ownership of a
-//! table can move between them over time, but at any point exactly one worker owns
-//! protocol interpretation for that table. Non-owning workers skip DDL, RELATION,
-//! and DML for that table and rely on the owning worker to advance the shared state.
+//! The apply worker and table sync workers share this state because ownership
+//! of a table can move between them over time, but at any point exactly one
+//! worker owns protocol interpretation for that table. Non-owning workers skip
+//! DDL, RELATION, and DML for that table and rely on the owning worker to
+//! advance the shared state.
 //!
 //! The cache is kept in-memory because PostgreSQL guarantees that `RELATION`
 //! messages are sent at the start of each connection and after schema changes
-//! before any dependent DML. Persisted schemas remain the durable source of truth;
-//! this cache only tracks the latest per-table decoding state needed by active
-//! workers.
+//! before any dependent DML. Persisted schemas remain the durable source of
+//! truth; this cache only tracks the latest per-table decoding state needed by
+//! active workers.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -28,8 +29,8 @@ use tracing::warn;
 pub(crate) struct SharedTableState {
     /// The latest schema snapshot known for the table.
     pub(crate) snapshot_id: SnapshotId,
-    /// The replication mask for [`SharedTableState::snapshot_id`], if a `RELATION`
-    /// message has already been processed for that snapshot.
+    /// The replication mask for [`SharedTableState::snapshot_id`], if a
+    /// `RELATION` message has already been processed for that snapshot.
     pub(crate) replication_mask: Option<ReplicationMask>,
 }
 
@@ -51,10 +52,12 @@ impl SharedTableCache {
         guard.get(table_id).cloned()
     }
 
-    /// Inserts or updates shared table state when the incoming snapshot is not stale.
+    /// Inserts or updates shared table state when the incoming snapshot is not
+    /// stale.
     ///
-    /// Pass `Some(mask)` to refresh the replication mask for that snapshot, or `None`
-    /// to clear it when a newer schema snapshot invalidates the old `RELATION` state.
+    /// Pass `Some(mask)` to refresh the replication mask for that snapshot, or
+    /// `None` to clear it when a newer schema snapshot invalidates the old
+    /// `RELATION` state.
     pub(crate) async fn upsert(
         &self,
         table_id: TableId,
@@ -73,7 +76,8 @@ impl SharedTableCache {
 
                 debug_assert!(
                     state.snapshot_id <= snapshot_id,
-                    "shared table cache received stale snapshot update for table {table_id}: current={}, requested={}",
+                    "shared table cache received stale snapshot update for table {table_id}: \
+                     current={}, requested={}",
                     state.snapshot_id,
                     snapshot_id
                 );

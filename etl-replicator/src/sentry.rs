@@ -117,8 +117,9 @@ fn collect_standard_exception_chain(
         current = error.source();
     }
 
-    // We reverse because Sentry will show as top-level the last element of the list, and since we
-    // want the first error in the source chain to be on top, we have to reverse everything.
+    // We reverse because Sentry will show as top-level the last element of the
+    // list, and since we want the first error in the source chain to be on top,
+    // we have to reverse everything.
     exceptions.reverse();
 }
 
@@ -145,7 +146,8 @@ fn count_leaf_errors(error: &EtlError) -> usize {
     }
 }
 
-/// Converts an ETL error tree into a serde value which will be used as metadata for sentry.
+/// Converts an ETL error tree into a serde value which will be used as metadata
+/// for sentry.
 fn etl_error_tree_to_serde_value(error: &EtlError) -> Value {
     if let Some(children) = error.errors() {
         json!({

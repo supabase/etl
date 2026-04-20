@@ -151,11 +151,12 @@ impl NotifyingStore {
             .collect()
     }
 
-    /// Registers a notification that fires when a table reaches a specific state type after this
-    /// method is called.
+    /// Registers a notification that fires when a table reaches a specific
+    /// state type after this method is called.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
-    /// expected state is not reached. This prevents tests from hanging indefinitely.
+    /// Returns a [`TimedNotify`] that will automatically timeout after the
+    /// specified timeout if the expected state is not reached. This
+    /// prevents tests from hanging indefinitely.
     pub async fn notify_on_table_state_type(
         &self,
         table_id: TableId,
@@ -168,11 +169,12 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when a table state matches a custom condition after this
-    /// method is called.
+    /// Registers a notification that fires when a table state matches a custom
+    /// condition after this method is called.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
-    /// condition is not met. This prevents tests from hanging indefinitely.
+    /// Returns a [`TimedNotify`] that will automatically timeout after the
+    /// specified timeout if the condition is not met. This prevents tests
+    /// from hanging indefinitely.
     pub async fn notify_on_table_state<F>(&self, table_id: TableId, condition: F) -> TimedNotify
     where
         F: Fn(&TableReplicationPhase) -> bool + Send + Sync + 'static,
@@ -184,11 +186,12 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
-    /// Registers a notification that fires when a table has stored at least the expected number
-    /// of schema snapshots after this method is called.
+    /// Registers a notification that fires when a table has stored at least the
+    /// expected number of schema snapshots after this method is called.
     ///
-    /// Returns a [`TimedNotify`] that will automatically timeout after the specified timeout if the
-    /// expected schema count is not reached. This prevents tests from hanging indefinitely.
+    /// Returns a [`TimedNotify`] that will automatically timeout after the
+    /// specified timeout if the expected schema count is not reached. This
+    /// prevents tests from hanging indefinitely.
     pub async fn notify_on_table_schema_count(
         &self,
         table_id: TableId,

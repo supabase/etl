@@ -54,10 +54,11 @@ use url::Url;
 
 use crate::support::ducklake::{ducklake_load_sql, open_verification_connection};
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── helpers
+// ───────────────────────────────────────────────────────────────────
 
-/// Creates a persistent temp directory named after the test and prints its path.
-/// Returns the directory path (kept on disk after the test completes).
+/// Creates a persistent temp directory named after the test and prints its
+/// path. Returns the directory path (kept on disk after the test completes).
 fn make_test_dir(test_name: &str) -> PathBuf {
     let dir = tempfile::Builder::new()
         .prefix(&format!("etl_ducklake_{test_name}_"))
@@ -115,8 +116,7 @@ fn make_rich_schema(table_id: u32) -> TableSchema {
 fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     let conn = open_verification_connection();
     conn.execute_batch(&format!(
-        "{} \
-         ATTACH {} AS {} (DATA_PATH {});",
+        "{} ATTACH {} AS {} (DATA_PATH {});",
         ducklake_load_sql(),
         quote_literal(&format!("ducklake:{}", catalog.as_str())),
         quote_identifier("lake"),
@@ -129,8 +129,8 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
 fn lake_table_exists(conn: &Connection, table_name: &str) -> bool {
     conn.query_row(
         &format!(
-            "SELECT COUNT(*) FROM information_schema.tables \
-             WHERE table_catalog = {} AND table_schema = {} AND table_name = {}",
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_catalog = {} AND \
+             table_schema = {} AND table_name = {}",
             quote_literal("lake"),
             quote_literal("main"),
             quote_literal(table_name)
@@ -205,8 +205,8 @@ fn count_table_files(data: &Path, table_name: &str) -> usize {
 fn flush_inlined_rows(conn: &Connection, table_name: &str) -> i64 {
     conn.query_row(
         &format!(
-            "SELECT COALESCE(SUM(rows_flushed), 0) \
-             FROM ducklake_flush_inlined_data({}, table_name => {})",
+            "SELECT COALESCE(SUM(rows_flushed), 0) FROM ducklake_flush_inlined_data({}, \
+             table_name => {})",
             quote_literal("lake"),
             quote_literal(table_name),
         ),
@@ -232,13 +232,15 @@ where
     }
 }
 
-/// Forces DuckLake to checkpoint catalog metadata before cross-connection verification.
+/// Forces DuckLake to checkpoint catalog metadata before cross-connection
+/// verification.
 ///
 /// Some tests shut the destination down and then open a brand-new DuckDB
 /// connection to verify the resulting lake state. Without an explicit
 /// checkpoint here, that fresh connection can temporarily observe stale catalog
 /// metadata even after shutdown has finished, which makes the assertions flaky.
-/// Running `CHECKPOINT` makes the final durable state visible deterministically.
+/// Running `CHECKPOINT` makes the final durable state visible
+/// deterministically.
 fn checkpoint_lake(catalog: &Url, data: &Url) {
     let conn = open_lake_conn(catalog, data);
     conn.execute_batch("CHECKPOINT").expect("failed to checkpoint DuckLake catalog");
@@ -246,8 +248,8 @@ fn checkpoint_lake(catalog: &Url, data: &Url) {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-/// `write_table_rows` inserts rows that can be queried back through the DuckLake
-/// catalog using a separate DuckDB connection.
+/// `write_table_rows` inserts rows that can be queried back through the
+/// DuckLake catalog using a separate DuckDB connection.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_table_rows_basic() {
     let dir = make_test_dir("write_table_rows_basic");
@@ -414,7 +416,8 @@ async fn test_write_table_rows_reuses_warm_pooled_connection() {
     assert_eq!(count_rows(&conn, &table_name), 2);
 }
 
-/// A failed write attempt should discard the pooled DuckDB connection and replace it.
+/// A failed write attempt should discard the pooled DuckDB connection and
+/// replace it.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_table_rows_replaces_broken_pooled_connection_after_retry() {
@@ -514,7 +517,8 @@ async fn test_write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     reset_ducklake_test_hooks();
 }
 
-/// Concurrent same-table copy batches should serialize cleanly and remain exact.
+/// Concurrent same-table copy batches should serialize cleanly and remain
+/// exact.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_concurrent_same_table_copy_batches_complete() {
     let dir = make_test_dir("concurrent_same_table_copy_batches_complete");
@@ -653,8 +657,8 @@ async fn test_truncate_clears_rows() {
     let col_count: i64 = conn
         .query_row(
             &format!(
-                "SELECT COUNT(*) FROM information_schema.columns \
-                 WHERE table_catalog = {} AND table_schema = {} AND table_name = {}",
+                "SELECT COUNT(*) FROM information_schema.columns WHERE table_catalog = {} AND \
+                 table_schema = {} AND table_name = {}",
                 quote_literal("lake"),
                 quote_literal("main"),
                 quote_literal(&table_name),
@@ -703,7 +707,8 @@ async fn test_truncate_clears_copy_markers_for_recopy() {
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
 }
 
-/// `write_events` applies inserts, updates, and deletes to the current table state.
+/// `write_events` applies inserts, updates, and deletes to the current table
+/// state.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
@@ -900,7 +905,8 @@ async fn test_write_events_with_old_row_update() {
     assert_eq!(name, "Gadget");
 }
 
-/// Replaying the same CDC batch should be a no-op after the marker row is committed.
+/// Replaying the same CDC batch should be a no-op after the marker row is
+/// committed.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_replay_is_idempotent() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
@@ -986,7 +992,8 @@ async fn test_write_events_replay_is_idempotent() {
     assert_eq!(name, "paid");
 }
 
-/// Marker-table rows should stay in the DuckLake catalog instead of creating Parquet files.
+/// Marker-table rows should stay in the DuckLake catalog instead of creating
+/// Parquet files.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_applied_batches_table_uses_data_inlining() {
     use etl::types::{InsertEvent, PgLsn};
@@ -1190,7 +1197,8 @@ async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
     );
 }
 
-/// Mixed table batches remain correct when multiple tables are written in one flush.
+/// Mixed table batches remain correct when multiple tables are written in one
+/// flush.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_mixed_multi_table_batches() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
@@ -1313,7 +1321,8 @@ async fn test_write_events_mixed_multi_table_batches() {
     assert_eq!(name_b, "b-two");
 }
 
-/// A post-commit retry should detect the batch marker and avoid double-applying rows.
+/// A post-commit retry should detect the batch marker and avoid double-applying
+/// rows.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
@@ -1508,8 +1517,7 @@ async fn test_type_mapping_round_trip() {
     let row: (i32, String, f64, bool, String) = conn
         .query_row(
             &format!(
-                "SELECT id, label, score, active, CAST(birthday AS VARCHAR) \
-                 FROM {}.{}",
+                "SELECT id, label, score, active, CAST(birthday AS VARCHAR) FROM {}.{}",
                 quote_identifier("lake"),
                 quote_identifier(&table_name)
             ),

@@ -169,11 +169,11 @@ impl LakekeeperClient {
     pub async fn drop_warehouse(&self, warehouse_id: Uuid) -> Result<(), reqwest::Error> {
         let url = format!("{}/warehouse/{warehouse_id}", self.base_url);
 
-        // Even if a warehouse has no namespaces, it can still return an error from a delete
-        // request if the namespace was deleted very recently. So we make the best effort
-        // to attempt to delete the warehouse with retries but do not fail the test if it
-        // still doesn't get deleted. At worst, we'll leave some warehouses around if
-        // that happens.
+        // Even if a warehouse has no namespaces, it can still return an error from a
+        // delete request if the namespace was deleted very recently. So we make
+        // the best effort to attempt to delete the warehouse with retries but
+        // do not fail the test if it still doesn't get deleted. At worst, we'll
+        // leave some warehouses around if that happens.
         const MAX_RETRIES: u8 = 10;
         for _ in 0..MAX_RETRIES {
             let response = self.client.delete(url.clone()).send().await?;

@@ -2,54 +2,67 @@
 //!   <img src="https://raw.githubusercontent.com/supabase/supabase/master/packages/common/assets/images/supabase-logo-wordmark--light.svg" alt="Supabase" width="480">
 //! </p>
 //!
-//! ⚠️ **Warning:** These docs are a work in progress, for this reason they may be incomplete.
+//! ⚠️ **Warning:** These docs are a work in progress, for this reason they may
+//! be incomplete.
 //!
-//! This crate provides a high-performance, streaming ETL (Extract, Transform, Load) system
-//! built on Postgres logical replication. It enables real-time data synchronization
-//! from Postgres databases to various destinations with configurable transformations
-//! and robust error handling.
+//! This crate provides a high-performance, streaming ETL (Extract, Transform,
+//! Load) system built on Postgres logical replication. It enables real-time
+//! data synchronization from Postgres databases to various destinations with
+//! configurable transformations and robust error handling.
 //!
 //! # Key Features
 //!
-//! - **Real-time streaming**: Uses Postgres logical replication for minimal latency
-//! - **Destination agnostic**: Implement your own custom destinations to which data will be sent
-//! - **Robust error handling**: Comprehensive error classification with retry strategies
-//! - **Concurrent processing**: Parallel table synchronization and event application for increased throughput
-//! - **Suspendable**: Persistent tracking of replication progress which allows the pipeline to be safely paused and restarted
+//! - **Real-time streaming**: Uses Postgres logical replication for minimal
+//!   latency
+//! - **Destination agnostic**: Implement your own custom destinations to which
+//!   data will be sent
+//! - **Robust error handling**: Comprehensive error classification with retry
+//!   strategies
+//! - **Concurrent processing**: Parallel table synchronization and event
+//!   application for increased throughput
+//! - **Suspendable**: Persistent tracking of replication progress which allows
+//!   the pipeline to be safely paused and restarted
 //!
 //! # Core Concepts
 //!
 //! ## Pipeline
-//! A [`pipeline::Pipeline`] represents a complete ETL workflow that connects a Postgres publication
-//! to a destination. It manages the replication stream, applies transformations,
-//! and handles failures gracefully.
+//! A [`pipeline::Pipeline`] represents a complete ETL workflow that connects a
+//! Postgres publication to a destination. It manages the replication stream,
+//! applies transformations, and handles failures gracefully.
 //!
 //! ## Destinations
-//! [`destination::Destination`] trait implementations define where replicated data should be sent.
-//! Destinations are pluggable and can integrate with external systems.
+//! [`destination::Destination`] trait implementations define where replicated
+//! data should be sent. Destinations are pluggable and can integrate with
+//! external systems.
 //!
 //! ## Store
-//! The [`store::schema::SchemaStore`] and [`store::state::StateStore`] traits define where the
-//! table schemas, replication state, and destination table metadata are stored. These stores are critical to a pipeline's
-//! operation, as they allow it to be safely paused and resumed.
+//! The [`store::schema::SchemaStore`] and [`store::state::StateStore`] traits
+//! define where the table schemas, replication state, and destination table
+//! metadata are stored. These stores are critical to a pipeline's operation, as
+//! they allow it to be safely paused and resumed.
 //!
-//! The [`store::state::StateStore`] trait handles both table replication states and destination table metadata,
-//! providing a single interface for all state-related storage operations.
+//! The [`store::state::StateStore`] trait handles both table replication states
+//! and destination table metadata, providing a single interface for all
+//! state-related storage operations.
 //!
-//! **Note:** To pause and resume a pipeline after the process is stopped, it must be able to
-//! persist data durably. The crate itself provides no durability guarantees as it only transfers
-//! data between Postgres and the destination relying on the store traits to provide the required
+//! **Note:** To pause and resume a pipeline after the process is stopped, it
+//! must be able to persist data durably. The crate itself provides no
+//! durability guarantees as it only transfers data between Postgres and the
+//! destination relying on the store traits to provide the required
 //! data when needed.
 //!
 //! ## Error Handling
-//! All operations return [`error::EtlResult<T>`] which provides detailed error classification
-//! for implementing appropriate retry and recovery strategies.
+//! All operations return [`error::EtlResult<T>`] which provides detailed error
+//! classification for implementing appropriate retry and recovery strategies.
 //!
 //! # Basic Usage Example
 //!
 //! ```rust,no_run
 //! use etl::{
-//!     config::{BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TcpKeepaliveConfig, TlsConfig, TableSyncCopyConfig},
+//!     config::{
+//!         BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+//!         PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+//!     },
 //!     destination::{Destination, TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
 //!     error::EtlResult,
 //!     pipeline::Pipeline,
@@ -61,16 +74,31 @@
 //! struct NoopDestination;
 //!
 //! impl Destination for NoopDestination {
-//!     fn name() -> &'static str { "noop" }
-//!     async fn truncate_table(&self, _replicated_table_schema: &ReplicatedTableSchema, async_result: TruncateTableResult<()>) -> EtlResult<()> {
+//!     fn name() -> &'static str {
+//!         "noop"
+//!     }
+//!     async fn truncate_table(
+//!         &self,
+//!         _replicated_table_schema: &ReplicatedTableSchema,
+//!         async_result: TruncateTableResult<()>,
+//!     ) -> EtlResult<()> {
 //!         async_result.send(Ok(()));
 //!         Ok(())
 //!     }
-//!     async fn write_table_rows(&self, _replicated_table_schema: &ReplicatedTableSchema, _table_rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> EtlResult<()> {
+//!     async fn write_table_rows(
+//!         &self,
+//!         _replicated_table_schema: &ReplicatedTableSchema,
+//!         _table_rows: Vec<TableRow>,
+//!         async_result: WriteTableRowsResult<()>,
+//!     ) -> EtlResult<()> {
 //!         async_result.send(Ok(()));
 //!         Ok(())
 //!     }
-//!     async fn write_events(&self, _events: Vec<Event>, async_result: WriteEventsResult<()>) -> EtlResult<()> {
+//!     async fn write_events(
+//!         &self,
+//!         _events: Vec<Event>,
+//!         async_result: WriteEventsResult<()>,
+//!     ) -> EtlResult<()> {
 //!         async_result.send(Ok(()));
 //!         Ok(())
 //!     }
@@ -86,7 +114,7 @@
 //!         username: "postgres".to_string(),
 //!         password: Some("password".to_string().into()),
 //!         tls: TlsConfig { enabled: false, trusted_root_certs: String::new() },
-//!         keepalive: TcpKeepaliveConfig::default()
+//!         keepalive: TcpKeepaliveConfig::default(),
 //!     };
 //!
 //!     // Create memory-based store and destination for testing
@@ -112,7 +140,7 @@
 //!     // Create and start the pipeline
 //!     let mut pipeline = Pipeline::new(config, store, destination);
 //!     pipeline.start().await?;
-//!     
+//!
 //!     // Pipeline will run until stopped
 //!     pipeline.wait().await?;
 //!
@@ -122,7 +150,7 @@
 //!
 //! # Feature Flags
 //!
-//! - `test-utils`: Enable testing utilities and mock implementations  
+//! - `test-utils`: Enable testing utilities and mock implementations
 //! - `failpoints`: Enable fault injection for testing error scenarios
 
 mod concurrency;

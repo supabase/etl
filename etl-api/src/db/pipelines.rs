@@ -24,8 +24,9 @@ use crate::{
 
 /// Maximum number of pipelines allowed per tenant.
 ///
-/// For now, we keep the maximum to 1, this way, we give us a simpler surface area for breaking changes
-/// to the `etl` schema in the source database since only one pipeline will use it.
+/// For now, we keep the maximum to 1, this way, we give us a simpler surface
+/// area for breaking changes to the `etl` schema in the source database since
+/// only one pipeline will use it.
 pub const MAX_PIPELINES_PER_TENANT: i64 = 1;
 
 pub struct Pipeline {
@@ -230,12 +231,13 @@ pub async fn delete_pipeline_cascading(
     )
     .await?;
 
-    // We start a transaction in the source database while the other transaction is active in the
-    // api database so that in case of failures when deleting the state, we also rollback the transaction
-    // in the api database.
+    // We start a transaction in the source database while the other transaction is
+    // active in the api database so that in case of failures when deleting the
+    // state, we also rollback the transaction in the api database.
     let mut source_txn = source_pool.begin().await?;
 
-    // Delete the pipeline from the main database (this does NOT cascade delete the replicator due to missing constraint)
+    // Delete the pipeline from the main database (this does NOT cascade delete the
+    // replicator due to missing constraint)
     delete_pipeline(txn.deref_mut(), tenant_id, pipeline.id).await?;
 
     // Manually delete the replicator since there's no cascade constraint
@@ -246,7 +248,8 @@ pub async fn delete_pipeline_cascading(
         db::destinations::delete_destination(txn.deref_mut(), tenant_id, destination.id).await?;
     }
 
-    // Get all table IDs for this pipeline before deleting state (only if all ETL tables exist).
+    // Get all table IDs for this pipeline before deleting state (only if all ETL
+    // tables exist).
     let etl_present = health::etl_tables_present(source_txn.deref_mut()).await?;
     let table_ids = if etl_present {
         Some(state::get_pipeline_table_ids(source_txn.deref_mut(), pipeline.id).await?)
@@ -254,7 +257,8 @@ pub async fn delete_pipeline_cascading(
         None
     };
 
-    // Delete state, schema, and destination metadata from the source database, only if ETL tables exist.
+    // Delete state, schema, and destination metadata from the source database, only
+    // if ETL tables exist.
     if etl_present {
         let _ = state::delete_replication_state_for_all_tables(source_txn.deref_mut(), pipeline.id)
             .await?;
@@ -267,14 +271,16 @@ pub async fn delete_pipeline_cascading(
         .await?;
     }
 
-    // Here we finish `txn` before `source_txn` since we want the guarantee that the pipeline has
-    // been deleted before committing the state and slots deletions.
+    // Here we finish `txn` before `source_txn` since we want the guarantee that the
+    // pipeline has been deleted before committing the state and slots
+    // deletions.
     txn.commit().await?;
     source_txn.commit().await?;
 
     if let Some(table_ids) = table_ids {
-        // If we succeeded to commit both transactions, we are safe to delete the slots. The reason for
-        // not deleting slots in the transaction is that `pg_drop_replication_slot(...)` is not transactional.
+        // If we succeeded to commit both transactions, we are safe to delete the slots.
+        // The reason for not deleting slots in the transaction is that
+        // `pg_drop_replication_slot(...)` is not transactional.
         slots::delete_pipeline_replication_slots(&source_pool, pipeline.id as u64, &table_ids)
             .await?;
     }

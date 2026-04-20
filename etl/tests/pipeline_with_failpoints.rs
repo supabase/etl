@@ -167,8 +167,8 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     let _scenario = FailScenario::setup();
-    // Since we have table_error_retry_max_attempts: 2, we want to fail 3 times, so that on the 3rd
-    // time, the system switches to manual retry.
+    // Since we have table_error_retry_max_attempts: 2, we want to fail 3 times, so
+    // that on the 3rd time, the system switches to manual retry.
     fail::cfg(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, "3*return(timed_retry)").unwrap();
 
     init_test_tracing();
@@ -193,8 +193,8 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
         destination.clone(),
     );
 
-    // Register notifications for waiting on the manual retry which is expected to be flipped by the
-    // max attempts handling.
+    // Register notifications for waiting on the manual retry which is expected to
+    // be flipped by the max attempts handling.
     let users_state_notify = store
         .notify_on_table_state(database_schema.users_schema().id, |phase| {
             matches!(
@@ -916,15 +916,15 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         )
         .await;
 
-    // The reason for why we wait for two `Relation` messages is that since we have a DDL event before
-    // DML statements, Postgres likely avoids sending an initial `Relation` message since it's already
-    // sent given the DDL event.
+    // The reason for why we wait for two `Relation` messages is that since we have
+    // a DDL event before DML statements, Postgres likely avoids sending an
+    // initial `Relation` message since it's already sent given the DDL event.
     let notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
         .await;
 
-    // We immediately add a column to the table without any DML, to show the case where we can recover
-    // in case we immediately start with a DDL event.
+    // We immediately add a column to the table without any DML, to show the case
+    // where we can recover in case we immediately start with a DDL event.
     database
         .alter_table(
             table_name.clone(),
@@ -965,7 +965,8 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 2);
     assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 2);
 
-    // Assert that we have 3 schema snapshots stored in order (1 base snapshot + 2 relation changes).
+    // Assert that we have 3 schema snapshots stored in order (1 base snapshot + 2
+    // relation changes).
     let table_schemas = store.get_table_schemas().await;
     let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
     assert_eq!(table_schemas_snapshots.len(), 3);
@@ -1254,7 +1255,8 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
     // Clear up the events.
     destination.clear_events().await;
 
-    // Restart the pipeline - Postgres will resend the data since we don't track progress exactly.
+    // Restart the pipeline - Postgres will resend the data since we don't track
+    // progress exactly.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,

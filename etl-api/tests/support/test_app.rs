@@ -484,8 +484,9 @@ impl Drop for TestApp {
         // First, abort the server task to ensure it's terminated.
         self.server_handle.abort();
 
-        // To use `block_in_place,` we need a multithreaded runtime since when a blocking
-        // task is issued, the runtime will offload existing tasks to another worker.
+        // To use `block_in_place,` we need a multithreaded runtime since when a
+        // blocking task is issued, the runtime will offload existing tasks to
+        // another worker.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tokio::task::block_in_place(|| {
                 Handle::current().block_on(async {
@@ -548,7 +549,8 @@ async fn spawn_test_app_with_services(
     let database_config = get_test_db_config();
     let api_db_pool = create_etl_api_database(&database_config).await;
 
-    // Generate encryption key bytes and create both the key and its base64 representation
+    // Generate encryption key bytes and create both the key and its base64
+    // representation
     let key_bytes = generate_random_bytes::<32>();
     let key =
         RandomizedNonceKey::new(&AES_256_GCM, &key_bytes).expect("failed to create encryption key");

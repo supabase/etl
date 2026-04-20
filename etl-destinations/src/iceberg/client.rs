@@ -39,10 +39,11 @@ const CATALOG_TOKEN: &str = "token";
 
 /// Client for managing Apache Iceberg data lake operations.
 ///
-/// This client provides a high-level interface for interacting with Iceberg catalogs,
-/// supporting operations such as namespace and table management, data insertion, and
-/// schema operations. It abstracts the underlying catalog implementation and provides
-/// a unified interface for both REST catalogs and Supabase-specific configurations.
+/// This client provides a high-level interface for interacting with Iceberg
+/// catalogs, supporting operations such as namespace and table management, data
+/// insertion, and schema operations. It abstracts the underlying catalog
+/// implementation and provides a unified interface for both REST catalogs and
+/// Supabase-specific configurations.
 ///
 /// The client maintains a thread-safe reference to the catalog implementation,
 /// allowing for concurrent operations across multiple threads.
@@ -55,9 +56,9 @@ pub struct IcebergClient {
 impl IcebergClient {
     /// Creates a new [`IcebergClient`] using a REST catalog configuration.
     ///
-    /// This constructor initializes a client that connects to an Iceberg catalog
-    /// through the REST catalog protocol. The REST catalog provides a standardized
-    /// HTTP-based interface for catalog operations.
+    /// This constructor initializes a client that connects to an Iceberg
+    /// catalog through the REST catalog protocol. The REST catalog provides
+    /// a standardized HTTP-based interface for catalog operations.
     pub async fn new_with_rest_catalog(
         catalog_uri: String,
         warehouse_name: String,
@@ -72,16 +73,18 @@ impl IcebergClient {
         Ok(IcebergClient { catalog: Arc::new(catalog) })
     }
 
-    /// Creates a new [`IcebergClient`] configured for Supabase storage integration.
+    /// Creates a new [`IcebergClient`] configured for Supabase storage
+    /// integration.
     ///
-    /// This constructor creates a client specifically configured to work with Supabase's
-    /// storage service, automatically setting up the necessary S3-compatible endpoints
-    /// and authentication parameters. The client uses Supabase's REST catalog implementation
-    /// with additional custom behavior for Supabase-specific operations.
+    /// This constructor creates a client specifically configured to work with
+    /// Supabase's storage service, automatically setting up the necessary
+    /// S3-compatible endpoints and authentication parameters. The client
+    /// uses Supabase's REST catalog implementation with additional custom
+    /// behavior for Supabase-specific operations.
     ///
-    /// The method automatically constructs the catalog URI and S3 endpoint from the
-    /// provided project reference and domain, simplifying the configuration process
-    /// for Supabase users.
+    /// The method automatically constructs the catalog URI and S3 endpoint from
+    /// the provided project reference and domain, simplifying the
+    /// configuration process for Supabase users.
     pub async fn new_with_supabase_catalog(
         project_ref: &str,
         supabase_domain: &str,
@@ -114,10 +117,10 @@ impl IcebergClient {
 
     /// Creates a namespace if it does not already exist.
     ///
-    /// This method performs an idempotent namespace creation operation. It first
-    /// checks if the namespace exists and only creates it if it's missing. The
-    /// namespace string can use dot notation for hierarchical namespaces
-    /// (e.g., "warehouse.schema").
+    /// This method performs an idempotent namespace creation operation. It
+    /// first checks if the namespace exists and only creates it if it's
+    /// missing. The namespace string can use dot notation for hierarchical
+    /// namespaces (e.g., "warehouse.schema").
     pub async fn create_namespace_if_missing(&self, namespace: &str) -> Result<(), iceberg::Error> {
         debug!(%namespace, "creating namespace");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
@@ -141,10 +144,11 @@ impl IcebergClient {
 
     /// Validates that the catalog is accessible by listing namespaces.
     ///
-    /// This method attempts to list namespaces in the catalog as a connectivity check,
-    /// similar to how BigQuery's `dataset_exists` verifies access. This is the cheapest
-    /// way to verify the connection to the Iceberg catalog works correctly.
-    /// Returns `Ok(())` if the catalog is accessible, or an error if connectivity fails.
+    /// This method attempts to list namespaces in the catalog as a connectivity
+    /// check, similar to how BigQuery's `dataset_exists` verifies access.
+    /// This is the cheapest way to verify the connection to the Iceberg
+    /// catalog works correctly. Returns `Ok(())` if the catalog is
+    /// accessible, or an error if connectivity fails.
     pub async fn validate_connectivity(&self) -> Result<(), iceberg::Error> {
         debug!("validating iceberg catalog connectivity");
         // Try to list namespaces as a connectivity check; this is the cheapest
@@ -156,9 +160,10 @@ impl IcebergClient {
     /// Creates a table if it does not already exist.
     ///
     /// This method performs an idempotent table creation operation. It checks
-    /// if the table exists within the specified namespace and creates it if missing.
-    /// The table schema is derived from the provided column schemas, which are
-    /// automatically converted from PostgreSQL types to Iceberg schema format.
+    /// if the table exists within the specified namespace and creates it if
+    /// missing. The table schema is derived from the provided column
+    /// schemas, which are automatically converted from PostgreSQL types to
+    /// Iceberg schema format.
     ///
     /// The created table includes default commit properties for retry behavior
     /// and transaction management.
@@ -185,7 +190,8 @@ impl IcebergClient {
         Ok(())
     }
 
-    /// Generates default table properties for commit behavior and retry configuration.
+    /// Generates default table properties for commit behavior and retry
+    /// configuration.
     ///
     /// This method returns a set of table properties that configure the commit
     /// behavior for Iceberg tables, including retry timeouts, retry counts, and
@@ -228,8 +234,8 @@ impl IcebergClient {
     /// Removes a table from the specified namespace if it exists.
     ///
     /// This method checks if the table exists before attempting to drop it,
-    /// providing idempotent behavior. Returns `Ok(true)` if a table was dropped,
-    /// `Ok(false)` if the table did not exist.
+    /// providing idempotent behavior. Returns `Ok(true)` if a table was
+    /// dropped, `Ok(false)` if the table did not exist.
     pub async fn drop_table_if_exists(
         &self,
         namespace: &str,
@@ -251,8 +257,9 @@ impl IcebergClient {
 
     /// Removes a namespace from the catalog.
     ///
-    /// This method permanently deletes the namespace from the catalog. The namespace
-    /// must be empty (contain no tables) before it can be dropped.
+    /// This method permanently deletes the namespace from the catalog. The
+    /// namespace must be empty (contain no tables) before it can be
+    /// dropped.
     pub async fn drop_namespace(&self, namespace: &str) -> Result<(), iceberg::Error> {
         debug!(%namespace, "dropping namespace");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
@@ -261,9 +268,9 @@ impl IcebergClient {
 
     /// Loads a table from the catalog.
     ///
-    /// This method retrieves the table metadata and returns a [`Table`] instance
-    /// that can be used for further operations such as reading data, writing data,
-    /// or inspecting the table schema and properties.
+    /// This method retrieves the table metadata and returns a [`Table`]
+    /// instance that can be used for further operations such as reading
+    /// data, writing data, or inspecting the table schema and properties.
     pub async fn load_table(
         &self,
         namespace: String,
@@ -296,8 +303,9 @@ impl IcebergClient {
         let table_metadata = table.metadata();
         let iceberg_schema = table_metadata.current_schema();
 
-        // Convert the actual Iceberg schema to Arrow schema using iceberg-rust's built-in converter
-        // This preserves field IDs properly for transaction-based writes
+        // Convert the actual Iceberg schema to Arrow schema using iceberg-rust's
+        // built-in converter This preserves field IDs properly for
+        // transaction-based writes
         let arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
             .map_err(iceberg_error_to_etl_error)?;
         let record_batch =
@@ -308,10 +316,11 @@ impl IcebergClient {
 
     /// Writes a RecordBatch to an Iceberg table using Parquet format.
     ///
-    /// This method handles the low-level details of writing Arrow RecordBatch data
-    /// to an Iceberg table. It creates the necessary writers, applies the data,
-    /// and commits the transaction to make the data visible in the table. Returns
-    /// the total number of bytes of the written data files.
+    /// This method handles the low-level details of writing Arrow RecordBatch
+    /// data to an Iceberg table. It creates the necessary writers, applies
+    /// the data, and commits the transaction to make the data visible in
+    /// the table. Returns the total number of bytes of the written data
+    /// files.
     async fn write_record_batch(
         &self,
         table: &Table,

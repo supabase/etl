@@ -516,7 +516,8 @@ async fn table_schema_copy_survives_pipeline_restarts() {
         database_schema.orders_schema()
     );
 
-    // We recreate a pipeline, assuming the other one was stopped, using the same state and destination.
+    // We recreate a pipeline, assuming the other one was stopped, using the same
+    // state and destination.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -527,7 +528,8 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 
     pipeline.start().await.unwrap();
 
-    // We wait for two inserts to be processed, one for `users` and one for `orders`.
+    // We wait for two inserts to be processed, one for `users` and one for
+    // `orders`.
     let insert_events_notify =
         destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
 
@@ -546,8 +548,8 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We check that both inserts were received, and we know that we can receive them only when the table
-    // schemas are available.
+    // We check that both inserts were received, and we know that we can receive
+    // them only when the table schemas are available.
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
     let users_inserts =
@@ -619,8 +621,9 @@ async fn publication_changes_are_correctly_handled() {
         .await
         .unwrap();
 
-    // Shutdown pipeline after the table was dropped. We do this to show that the dropping of a table
-    // doesn't cause issues with the pipeline since the change is picked up on pipeline restart.
+    // Shutdown pipeline after the table was dropped. We do this to show that the
+    // dropping of a table doesn't cause issues with the pipeline since the
+    // change is picked up on pipeline restart.
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Create table_3 which is going to be added to the publication.
@@ -645,8 +648,8 @@ async fn publication_changes_are_correctly_handled() {
 
     table_3_ready_notify.notified().await;
 
-    // Insert one row in table_1 and wait for it. (We wait for 4 inserts since it keeps the previous
-    // ones).
+    // Insert one row in table_1 and wait for it. (We wait for 4 inserts since it
+    // keeps the previous ones).
     let inserts_notify =
         destination.wait_for_events_count_deduped(vec![(EventType::Insert, 4)]).await;
 
@@ -669,8 +672,8 @@ async fn publication_changes_are_correctly_handled() {
     let slot_state = database.get_replication_slot_state(&table_2_slot_name).await.unwrap();
     assert_eq!(slot_state, None, "Table sync slot for removed table should be deleted");
 
-    // The destination should have the 2 events of the first table, the 1 event of the removed table
-    // and the 1 event of the new table.
+    // The destination should have the 2 events of the first table, the 1 event of
+    // the removed table and the 1 event of the new table.
     // Use de-duplicated events for assertions to be robust to potential duplicates
     // on restart where confirmed_flush_lsn may not have been stored.
     let events = destination.get_events_deduped().await;
@@ -737,8 +740,8 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         database.create_table(table_2.clone(), true, &[("value", "int4 not null")]).await.unwrap();
     database.insert_values(table_2.clone(), &["value"], &[&1_i32]).await.unwrap();
 
-    // Wait for the events to come in from the new table to make sure the pipeline reacts to them
-    // gracefully even if they are not replicated.
+    // Wait for the events to come in from the new table to make sure the pipeline
+    // reacts to them gracefully even if they are not replicated.
     sleep(Duration::from_secs(2)).await;
 
     // Shutdown and verify no errors occurred.
@@ -866,8 +869,8 @@ async fn run_table_sync_copy_case<F>(
     let orders_table_copied_rows = table_rows.get(&orders_table_id).map(|r| r.len()).unwrap_or(0);
     assert_eq!(users_table_copied_rows, expected_users_copied_rows);
     assert_eq!(orders_table_copied_rows, expected_orders_copied_rows);
-    // We always expect the method to be called since the downstream table should be created
-    // nonetheless.
+    // We always expect the method to be called since the downstream table should be
+    // created nonetheless.
     assert_eq!(destination.write_table_rows_called().await, 2);
 
     // We validate that the single insert was received.
@@ -1077,11 +1080,12 @@ async fn table_copy_and_sync_streams_new_data() {
         get_users_age_sum_from_rows(&destination, database_schema.users_schema().id).await;
     assert_eq!(age_sum, expected_age_sum);
 
-    // Get all the events that were produced to the destination and assert them individually by table
-    // since the only thing we are guaranteed is that the order of operations is preserved within the
-    // same table but not across tables given the asynchronous nature of the pipeline (e.g., we could
-    // start streaming earlier on a table for data which was inserted after another table which was
-    // modified before this one)
+    // Get all the events that were produced to the destination and assert them
+    // individually by table since the only thing we are guaranteed is that the
+    // order of operations is preserved within the same table but not across
+    // tables given the asynchronous nature of the pipeline (e.g., we could
+    // start streaming earlier on a table for data which was inserted after another
+    // table which was modified before this one)
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
     let users_inserts =
@@ -1127,8 +1131,8 @@ async fn table_sync_streams_new_data_with_batch_timeout_expired() {
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
-    // We set a batch of 1000 elements to check if after 1000ms we still get the batch which is <
-    // 1000 elements.
+    // We set a batch of 1000 elements to check if after 1000ms we still get the
+    // batch which is < 1000 elements.
     let batch_config = BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2 };
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
@@ -1190,8 +1194,8 @@ async fn table_processing_converges_to_apply_loop_with_no_events_coming() {
 
     // Start pipeline from scratch.
     let pipeline_id: PipelineId = random();
-    // We set a batch of 1000 elements to still check that even with batching we are getting all the
-    // data.
+    // We set a batch of 1000 elements to still check that even with batching we are
+    // getting all the data.
     let batch_config = BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2 };
     let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
@@ -1243,7 +1247,8 @@ async fn table_without_primary_key_is_errored() {
         .await
         .expect("Failed to create publication");
 
-    // Insert a row to later check that this doesn't appear in destination's table rows.
+    // Insert a row to later check that this doesn't appear in destination's table
+    // rows.
     database.insert_values(table_name.clone(), &["name"], &[&"abc"]).await.unwrap();
 
     let state_store = NotifyingStore::new();
@@ -1347,7 +1352,8 @@ async fn pipeline_respects_column_level_publication() {
     // Insert test data with all columns (including email and phone).
     database
         .run_sql(&format!(
-            "insert into {} (name, age, email, phone) values ('Alice', 25, 'alice@example.com', '555-0001')",
+            "insert into {} (name, age, email, phone) values ('Alice', 25, 'alice@example.com', \
+             '555-0001')",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1384,8 +1390,8 @@ async fn pipeline_respects_column_level_publication() {
     );
     assert_eq!(initial_relation_event.replicated_table_schema.inner().column_schemas.len(), 5);
 
-    // Check that each insert event contains only the published columns (id, name, age) and that the
-    // schema used is correct.
+    // Check that each insert event contains only the published columns (id, name,
+    // age) and that the schema used is correct.
     for event in insert_events {
         if let Event::Insert(InsertEvent { replicated_table_schema, table_row, .. }) = event {
             // Verify exactly 3 columns (id, name, age).
@@ -1421,7 +1427,8 @@ async fn pipeline_respects_column_level_publication() {
 
     database
         .run_sql(&format!(
-            "insert into {} (name, age, email, phone) values ('Charlie', 35, 'charlie@example.com', '555-0003')",
+            "insert into {} (name, age, email, phone) values ('Charlie', 35, \
+             'charlie@example.com', '555-0003')",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1486,7 +1493,8 @@ async fn pipeline_respects_column_level_publication() {
 
     database
         .run_sql(&format!(
-            "insert into {} (name, age, email, phone) values ('Diana', 40, 'diana@example.com', '555-0004')",
+            "insert into {} (name, age, email, phone) values ('Diana', 40, 'diana@example.com', \
+             '555-0004')",
             table_name.as_quoted_identifier()
         ))
         .await
@@ -1605,11 +1613,13 @@ async fn empty_tables_are_created_at_destination() {
     assert_eq!(destination.write_table_rows_called().await, 1);
 }
 
-/// Tests that resetting a table's state to Init triggers a table sync that truncates the
-/// destination before re-copying data. This ensures no duplicate data after a state reset.
+/// Tests that resetting a table's state to Init triggers a table sync that
+/// truncates the destination before re-copying data. This ensures no duplicate
+/// data after a state reset.
 ///
 /// Test flow:
-/// 1. Initial table sync: 5 rows (ids 1-5) written to table_rows for both users and orders
+/// 1. Initial table sync: 5 rows (ids 1-5) written to table_rows for both users
+///    and orders
 /// 2. CDC phase: 2 rows (ids 6-7) written as events for both tables
 /// 3. Reset users table state to Init
 /// 4. Insert 3 new rows (ids 100-102) for users only
@@ -1710,13 +1720,15 @@ async fn table_sync_truncates_destination_after_state_reset() {
 
     // We clear the events and rows to check that only users data is written.
     //
-    // This deletion becomes a bit confusing when used in the context of truncation that should take
-    // care of deleting data by itself, however, in this test we just want to make sure that truncation
-    // is called and that the data is rewritten from scratch.
+    // This deletion becomes a bit confusing when used in the context of truncation
+    // that should take care of deleting data by itself, however, in this test
+    // we just want to make sure that truncation is called and that the data is
+    // rewritten from scratch.
     destination.clear_events().await;
     destination.clear_table_rows().await;
 
-    // Register waits before resetting state so they observe the resync work from this point on.
+    // Register waits before resetting state so they observe the resync work from
+    // this point on.
     let users_ready_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,
@@ -1730,7 +1742,8 @@ async fn table_sync_truncates_destination_after_state_reset() {
     users_ready_notify.notified().await;
 
     // Wait for all user events (table_rows + CDC) to be processed.
-    // After reset, data can end up in either table_rows or events depending on timing.
+    // After reset, data can end up in either table_rows or events depending on
+    // timing.
     let total_expected_users = initial_rows + cdc_rows + new_rows_after_reset;
     let all_users_events_notify = destination
         .wait_for_all_events(vec![EventCondition::Table(
@@ -1761,7 +1774,8 @@ async fn table_sync_truncates_destination_after_state_reset() {
     let events_after = destination.get_events().await;
     let grouped_events_after = group_events_by_type_and_table_id(&events_after);
 
-    // Users: table_rows + events should equal the total expected (data can be in either).
+    // Users: table_rows + events should equal the total expected (data can be in
+    // either).
     let users_rows = table_rows_after.get(&database_schema.users_schema().id).unwrap().len();
     let users_events = grouped_events_after
         .get(&(EventType::Insert, database_schema.users_schema().id))
@@ -1769,7 +1783,8 @@ async fn table_sync_truncates_destination_after_state_reset() {
         .unwrap_or(0);
     assert_eq!(users_rows + users_events, total_expected_users);
 
-    // Orders: no data, since we cleared it before restart and nothing should happen on orders.
+    // Orders: no data, since we cleared it before restart and nothing should happen
+    // on orders.
     assert!(!table_rows_after.contains_key(&database_schema.orders_schema().id));
     assert!(
         !grouped_events_after
@@ -1803,8 +1818,8 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     pipeline.start().await.unwrap();
 
     // Spawn a task that inserts data concurrently using a separate connection.
-    // This creates a race condition where some rows may be captured during table copy
-    // and others during streaming replication.
+    // This creates a race condition where some rows may be captured during table
+    // copy and others during streaming replication.
     let rows_to_insert = 10;
     let users_table_name = database_schema.users_schema().name.clone();
     let orders_table_name = database_schema.orders_schema().name.clone();
@@ -1824,8 +1839,9 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
         )
         .await;
 
-    // Wait for all rows to be processed (either as table copy or streaming inserts).
-    // This waits for 20 total inserts across both tables (10 users + 10 orders).
+    // Wait for all rows to be processed (either as table copy or streaming
+    // inserts). This waits for 20 total inserts across both tables (10 users +
+    // 10 orders).
     let all_events_notify = destination
         .wait_for_all_events(vec![EventCondition::Any(
             EventType::Insert,
@@ -1833,7 +1849,8 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
         )])
         .await;
 
-    // Use a JoinHandle to ensure the task completes and the database isn't dropped prematurely.
+    // Use a JoinHandle to ensure the task completes and the database isn't dropped
+    // prematurely.
     let insert_handle = tokio::spawn(async move {
         insert_mock_data(
             &mut duplicate_database,
@@ -1844,7 +1861,8 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
         )
         .await;
 
-        // Return the database to prevent it from being dropped and destroying the test database.
+        // Return the database to prevent it from being dropped and destroying the test
+        // database.
         duplicate_database
     });
 
@@ -1855,7 +1873,8 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     // Wait for the insert task to complete and retrieve the database connection.
     let duplicate_database = insert_handle.await.unwrap();
 
-    // Validate that the sum of table rows (from copy) + insert events (from streaming) equals expected count.
+    // Validate that the sum of table rows (from copy) + insert events (from
+    // streaming) equals expected count.
     let table_rows = destination.get_table_rows().await;
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);

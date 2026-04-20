@@ -30,7 +30,8 @@ const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 30;
 /// Delay in milliseconds between verification attempts when querying BigQuery.
 const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
 
-/// Retry policy for BigQuery test setup operations (client creation, dataset creation).
+/// Retry policy for BigQuery test setup operations (client creation, dataset
+/// creation).
 const SETUP_RETRY_POLICY: RetryPolicy = RetryPolicy {
     max_retries: 4,
     initial_delay: Duration::from_secs(1),
@@ -103,7 +104,8 @@ pub fn random_dataset_id() -> String {
 
 /// BigQuery database connection for testing.
 ///
-/// Provides a wrapper around the BigQuery client with automatic dataset cleanup on drop.
+/// Provides a wrapper around the BigQuery client with automatic dataset cleanup
+/// on drop.
 pub struct BigQueryDatabase {
     client: Client,
     project_id: String,
@@ -118,8 +120,8 @@ impl BigQueryDatabase {
     ///
     /// # Panics
     ///
-    /// Panics if the `TESTS_BIGQUERY_PROJECT_ID` environment variable is not set
-    /// or if client creation fails.
+    /// Panics if the `TESTS_BIGQUERY_PROJECT_ID` environment variable is not
+    /// set or if client creation fails.
     pub async fn new(sa_key_path: &str) -> Self {
         let project_id = get_project_id();
         let client = ClientBuilder::new()
@@ -196,8 +198,9 @@ impl BigQueryDatabase {
 
     /// Executes a SELECT * query against the specified table.
     ///
-    /// Returns all rows from the table in the test dataset, polling until BigQuery
-    /// surfaces the streamed data or a short retry budget is exhausted.
+    /// Returns all rows from the table in the test dataset, polling until
+    /// BigQuery surfaces the streamed data or a short retry budget is
+    /// exhausted.
     pub async fn query_table(&self, table_name: TableName) -> Option<Vec<TableRow>> {
         let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
         let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
@@ -226,8 +229,8 @@ impl BigQueryDatabase {
     /// Queries the schema (column metadata) for a table.
     ///
     /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS.
-    /// The table name pattern matches using REGEXP_CONTAINS to match the sequenced
-    /// table name format: `{table_id}_{sequence_number}`.
+    /// The table name pattern matches using REGEXP_CONTAINS to match the
+    /// sequenced table name format: `{table_id}_{sequence_number}`.
     pub async fn query_table_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
         let project_id = self.project_id();
         let dataset_id = self.dataset_id();
@@ -237,10 +240,9 @@ impl BigQueryDatabase {
         // BigQuery table names have format: {schema}_{table}_{sequence_number}
         // The regex matches the table_id followed by underscore and one or more digits.
         let query = format!(
-            "SELECT column_name, data_type, ordinal_position \
-             FROM `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` \
-             WHERE REGEXP_CONTAINS(table_name, r'^{table_id}_[0-9]+$') \
-             ORDER BY ordinal_position"
+            "SELECT column_name, data_type, ordinal_position FROM \
+             `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` WHERE \
+             REGEXP_CONTAINS(table_name, r'^{table_id}_[0-9]+$') ORDER BY ordinal_position"
         );
 
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
@@ -265,8 +267,9 @@ impl BigQueryDatabase {
 
     /// Manually creates a table in the test dataset using column definitions.
     ///
-    /// Creates a table by generating a DDL statement from the provided column specifications.
-    /// Each column is specified as a tuple of (column_name, bigquery_type).
+    /// Creates a table by generating a DDL statement from the provided column
+    /// specifications. Each column is specified as a tuple of (column_name,
+    /// bigquery_type).
     pub async fn create_table(&self, table_id: &str, columns: &[(&str, &str)]) {
         let column_definitions: Vec<String> =
             columns.iter().map(|(name, data_type)| format!("{name} {data_type}")).collect();
@@ -389,7 +392,8 @@ impl BigQueryTableSchema {
         );
     }
 
-    /// Asserts that the schema contains exactly the specified columns (by name).
+    /// Asserts that the schema contains exactly the specified columns (by
+    /// name).
     ///
     /// The order of columns does not matter. CDC columns (`_CHANGE_TYPE` and
     /// `_CHANGE_SEQUENCE_NUMBER`) are excluded from the comparison.
@@ -439,7 +443,8 @@ pub async fn setup_bigquery_database() -> BigQueryDatabase {
     db
 }
 
-/// Sets up a BigQuery database connection for testing without creating a dataset.
+/// Sets up a BigQuery database connection for testing without creating a
+/// dataset.
 ///
 /// Useful for validation tests that don't need an actual dataset.
 /// The dataset ID is still generated but not created in BigQuery.

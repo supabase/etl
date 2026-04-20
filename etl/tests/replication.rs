@@ -51,16 +51,14 @@ fn test_column(
 }
 
 fn column_schemas_from_ddl_message(message: &JsonValue) -> Vec<ColumnSchema> {
-    let primary_key_positions: std::collections::HashMap<i32, i32> =
-        message["identity"]["primary_key_attnums"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .enumerate()
-            .map(|(index, attnum)| {
-                (attnum.as_i64().unwrap() as i32, i32::try_from(index + 1).unwrap())
-            })
-            .collect();
+    let primary_key_positions: std::collections::HashMap<i32, i32> = message["identity"]
+        ["primary_key_attnums"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(index, attnum)| (attnum.as_i64().unwrap() as i32, i32::try_from(index + 1).unwrap()))
+        .collect();
 
     let mut columns = message["columns"]
         .as_array()
@@ -275,8 +273,8 @@ async fn test_replication_client_creates_slot() {
     let get_slot = client.get_slot(&slot_name).await.unwrap();
     assert!(!get_slot.confirmed_flush_lsn.to_string().is_empty());
 
-    // Since we did not do anything with the slot, we expect the consistent point to be the same
-    // as the confirmed flush lsn.
+    // Since we did not do anything with the slot, we expect the consistent point to
+    // be the same as the confirmed flush lsn.
     assert_eq!(create_slot.consistent_point, get_slot.confirmed_flush_lsn);
 }
 
@@ -438,7 +436,8 @@ async fn test_table_schema_copy_across_multiple_connections() {
         .await
         .unwrap();
 
-    // We create the slot when the database schema contains both 'table_1' and 'table_2'.
+    // We create the slot when the database schema contains both 'table_1' and
+    // 'table_2'.
     let (transaction, _) =
         second_client.create_slot_with_transaction(&test_slot_name("my_slot")).await.unwrap();
 
@@ -486,8 +485,8 @@ async fn test_table_schema_preserves_primary_key_constraint_order() {
         .as_ref()
         .unwrap()
         .query_one(
-            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace \
-             where n.nspname = $1 and c.relname = $2",
+            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace where \
+             n.nspname = $1 and c.relname = $2",
             &[&table_name.schema, &table_name.name],
         )
         .await
@@ -534,8 +533,8 @@ async fn test_ddl_message_primary_key_order_matches_loaded_table_schema() {
         .as_ref()
         .unwrap()
         .query_one(
-            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace \
-             where n.nspname = $1 and c.relname = $2",
+            "select c.oid from pg_class c join pg_namespace n on n.oid = c.relnamespace where \
+             n.nspname = $1 and c.relname = $2",
             &[&table_name.schema, &table_name.name],
         )
         .await
@@ -661,9 +660,10 @@ async fn test_table_copy_stream_respects_row_filter() {
 
     let parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    // We apply a row filter (age >= 18), so we expect the number of rows post-synchronization to be the numbers 18..=30
-    // when inserting the range 1..=30 (`insert_generate_series` has an inclusive end)
-    // We use (18..30+1) since inclusive ranges don't have a `len` for i32.
+    // We apply a row filter (age >= 18), so we expect the number of rows
+    // post-synchronization to be the numbers 18..=30 when inserting the range
+    // 1..=30 (`insert_generate_series` has an inclusive end) We use (18..30+1)
+    // since inclusive ranges don't have a `len` for i32.
     let total_rows_count = 30;
     let expected_rows_count = (18..1 + total_rows_count as i32).len();
 
@@ -771,7 +771,8 @@ async fn test_get_replicated_column_names_respects_column_filter() {
         ],
     );
 
-    // Get replicated column names from the publication - should only include published columns.
+    // Get replicated column names from the publication - should only include
+    // published columns.
     let replicated_columns = transaction
         .get_replicated_column_names(test_table_id, &table_schema, publication_name)
         .await
@@ -815,7 +816,8 @@ async fn test_get_replicated_column_names_for_all_tables_publication() {
         .await
         .unwrap();
 
-    // Create a FOR ALL TABLES publication. Column filtering is NOT supported with this type.
+    // Create a FOR ALL TABLES publication. Column filtering is NOT supported with
+    // this type.
     let publication_name = "test_pub_all_tables";
     database
         .run_sql(&format!("create publication {publication_name} for all tables"))
@@ -830,8 +832,8 @@ async fn test_get_replicated_column_names_for_all_tables_publication() {
     // Get table schema.
     let table_schema = transaction.get_table_schema(test_table_id).await.unwrap();
 
-    // Get replicated column names - FOR ALL TABLES doesn't support column filtering,
-    // so all columns should be returned.
+    // Get replicated column names - FOR ALL TABLES doesn't support column
+    // filtering, so all columns should be returned.
     let replicated_columns = transaction
         .get_replicated_column_names(test_table_id, &table_schema, publication_name)
         .await
@@ -839,7 +841,8 @@ async fn test_get_replicated_column_names_for_all_tables_publication() {
 
     transaction.commit().await.unwrap();
 
-    // All columns should be returned since FOR ALL TABLES doesn't support column filtering.
+    // All columns should be returned since FOR ALL TABLES doesn't support column
+    // filtering.
     assert_eq!(replicated_columns.len(), 4);
     assert!(replicated_columns.contains("id"));
     assert!(replicated_columns.contains("name"));
@@ -874,8 +877,9 @@ async fn test_get_replicated_column_names_for_tables_in_schema_publication() {
         .await
         .unwrap();
 
-    // Create a FOR TABLES IN SCHEMA publication. Column filtering is NOT supported with this type.
-    // Note: Tables are created in the "test" schema by test_table_name().
+    // Create a FOR TABLES IN SCHEMA publication. Column filtering is NOT supported
+    // with this type. Note: Tables are created in the "test" schema by
+    // test_table_name().
     let publication_name = "test_pub_schema";
     database
         .run_sql(&format!("create publication {publication_name} for tables in schema test"))
@@ -890,8 +894,8 @@ async fn test_get_replicated_column_names_for_tables_in_schema_publication() {
     // Get table schema.
     let table_schema = transaction.get_table_schema(test_table_id).await.unwrap();
 
-    // Get replicated column names - FOR TABLES IN SCHEMA doesn't support column filtering,
-    // so all columns should be returned.
+    // Get replicated column names - FOR TABLES IN SCHEMA doesn't support column
+    // filtering, so all columns should be returned.
     let replicated_columns = transaction
         .get_replicated_column_names(test_table_id, &table_schema, publication_name)
         .await
@@ -899,7 +903,8 @@ async fn test_get_replicated_column_names_for_tables_in_schema_publication() {
 
     transaction.commit().await.unwrap();
 
-    // All columns should be returned since FOR TABLES IN SCHEMA doesn't support column filtering.
+    // All columns should be returned since FOR TABLES IN SCHEMA doesn't support
+    // column filtering.
     assert_eq!(replicated_columns.len(), 4);
     assert!(replicated_columns.contains("id"));
     assert!(replicated_columns.contains("name"));
@@ -946,7 +951,8 @@ async fn test_get_replicated_column_names_errors_when_table_not_in_publication()
     // Get table schema for the table NOT in the publication.
     let table_schema = transaction.get_table_schema(table_1_id).await.unwrap();
 
-    // Attempting to get replicated column names for a table not in the publication should error.
+    // Attempting to get replicated column names for a table not in the publication
+    // should error.
     let result =
         transaction.get_replicated_column_names(table_1_id, &table_schema, publication_name).await;
 
@@ -1135,11 +1141,12 @@ async fn test_start_logical_replication() {
     let counts = count_stream_components(stream, |counts| counts.insert_count == 10).await;
     assert_eq!(counts.insert_count, 10);
 
-    // We create a new connection and start another replication instance from the same slot to check
-    // if the same data is received.
+    // We create a new connection and start another replication instance from the
+    // same slot to check if the same data is received.
     let parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    // We try to stream again from that consistent point and see if we get the same data.
+    // We try to stream again from that consistent point and see if we get the same
+    // data.
     let stream = parent_client
         .start_logical_replication("my_publication", &slot_name, slot.consistent_point)
         .await
@@ -1187,7 +1194,8 @@ async fn test_schema_change_messages_emit_enriched_payload_for_multiple_alter_ta
         .unwrap();
     database
         .run_sql(&format!(
-            "insert into {quoted_table_name} (name, age, email) values ('alice', 30, 'alice@example.com')"
+            "insert into {quoted_table_name} (name, age, email) values ('alice', 30, \
+             'alice@example.com')"
         ))
         .await
         .unwrap();
@@ -1201,7 +1209,8 @@ async fn test_schema_change_messages_emit_enriched_payload_for_multiple_alter_ta
         .unwrap();
     database
         .run_sql(&format!(
-            "insert into {quoted_table_name} (full_name, age, email) values ('alice 2', 31, 'alice2@example.com')"
+            "insert into {quoted_table_name} (full_name, age, email) values ('alice 2', 31, \
+             'alice2@example.com')"
         ))
         .await
         .unwrap();
@@ -1215,7 +1224,8 @@ async fn test_schema_change_messages_emit_enriched_payload_for_multiple_alter_ta
         .unwrap();
     database
         .run_sql(&format!(
-            "insert into {quoted_table_name} (full_name, age, email) values ('alice 3', 32, 'alice3@example.com')"
+            "insert into {quoted_table_name} (full_name, age, email) values ('alice 3', 32, \
+             'alice3@example.com')"
         ))
         .await
         .unwrap();
@@ -1226,7 +1236,8 @@ async fn test_schema_change_messages_emit_enriched_payload_for_multiple_alter_ta
         .unwrap();
     database
         .run_sql(&format!(
-            "insert into {quoted_table_name} (full_name, age, email) values ('alice 4', 33, 'alice4@example.com')"
+            "insert into {quoted_table_name} (full_name, age, email) values ('alice 4', 33, \
+             'alice4@example.com')"
         ))
         .await
         .unwrap();
@@ -1459,7 +1470,8 @@ async fn test_single_alter_table_statement_with_multiple_subcommands_emits_one_d
         .unwrap();
     database
         .run_sql(&format!(
-            "insert into {quoted_table_name} (name, email, status) values ('alice', 'alice@example.com', 'active')"
+            "insert into {quoted_table_name} (name, email, status) values ('alice', \
+             'alice@example.com', 'active')"
         ))
         .await
         .unwrap();

@@ -69,8 +69,8 @@ pub struct EncryptedValue {
 
 /// Encrypts a string using AES-256-GCM encryption.
 ///
-/// Returns an [`EncryptedValue`] containing the key ID, nonce, and encrypted data,
-/// all base64-encoded for safe storage and transmission.
+/// Returns an [`EncryptedValue`] containing the key ID, nonce, and encrypted
+/// data, all base64-encoded for safe storage and transmission.
 pub fn encrypt_text(
     value: String,
     encryption_key: &EncryptionKey,
@@ -88,8 +88,8 @@ pub fn encrypt_text(
 
 /// Decrypts an [`EncryptedValue`] back to the original string.
 ///
-/// Validates the key ID matches before attempting decryption. Returns the original
-/// plaintext string if decryption succeeds.
+/// Validates the key ID matches before attempting decryption. Returns the
+/// original plaintext string if decryption succeeds.
 pub fn decrypt_text(
     encrypted_value: EncryptedValue,
     encryption_key: &EncryptionKey,

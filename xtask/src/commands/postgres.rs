@@ -12,7 +12,8 @@ use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT};
 const COMPOSE_FILE: &str = "./scripts/docker-compose.yaml";
 
 /// Returns the program and initial args for docker compose.
-/// Prefers `docker compose` (v2 plugin) and falls back to `docker-compose` (standalone).
+/// Prefers `docker compose` (v2 plugin) and falls back to `docker-compose`
+/// (standalone).
 fn docker_compose_command() -> (&'static str, &'static [&'static str]) {
     if Command::new("docker")
         .args(["compose", "version"])
@@ -52,7 +53,8 @@ struct StartArgs {
     #[arg(long, env = "NUM_LOCAL_DATABASES", default_value_t = DEFAULT_PG_SHARD_COUNT)]
     shards: u16,
 
-    /// Base port for the first cluster. Additional clusters use consecutive ports.
+    /// Base port for the first cluster. Additional clusters use consecutive
+    /// ports.
     #[arg(long, env = "TESTS_DATABASE_START_PORT", default_value_t = DEFAULT_BASE_PORT)]
     base_port: u16,
 

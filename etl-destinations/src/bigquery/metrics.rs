@@ -14,7 +14,8 @@ pub(super) const ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL: &str =
 /// Register BigQuery-specific metrics.
 ///
 /// This should be called before starting BigQuery operations.
-/// It is safe to call this method multiple times - metrics are registered only once.
+/// It is safe to call this method multiple times - metrics are registered only
+/// once.
 pub(super) fn register_metrics() {
     REGISTER_METRICS.call_once(|| {
         describe_histogram!(

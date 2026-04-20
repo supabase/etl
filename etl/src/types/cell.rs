@@ -26,12 +26,13 @@ macro_rules! convert_array_variant {
 
 /// Represents a single database cell value with support for Postgres types.
 ///
-/// [`Cell`] is the primary data container for individual values during ETL processing.
-/// It supports all common Postgres data types including arrays, JSON, and temporal types.
-/// Each variant handles nullable data appropriately for the destination system.
+/// [`Cell`] is the primary data container for individual values during ETL
+/// processing. It supports all common Postgres data types including arrays,
+/// JSON, and temporal types. Each variant handles nullable data appropriately
+/// for the destination system.
 ///
-/// The enum is designed to preserve type information and enable efficient conversion
-/// to destination formats while maintaining data fidelity.
+/// The enum is designed to preserve type information and enable efficient
+/// conversion to destination formats while maintaining data fidelity.
 #[derive(Debug, PartialEq)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum Cell {
@@ -103,12 +104,13 @@ impl Cell {
 
 /// Represents array data from Postgres with nullable elements.
 ///
-/// [`ArrayCell`] handles Postgres array types where individual elements can be NULL.
-/// Each variant corresponds to a Postgres array type and maintains the nullable
-/// nature of array elements as they exist in the source database.
+/// [`ArrayCell`] handles Postgres array types where individual elements can be
+/// NULL. Each variant corresponds to a Postgres array type and maintains the
+/// nullable nature of array elements as they exist in the source database.
 ///
 /// This type is used internally during data conversion and can be converted to
-/// [`ArrayCellNonOptional`] for destinations that don't support nullable array elements.
+/// [`ArrayCellNonOptional`] for destinations that don't support nullable array
+/// elements.
 #[derive(Debug, PartialEq)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum ArrayCell {
@@ -172,12 +174,12 @@ impl ArrayCell {
 
 /// Represents a database cell value with non-nullable array elements.
 ///
-/// [`CellNonOptional`] is a variant of [`Cell`] designed for destinations that do not
-/// support NULL values within arrays. The conversion from [`Cell`] to [`CellNonOptional`]
-/// will fail if any array contains NULL elements.
+/// [`CellNonOptional`] is a variant of [`Cell`] designed for destinations that
+/// do not support NULL values within arrays. The conversion from [`Cell`] to
+/// [`CellNonOptional`] will fail if any array contains NULL elements.
 ///
-/// This type is typically used when writing to destinations like BigQuery that require
-/// all array elements to be non-null.
+/// This type is typically used when writing to destinations like BigQuery that
+/// require all array elements to be non-null.
 #[derive(Debug, PartialEq)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum CellNonOptional {
@@ -261,12 +263,14 @@ impl CellNonOptional {
 
 /// Represents array data with non-nullable elements.
 ///
-/// [`ArrayCellNonOptional`] is the non-nullable counterpart to [`ArrayCell`]. It is used
-/// for destinations that do not support NULL values within arrays. The conversion from
-/// [`ArrayCell`] will fail with [`ErrorKind::NullValuesNotSupportedInArrayInDestination`]
-/// if any element is NULL.
+/// [`ArrayCellNonOptional`] is the non-nullable counterpart to [`ArrayCell`].
+/// It is used for destinations that do not support NULL values within arrays.
+/// The conversion from [`ArrayCell`] will fail with
+/// [`ErrorKind::NullValuesNotSupportedInArrayInDestination`] if any element is
+/// NULL.
 ///
-/// Each variant corresponds to a Postgres array type with guaranteed non-null elements.
+/// Each variant corresponds to a Postgres array type with guaranteed non-null
+/// elements.
 #[derive(Debug, PartialEq)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum ArrayCellNonOptional {

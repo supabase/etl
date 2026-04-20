@@ -46,20 +46,20 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maximum number of schema snapshots to keep cached per table.
 ///
-/// This limits memory usage by evicting older snapshots when new ones are added.
-/// In practice, during a single batch of events, it's highly unlikely to need
-/// more than 2 schema versions for any given table.
+/// This limits memory usage by evicting older snapshots when new ones are
+/// added. In practice, during a single batch of events, it's highly unlikely to
+/// need more than 2 schema versions for any given table.
 const MAX_CACHED_SCHEMAS_PER_TABLE: usize = 2;
 
 /// Creates a lazily connected pool with automatic idle connection cleanup.
 ///
-/// This function returns immediately without establishing any connections. Connections are created
-/// on-demand when queries are executed and automatically closed after being idle for the specified
-/// duration.
+/// This function returns immediately without establishing any connections.
+/// Connections are created on-demand when queries are executed and
+/// automatically closed after being idle for the specified duration.
 ///
-/// This is ideal for the store connection since we might want a connection to be open for a while
-/// and then closed when it's unnecessary since after the first table copy phase, we don't update
-/// the state so often.
+/// This is ideal for the store connection since we might want a connection to
+/// be open for a while and then closed when it's unnecessary since after the
+/// first table copy phase, we don't update the state so often.
 fn create_database_pool(config: &PgConnectionConfig) -> PgPool {
     let options = config.with_db(Some(&ETL_STATE_MANAGEMENT_OPTIONS));
 
@@ -82,7 +82,8 @@ async fn apply_migrations(connection_config: &PgConnectionConfig) -> Result<(), 
 
     let mut conn = PgConnection::connect_with(&options).await?;
 
-    // Suppress routine DDL notices so startup logs stay focused on phase-level events.
+    // Suppress routine DDL notices so startup logs stay focused on phase-level
+    // events.
     conn.execute("set client_min_messages = warning;").await?;
 
     // Create the `etl` schema if it doesn't exist.
@@ -103,7 +104,8 @@ async fn apply_migrations(connection_config: &PgConnectionConfig) -> Result<(), 
     Ok(())
 }
 
-/// Emits table-related metrics which quantify the total number of tables in each phase.
+/// Emits table-related metrics which quantify the total number of tables in
+/// each phase.
 fn emit_table_metrics(counts_by_phase: &HashMap<&'static str, u64>) {
     for (phase, count) in counts_by_phase {
         gauge!(ETL_TABLES_TOTAL, PHASE_LABEL => *phase).set(*count as f64);
@@ -117,13 +119,14 @@ struct Inner {
     phase_counts: HashMap<&'static str, u64>,
     /// Cached table replication states indexed by table ID.
     table_states: TableReplicationStates,
-    /// Cached table schemas indexed by (table_id, snapshot_id) for versioning support.
+    /// Cached table schemas indexed by (table_id, snapshot_id) for versioning
+    /// support.
     ///
-    /// This cache is optimized for keeping the most actively used schemas in memory,
-    /// not all historical snapshots. Schemas are loaded on-demand from the database
-    /// when not found in cache. During normal operation, this typically contains
-    /// only the latest schema version for each table, since that's what the
-    /// replication pipeline actively uses.
+    /// This cache is optimized for keeping the most actively used schemas in
+    /// memory, not all historical snapshots. Schemas are loaded on-demand
+    /// from the database when not found in cache. During normal operation,
+    /// this typically contains only the latest schema version for each
+    /// table, since that's what the replication pipeline actively uses.
     table_schemas: HashMap<(TableId, SnapshotId), Arc<TableSchema>>,
     /// Cached destination table metadata indexed by table ID.
     destination_tables_metadata: DestinationTablesMetadata,
@@ -222,14 +225,16 @@ impl Inner {
 /// restart (the database is the source of truth).
 ///
 /// The application-level lock is only held for brief cache updates, minimizing
-/// the critical section to increase performance. This design assumes no concurrent
-/// updates to the same table: the `apply_worker` and `table_sync_worker` coordinate through state
-/// transitions and never race on the same table.
+/// the critical section to increase performance. This design assumes no
+/// concurrent updates to the same table: the `apply_worker` and
+/// `table_sync_worker` coordinate through state transitions and never race on
+/// the same table.
 ///
-/// If this invariant is violated, there could be some execution orders that could
-/// result in an inconsistent state. For example, there could be two state updates u1 and u2 being
-/// run in sequence. However, then u2 lands before u1 due to network latency, which causes the in-memory
-/// code to be updated to the result of u2 and then later to u1, causing an inconsistent state.
+/// If this invariant is violated, there could be some execution orders that
+/// could result in an inconsistent state. For example, there could be two state
+/// updates u1 and u2 being run in sequence. However, then u2 lands before u1
+/// due to network latency, which causes the in-memory code to be updated to the
+/// result of u2 and then later to u1, causing an inconsistent state.
 #[derive(Debug, Clone)]
 pub struct PostgresStore {
     pipeline_id: PipelineId,
@@ -240,9 +245,10 @@ pub struct PostgresStore {
 impl PostgresStore {
     /// Creates a new Postgres-backed store for the given pipeline.
     ///
-    /// Runs the required ETL migrations and then creates a lazily-connected pool
-    /// with automatic idle timeout. Connections are established on first use and
-    /// automatically closed after [`IDLE_TIMEOUT`] of inactivity.
+    /// Runs the required ETL migrations and then creates a lazily-connected
+    /// pool with automatic idle timeout. Connections are established on
+    /// first use and automatically closed after [`IDLE_TIMEOUT`] of
+    /// inactivity.
     pub async fn new(
         pipeline_id: PipelineId,
         source_config: PgConnectionConfig,
@@ -310,8 +316,9 @@ impl StateStore for PostgresStore {
 
         let table_states_len = table_states.len();
 
-        // For performance reasons, since we load the replication states only once during startup
-        // and from a single thread, we can afford to have a short critical section.
+        // For performance reasons, since we load the replication states only once
+        // during startup and from a single thread, we can afford to have a
+        // short critical section.
         let mut inner = self.inner.lock().await;
         inner.init_phase_counts(&table_states);
         inner.table_states = Arc::new(table_states);
@@ -325,12 +332,14 @@ impl StateStore for PostgresStore {
         Ok(table_states_len)
     }
 
-    /// Updates multiple table replication states atomically in both database and cache.
+    /// Updates multiple table replication states atomically in both database
+    /// and cache.
     async fn update_table_replication_states(
         &self,
         updates: Vec<(TableId, TableReplicationPhase)>,
     ) -> EtlResult<()> {
-        // Convert all states upfront to catch any conversion errors before starting the transaction
+        // Convert all states upfront to catch any conversion errors before starting the
+        // transaction
         let db_updates: Vec<(TableId, state::TableReplicationStateType, serde_json::Value)> =
             updates
                 .iter()
@@ -505,10 +514,11 @@ impl StateStore for PostgresStore {
 impl SchemaStore for PostgresStore {
     /// Retrieves a table schema at a specific snapshot point.
     ///
-    /// Returns the schema version with the largest snapshot_id <= the requested snapshot_id.
-    /// First checks the in-memory cache, then loads from the database if not found.
-    /// The loaded schema is cached for subsequent requests. Note that the cache is
-    /// optimized for active schemas, not historical snapshots.
+    /// Returns the schema version with the largest snapshot_id <= the requested
+    /// snapshot_id. First checks the in-memory cache, then loads from the
+    /// database if not found. The loaded schema is cached for subsequent
+    /// requests. Note that the cache is optimized for active schemas, not
+    /// historical snapshots.
     async fn get_table_schema(
         &self,
         table_id: &TableId,
@@ -516,13 +526,14 @@ impl SchemaStore for PostgresStore {
     ) -> EtlResult<Option<Arc<TableSchema>>> {
         // First, check if we have a cached schema that matches the criteria.
         //
-        // We can afford to hold the lock only for this short critical section since we assume that
-        // there is not really concurrency at the table level since each table is processed by exactly
-        // one worker.
+        // We can afford to hold the lock only for this short critical section since we
+        // assume that there is not really concurrency at the table level since
+        // each table is processed by exactly one worker.
         {
             let inner = self.inner.lock().await;
 
-            // Find the best matching schema in the cache (largest snapshot_id <= requested).
+            // Find the best matching schema in the cache (largest snapshot_id <=
+            // requested).
             let newest_table_schema = inner
                 .table_schemas
                 .iter()
@@ -588,9 +599,9 @@ impl SchemaStore for PostgresStore {
     /// Loads table schemas from Postgres into memory cache.
     ///
     /// This method connects to the source database, retrieves the latest schema
-    /// version for all tables in this pipeline, and populates the in-memory cache.
-    /// Called during pipeline initialization to establish the schema context
-    /// needed for processing replication events.
+    /// version for all tables in this pipeline, and populates the in-memory
+    /// cache. Called during pipeline initialization to establish the schema
+    /// context needed for processing replication events.
     async fn load_table_schemas(&self) -> EtlResult<usize> {
         debug!("loading table schemas from postgres state store");
 

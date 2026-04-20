@@ -9,13 +9,12 @@ use clap::{Args, ValueEnum};
 
 /// Nextest filter expression that selects tests requiring a Postgres cluster.
 ///
-/// This must stay in sync with the `shared-pg` test group in `.config/nextest.toml`.
+/// This must stay in sync with the `shared-pg` test group in
+/// `.config/nextest.toml`.
 const SHARED_PG_FILTER: &str = "\
-    test(exclusive_) \
-    | binary_id(etl::main) \
-    | (binary_id(etl-destinations::main) \
-       & test(/^(bigquery_pipeline|ducklake_pipeline|iceberg_destination)::/))\
-";
+    test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & \
+                                test(/^(bigquery_pipeline|ducklake_pipeline|iceberg_destination)::/\
+                                ))";
 
 use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT};
 
@@ -142,9 +141,11 @@ struct Lane {
     name: String,
     /// Nextest filter expression (`-E`) selecting which tests this lane runs.
     filter: String,
-    /// Nextest hash partition (e.g. `hash:1/3`). `None` for unpartitioned lanes.
+    /// Nextest hash partition (e.g. `hash:1/3`). `None` for unpartitioned
+    /// lanes.
     partition: Option<String>,
-    /// Port of the Postgres cluster for this lane. `None` for non-Postgres lanes.
+    /// Port of the Postgres cluster for this lane. `None` for non-Postgres
+    /// lanes.
     pg_port: Option<u16>,
 }
 

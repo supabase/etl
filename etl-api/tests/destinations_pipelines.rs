@@ -454,8 +454,8 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cannot_be_update
 
 // TODO: Re-enable these tests once MAX_PIPELINES_PER_TENANT is lifted from 1.
 // #[tokio::test(flavor = "multi_thread")]
-// async fn duplicate_destination_pipeline_with_same_source_cannot_be_created() {
-//     init_test_tracing();
+// async fn duplicate_destination_pipeline_with_same_source_cannot_be_created()
+// {     init_test_tracing();
 //     // Arrange
 //     let app = spawn_test_app().await;
 //     create_default_image(&app).await;
@@ -479,8 +479,8 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cannot_be_update
 //         .expect("failed to deserialize response");
 //     let first_destination_id = response.destination_id;
 //
-//     // Act - Try to create another pipeline with same source and the first destination
-//     let pipeline_request = CreatePipelineRequest {
+//     // Act - Try to create another pipeline with same source and the first
+// destination     let pipeline_request = CreatePipelineRequest {
 //         source_id,
 //         destination_id: first_destination_id,
 //         config: updated_pipeline_config(),
@@ -500,7 +500,8 @@ async fn destination_and_pipeline_can_be_deleted() {
     let tenant_id = &create_tenant(&app).await;
     create_default_image(&app).await;
 
-    // We set up the source database (just to make the deletion of state tables work)
+    // We set up the source database (just to make the deletion of state tables
+    // work)
     let (_source_pool, source_id, source_db_config) =
         create_test_source_database(&app, tenant_id).await;
     run_etl_migrations_on_source_database(&source_db_config).await;

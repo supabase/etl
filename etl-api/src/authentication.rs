@@ -9,8 +9,9 @@ use crate::config::{ApiConfig, ApiKey};
 
 /// Validates bearer token authentication for API requests.
 ///
-/// Compares the provided token against the configured API key using constant-time
-/// comparison to prevent timing attacks. Returns authentication errors for invalid tokens.
+/// Compares the provided token against the configured API key using
+/// constant-time comparison to prevent timing attacks. Returns authentication
+/// errors for invalid tokens.
 pub async fn auth_validator(
     req: ServiceRequest,
     credentials: BearerAuth,
@@ -47,7 +48,8 @@ pub async fn auth_validator(
         configured_keys
     };
 
-    // Compare against all configured keys without an early exit to avoid timing leaks.
+    // Compare against all configured keys without an early exit to avoid timing
+    // leaks.
     let mut valid = false;
     for key in &configured_keys {
         valid |= constant_time_eq_n(&key.key, &token.key);

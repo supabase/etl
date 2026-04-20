@@ -333,8 +333,8 @@ async fn table_subsequent_updates() {
         .await
         .unwrap();
 
-    // Create two transactions A and B on separate connections to make sure that the updates are
-    // ordered correctly.
+    // Create two transactions A and B on separate connections to make sure that the
+    // updates are ordered correctly.
     let transaction_a = database_1.begin_transaction().await;
     transaction_a
         .update_values(
@@ -381,8 +381,9 @@ async fn table_truncate_with_batching() {
 
     let bigquery_database = setup_bigquery_database().await;
 
-    // We create table `test_users_1` to simulate an error in the system where a table with that name
-    // already exists and should be replaced for replication to work correctly.
+    // We create table `test_users_1` to simulate an error in the system where a
+    // table with that name already exists and should be replaced for
+    // replication to work correctly.
     bigquery_database.create_table("test_users_1", &[("age", "integer")]).await;
 
     let store = NotifyingStore::new();
@@ -421,7 +422,8 @@ async fn table_truncate_with_batching() {
     users_state_notify.notified().await;
     orders_state_notify.notified().await;
 
-    // Wait for the 8 inserts (4 per table + 4 after truncate) and 2 truncates (1 per table).
+    // Wait for the 8 inserts (4 per table + 4 after truncate) and 2 truncates (1
+    // per table).
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 8), (EventType::Truncate, 2)])
         .await;
@@ -454,8 +456,8 @@ async fn table_truncate_with_batching() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We query BigQuery directly to get the data which tests have inserted, expecting that
-    // only the rows after truncation are there.
+    // We query BigQuery directly to get the data which tests have inserted,
+    // expecting that only the rows after truncation are there.
     let users_rows =
         bigquery_database.query_table(database_schema.users_schema().name).await.unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
@@ -1452,9 +1454,9 @@ async fn table_array_with_null_values() {
         .await
         .unwrap();
 
-    // We sleep to wait for the event to be processed. This is not ideal, but if we wanted to do
-    // this better, we would have to also implement error handling within the apply worker to write
-    // in the state store.
+    // We sleep to wait for the event to be processed. This is not ideal, but if we
+    // wanted to do this better, we would have to also implement error handling
+    // within the apply worker to write in the state store.
     sleep(Duration::from_secs(5)).await;
 
     // Wait for the pipeline expecting an error to be returned.
@@ -1471,12 +1473,12 @@ async fn table_array_with_null_values() {
         .await
         .unwrap();
 
-    // We have to reset the state of the table and copy it from scratch, otherwise the CDC will contain
-    // the inserts and deletes, failing again.
+    // We have to reset the state of the table and copy it from scratch, otherwise
+    // the CDC will contain the inserts and deletes, failing again.
     store.reset_table_state(table_id).await.unwrap();
 
-    // We also clear the events so that it's more idiomatic to wait for them, since we don't have
-    // the prior insert.
+    // We also clear the events so that it's more idiomatic to wait for them, since
+    // we don't have the prior insert.
     destination.clear_events().await;
 
     // We recreate the pipeline and try again.
@@ -1522,8 +1524,8 @@ async fn table_array_with_null_values() {
     // Check that there is only the valid row in BigQuery
     assert_eq!(table_rows.len(), 1);
 
-    // Check that the int array contains 3 elements, meaning it must be the second insert with all
-    // NON-NULL values
+    // Check that the int array contains 3 elements, meaning it must be the second
+    // insert with all NON-NULL values
     let row = &table_rows[0];
     if let Some(columns) = &row.columns {
         assert_eq!(columns.len(), 2);
@@ -1726,10 +1728,11 @@ async fn table_schema_change() {
     // 2. Drop the status column
     // 3. Add email column
     //
-    // Note: Each DDL change is captured via the DDL event trigger and stored in the schema
-    // store, but PostgreSQL sends only ONE Relation message with the final schema when the
-    // next DML operation (INSERT) occurs. The schema diffing in handle_relation_event then
-    // computes and applies all changes at once.
+    // Note: Each DDL change is captured via the DDL event trigger and stored in the
+    // schema store, but PostgreSQL sends only ONE Relation message with the
+    // final schema when the next DML operation (INSERT) occurs. The schema
+    // diffing in handle_relation_event then computes and applies all changes at
+    // once.
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;

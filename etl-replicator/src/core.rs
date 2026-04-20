@@ -52,8 +52,9 @@ pub(crate) async fn start_replicator_with_config(
     )
     .await?;
 
-    // For each destination, we start the pipeline. This is more verbose due to static dispatch, but
-    // we prefer more performance at the cost of ergonomics.
+    // For each destination, we start the pipeline. This is more verbose due to
+    // static dispatch, but we prefer more performance at the cost of
+    // ergonomics.
     match &replicator_config.destination {
         DestinationConfig::BigQuery {
             project_id,
@@ -172,7 +173,8 @@ pub(crate) async fn start_replicator_with_config(
                 (None, None) => None,
                 _ => {
                     return Err(ReplicatorError::config(std::io::Error::other(
-                        "ducklake s3 credentials must include both access key id and secret access key",
+                        "ducklake s3 credentials must include both access key id and secret \
+                         access key",
                     )));
                 }
             };
@@ -245,8 +247,9 @@ where
     // Start the pipeline.
     pipeline.start().await?;
 
-    // We spawn metrics collection after the pipeline was started, so that if we crash before starting
-    // we don't keep emitting metrics that make it look as if the system is running.
+    // We spawn metrics collection after the pipeline was started, so that if we
+    // crash before starting we don't keep emitting metrics that make it look as
+    // if the system is running.
     metrics::spawn_metrics_tasks();
 
     // Spawn a task to listen for shutdown signals and trigger shutdown.
@@ -254,8 +257,9 @@ where
     let shutdown_handle = tokio::spawn(async move {
         // Listen for SIGTERM, sent by Kubernetes before SIGKILL during pod termination.
         //
-        // If the process is killed before shutdown completes, the pipeline may become corrupted,
-        // depending on the state store and destination implementations.
+        // If the process is killed before shutdown completes, the pipeline may become
+        // corrupted, depending on the state store and destination
+        // implementations.
         let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
             error!("failed to register sigterm handler, shutting down pipeline");
 
@@ -285,8 +289,9 @@ where
 
     // Ensure the shutdown task is finished before returning.
     // If the pipeline finished before Ctrl+C, we want to abort the shutdown task.
-    // If Ctrl+C was pressed, the shutdown task will have already triggered shutdown.
-    // We don't care about the result of the shutdown_handle, but we should abort it if it's still running.
+    // If Ctrl+C was pressed, the shutdown task will have already triggered
+    // shutdown. We don't care about the result of the shutdown_handle, but we
+    // should abort it if it's still running.
     shutdown_handle.abort();
     let _ = shutdown_handle.await;
 

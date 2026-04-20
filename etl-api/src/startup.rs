@@ -80,7 +80,8 @@ use crate::{
 
 /// ETL API application server wrapper.
 ///
-/// Manages the HTTP server lifecycle including startup, migration, and shutdown.
+/// Manages the HTTP server lifecycle including startup, migration, and
+/// shutdown.
 pub struct Application {
     port: u16,
     server: Server,
@@ -89,8 +90,8 @@ pub struct Application {
 impl Application {
     /// Builds and configures the API application server.
     ///
-    /// Sets up database connections, encryption, Kubernetes client, and HTTP server
-    /// with all routes and middleware configured.
+    /// Sets up database connections, encryption, Kubernetes client, and HTTP
+    /// server with all routes and middleware configured.
     pub async fn build(config: ApiConfig) -> anyhow::Result<Self> {
         let connection_pool = get_connection_pool(&config.database);
 
@@ -191,7 +192,8 @@ async fn test_orbstack_connection(client: &kube::Client) -> Result<(), K8sError>
         }
         Err(e) => {
             error!(
-                "failed to connect to orbstack, ensure orbstack is installed and kubernetes is enabled"
+                "failed to connect to orbstack, ensure orbstack is installed and kubernetes is \
+                 enabled"
             );
             return Err(e.into());
         }
@@ -202,7 +204,8 @@ async fn test_orbstack_connection(client: &kube::Client) -> Result<(), K8sError>
 
 /// Creates a Postgres connection pool from the provided configuration.
 ///
-/// Connects to the API's own metadata database using server defaults (no custom options).
+/// Connects to the API's own metadata database using server defaults (no custom
+/// options).
 pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
     PgPoolOptions::new().connect_lazy_with(config.with_db(None))
 }
@@ -210,7 +213,8 @@ pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
 /// Creates and configures the HTTP server with all routes and middleware.
 ///
 /// Sets up authentication, tracing, Swagger UI, and all API endpoints.
-/// The Kubernetes client and trusted root certs cache are optional to support testing scenarios.
+/// The Kubernetes client and trusted root certs cache are optional to support
+/// testing scenarios.
 pub fn run(
     config: ApiConfig,
     listener: TcpListener,

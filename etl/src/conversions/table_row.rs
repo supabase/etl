@@ -13,14 +13,15 @@ use crate::{
 /// Converts raw Postgres COPY format data into a typed table row.
 ///
 /// This method parses the text format data produced by Postgres's COPY command
-/// and converts it into strongly-typed [`Cell`] values according to the provided
-/// column schemas. It handles Postgres's specific escaping rules and type formats.
+/// and converts it into strongly-typed [`Cell`] values according to the
+/// provided column schemas. It handles Postgres's specific escaping rules and
+/// type formats.
 ///
 /// # Errors
 ///
-/// Returns an error if the row data is not valid UTF-8, the column count doesn't
-/// match the schema, the row is not properly terminated, or a cell value cannot
-/// be parsed according to its column type.
+/// Returns an error if the row data is not valid UTF-8, the column count
+/// doesn't match the schema, the row is not properly terminated, or a cell
+/// value cannot be parsed according to its column type.
 pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
     row: &[u8],
     mut column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
@@ -122,7 +123,8 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
             } else {
                 // Convert non-null field value to appropriate Cell type based on column schema
                 // This delegates to TextFormatConverter which handles Postgres text format
-                // parsing for all supported data types (integers, floats, strings, booleans, etc.)
+                // parsing for all supported data types (integers, floats, strings, booleans,
+                // etc.)
                 match parse_cell_from_postgres_text(&column_schema.typ, &val_str) {
                     Ok(value) => value,
                     Err(e) => {

@@ -4,10 +4,12 @@ use tokio::{sync::Notify, time::timeout};
 
 /// Default timeout duration for notifications.
 ///
-/// This duration was chosen empirically since most waiting should not take more than a few seconds.
+/// This duration was chosen empirically since most waiting should not take more
+/// than a few seconds.
 pub const DEFAULT_NOTIFY_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// A wrapper around [`Arc<Notify>`] that provides automatic timeout functionality for tests.
+/// A wrapper around [`Arc<Notify>`] that provides automatic timeout
+/// functionality for tests.
 ///
 /// This prevents tests from hanging indefinitely when waiting for state changes
 /// that may never occur. The timeout ensures tests fail quickly with a clear
@@ -33,16 +35,17 @@ impl TimedNotify {
     ///
     /// # Panics
     ///
-    /// Panics if the timeout duration elapses before the notification is received.
-    /// This is intentional behavior for tests to fail fast rather than hang.
+    /// Panics if the timeout duration elapses before the notification is
+    /// received. This is intentional behavior for tests to fail fast rather
+    /// than hang.
     pub async fn notified(&self) {
         match timeout(self.timeout_duration, self.notify.notified()).await {
             Ok(()) => {}
             Err(_) => {
                 panic!(
-                    "Test notification timed out after {:?}. \
-                     This likely indicates the expected state was never reached. \
-                     Check if the pipeline is running correctly or if the condition is reachable.",
+                    "Test notification timed out after {:?}. This likely indicates the expected \
+                     state was never reached. Check if the pipeline is running correctly or if \
+                     the condition is reachable.",
                     self.timeout_duration
                 );
             }

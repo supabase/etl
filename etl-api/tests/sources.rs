@@ -309,7 +309,8 @@ async fn source_creation_with_non_matching_trusted_username_fails() {
     // Create the actual source database.
     let _source_pool = create_pg_database(&source_db_config).await;
 
-    // Create a source config that connects to the test database with the actual username.
+    // Create a source config that connects to the test database with the actual
+    // username.
     let source_config = source_config_from_db_config(&source_db_config);
 
     let source = CreateSourceRequest { name: new_name(), config: source_config };

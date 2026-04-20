@@ -3,8 +3,8 @@ use sqlx::{Connection, Executor, PgConnection, PgPool};
 
 /// Creates a new Postgres database and returns a connection pool.
 ///
-/// Connects to Postgres server, creates a new database, and returns a [`PgPool`]
-/// connected to the newly created database.
+/// Connects to Postgres server, creates a new database, and returns a
+/// [`PgPool`] connected to the newly created database.
 ///
 /// # Panics
 /// Panics if connection or database creation fails.

@@ -56,9 +56,9 @@ impl TrustedRootCertsCache {
 
     /// Returns a [`TlsConfig`] based on whether TLS is enabled.
     ///
-    /// When `tls_enabled` is `true`, fetches trusted root certificates from the cache
-    /// and returns an enabled TLS config. When `false`, returns a disabled TLS config
-    /// without fetching certificates.
+    /// When `tls_enabled` is `true`, fetches trusted root certificates from the
+    /// cache and returns an enabled TLS config. When `false`, returns a
+    /// disabled TLS config without fetching certificates.
     pub async fn get_tls_config(
         &self,
         tls_enabled: bool,
@@ -71,13 +71,15 @@ impl TrustedRootCertsCache {
         }
     }
 
-    /// Returns the cached trusted root certificates, fetching from Kubernetes if needed.
+    /// Returns the cached trusted root certificates, fetching from Kubernetes
+    /// if needed.
     ///
     /// The cache is refreshed when:
     /// - No cached value exists
     /// - The cached value has expired (older than 1 day)
     ///
-    /// Returns an error if the Kubernetes fetch fails or the ConfigMap is malformed.
+    /// Returns an error if the Kubernetes fetch fails or the ConfigMap is
+    /// malformed.
     pub async fn get(&self) -> Result<String, TrustedRootCertsError> {
         // Fast path: check if we have a valid cached value
         {

@@ -18,8 +18,8 @@ pub(crate) struct ChaosArgs {
     #[command(subcommand)]
     scenario: scenario::Scenario,
 
-    /// Label selector for the pod to inject chaos on; repeat for multiple labels.
-    /// Example: --selector app.kubernetes.io/name=local-replicator
+    /// Label selector for the pod to inject chaos on; repeat for multiple
+    /// labels. Example: --selector app.kubernetes.io/name=local-replicator
     #[arg(long = "selector", default_value = "app=replicator", global = true)]
     selector: Vec<String>,
 
@@ -64,7 +64,8 @@ impl ChaosArgs {
     }
 }
 
-// ─── CRD types ────────────────────────────────────────────────────────────────
+// ─── CRD types
+// ────────────────────────────────────────────────────────────────
 
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[kube(
@@ -136,7 +137,8 @@ pub(crate) struct BandwidthSpec {
     pub(crate) buffer: u32,
 }
 
-// ─── Chaos client ─────────────────────────────────────────────────────────────
+// ─── Chaos client
+// ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub(crate) struct ChaosClient {
@@ -153,8 +155,9 @@ impl ChaosClient {
         let discovery = Discovery::new(client.clone()).run().await?;
         if !discovery.has_group("chaos-mesh.org") {
             anyhow::bail!(
-                "Chaos Mesh is not installed in this cluster (chaos-mesh.org API group not found).\n\
-                 Install it with: helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh --create-namespace"
+                "Chaos Mesh is not installed in this cluster (chaos-mesh.org API group not \
+                 found).\nInstall it with: helm install chaos-mesh chaos-mesh/chaos-mesh -n \
+                 chaos-mesh --create-namespace"
             );
         }
 
@@ -176,8 +179,9 @@ impl ChaosClient {
     /// Resolve a Kubernetes service name to its ClusterIP.
     ///
     /// This is the correct target for pod-to-service traffic: kube-proxy's DNAT
-    /// runs at the node level (outside the pod's network namespace), so Chaos Mesh
-    /// must match the ClusterIP — not the pod IP — to intercept the traffic.
+    /// runs at the node level (outside the pod's network namespace), so Chaos
+    /// Mesh must match the ClusterIP — not the pod IP — to intercept the
+    /// traffic.
     pub(crate) async fn resolve_svc_clusterip(&self, svc_name: &str) -> Result<String> {
         let svc_api: Api<Service> = Api::namespaced(self.client.clone(), &self.namespace);
         let svc = svc_api.get(svc_name).await.map_err(|e| {
@@ -213,7 +217,8 @@ impl ChaosClient {
                         Err(kube::Error::Api(ref e)) if e.code == 404 => break,
                         _ if std::time::Instant::now() >= deadline => {
                             eprintln!(
-                                "warning: timed out waiting for {name} to be deleted, proceeding anyway"
+                                "warning: timed out waiting for {name} to be deleted, proceeding \
+                                 anyway"
                             );
                             break;
                         }
@@ -411,20 +416,23 @@ impl ChaosClient {
     }
 }
 
-// ─── Target ───────────────────────────────────────────────────────────────────
+// ─── Target
+// ───────────────────────────────────────────────────────────────────
 
 /// Specifies the destination for a [`ChaosClient::drop_to`] call.
 pub(crate) enum Target {
     /// All traffic in the given direction — no specific destination filter.
     All,
 
-    /// In-cluster pods matching these labels (resolved within the client's namespace).
+    /// In-cluster pods matching these labels (resolved within the client's
+    /// namespace).
     Pods(Vec<(String, String)>),
 
     /// External hostname, IP address, CIDR block, or `"host:port"` string.
     ///
     /// Passed directly as a Chaos Mesh `externalTargets` entry.
-    /// Examples: `"postgres"`, `"10.0.0.1"`, `"10.0.0.0/8"`, `"clickhouse:8123"`
+    /// Examples: `"postgres"`, `"10.0.0.1"`, `"10.0.0.0/8"`,
+    /// `"clickhouse:8123"`
     Url(String),
 
     /// All traffic to a specific destination port, regardless of host.
@@ -434,7 +442,8 @@ pub(crate) enum Target {
     Port(u16),
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers
+// ──────────────────────────────────────────────────────────────────
 
 pub(crate) type Labels = Vec<(String, String)>;
 
@@ -450,8 +459,9 @@ pub(crate) fn parse_selector(selectors: &[String]) -> anyhow::Result<Labels> {
         .collect()
 }
 
-/// Derive a short name suitable for a Kubernetes resource name from a label set.
-/// Uses the value of the first label, e.g. `app.kubernetes.io/name=etl` → `"etl"`.
+/// Derive a short name suitable for a Kubernetes resource name from a label
+/// set. Uses the value of the first label, e.g. `app.kubernetes.io/name=etl` →
+/// `"etl"`.
 pub(crate) fn app_name_from_labels(labels: &Labels) -> &str {
     labels.first().map(|(_, v)| v.as_str()).unwrap_or("app")
 }

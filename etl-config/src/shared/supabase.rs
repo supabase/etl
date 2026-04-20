@@ -19,7 +19,8 @@ pub struct SupabaseConfig {
     /// This API key is used to authenticate requests to the Supabase API.
     /// Required when `api_url` is provided.
     pub api_key: Option<SecretString>,
-    /// Optional ConfigCat SDK key for feature flag integration used at Supabase.
+    /// Optional ConfigCat SDK key for feature flag integration used at
+    /// Supabase.
     ///
     /// If provided, enables ConfigCat feature flag evaluation.
     /// If `None`, the replicator operates without feature flag support.

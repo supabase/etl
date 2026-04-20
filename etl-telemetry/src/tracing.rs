@@ -70,15 +70,17 @@ pub enum LogFlusher {
 
 /// Initializes tracing for test environments.
 ///
-/// Call once at the beginning of tests. Set `ENABLE_TRACING=1` to view tracing output:
+/// Call once at the beginning of tests. Set `ENABLE_TRACING=1` to view tracing
+/// output:
 /// ```bash
 /// ENABLE_TRACING=1 cargo test test_name
 /// ```
 pub fn init_test_tracing() {
     INIT_TEST_TRACING.call_once(|| {
         if std::env::var("ENABLE_TRACING").is_ok() {
-            // Needed because if no env is set, it defaults to prod, which logs to files instead of terminal,
-            // and we need to log to terminal when `ENABLE_TRACING` env var is set.
+            // Needed because if no env is set, it defaults to prod, which logs to files
+            // instead of terminal, and we need to log to terminal when
+            // `ENABLE_TRACING` env var is set.
             Environment::Dev.set();
             let _log_flusher =
                 init_tracing("test").expect("Failed to initialize tracing for tests");
@@ -272,8 +274,8 @@ pub fn init_tracing(app_name: &str) -> Result<LogFlusher, TracingError> {
 
 /// Initializes tracing with optional top-level fields.
 ///
-/// Like [`init_tracing`] but allows specifying multiple top-level fields that will be added to each
-/// log entry.
+/// Like [`init_tracing`] but allows specifying multiple top-level fields that
+/// will be added to each log entry.
 pub fn init_tracing_with_top_level_fields(
     app_name: &str,
     project_ref: Option<&str>,
@@ -296,7 +298,8 @@ pub fn init_tracing_with_top_level_fields(
 
     let is_prod = Environment::load()?.is_prod();
 
-    // Set the default log level to `info` if not specified in the `RUST_LOG` environment variable.
+    // Set the default log level to `info` if not specified in the `RUST_LOG`
+    // environment variable.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
 
     let log_flusher = if is_prod {
@@ -307,14 +310,15 @@ pub fn init_tracing_with_top_level_fields(
 
     set_tracing_panic_hook();
 
-    // Return the log flusher to ensure logs are flushed before the application exits
-    // without this the logs in memory may not be flushed to the file.
+    // Return the log flusher to ensure logs are flushed before the application
+    // exits without this the logs in memory may not be flushed to the file.
     Ok(log_flusher)
 }
 
 /// Configures tracing for production environments.
 ///
-/// Sets up structured JSON logging to rotating daily files with project injection.
+/// Sets up structured JSON logging to rotating daily files with project
+/// injection.
 fn configure_prod_tracing(filter: EnvFilter, app_name: &str) -> Result<LogFlusher, TracingError> {
     let filename_suffix = "log";
     let log_dir = "logs";

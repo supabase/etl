@@ -18,10 +18,11 @@ use crate::{
 ///
 /// This helper method provides sensible default values for Postgres types,
 /// primarily used during cell initialization and error recovery scenarios.
-/// The defaults are chosen to be the zero/empty value for each type where possible.
+/// The defaults are chosen to be the zero/empty value for each type where
+/// possible.
 ///
-/// For complex types like arrays, empty vectors are returned. For temporal types,
-/// minimal valid timestamps are used (year 1, month 1, day 1).
+/// For complex types like arrays, empty vectors are returned. For temporal
+/// types, minimal valid timestamps are used (year 1, month 1, day 1).
 pub(crate) fn default_value_for_type(typ: &Type) -> EtlResult<Cell> {
     const DEFAULT_DATE: NaiveDate = NaiveDate::from_ymd_opt(1, 1, 1).unwrap();
     const DEFAULT_TIMESTAMP: NaiveDateTime = NaiveDateTime::new(DEFAULT_DATE, NaiveTime::MIN);
@@ -75,10 +76,12 @@ pub(crate) fn default_value_for_type(typ: &Type) -> EtlResult<Cell> {
 ///
 /// This method parses Postgres's text representation of various data types
 /// into strongly-typed [`Cell`] variants. It handles all major Postgres types
-/// including arrays, and provides comprehensive error handling for malformed input.
+/// including arrays, and provides comprehensive error handling for malformed
+/// input.
 ///
-/// For array types, it delegates to [`parse_cell_from_postgres_text_array`] which handles Postgres's
-/// array literal syntax with proper escaping and null value support.
+/// For array types, it delegates to [`parse_cell_from_postgres_text_array`]
+/// which handles Postgres's array literal syntax with proper escaping and null
+/// value support.
 pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<Cell> {
     match *typ {
         Type::BOOL => Ok(Cell::Bool(parse_bool(str)?)),
@@ -579,14 +582,15 @@ mod tests {
 
     #[test]
     fn parse_array_escape_sequences() {
-        // The array parser doesn't process escape sequences in the same way as the table row parser
-        // It expects literal characters in the array string
+        // The array parser doesn't process escape sequences in the same way as the
+        // table row parser It expects literal characters in the array string
         let cell =
             parse_cell_from_postgres_text(&Type::TEXT_ARRAY, r#"{"line1\\nline2","tab\\there"}"#)
                 .unwrap();
         match cell {
             Cell::Array(ArrayCell::String(v)) => {
-                // These should be literal strings since array parser doesn't decode escapes like table parser
+                // These should be literal strings since array parser doesn't decode escapes
+                // like table parser
                 assert_eq!(
                     v,
                     vec![Some("line1\\nline2".to_string()), Some("tab\\there".to_string())]

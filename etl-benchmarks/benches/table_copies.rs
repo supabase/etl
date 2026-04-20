@@ -127,7 +127,8 @@ enum Commands {
         /// BigQuery dataset ID (required when using BigQuery destination)
         #[arg(long)]
         bq_dataset_id: Option<String>,
-        /// BigQuery service account key file path (required when using BigQuery destination)
+        /// BigQuery service account key file path (required when using BigQuery
+        /// destination)
         #[arg(long)]
         bq_sa_key_file: Option<String>,
         /// BigQuery maximum staleness in minutes (optional)
@@ -270,7 +271,8 @@ async fn cleanup_replication_slots(
     let apply_slot = format!("supabase_etl_apply_{pipeline_id}");
     info!(slot_name = %apply_slot, "dropping apply replication slot");
     let drop_apply_sql = format!(
-        "select pg_drop_replication_slot('{apply_slot}') where exists (select 1 from pg_replication_slots where slot_name = '{apply_slot}')"
+        "select pg_drop_replication_slot('{apply_slot}') where exists (select 1 from \
+         pg_replication_slots where slot_name = '{apply_slot}')"
     );
     sqlx::query(&drop_apply_sql).execute(&pool).await.ok(); // Ignore errors if slot doesn't exist
 
@@ -279,7 +281,8 @@ async fn cleanup_replication_slots(
         let table_slot = format!("supabase_etl_table_sync_{pipeline_id}_{table_id}");
         info!(slot_name = %table_slot, "dropping table sync replication slot");
         let drop_table_sql = format!(
-            "select pg_drop_replication_slot('{table_slot}') where exists (select 1 from pg_replication_slots where slot_name = '{table_slot}')"
+            "select pg_drop_replication_slot('{table_slot}') where exists (select 1 from \
+             pg_replication_slots where slot_name = '{table_slot}')"
         );
         sqlx::query(&drop_table_sql).execute(&pool).await.ok(); // Ignore errors if slot doesn't exist
     }

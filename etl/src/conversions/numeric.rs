@@ -55,8 +55,8 @@ impl From<Sign> for u16 {
 /// Postgres NUMERIC/DECIMAL type with arbitrary precision.
 ///
 /// [`PgNumeric`] represents Postgres's NUMERIC and DECIMAL types, which support
-/// arbitrary precision arithmetic. This enum closely matches Postgres's internal
-/// wire format and can represent special values like NaN and infinity.
+/// arbitrary precision arithmetic. This enum closely matches Postgres's
+/// internal wire format and can represent special values like NaN and infinity.
 ///
 /// The numeric format uses base-10000 digits internally for efficient storage
 /// and calculation while maintaining exact decimal precision.
@@ -73,9 +73,11 @@ pub enum PgNumeric {
         /// Sign of the numeric value.
         sign: Sign,
         /// Weight represents the power of 10000 for the first digit.
-        /// For example, if weight=2, the first digit represents multiples of 10000^2.
+        /// For example, if weight=2, the first digit represents multiples of
+        /// 10000^2.
         weight: i16,
-        /// Number of decimal digits after the decimal point for display purposes.
+        /// Number of decimal digits after the decimal point for display
+        /// purposes.
         scale: u16,
         /// Actual numeric digits stored in base-10000 format for efficiency.
         digits: Vec<i16>,
@@ -274,8 +276,8 @@ fn parse_special_value(
 /// Parses a regular numeric value from character input.
 ///
 /// This function processes decimal digits, decimal points, underscores (digit
-/// separators), and scientific notation to construct a numeric value. It handles
-/// both integer and fractional parts with arbitrary precision.
+/// separators), and scientific notation to construct a numeric value. It
+/// handles both integer and fractional parts with arbitrary precision.
 fn parse_numeric_value(
     chars: &mut Peekable<Chars>,
     sign: Sign,

@@ -1,8 +1,9 @@
 //! Error types and result definitions for ETL operations.
 //!
-//! Provides a comprehensive error system with classification, aggregation, and captured
-//! diagnostic metadata for ETL pipeline operations. The [`EtlError`] type supports single errors,
-//! errors with additional detail, and multiple aggregated errors for complex failure scenarios.
+//! Provides a comprehensive error system with classification, aggregation, and
+//! captured diagnostic metadata for ETL pipeline operations. The [`EtlError`]
+//! type supports single errors, errors with additional detail, and multiple
+//! aggregated errors for complex failure scenarios.
 
 use std::{
     backtrace::Backtrace,
@@ -14,10 +15,11 @@ use std::{
 
 use crate::conversions::ParseNumericError;
 
-/// Convenient result type for ETL operations using [`EtlError`] as the error type.
+/// Convenient result type for ETL operations using [`EtlError`] as the error
+/// type.
 ///
-/// This type alias reduces boilerplate when working with fallible ETL operations.
-/// Most ETL functions return this type.
+/// This type alias reduces boilerplate when working with fallible ETL
+/// operations. Most ETL functions return this type.
 pub type EtlResult<T> = Result<T, EtlError>;
 
 /// Detailed payload stored for single [`EtlError`] instances.
@@ -45,9 +47,10 @@ impl ErrorPayload {
 
 /// Main error type for ETL operations.
 ///
-/// [`EtlError`] provides a comprehensive error system that can represent single errors,
-/// errors with additional detail, or multiple aggregated errors. The design allows for
-/// rich error information while maintaining ergonomic usage patterns.
+/// [`EtlError`] provides a comprehensive error system that can represent single
+/// errors, errors with additional detail, or multiple aggregated errors. The
+/// design allows for rich error information while maintaining ergonomic usage
+/// patterns.
 #[derive(Debug, Clone)]
 pub struct EtlError {
     repr: ErrorRepr,
@@ -55,8 +58,9 @@ pub struct EtlError {
 
 /// Internal representation of error data.
 ///
-/// This enum supports different error patterns while maintaining a unified interface.
-/// Users should not interact with this type directly but use [`EtlError`] methods instead.
+/// This enum supports different error patterns while maintaining a unified
+/// interface. Users should not interact with this type directly but use
+/// [`EtlError`] methods instead.
 #[derive(Debug, Clone)]
 enum ErrorRepr {
     /// Single error payload holding rich metadata.
@@ -69,8 +73,9 @@ enum ErrorRepr {
 
 /// Specific categories of errors that can occur during ETL operations.
 ///
-/// This enum provides granular error classification to enable appropriate error handling
-/// strategies. Error kinds are organized by functional area and failure mode.
+/// This enum provides granular error classification to enable appropriate error
+/// handling strategies. Error kinds are organized by functional area and
+/// failure mode.
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -144,7 +149,8 @@ pub enum ErrorKind {
     // Unknown / Uncategorized
     Unknown,
 
-    // Special error kinds used for tests that trigger specific retry behaviors via fault injection.
+    // Special error kinds used for tests that trigger specific retry behaviors via fault
+    // injection.
     #[cfg(feature = "failpoints")]
     WithNoRetry,
     #[cfg(feature = "failpoints")]
@@ -156,8 +162,8 @@ pub enum ErrorKind {
 impl EtlError {
     /// Returns the [`ErrorKind`] of this error.
     ///
-    /// For multiple errors, returns the kind of the first error or [`ErrorKind::Unknown`]
-    /// if the error list is empty.
+    /// For multiple errors, returns the kind of the first error or
+    /// [`ErrorKind::Unknown`] if the error list is empty.
     pub fn kind(&self) -> ErrorKind {
         match self.repr {
             ErrorRepr::Single(ref payload) => payload.kind,
@@ -169,8 +175,8 @@ impl EtlError {
 
     /// Returns all [`ErrorKind`]s present in this error.
     ///
-    /// For single errors, returns a vector with one element. For multiple errors,
-    /// returns a flattened vector of all error kinds.
+    /// For single errors, returns a vector with one element. For multiple
+    /// errors, returns a flattened vector of all error kinds.
     pub fn kinds(&self) -> Vec<ErrorKind> {
         match self.repr {
             ErrorRepr::Single(ref payload) => vec![payload.kind],
@@ -180,7 +186,8 @@ impl EtlError {
         }
     }
 
-    /// Returns the top-level human-readable description if this is a single error.
+    /// Returns the top-level human-readable description if this is a single
+    /// error.
     ///
     /// Returns [`None`] for aggregated errors.
     pub fn description(&self) -> Option<&str> {
@@ -226,11 +233,13 @@ impl EtlError {
         }
     }
 
-    /// Attaches an originating [`error::Error`] to this error and returns the modified instance.
+    /// Attaches an originating [`error::Error`] to this error and returns the
+    /// modified instance.
     ///
-    /// The stored source is preserved across clones and exposed via [`error::Error::source`].
-    /// Has no effect when called on aggregated errors because aggregates forward the first
-    /// contained error as their source.
+    /// The stored source is preserved across clones and exposed via
+    /// [`error::Error::source`]. Has no effect when called on aggregated
+    /// errors because aggregates forward the first contained error as their
+    /// source.
     pub fn with_source<E>(mut self, source: E) -> Self
     where
         E: error::Error + Send + Sync + 'static,
@@ -286,7 +295,8 @@ impl PartialEq for EtlError {
 impl Hash for EtlError {
     /// Hashes the error using only its stable identifying components.
     ///
-    /// Only hashes the error kind and static description, intentionally excluding:
+    /// Only hashes the error kind and static description, intentionally
+    /// excluding:
     /// - Location information (file, line, column)
     /// - Detail field (often contains dynamic data like table names, IDs)
     /// - Source errors
@@ -392,7 +402,8 @@ impl From<(ErrorKind, &'static str)> for EtlError {
     }
 }
 
-/// Creates an [`EtlError`] from an error kind, static description, and dynamic detail.
+/// Creates an [`EtlError`] from an error kind, static description, and dynamic
+/// detail.
 impl<D> From<(ErrorKind, &'static str, D)> for EtlError
 where
     D: Into<Cow<'static, str>>,
@@ -404,8 +415,8 @@ where
 
 /// Creates an [`EtlError`] from a vector of errors for aggregation.
 ///
-/// If the vector contains exactly one error, returns that error directly without wrapping
-/// it in the [`ErrorRepr::Many`] variant.
+/// If the vector contains exactly one error, returns that error directly
+/// without wrapping it in the [`ErrorRepr::Many`] variant.
 impl<E> From<Vec<E>> for EtlError
 where
     E: Into<EtlError>,
@@ -435,10 +446,12 @@ impl From<std::io::Error> for EtlError {
     }
 }
 
-/// Converts [`serde_json::Error`] to [`EtlError`] with the appropriate error kind.
+/// Converts [`serde_json::Error`] to [`EtlError`] with the appropriate error
+/// kind.
 ///
 /// Maps to [`ErrorKind::SerializationError`] for serialization failures and
-/// [`ErrorKind::DeserializationError`] for deserialization failures based on error classification.
+/// [`ErrorKind::DeserializationError`] for deserialization failures based on
+/// error classification.
 impl From<serde_json::Error> for EtlError {
     fn from(err: serde_json::Error) -> EtlError {
         let (kind, description) = match err.classify() {
@@ -462,7 +475,8 @@ impl From<serde_json::Error> for EtlError {
     }
 }
 
-/// Converts [`std::str::Utf8Error`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+/// Converts [`std::str::Utf8Error`] to [`EtlError`] with
+/// [`ErrorKind::ConversionError`].
 impl From<std::str::Utf8Error> for EtlError {
     fn from(err: std::str::Utf8Error) -> EtlError {
         let detail = err.to_string();
@@ -476,7 +490,8 @@ impl From<std::str::Utf8Error> for EtlError {
     }
 }
 
-/// Converts [`std::string::FromUtf8Error`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+/// Converts [`std::string::FromUtf8Error`] to [`EtlError`] with
+/// [`ErrorKind::ConversionError`].
 impl From<std::string::FromUtf8Error> for EtlError {
     fn from(err: std::string::FromUtf8Error) -> EtlError {
         let detail = err.to_string();
@@ -490,7 +505,8 @@ impl From<std::string::FromUtf8Error> for EtlError {
     }
 }
 
-/// Converts [`std::num::ParseIntError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+/// Converts [`std::num::ParseIntError`] to [`EtlError`] with
+/// [`ErrorKind::ConversionError`].
 impl From<std::num::ParseIntError> for EtlError {
     fn from(err: std::num::ParseIntError) -> EtlError {
         let detail = err.to_string();
@@ -504,7 +520,8 @@ impl From<std::num::ParseIntError> for EtlError {
     }
 }
 
-/// Converts [`std::num::ParseFloatError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+/// Converts [`std::num::ParseFloatError`] to [`EtlError`] with
+/// [`ErrorKind::ConversionError`].
 impl From<std::num::ParseFloatError> for EtlError {
     fn from(err: std::num::ParseFloatError) -> EtlError {
         let detail = err.to_string();
@@ -518,10 +535,11 @@ impl From<std::num::ParseFloatError> for EtlError {
     }
 }
 
-/// Converts [`tokio_postgres::Error`] to [`EtlError`] with the appropriate error kind.
+/// Converts [`tokio_postgres::Error`] to [`EtlError`] with the appropriate
+/// error kind.
 ///
-/// Maps errors based on Postgres SQLSTATE codes to provide granular error classification
-/// for better error handling in ETL operations.
+/// Maps errors based on Postgres SQLSTATE codes to provide granular error
+/// classification for better error handling in ETL operations.
 impl From<tokio_postgres::Error> for EtlError {
     fn from(err: tokio_postgres::Error) -> EtlError {
         let (kind, description) = match err.code() {
@@ -811,7 +829,8 @@ impl From<tokio_postgres::Error> for EtlError {
     }
 }
 
-/// Converts [`rustls::Error`] to [`EtlError`] with [`ErrorKind::EncryptionError`].
+/// Converts [`rustls::Error`] to [`EtlError`] with
+/// [`ErrorKind::EncryptionError`].
 impl From<rustls::Error> for EtlError {
     fn from(err: rustls::Error) -> EtlError {
         let detail = err.to_string();
@@ -825,7 +844,8 @@ impl From<rustls::Error> for EtlError {
     }
 }
 
-/// Converts [`rustls::pki_types::pem::Error`] to [`EtlError`] with [`ErrorKind::ConfigError`].
+/// Converts [`rustls::pki_types::pem::Error`] to [`EtlError`] with
+/// [`ErrorKind::ConfigError`].
 impl From<rustls::pki_types::pem::Error> for EtlError {
     fn from(err: rustls::pki_types::pem::Error) -> EtlError {
         let detail = err.to_string();
@@ -853,7 +873,8 @@ impl From<uuid::Error> for EtlError {
     }
 }
 
-/// Converts [`chrono::ParseError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+/// Converts [`chrono::ParseError`] to [`EtlError`] with
+/// [`ErrorKind::ConversionError`].
 impl From<chrono::ParseError> for EtlError {
     fn from(err: chrono::ParseError) -> EtlError {
         let detail = err.to_string();
@@ -867,7 +888,8 @@ impl From<chrono::ParseError> for EtlError {
     }
 }
 
-/// Converts [`ParseNumericError`] to [`EtlError`] with [`ErrorKind::ConversionError`].
+/// Converts [`ParseNumericError`] to [`EtlError`] with
+/// [`ErrorKind::ConversionError`].
 impl From<ParseNumericError> for EtlError {
     fn from(err: ParseNumericError) -> EtlError {
         let detail = err.to_string();
@@ -883,8 +905,9 @@ impl From<ParseNumericError> for EtlError {
 
 /// Converts [`sqlx::Error`] to [`EtlError`] with the appropriate error kind.
 ///
-/// Maps database errors to [`ErrorKind::SourceQueryFailed`], I/O errors to [`ErrorKind::IoError`],
-/// and connection pool errors to [`ErrorKind::SourceConnectionFailed`].
+/// Maps database errors to [`ErrorKind::SourceQueryFailed`], I/O errors to
+/// [`ErrorKind::IoError`], and connection pool errors to
+/// [`ErrorKind::SourceConnectionFailed`].
 impl From<sqlx::Error> for EtlError {
     fn from(err: sqlx::Error) -> EtlError {
         let kind = match &err {
@@ -907,7 +930,8 @@ impl From<sqlx::Error> for EtlError {
     }
 }
 
-/// Converts [`etl_postgres::replication::slots::EtlReplicationSlotError`] to [`EtlError`] with appropriate error kind.
+/// Converts [`etl_postgres::replication::slots::EtlReplicationSlotError`] to
+/// [`EtlError`] with appropriate error kind.
 impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlError {
     fn from(err: etl_postgres::replication::slots::EtlReplicationSlotError) -> EtlError {
         match err {
@@ -931,7 +955,8 @@ impl From<etl_postgres::replication::slots::EtlReplicationSlotError> for EtlErro
     }
 }
 
-/// Converts [`crate::types::SchemaError`] to [`EtlError`] with [`ErrorKind::CorruptedTableSchema`].
+/// Converts [`crate::types::SchemaError`] to [`EtlError`] with
+/// [`ErrorKind::CorruptedTableSchema`].
 impl From<crate::types::SchemaError> for EtlError {
     #[track_caller]
     fn from(err: crate::types::SchemaError) -> EtlError {
@@ -940,13 +965,14 @@ impl From<crate::types::SchemaError> for EtlError {
                 EtlError::from_components(
                     ErrorKind::CorruptedTableSchema,
                     Cow::Borrowed(
-                        "Received columns during replication that are not in the stored table schema",
+                        "Received columns during replication that are not in the stored table \
+                         schema",
                     ),
                     Some(Cow::Owned(format!(
-                        "Unknown columns: {columns:?}\n\n\
-                        Cause: The pipeline crashed after a schema change but before reporting progress \
-                        back to Postgres. On restart, event streaming resumed from past events with an \
-                        outdated schema."
+                        "Unknown columns: {columns:?}\n\nCause: The pipeline crashed after a \
+                         schema change but before reporting progress back to Postgres. On \
+                         restart, event streaming resumed from past events with an outdated \
+                         schema."
                     ))),
                     None,
                 )

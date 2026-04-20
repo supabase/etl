@@ -1,22 +1,29 @@
 //! ETL replicator service binary.
 //!
-//! Initializes and runs the replicator pipeline that handles Postgres logical replication
-//! and routes data to configured destinations. Includes telemetry, error handling, and
-//! graceful shutdown capabilities.
+//! Initializes and runs the replicator pipeline that handles Postgres logical
+//! replication and routes data to configured destinations. Includes telemetry,
+//! error handling, and graceful shutdown capabilities.
 
-/// Jemalloc allocator for better memory management in high-throughput async workloads.
+/// Jemalloc allocator for better memory management in high-throughput async
+/// workloads.
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 /// Jemalloc configuration optimized for high-throughput async CDC workloads.
 ///
-/// - `narenas:8`: Fixed arena count for predictable memory behavior in containers.
-/// - `background_thread:true`: Offloads memory purging to background threads (Linux only).
-/// - `metadata_thp:auto`: Enables transparent huge pages for jemalloc metadata, reducing TLB misses.
-/// - `dirty_decay_ms:10000`: Returns unused dirty pages to the OS after 10 seconds.
-/// - `muzzy_decay_ms:10000`: Returns unused muzzy pages to the OS after 10 seconds.
-/// - `tcache_max:8192`: Reduces thread-local cache size for better container memory efficiency.
+/// - `narenas:8`: Fixed arena count for predictable memory behavior in
+///   containers.
+/// - `background_thread:true`: Offloads memory purging to background threads
+///   (Linux only).
+/// - `metadata_thp:auto`: Enables transparent huge pages for jemalloc metadata,
+///   reducing TLB misses.
+/// - `dirty_decay_ms:10000`: Returns unused dirty pages to the OS after 10
+///   seconds.
+/// - `muzzy_decay_ms:10000`: Returns unused muzzy pages to the OS after 10
+///   seconds.
+/// - `tcache_max:8192`: Reduces thread-local cache size for better container
+///   memory efficiency.
 /// - `abort_conf:true`: Aborts on invalid configuration for fail-fast behavior.
 ///
 /// On Linux, this can be overridden via `MALLOC_CONF` env var.
@@ -27,7 +34,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 static malloc_conf: &[u8] =
     b"narenas:8,background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
 
-/// Jemalloc configuration for macOS (uses prefixed symbol since unprefixed not supported).
+/// Jemalloc configuration for macOS (uses prefixed symbol since unprefixed not
+/// supported).
 #[cfg(all(target_os = "macos", not(target_env = "msvc")))]
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "_rjem_malloc_conf")]
@@ -54,14 +62,15 @@ mod init;
 mod metrics;
 mod sentry;
 
-/// The name of the environment variable which contains version information for this replicator.
+/// The name of the environment variable which contains version information for
+/// this replicator.
 const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
 
 /// Entry point for the replicator service.
 ///
-/// Loads configuration, initializes tracing and Sentry, starts the async runtime,
-/// and launches the replicator pipeline. Handles all errors and ensures proper
-/// service initialization sequence.
+/// Loads configuration, initializes tracing and Sentry, starts the async
+/// runtime, and launches the replicator pipeline. Handles all errors and
+/// ensures proper service initialization sequence.
 fn main() -> ExitCode {
     match try_main() {
         Ok(()) => ExitCode::SUCCESS,
@@ -116,8 +125,8 @@ fn run_async_runtime(
 
 /// Main async entry point that starts the replicator pipeline.
 ///
-/// Launches the replicator with the provided configuration and captures any errors
-/// to Sentry and optionally sends notifications to the Supabase API.
+/// Launches the replicator with the provided configuration and captures any
+/// errors to Sentry and optionally sends notifications to the Supabase API.
 async fn async_main(
     replicator_config: ReplicatorConfig,
     notification_client: Option<ErrorNotificationClient>,

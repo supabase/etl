@@ -74,7 +74,8 @@ pub struct StoredSourceConfig {
 }
 
 impl StoredSourceConfig {
-    /// Converts the stored source config into a Postgres connection config with TLS settings.
+    /// Converts the stored source config into a Postgres connection config with
+    /// TLS settings.
     pub fn into_connection_config(self, tls_config: TlsConfig) -> PgConnectionConfig {
         PgConnectionConfig {
             host: self.host,

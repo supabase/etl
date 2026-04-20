@@ -48,8 +48,9 @@ pub(crate) enum Scenario {
         #[arg(long, conflicts_with_all = ["target_url", "target_port", "target_svc"])]
         target_pod: Vec<String>,
 
-        /// Target a Kubernetes service by name — resolves its ClusterIP automatically.
-        /// Use this instead of --target-pod for services accessed via ClusterIP.
+        /// Target a Kubernetes service by name — resolves its ClusterIP
+        /// automatically. Use this instead of --target-pod for services
+        /// accessed via ClusterIP.
         #[arg(long, conflicts_with_all = ["target_url", "target_port", "target_pod"])]
         target_svc: Option<String>,
     },
@@ -73,7 +74,8 @@ pub(crate) enum Scenario {
         #[arg(long, conflicts_with_all = ["target_url", "target_port", "target_svc"])]
         target_pod: Vec<String>,
 
-        /// Target a Kubernetes service by name — resolves its ClusterIP automatically
+        /// Target a Kubernetes service by name — resolves its ClusterIP
+        /// automatically
         #[arg(long, conflicts_with_all = ["target_url", "target_port", "target_pod"])]
         target_svc: Option<String>,
     },
@@ -93,7 +95,8 @@ pub(crate) enum Scenario {
     },
     /// Corrupt x% of packets on the app pod's wire
     PacketCorruption {
-        /// Corrupted packet percentage (0–100); not required when using --delete
+        /// Corrupted packet percentage (0–100); not required when using
+        /// --delete
         #[arg(value_parser = clap::value_parser!(u8).range(0..=100))]
         percentage: Option<u8>,
     },
@@ -115,7 +118,8 @@ pub(crate) enum Scenario {
         #[arg(long, conflicts_with_all = ["target_url", "target_port", "target_svc"])]
         target_pod: Vec<String>,
 
-        /// Target a Kubernetes service by name — resolves its ClusterIP automatically
+        /// Target a Kubernetes service by name — resolves its ClusterIP
+        /// automatically
         #[arg(long, conflicts_with_all = ["target_url", "target_port", "target_pod"])]
         target_svc: Option<String>,
     },
@@ -127,7 +131,8 @@ pub(crate) enum Scenario {
     },
 }
 
-// ─── CRD resource name suffixes ───────────────────────────────────────────────
+// ─── CRD resource name suffixes
+// ───────────────────────────────────────────────
 
 const NAME_PACKET_LOSS: &str = "packet-los";
 const NAME_PARTITION: &str = "partition";
@@ -136,7 +141,8 @@ const NAME_FLAP: &str = "flap";
 const NAME_PACKET_CORRUPTION: &str = "packet-corruption";
 const NAME_BANDWIDTH: &str = "bandwidth";
 
-// ─── Scenario methods ─────────────────────────────────────────────────────────
+// ─── Scenario methods
+// ─────────────────────────────────────────────────────────
 
 impl Scenario {
     fn name(&self, labels: &Labels) -> String {
@@ -237,11 +243,13 @@ impl Scenario {
     }
 }
 
-// ─── Direction / target compatibility validation ──────────────────────────────
+// ─── Direction / target compatibility validation
+// ──────────────────────────────
 
 /// Chaos Mesh netem actions (loss/delay/corrupt) have two hard constraints when
 /// `direction` is `"from"` or `"both"`:
-///   1. `externalTargets` is not supported → `Target::Url` / `Target::Port` are invalid.
+///   1. `externalTargets` is not supported → `Target::Url` / `Target::Port` are
+///      invalid.
 ///   2. A pod `target` selector is mandatory → `Target::All` is invalid.
 ///
 /// Call this before building any netem `NetworkChaos` spec.
@@ -252,16 +260,16 @@ fn check_netem_direction(direction: &str, target: &Target) -> Result<()> {
     match target {
         Target::Pods(_) => Ok(()),
         Target::Url(_) | Target::Port(_) => anyhow::bail!(
-            "--direction '{direction}' is incompatible with --target-url / --target-port.\n\
-             Chaos Mesh netem actions do not support externalTargets with 'from'/'both' direction.\n\
-             Use --target-pod to specify the source pod instead, e.g.:\n\
-             \n  --direction from --target-pod app.kubernetes.io/name=<source-app>"
+            "--direction '{direction}' is incompatible with --target-url / --target-port.\nChaos \
+             Mesh netem actions do not support externalTargets with 'from'/'both' direction.\nUse \
+             --target-pod to specify the source pod instead, e.g.:\n\n  --direction from \
+             --target-pod app.kubernetes.io/name=<source-app>"
         ),
         Target::All => anyhow::bail!(
-            "--direction '{direction}' requires --target-pod.\n\
-             Chaos Mesh netem actions require a pod target selector when direction is 'from'/'both'.\n\
-             Specify the source pod with --target-pod, e.g.:\n\
-             \n  --direction from --target-pod app.kubernetes.io/name=<source-app>"
+            "--direction '{direction}' requires --target-pod.\nChaos Mesh netem actions require a \
+             pod target selector when direction is 'from'/'both'.\nSpecify the source pod with \
+             --target-pod, e.g.:\n\n  --direction from --target-pod \
+             app.kubernetes.io/name=<source-app>"
         ),
     }
 }
@@ -306,7 +314,8 @@ pub(crate) async fn latency(
     client.apply(chaos).await
 }
 
-/// Flap the app pod's network `flaps` times with configurable chaos/recovery durations.
+/// Flap the app pod's network `flaps` times with configurable chaos/recovery
+/// durations.
 pub(crate) async fn connection_flapping(
     client: &ChaosClient,
     labels: Labels,
@@ -351,7 +360,8 @@ pub(crate) async fn packet_corruption(
     percentage: u8,
     direction: &str,
 ) -> Result<()> {
-    // Same constraint as latency: no --target-pod support, so 'from'/'both' is invalid.
+    // Same constraint as latency: no --target-pod support, so 'from'/'both' is
+    // invalid.
     check_netem_direction(direction, &Target::All)?;
     let chaos = client.corrupt(chaos_name, labels, percentage, direction);
     client.apply(chaos).await

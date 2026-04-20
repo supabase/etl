@@ -69,7 +69,8 @@ struct AppArgs {
     // BigQuery destination parameters
     #[clap(flatten)]
     bq_args: BqArgs,
-    /// Postgres publication name (must be created beforehand with CREATE PUBLICATION)
+    /// Postgres publication name (must be created beforehand with CREATE
+    /// PUBLICATION)
     #[arg(long)]
     publication: String,
 }
@@ -97,7 +98,8 @@ struct DbArgs {
 // BigQuery destination configuration
 #[derive(Debug, Args)]
 struct BqArgs {
-    /// Path to GCP service account key JSON file (download from GCP Console > IAM & Admin > Service Accounts)
+    /// Path to GCP service account key JSON file (download from GCP Console >
+    /// IAM & Admin > Service Accounts)
     #[arg(long)]
     bq_sa_key_file: String,
     /// BigQuery project ID (found in GCP Console project selector)
@@ -106,10 +108,12 @@ struct BqArgs {
     /// BigQuery dataset ID (must exist in the specified project)
     #[arg(long)]
     bq_dataset_id: String,
-    /// Maximum time to wait for a batch to fill in milliseconds (lower values = lower latency, less throughput)
+    /// Maximum time to wait for a batch to fill in milliseconds (lower values =
+    /// lower latency, less throughput)
     #[arg(long, default_value = "5000")]
     max_batch_fill_duration_ms: u64,
-    /// Maximum number of concurrent table sync workers (higher values = faster initial sync, more resource usage)
+    /// Maximum number of concurrent table sync workers (higher values = faster
+    /// initial sync, more resource usage)
     #[arg(long, default_value = "4")]
     max_table_sync_workers: u16,
 }
@@ -125,7 +129,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// Initialize structured logging with configurable log levels via RUST_LOG environment variable
+// Initialize structured logging with configurable log levels via RUST_LOG
+// environment variable
 fn init_tracing() {
     tracing_subscriber::registry()
         .with(
@@ -145,7 +150,8 @@ fn set_log_level() {
     }
 }
 
-// Main implementation function containing all the pipeline setup and execution logic
+// Main implementation function containing all the pipeline setup and execution
+// logic
 async fn main_impl() -> Result<(), Box<dyn Error>> {
     // Set up logging and tracing
     set_log_level();
@@ -172,8 +178,9 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         keepalive: TcpKeepaliveConfig::default(),
     };
 
-    // Create in-memory store for tracking table replication states and table schemas
-    // In production, you might want to use a persistent store like PostgresStore
+    // Create in-memory store for tracking table replication states and table
+    // schemas In production, you might want to use a persistent store like
+    // PostgresStore
     let store = MemoryStore::new();
 
     // Create pipeline configuration with batching and retry settings
@@ -183,7 +190,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         pg_connection: pg_connection_config,
         batch: BatchConfig {
             max_fill_ms: args.bq_args.max_batch_fill_duration_ms,
-            memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
+            memory_budget_ratio: 0.2,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
@@ -230,8 +237,9 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         info!("received ctrl+c signal, initiating graceful shutdown");
     };
 
-    // Wait for either the pipeline to complete naturally or receive a shutdown signal
-    // The pipeline will run indefinitely unless an error occurs or it's manually stopped
+    // Wait for either the pipeline to complete naturally or receive a shutdown
+    // signal The pipeline will run indefinitely unless an error occurs or it's
+    // manually stopped
     tokio::select! {
         result = pipeline.wait() => {
             info!("pipeline completed normally (this usually indicates an error condition)");

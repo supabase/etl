@@ -1,6 +1,6 @@
 // This code is copied from the tokio-postgres-rustls library (https://github.com/jbg/tokio-postgres-rustls),
-// available under the MIT License, which provides Rustls-based TLS support for secure asynchronous
-// Postgres connections using the tokio-postgres client.
+// available under the MIT License, which provides Rustls-based TLS support for
+// secure asynchronous Postgres connections using the tokio-postgres client.
 
 use std::{
     io,

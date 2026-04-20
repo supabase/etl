@@ -32,7 +32,8 @@ const ICEBERG_CATALOG_TOKEN_KEY_NAME: &str = "catalog-token";
 const ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME: &str = "s3-access-key-id";
 /// Name of s3 acess key id in the iceberg secret and its reference.
 const ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME: &str = "s3-secret-access-key";
-/// Secret name suffix for ducklake secrets (includes s3 access key id and s3 secret access key).
+/// Secret name suffix for ducklake secrets (includes s3 access key id and s3
+/// secret access key).
 const DUCKLAKE_SECRET_NAME_SUFFIX: &str = "ducklake";
 /// Name of s3 access key id in the ducklake secret and its reference.
 const DUCKLAKE_S3_ACCESS_KEY_ID_KEY_NAME: &str = "s3-access-key-id";
@@ -116,13 +117,15 @@ struct ReplicatorResourceConfig {
 }
 
 impl ReplicatorResourceConfig {
-    /// Builds runtime limits using default config-backed sizing for the environment.
+    /// Builds runtime limits using default config-backed sizing for the
+    /// environment.
     #[cfg(test)]
     fn load(environment: &Environment) -> Result<Self, K8sError> {
         Self::load_with_overrides(environment, &K8sConfig::default())
     }
 
-    /// Builds runtime limits from environment defaults with optional config overrides.
+    /// Builds runtime limits from environment defaults with optional config
+    /// overrides.
     fn load_with_overrides(
         environment: &Environment,
         k8s_config: &K8sConfig,
@@ -209,8 +212,8 @@ impl HttpK8sClient {
         Ok(HttpK8sClient { secrets_api, config_maps_api, stateful_sets_api, pods_api, k8s_config })
     }
 
-    /// Helper function to handle delete operations that should ignore 404 errors
-    /// but propagate other errors.
+    /// Helper function to handle delete operations that should ignore 404
+    /// errors but propagate other errors.
     fn handle_delete_with_404_ignore<T>(
         delete_result: Result<T, kube::Error>,
     ) -> Result<(), K8sError> {
@@ -221,7 +224,8 @@ impl HttpK8sClient {
         }
     }
 
-    /// Returns true if the replicator container in the pod has terminated with error code
+    /// Returns true if the replicator container in the pod has terminated with
+    /// error code
     fn has_replicator_container_error(pod: &Pod, replicator_container_name: &str) -> bool {
         // Find the replicator container status
         let container_status = pod.status.as_ref().and_then(|status| {
@@ -243,7 +247,8 @@ impl HttpK8sClient {
             return terminated.exit_code != 0;
         }
 
-        // Waiting state, we want to distinguish normal waiting reasons from abnormal ones.
+        // Waiting state, we want to distinguish normal waiting reasons from abnormal
+        // ones.
         if let Some(waiting) = &state.waiting
             && let Some(reason) = &waiting.reason
         {
@@ -290,9 +295,10 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(postgres_secret_json)?;
 
-        // We are forcing the update since we are the field manager that should own the fields. If
-        // there is an override (likely during an incident or SREs intervention), we want to override
-        // their changes. The API database is the source of truth for credentials.
+        // We are forcing the update since we are the field manager that should own the
+        // fields. If there is an override (likely during an incident or SREs
+        // intervention), we want to override their changes. The API database is
+        // the source of truth for credentials.
         let pp = PatchParams::apply(&postgres_secret_name).force();
         self.secrets_api.patch(&postgres_secret_name, &pp, &Patch::Apply(secret)).await?;
 
@@ -316,9 +322,10 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(bq_secret_json)?;
 
-        // We are forcing the update since we are the field manager that should own the fields. If
-        // there is an override (likely during an incident or SREs intervention), we want to override
-        // their changes. The API database is the source of truth for credentials.
+        // We are forcing the update since we are the field manager that should own the
+        // fields. If there is an override (likely during an incident or SREs
+        // intervention), we want to override their changes. The API database is
+        // the source of truth for credentials.
         let pp = PatchParams::apply(&bq_secret_name).force();
         self.secrets_api.patch(&bq_secret_name, &pp, &Patch::Apply(secret)).await?;
 
@@ -349,9 +356,10 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(iceberg_secret_json)?;
 
-        // We are forcing the update since we are the field manager that should own the fields. If
-        // there is an override (likely during an incident or SREs intervention), we want to override
-        // their changes. The API database is the source of truth for credentials.
+        // We are forcing the update since we are the field manager that should own the
+        // fields. If there is an override (likely during an incident or SREs
+        // intervention), we want to override their changes. The API database is
+        // the source of truth for credentials.
         let pp = PatchParams::apply(&iceberg_secret_name).force();
         self.secrets_api.patch(&iceberg_secret_name, &pp, &Patch::Apply(secret)).await?;
 
@@ -461,9 +469,10 @@ impl K8sClient for HttpK8sClient {
         );
         let config_map: ConfigMap = serde_json::from_value(config_map_json)?;
 
-        // We are forcing the update since we are the field manager that should own the fields. If
-        // there is an override (likely during an incident or SREs intervention), we want to override
-        // their changes. The API database is the source of truth for configuration.
+        // We are forcing the update since we are the field manager that should own the
+        // fields. If there is an override (likely during an incident or SREs
+        // intervention), we want to override their changes. The API database is
+        // the source of truth for configuration.
         let pp = PatchParams::apply(&replicator_config_map_name).force();
         self.config_maps_api
             .patch(&replicator_config_map_name, &pp, &Patch::Apply(config_map))
@@ -525,9 +534,9 @@ impl K8sClient for HttpK8sClient {
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
 
-        // We are forcing the update since we are the field manager that should own the fields. If
-        // there is an override (likely during an incident or SREs intervention), we want to override
-        // their changes.
+        // We are forcing the update since we are the field manager that should own the
+        // fields. If there is an override (likely during an incident or SREs
+        // intervention), we want to override their changes.
         let pp = PatchParams::apply(&stateful_set_name).force();
         self.stateful_sets_api.patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set)).await?;
 
@@ -1174,8 +1183,8 @@ fn create_replicator_stateful_set_json(
 
 fn get_restarted_at_annotation_value() -> String {
     let now = Utc::now();
-    // We use nanoseconds to decrease the likelihood of generating the same annotation in sequence,
-    // which would not result in a restart.
+    // We use nanoseconds to decrease the likelihood of generating the same
+    // annotation in sequence, which would not result in a restart.
     now.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }
 

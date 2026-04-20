@@ -1,7 +1,8 @@
 //! Fault injection utilities for testing error scenarios.
 //!
-//! Provides configurable failpoints that can trigger specific error conditions during testing.
-//! Failpoints support different retry policies to test error handling and recovery behavior.
+//! Provides configurable failpoints that can trigger specific error conditions
+//! during testing. Failpoints support different retry policies to test error
+//! handling and recovery behavior.
 
 use fail::fail_point;
 
@@ -17,9 +18,9 @@ pub const SEND_STATUS_UPDATE_FP: &str = "send_status_update_fp";
 
 /// Executes a configurable failpoint for testing error scenarios.
 ///
-/// When the failpoint is active, and it's set to return an error, this function generates an [`EtlError`] with
-/// the specified retry policy. The retry behavior can be controlled through
-/// the failpoint parameter:
+/// When the failpoint is active, and it's set to return an error, this function
+/// generates an [`EtlError`] with the specified retry policy. The retry
+/// behavior can be controlled through the failpoint parameter:
 ///
 /// - `"no_retry"` - Creates an error that should not be retried
 /// - `"manual_retry"` - Creates an error requiring manual intervention

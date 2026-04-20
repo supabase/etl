@@ -10,26 +10,32 @@ use prost::bytes;
 
 use crate::bigquery::validation::validate_cell_for_bigquery;
 
-/// Protocol buffer wrapper for a BigQuery table row containing non-optional cells.
+/// Protocol buffer wrapper for a BigQuery table row containing non-optional
+/// cells.
 ///
-/// Wraps a vector of [`CellNonOptional`] values and implements the [`prost::Message`]
-/// trait to enable Protocol Buffer serialization for BigQuery streaming inserts.
+/// Wraps a vector of [`CellNonOptional`] values and implements the
+/// [`prost::Message`] trait to enable Protocol Buffer serialization for
+/// BigQuery streaming inserts.
 #[derive(Debug)]
 pub(super) struct BigQueryTableRow(Vec<CellNonOptional>);
 
 impl TryFrom<TableRow> for BigQueryTableRow {
     type Error = EtlError;
 
-    /// Converts a [`TableRow`] to a [`BigQueryTableRow`] by transforming all cell values
-    /// to their non-optional equivalents and validating them for BigQuery compatibility.
+    /// Converts a [`TableRow`] to a [`BigQueryTableRow`] by transforming all
+    /// cell values to their non-optional equivalents and validating them
+    /// for BigQuery compatibility.
     ///
     /// This implementation:
-    /// 1. Converts each [`Cell`] to [`CellNonOptional`] to ensure no null values in arrays
-    /// 2. Validates each cell value against BigQuery's supported ranges and types
+    /// 1. Converts each [`Cell`] to [`CellNonOptional`] to ensure no null
+    ///    values in arrays
+    /// 2. Validates each cell value against BigQuery's supported ranges and
+    ///    types
     /// 3. Returns an error if any value is outside BigQuery's supported bounds
     ///
-    /// The validation strategy fails fast on any unsupported value rather than clamping,
-    /// ensuring users are aware when their data doesn't fit BigQuery's constraints.
+    /// The validation strategy fails fast on any unsupported value rather than
+    /// clamping, ensuring users are aware when their data doesn't fit
+    /// BigQuery's constraints.
     fn try_from(value: TableRow) -> Result<Self, Self::Error> {
         let mut validated_cells = Vec::with_capacity(value.values().len());
 
@@ -65,7 +71,8 @@ impl TryFrom<TableRow> for BigQueryTableRow {
 }
 
 impl prost::Message for BigQueryTableRow {
-    /// Encodes the table row into the provided buffer using Protocol Buffer format.
+    /// Encodes the table row into the provided buffer using Protocol Buffer
+    /// format.
     ///
     /// Each cell is encoded with a sequential tag starting from 1, using the
     /// appropriate prost encoding method for the cell's data type.
@@ -82,8 +89,8 @@ impl prost::Message for BigQueryTableRow {
 
     /// Merges a field from a Protocol Buffer message into this table row.
     ///
-    /// Currently unimplemented as this functionality is not required for BigQuery
-    /// streaming inserts, which only need encoding capabilities.
+    /// Currently unimplemented as this functionality is not required for
+    /// BigQuery streaming inserts, which only need encoding capabilities.
     fn merge_field(
         &mut self,
         _tag: u32,
@@ -120,11 +127,12 @@ impl prost::Message for BigQueryTableRow {
     }
 }
 
-/// Encodes a single [`CellNonOptional`] into Protocol Buffer format using the specified tag.
+/// Encodes a single [`CellNonOptional`] into Protocol Buffer format using the
+/// specified tag.
 ///
-/// Each cell type is encoded using the appropriate prost encoding method. Temporal types
-/// and UUIDs are formatted as strings, while numeric types use their native encoding.
-/// Null cells produce no encoded output.
+/// Each cell type is encoded using the appropriate prost encoding method.
+/// Temporal types and UUIDs are formatted as strings, while numeric types use
+/// their native encoding. Null cells produce no encoded output.
 fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes::BufMut) {
     match cell {
         CellNonOptional::Null => {}
@@ -190,11 +198,12 @@ fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes::Buf
     }
 }
 
-/// Calculates the encoded length in bytes for a single [`CellNonOptional`] with the specified tag.
+/// Calculates the encoded length in bytes for a single [`CellNonOptional`] with
+/// the specified tag.
 ///
-/// Returns the number of bytes that would be produced when encoding this cell in Protocol
-/// Buffer format. Null cells return zero length, while other types calculate their
-/// encoded size using the corresponding prost length functions.
+/// Returns the number of bytes that would be produced when encoding this cell
+/// in Protocol Buffer format. Null cells return zero length, while other types
+/// calculate their encoded size using the corresponding prost length functions.
 fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
     match cell {
         CellNonOptional::Null => 0,
@@ -242,11 +251,12 @@ fn cell_encode_len_prost(cell: &CellNonOptional, tag: u32) -> usize {
     }
 }
 
-/// Encodes an [`ArrayCellNonOptional`] into Protocol Buffer format using the specified tag.
+/// Encodes an [`ArrayCellNonOptional`] into Protocol Buffer format using the
+/// specified tag.
 ///
-/// Array cells are encoded using either packed encoding for numeric types or repeated
-/// encoding for string-based types. Temporal arrays are converted to string arrays
-/// with appropriate formatting before encoding.
+/// Array cells are encoded using either packed encoding for numeric types or
+/// repeated encoding for string-based types. Temporal arrays are converted to
+/// string arrays with appropriate formatting before encoding.
 fn array_cell_encode_prost(
     array_cell: &ArrayCellNonOptional,
     tag: u32,
@@ -316,11 +326,12 @@ fn array_cell_encode_prost(
     }
 }
 
-/// Calculates the encoded length in bytes for an [`ArrayCellNonOptional`] with the specified tag.
+/// Calculates the encoded length in bytes for an [`ArrayCellNonOptional`] with
+/// the specified tag.
 ///
-/// Returns the number of bytes that would be produced when encoding this array cell in
-/// Protocol Buffer format. Uses packed length calculation for numeric arrays and repeated
-/// length calculation for string-based arrays.
+/// Returns the number of bytes that would be produced when encoding this array
+/// cell in Protocol Buffer format. Uses packed length calculation for numeric
+/// arrays and repeated length calculation for string-based arrays.
 fn array_cell_non_optional_encoded_len_prost(array_cell: &ArrayCellNonOptional, tag: u32) -> usize {
     match array_cell {
         ArrayCellNonOptional::Bool(vec) => prost::encoding::bool::encoded_len_packed(tag, vec),
@@ -484,8 +495,9 @@ mod tests {
     #[test]
     fn test_bigquery_table_row_try_from_multiple_errors_first_wins() {
         let table_row = TableRow::new(vec![
-            Cell::Numeric(PgNumeric::NaN),              // First invalid cell
-            Cell::Numeric(PgNumeric::PositiveInfinity), // Second invalid cell (should not be reached)
+            Cell::Numeric(PgNumeric::NaN), // First invalid cell
+            Cell::Numeric(PgNumeric::PositiveInfinity), /* Second invalid cell (should not be
+                                            * reached) */
         ]);
 
         let result = BigQueryTableRow::try_from(table_row);

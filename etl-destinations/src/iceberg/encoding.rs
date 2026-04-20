@@ -23,13 +23,14 @@ const UUID_BYTE_WIDTH: i32 = 16;
 
 /// Converts a slice of [`TableRow`]s to an Arrow [`RecordBatch`].
 ///
-/// This function transforms tabular data from the ETL pipeline's internal format
-/// into Apache Arrow's columnar format for efficient storage and processing in
-/// Iceberg tables. Each field in the schema is processed sequentially to build
-/// the corresponding Arrow arrays.
+/// This function transforms tabular data from the ETL pipeline's internal
+/// format into Apache Arrow's columnar format for efficient storage and
+/// processing in Iceberg tables. Each field in the schema is processed
+/// sequentially to build the corresponding Arrow arrays.
 ///
-/// Returns a [`RecordBatch`] containing the converted data, or an [`ArrowError`]
-/// if the conversion fails due to schema mismatches or other Arrow-related issues.
+/// Returns a [`RecordBatch`] containing the converted data, or an
+/// [`ArrowError`] if the conversion fails due to schema mismatches or other
+/// Arrow-related issues.
 pub(super) fn rows_to_record_batch(
     rows: &[TableRow],
     schema: Schema,
@@ -46,16 +47,17 @@ pub(super) fn rows_to_record_batch(
     Ok(batch)
 }
 
-/// Builds an [`ArrayRef`] from the [`TableRow`]s for a field specified by the `field_idx`.
+/// Builds an [`ArrayRef`] from the [`TableRow`]s for a field specified by the
+/// `field_idx`.
 ///
 /// This function dispatches to type-specific array builders based on the Arrow
-/// [`DataType`]. It handles all supported data types including primitives, strings,
-/// binary data, dates, times, timestamps, and UUIDs. Unsupported types fall back
-/// to string representation.
+/// [`DataType`]. It handles all supported data types including primitives,
+/// strings, binary data, dates, times, timestamps, and UUIDs. Unsupported types
+/// fall back to string representation.
 ///
-/// Returns an [`ArrayRef`] containing the encoded field values in the appropriate
-/// Arrow array type. For unsupported types, returns a string array with string
-/// representations of the values.
+/// Returns an [`ArrayRef`] containing the encoded field values in the
+/// appropriate Arrow array type. For unsupported types, returns a string array
+/// with string representations of the values.
 fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataType) -> ArrayRef {
     match data_type {
         DataType::Boolean => build_boolean_array(rows, field_idx),
@@ -81,12 +83,13 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
     }
 }
 
-/// Builds a primitive Arrow array from [`TableRow`]s using a type-specific converter function.
+/// Builds a primitive Arrow array from [`TableRow`]s using a type-specific
+/// converter function.
 ///
-/// This generic function creates Arrow arrays for primitive types (integers, floats,
-/// dates, times, timestamps) by applying a converter function to each cell value.
-/// The converter handles type conversion and returns [`None`] for incompatible values,
-/// which become null entries in the resulting array.
+/// This generic function creates Arrow arrays for primitive types (integers,
+/// floats, dates, times, timestamps) by applying a converter function to each
+/// cell value. The converter handles type conversion and returns [`None`] for
+/// incompatible values, which become null entries in the resulting array.
 ///
 /// # Returns
 ///
@@ -155,8 +158,8 @@ fn build_timestamptz_array(rows: &[TableRow], field_idx: usize, tz: &str) -> Arr
 ///
 /// # Panics
 ///
-/// Panics if the UUID byte array length doesn't match the expected 16-byte width,
-/// which should never occur with valid UUID values.
+/// Panics if the UUID byte array length doesn't match the expected 16-byte
+/// width, which should never occur with valid UUID values.
 fn build_uuid_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
     let mut builder = FixedSizeBinaryBuilder::new(UUID_BYTE_WIDTH);
 
@@ -273,7 +276,8 @@ fn cell_to_time64(cell: &Cell) -> Option<i64> {
     }
 }
 
-/// Converts a [`Cell`] to a 64-bit timestamp value (microseconds since Unix epoch).
+/// Converts a [`Cell`] to a 64-bit timestamp value (microseconds since Unix
+/// epoch).
 ///
 /// Transforms naive [`Cell::Timestamp`] values into microseconds since the
 /// Unix epoch by treating them as UTC timestamps. Returns [`None`] for
@@ -285,7 +289,8 @@ fn cell_to_timestamp(cell: &Cell) -> Option<i64> {
     }
 }
 
-/// Converts a [`Cell`] to a timezone-aware timestamp value (microseconds since Unix epoch).
+/// Converts a [`Cell`] to a timezone-aware timestamp value (microseconds since
+/// Unix epoch).
 ///
 /// Transforms timezone-aware [`Cell::TimestampTz`] values into microseconds
 /// since the Unix epoch, preserving the timezone information in the timestamp.
@@ -300,7 +305,8 @@ fn cell_to_timestamptz(cell: &Cell) -> Option<i64> {
 /// Extracts UUID bytes from a [`Cell`] value.
 ///
 /// This function attempts to extract the 16-byte representation of a UUID
-/// from a [`Cell::Uuid`] variant. For all other cell types, it returns [`None`].
+/// from a [`Cell::Uuid`] variant. For all other cell types, it returns
+/// [`None`].
 ///
 /// Returns [`Some`] with a reference to the 16-byte UUID array if the cell
 /// contains a UUID, or [`None`] for all other cell types.
@@ -327,7 +333,8 @@ fn cell_to_uuid(cell: &Cell) -> Option<&[u8; UUID_BYTE_WIDTH as usize]> {
 /// - Arrays use debug formatting
 ///
 /// Returns [`Some`] with the string representation for non-null values,
-/// or [`None`] for [`Cell::Null`] which becomes a null entry in the Arrow array.
+/// or [`None`] for [`Cell::Null`] which becomes a null entry in the Arrow
+/// array.
 fn cell_to_string(cell: &Cell) -> Option<String> {
     match cell {
         Cell::Null => None,
@@ -354,8 +361,8 @@ fn cell_to_string(cell: &Cell) -> Option<String> {
 /// Extracts [`ArrayCell`] from a [`Cell::Array`] value.
 ///
 /// This function safely extracts the array data from a [`Cell::Array`] variant,
-/// returning [`None`] for non-array cells. This is used when building Arrow list
-/// arrays to access the underlying array elements.
+/// returning [`None`] for non-array cells. This is used when building Arrow
+/// list arrays to access the underlying array elements.
 ///
 /// Returns [`Some`] with a reference to the [`ArrayCell`] if the cell contains
 /// an array, or [`None`] for all other cell types including [`Cell::Null`].
@@ -368,13 +375,14 @@ fn cell_to_array_cell(cell: &Cell) -> Option<&ArrayCell> {
 
 /// Builds an Arrow list array from [`TableRow`]s for a specific field.
 ///
-/// This function creates an Arrow [`ListArray`] by processing [`Cell::Array`] values
-/// from the specified field index. It delegates to type-specific builders based on
-/// the list element type, reusing the existing primitive and string array building
-/// infrastructure.
+/// This function creates an Arrow [`ListArray`] by processing [`Cell::Array`]
+/// values from the specified field index. It delegates to type-specific
+/// builders based on the list element type, reusing the existing primitive and
+/// string array building infrastructure.
 ///
-/// Returns an [`ArrayRef`] containing a list array with the appropriate element type.
-/// Rows with non-array cells become null entries in the resulting list array.
+/// Returns an [`ArrayRef`] containing a list array with the appropriate element
+/// type. Rows with non-array cells become null entries in the resulting list
+/// array.
 fn build_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
     match field.data_type() {
         DataType::Boolean => build_boolean_list_array(rows, field_idx, field),
@@ -805,10 +813,12 @@ fn build_list_array_for_strings(rows: &[TableRow], field_idx: usize, field: Fiel
     Arc::new(list_builder.finish())
 }
 
-/// Helper function to append any [`ArrayCell`] variant as string elements to a list builder.
+/// Helper function to append any [`ArrayCell`] variant as string elements to a
+/// list builder.
 ///
-/// This function converts array elements to their string representation and appends
-/// them to a string list builder. It's used as a fallback for unsupported array types.
+/// This function converts array elements to their string representation and
+/// appends them to a string list builder. It's used as a fallback for
+/// unsupported array types.
 fn append_array_cell_as_strings(
     list_builder: &mut ListBuilder<StringBuilder>,
     array_cell: &ArrayCell,
@@ -2615,7 +2625,8 @@ mod tests {
     fn test_build_list_array_dispatch() {
         use arrow::datatypes::Field;
 
-        // Test that build_list_array correctly dispatches to the right type-specific builders
+        // Test that build_list_array correctly dispatches to the right type-specific
+        // builders
         let test_cases = vec![
             (DataType::Boolean, "boolean list"),
             (DataType::Int32, "int32 list"),
@@ -2653,7 +2664,8 @@ mod tests {
     fn test_build_list_array_unsupported_type_fallback() {
         use arrow::datatypes::Field;
 
-        // Test with an unsupported inner type that should fall back to string representation
+        // Test with an unsupported inner type that should fall back to string
+        // representation
         let field = Field::new("item", DataType::Decimal128(10, 2), true); // Unsupported type
         let field_ref = Arc::new(field);
 

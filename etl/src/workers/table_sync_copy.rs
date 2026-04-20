@@ -76,7 +76,8 @@ pub(crate) enum TableCopyResult {
     Shutdown,
 }
 
-/// Copies rows from a batched table-copy stream into the destination with prioritized shutdown handling.
+/// Copies rows from a batched table-copy stream into the destination with
+/// prioritized shutdown handling.
 async fn copy_table_rows_from_stream<D, S>(
     mut table_copy_stream: Pin<&mut S>,
     mut shutdown_rx: ShutdownRx,
@@ -176,8 +177,9 @@ where
 
 /// Describes which slice of a table a single parallel copy task should read.
 ///
-/// For non-partitioned tables, the table is divided into ctid ranges by page estimation.
-/// For partitioned tables, each leaf partition becomes its own copy unit.
+/// For non-partitioned tables, the table is divided into ctid ranges by page
+/// estimation. For partitioned tables, each leaf partition becomes its own copy
+/// unit.
 #[derive(Debug)]
 enum CopyPartition {
     /// A ctid range within a single (non-partitioned) table.
@@ -186,12 +188,14 @@ enum CopyPartition {
     LeafPartition { leaf_table_id: TableId },
 }
 
-/// Copies a table using the appropriate strategy based on the number of connections.
+/// Copies a table using the appropriate strategy based on the number of
+/// connections.
 ///
-/// When `max_copy_connections` is 1, performs a serial copy using the slot transaction's
-/// consistent snapshot. When greater than 1, performs a parallel copy using ctid-based
-/// partitioning (for regular tables) or per-leaf-partition parallelism (for partitioned
-/// tables) across multiple child connections that share the same exported snapshot.
+/// When `max_copy_connections` is 1, performs a serial copy using the slot
+/// transaction's consistent snapshot. When greater than 1, performs a parallel
+/// copy using ctid-based partitioning (for regular tables) or
+/// per-leaf-partition parallelism (for partitioned tables) across multiple
+/// child connections that share the same exported snapshot.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction,
@@ -235,7 +239,8 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     }
 }
 
-/// Copies a table serially using a single COPY stream from the slot transaction.
+/// Copies a table serially using a single COPY stream from the slot
+/// transaction.
 #[expect(clippy::too_many_arguments)]
 async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction,
@@ -308,7 +313,8 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 ///
 /// For non-partitioned tables, uses ctid-based partitioning by page estimation.
 /// For partitioned tables, copies each leaf partition as a separate unit.
-/// A semaphore limits the number of concurrent copy tasks to `max_copy_connections`.
+/// A semaphore limits the number of concurrent copy tasks to
+/// `max_copy_connections`.
 #[expect(clippy::too_many_arguments)]
 async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction,
@@ -326,9 +332,10 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 
     info!(table_id = table_id.0, max_copy_connections, "starting parallel table copy");
 
-    // Determine copy partitions: ctid ranges for regular tables, leaf partitions for
-    // partitioned tables. Ctid-based partitioning cannot be used with partitioned tables
-    // because each child partition has its own ctid space, which causes duplicate rows.
+    // Determine copy partitions: ctid ranges for regular tables, leaf partitions
+    // for partitioned tables. Ctid-based partitioning cannot be used with
+    // partitioned tables because each child partition has its own ctid space,
+    // which causes duplicate rows.
     let is_partitioned = transaction.is_partitioned_table(table_id).await?;
     let copy_partitions: Vec<CopyPartition> = if is_partitioned {
         let leave_table_ids = transaction.get_leaf_partitions(table_id).await?;
@@ -362,9 +369,10 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         return Ok(TableCopyResult::Completed { total_rows: 0, total_duration_secs: 0.0 });
     }
 
-    // Export the snapshot from the main connection's transaction so child connections can
-    // import it via SET TRANSACTION SNAPSHOT. The main transaction must stay open for the
-    // entire duration of the parallel copy to keep the snapshot valid.
+    // Export the snapshot from the main connection's transaction so child
+    // connections can import it via SET TRANSACTION SNAPSHOT. The main
+    // transaction must stay open for the entire duration of the parallel copy
+    // to keep the snapshot valid.
     let snapshot_id = transaction.export_snapshot().await?;
 
     let semaphore = Arc::new(Semaphore::new(max_copy_connections as usize));
@@ -372,7 +380,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     let publication_name = publication_name.map(Arc::<str>::from);
 
     for partition in copy_partitions {
-        // Acquire a concurrency slot to make sure we are always using at most `max_copy_connections`.
+        // Acquire a concurrency slot to make sure we are always using at most
+        // `max_copy_connections`.
         let permit = semaphore.clone().acquire_owned().await.map_err(|err| {
             etl_error!(
                 ErrorKind::InvalidState,
@@ -420,14 +429,14 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     let mut partition_durations = Vec::new();
     let mut partition_row_counts = Vec::new();
 
-    // TODO: we might want to edit retries within the same partition if the copy fails. However, we
-    //  need to investigate the frequency.
+    // TODO: we might want to edit retries within the same partition if the copy
+    // fails. However, we  need to investigate the frequency.
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok(Ok(result)) => {
-                // If all the copy was successful, we collect how many rows were copied but if at least
-                // one received the shutdown result, we shut everything down causing all progress to be
-                // lost.
+                // If all the copy was successful, we collect how many rows were copied but if
+                // at least one received the shutdown result, we shut everything
+                // down causing all progress to be lost.
                 match result {
                     TableCopyResult::Completed {
                         total_rows: partition_total_rows,
@@ -439,7 +448,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                     }
                     TableCopyResult::Shutdown => {
                         info!(
-                            "shutting down parallel table copy since one or more partitions were interrupted by shutdown"
+                            "shutting down parallel table copy since one or more partitions were \
+                             interrupted by shutdown"
                         );
 
                         return Ok(TableCopyResult::Shutdown);
@@ -493,9 +503,9 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 
 /// Copies a single partition from the source table to the destination.
 ///
-/// The child transaction is already pinned to the exported snapshot. Depending on the
-/// [`CopyPartition`] variant, streams rows from either a ctid range or an entire leaf
-/// partition. All rows are written under the parent `table_id`.
+/// The child transaction is already pinned to the exported snapshot. Depending
+/// on the [`CopyPartition`] variant, streams rows from either a ctid range or
+/// an entire leaf partition. All rows are written under the parent `table_id`.
 #[expect(clippy::too_many_arguments)]
 async fn copy_partition<D>(
     child_transaction: PgReplicationChildTransaction,
@@ -607,8 +617,8 @@ where
         }
     };
 
-    // We commit the transaction for the same reason as the rollback, to let Postgres immediately free
-    // up things related to in-progress transactions.
+    // We commit the transaction for the same reason as the rollback, to let
+    // Postgres immediately free up things related to in-progress transactions.
     child_transaction.commit().await?;
 
     histogram!(

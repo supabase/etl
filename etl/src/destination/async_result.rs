@@ -15,24 +15,28 @@ use crate::{
     types::PgLsn,
 };
 
-/// Async completion handle used for [`crate::destination::Destination::write_table_rows`].
+/// Async completion handle used for
+/// [`crate::destination::Destination::write_table_rows`].
 ///
-/// ETL waits for this result before requesting the next row batch for the same copy partition.
-/// The handle exists mostly to keep the destination API aligned with
-/// [`WriteEventsResult`], so destinations may still choose to structure their internal write
-/// paths in a similar way.
+/// ETL waits for this result before requesting the next row batch for the same
+/// copy partition. The handle exists mostly to keep the destination API aligned
+/// with [`WriteEventsResult`], so destinations may still choose to structure
+/// their internal write paths in a similar way.
 pub type WriteTableRowsResult<T = ()> = AsyncResult<T>;
 
-/// Async completion handle used for [`crate::destination::Destination::truncate_table`].
+/// Async completion handle used for
+/// [`crate::destination::Destination::truncate_table`].
 ///
-/// ETL waits for this result immediately. It is primarily an API consistency hook rather than a
-/// mechanism for overlapping more ETL work with truncation.
+/// ETL waits for this result immediately. It is primarily an API consistency
+/// hook rather than a mechanism for overlapping more ETL work with truncation.
 pub type TruncateTableResult<T = ()> = AsyncResult<T>;
 
-/// Async completion handle used for [`crate::destination::Destination::write_events`].
+/// Async completion handle used for
+/// [`crate::destination::Destination::write_events`].
 ///
-/// This is the path where asynchronous completion changes ETL behavior the most: once dispatch
-/// succeeds, the apply loop may continue other work while the destination finishes the batch.
+/// This is the path where asynchronous completion changes ETL behavior the
+/// most: once dispatch succeeds, the apply loop may continue other work while
+/// the destination finishes the batch.
 pub type WriteEventsResult<T = ()> = AsyncResult<T>;
 /// Pending async completion used for `Destination::write_events`.
 pub(crate) type PendingWriteEventsResult<T = ()> =
@@ -61,19 +65,21 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
 
 /// Sender half of a typed asynchronous completion result.
 ///
-/// Destinations receive this handle from ETL and complete it once the operation is truly done.
-/// The method return value is reserved for immediate dispatch or setup failures before work has
-/// been accepted. ETL may wait on the pending side immediately or later, depending on the method.
+/// Destinations receive this handle from ETL and complete it once the operation
+/// is truly done. The method return value is reserved for immediate dispatch or
+/// setup failures before work has been accepted. ETL may wait on the pending
+/// side immediately or later, depending on the method.
 #[derive(Debug)]
 pub struct AsyncResult<T> {
     tx: Option<oneshot::Sender<EtlResult<T>>>,
 }
 
 impl<T> AsyncResult<T> {
-    /// Creates a new asynchronous completion result and its pending counterpart.
+    /// Creates a new asynchronous completion result and its pending
+    /// counterpart.
     ///
-    /// The metadata is stored only on the pending/completed side so ETL can carry method-specific
-    /// context across the asynchronous boundary.
+    /// The metadata is stored only on the pending/completed side so ETL can
+    /// carry method-specific context across the asynchronous boundary.
     pub(crate) fn new<M>(metadata: M) -> (Self, PendingAsyncResult<T, M>) {
         let (tx, rx) = oneshot::channel();
 

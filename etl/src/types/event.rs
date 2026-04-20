@@ -7,9 +7,9 @@ use crate::types::{SizeHint, TableRow};
 
 /// Transaction begin event from Postgres logical replication.
 ///
-/// [`BeginEvent`] marks the start of a new transaction in the replication stream.
-/// It contains metadata about the transaction including LSN positions and timing
-/// information for proper sequencing and recovery.
+/// [`BeginEvent`] marks the start of a new transaction in the replication
+/// stream. It contains metadata about the transaction including LSN positions
+/// and timing information for proper sequencing and recovery.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeginEvent {
     /// LSN position where the transaction started.
@@ -33,9 +33,9 @@ impl BeginEvent {
 
 /// Transaction commit event from Postgres logical replication.
 ///
-/// [`CommitEvent`] marks the successful completion of a transaction in the replication
-/// stream. It provides final metadata about the transaction including timing and
-/// LSN positions for maintaining consistency and ordering.
+/// [`CommitEvent`] marks the successful completion of a transaction in the
+/// replication stream. It provides final metadata about the transaction
+/// including timing and LSN positions for maintaining consistency and ordering.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommitEvent {
     /// LSN position where the transaction started.
@@ -121,7 +121,8 @@ impl UpdateEvent {
 /// Row deletion event from Postgres logical replication.
 ///
 /// [`DeleteEvent`] represents a row being removed from a table. It contains
-/// information about the deleted row for proper cleanup in the destination system.
+/// information about the deleted row for proper cleanup in the destination
+/// system.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct DeleteEvent {
@@ -150,9 +151,9 @@ impl DeleteEvent {
 
 /// Table truncation event from Postgres logical replication.
 ///
-/// [`TruncateEvent`] represents one or more tables being truncated (all rows deleted).
-/// This is a bulk operation that clears entire tables and may affect multiple tables
-/// in a single operation when using cascading truncates.
+/// [`TruncateEvent`] represents one or more tables being truncated (all rows
+/// deleted). This is a bulk operation that clears entire tables and may affect
+/// multiple tables in a single operation when using cascading truncates.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct TruncateEvent {
@@ -177,10 +178,10 @@ impl TruncateEvent {
 
 /// Relation (schema) event from Postgres logical replication.
 ///
-/// [`RelationEvent`] represents a table schema notification in the replication stream.
-/// It is emitted when a RELATION message is received, containing the current
-/// replication mask for the table. This event notifies downstream consumers
-/// about which columns are being replicated for a table.
+/// [`RelationEvent`] represents a table schema notification in the replication
+/// stream. It is emitted when a RELATION message is received, containing the
+/// current replication mask for the table. This event notifies downstream
+/// consumers about which columns are being replicated for a table.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct RelationEvent {
@@ -190,7 +191,8 @@ pub struct RelationEvent {
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
-    /// The replicated table schema containing the table schema and replication mask.
+    /// The replicated table schema containing the table schema and replication
+    /// mask.
     pub replicated_table_schema: ReplicatedTableSchema,
 }
 
@@ -203,9 +205,10 @@ impl RelationEvent {
 
 /// Represents a single replication event from Postgres logical replication.
 ///
-/// [`Event`] encapsulates all possible events that can occur in a Postgres replication
-/// stream, including data modification events and transaction control events. Each event
-/// type corresponds to specific operations in the source database.
+/// [`Event`] encapsulates all possible events that can occur in a Postgres
+/// replication stream, including data modification events and transaction
+/// control events. Each event type corresponds to specific operations in the
+/// source database.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum Event {
@@ -221,7 +224,8 @@ pub enum Event {
     Delete(DeleteEvent),
     /// Table truncation event clearing all rows from tables.
     Truncate(TruncateEvent),
-    /// Relation (schema) event notifying about table schema and replication mask.
+    /// Relation (schema) event notifying about table schema and replication
+    /// mask.
     Relation(RelationEvent),
     /// Unsupported event type that cannot be processed.
     Unsupported,
@@ -237,7 +241,8 @@ pub struct EventSequenceKey {
 }
 
 impl EventSequenceKey {
-    /// Creates a new sequence key from commit LSN and transaction-local ordinal.
+    /// Creates a new sequence key from commit LSN and transaction-local
+    /// ordinal.
     pub fn new(commit_lsn: PgLsn, tx_ordinal: u64) -> Self {
         Self { commit_lsn, tx_ordinal }
     }
@@ -310,9 +315,9 @@ impl SizeHint for Event {
 
 /// Classification of Postgres replication event types.
 ///
-/// [`EventType`] provides a lightweight enumeration of possible replication events
-/// without carrying the associated data. This is useful for filtering, routing,
-/// and processing decisions based on event type alone.
+/// [`EventType`] provides a lightweight enumeration of possible replication
+/// events without carrying the associated data. This is useful for filtering,
+/// routing, and processing decisions based on event type alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EventType {
     /// Transaction begin marker.

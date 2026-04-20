@@ -17,7 +17,8 @@ use crate::{
 /// Refresh interval for cached batch budget reads.
 const CACHED_BATCH_BUDGET_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Computes per-stream batch byte budgets from current memory and active stream load.
+/// Computes per-stream batch byte budgets from current memory and active stream
+/// load.
 #[derive(Debug, Clone)]
 pub(crate) struct BatchBudgetController {
     pipeline_id: PipelineId,
@@ -41,7 +42,8 @@ impl BatchBudgetController {
         }
     }
 
-    /// Registers active stream load units and returns a guard that unregisters on drop.
+    /// Registers active stream load units and returns a guard that unregisters
+    /// on drop.
     pub(crate) fn register_stream_load(&self, units: usize) -> ActiveStreamsGuard {
         let units = units.max(1);
         self.active_streams.fetch_add(units, Ordering::Relaxed);
@@ -49,7 +51,8 @@ impl BatchBudgetController {
         ActiveStreamsGuard { active_streams: self.active_streams.clone(), units }
     }
 
-    /// Returns a cached budget reader that refreshes from the controller every 100ms.
+    /// Returns a cached budget reader that refreshes from the controller every
+    /// 100ms.
     pub(crate) fn cached(&self) -> CachedBatchBudget {
         CachedBatchBudget::new(self.clone())
     }
@@ -59,9 +62,10 @@ impl BatchBudgetController {
     /// The budget is computed as:
     /// `(total_memory_bytes * target_ratio) / active_streams`.
     ///
-    /// This intentionally subdivides the configured memory percentage across concurrently active
-    /// streams, leaving headroom for other allocations in the process, such as destination batch
-    /// construction and serialization buffers.
+    /// This intentionally subdivides the configured memory percentage across
+    /// concurrently active streams, leaving headroom for other allocations
+    /// in the process, such as destination batch construction and
+    /// serialization buffers.
     pub(crate) fn ideal_batch_size_bytes(&self) -> usize {
         let total_memory_bytes = self.memory_monitor.total_memory_bytes() as f64;
         let target_ratio = self.memory_budget_ratio;
@@ -87,8 +91,8 @@ impl BatchBudgetController {
 
 /// Cached view over [`BatchBudgetController`] ideal batch size calculations.
 ///
-/// This avoids querying atomics and recomputing budgets on every item while still adapting quickly
-/// to changing memory pressure and worker load.
+/// This avoids querying atomics and recomputing budgets on every item while
+/// still adapting quickly to changing memory pressure and worker load.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedBatchBudget {
     controller: BatchBudgetController,
@@ -97,7 +101,8 @@ pub(crate) struct CachedBatchBudget {
 }
 
 impl CachedBatchBudget {
-    /// Creates a new cached budget initialized from the current controller value.
+    /// Creates a new cached budget initialized from the current controller
+    /// value.
     pub(crate) fn new(controller: BatchBudgetController) -> Self {
         Self {
             last_known_batch_size_bytes: controller.ideal_batch_size_bytes(),
@@ -106,7 +111,8 @@ impl CachedBatchBudget {
         }
     }
 
-    /// Returns the current ideal batch size in bytes, refreshing at most every 100ms.
+    /// Returns the current ideal batch size in bytes, refreshing at most every
+    /// 100ms.
     pub(crate) fn current_batch_size_bytes(&mut self) -> usize {
         let now = Instant::now();
         let should_refresh = match self.last_checked_at {

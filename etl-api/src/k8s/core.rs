@@ -21,8 +21,8 @@ use crate::{
 
 /// Secret types required by different destination configurations.
 ///
-/// This enum encapsulates the various credential combinations needed for different
-/// replicator destinations, ensuring type-safe secret management.
+/// This enum encapsulates the various credential combinations needed for
+/// different replicator destinations, ensuring type-safe secret management.
 #[derive(Debug)]
 pub enum Secrets {
     /// No secrets required for the destination.
@@ -58,10 +58,10 @@ pub enum Secrets {
 
 /// Creates or updates all Kubernetes resources required for a pipeline.
 ///
-/// This function orchestrates the creation or update of secrets, config maps, and stateful
-/// sets needed to run a pipeline in Kubernetes. It extracts credentials from the
-/// source and destination configurations, builds the replicator configuration, and applies
-/// all resources to the cluster.
+/// This function orchestrates the creation or update of secrets, config maps,
+/// and stateful sets needed to run a pipeline in Kubernetes. It extracts
+/// credentials from the source and destination configurations, builds the
+/// replicator configuration, and applies all resources to the cluster.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_or_update_pipeline_resources_in_k8s(
     k8s_client: &dyn K8sClient,
@@ -90,8 +90,8 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     let log_level = pipeline.config.log_level.clone().unwrap_or_default();
     let replicator_config = build_replicator_config_without_secrets(
         // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
-        // around, and we won't have two different values map to the same u64, since the domain size
-        // is the same.
+        // around, and we won't have two different values map to the same u64, since the domain
+        // size is the same.
         pipeline.id as u64,
         source.config,
         destination.config,
@@ -117,9 +117,9 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
 
 /// Deletes all Kubernetes resources associated with a pipeline.
 ///
-/// This function removes all secrets, config maps, and stateful sets created for a
-/// replicator. It uses the tenant ID and replicator ID to identify and delete
-/// the correct resources.
+/// This function removes all secrets, config maps, and stateful sets created
+/// for a replicator. It uses the tenant ID and replicator ID to identify and
+/// delete the correct resources.
 pub async fn delete_pipeline_resources_in_k8s(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
@@ -146,11 +146,12 @@ pub async fn is_replicator_pod_stopped(
     Ok(matches!(pod_status, PodStatus::Stopped))
 }
 
-/// Extracts and combines credentials from source and destination configurations.
+/// Extracts and combines credentials from source and destination
+/// configurations.
 ///
-/// This function determines which credentials are needed based on the destination type
-/// and extracts them from the provided configurations, exposing secrets as plain strings
-/// for Kubernetes secret creation.
+/// This function determines which credentials are needed based on the
+/// destination type and extracts them from the provided configurations,
+/// exposing secrets as plain strings for Kubernetes secret creation.
 fn build_secrets_from_configs(
     source_config: &StoredSourceConfig,
     destination_config: &StoredDestinationConfig,
@@ -196,9 +197,10 @@ fn build_secrets_from_configs(
 
 /// Builds a replicator configuration with credentials omitted.
 ///
-/// This function constructs a [`ReplicatorConfigWithoutSecrets`] by combining pipeline,
-/// source, and destination configurations. It uses the provided trusted root certificates
-/// for TLS configuration. Secrets are managed separately through Kubernetes secret resources.
+/// This function constructs a [`ReplicatorConfigWithoutSecrets`] by combining
+/// pipeline, source, and destination configurations. It uses the provided
+/// trusted root certificates for TLS configuration. Secrets are managed
+/// separately through Kubernetes secret resources.
 fn build_replicator_config_without_secrets(
     pipeline_id: u64,
     source_config: StoredSourceConfig,
@@ -218,18 +220,18 @@ fn build_replicator_config_without_secrets(
 
 /// Creates a consistent naming prefix for Kubernetes resources.
 ///
-/// This function generates a prefix string by combining the tenant ID and replicator ID,
-/// which is used to name all Kubernetes resources (secrets, config maps, stateful sets)
-/// associated with a specific pipeline instance.
+/// This function generates a prefix string by combining the tenant ID and
+/// replicator ID, which is used to name all Kubernetes resources (secrets,
+/// config maps, stateful sets) associated with a specific pipeline instance.
 pub fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
     format!("{tenant_id}-{replicator_id}")
 }
 
 /// Creates or updates Kubernetes secrets based on the destination type.
 ///
-/// This function creates different sets of secrets depending on the [`Secrets`] variant,
-/// handling PostgreSQL credentials and destination-specific authentication credentials.
-/// For [`Secrets::None`], no secrets are created.
+/// This function creates different sets of secrets depending on the [`Secrets`]
+/// variant, handling PostgreSQL credentials and destination-specific
+/// authentication credentials. For [`Secrets::None`], no secrets are created.
 async fn create_or_update_dynamic_replicator_secrets(
     k8s_client: &dyn K8sClient,
     prefix: &str,
@@ -282,9 +284,9 @@ async fn create_or_update_dynamic_replicator_secrets(
 
 /// Creates or updates the replicator configuration in a Kubernetes config map.
 ///
-/// This function serializes the [`ReplicatorConfigWithoutSecrets`] to JSON and stores it
-/// in a Kubernetes config map. The replicator pods mount this config map to access their
-/// runtime configuration.
+/// This function serializes the [`ReplicatorConfigWithoutSecrets`] to JSON and
+/// stores it in a Kubernetes config map. The replicator pods mount this config
+/// map to access their runtime configuration.
 async fn create_or_update_replicator_config(
     k8s_client: &dyn K8sClient,
     prefix: &str,
@@ -310,9 +312,10 @@ async fn create_or_update_replicator_config(
 
 /// Creates or updates the Kubernetes stateful set for the replicator.
 ///
-/// This function creates a stateful set that runs the replicator container with the
-/// specified image. The stateful set is configured with environment-specific settings
-/// and destination-type-specific resource requirements.
+/// This function creates a stateful set that runs the replicator container with
+/// the specified image. The stateful set is configured with
+/// environment-specific settings and destination-type-specific resource
+/// requirements.
 async fn create_or_update_replicator_stateful_set(
     k8s_client: &dyn K8sClient,
     prefix: &str,
@@ -336,21 +339,23 @@ async fn create_or_update_replicator_stateful_set(
 
 /// Deletes all Kubernetes secrets associated with a replicator.
 ///
-/// This function deletes PostgreSQL, BigQuery, and Iceberg secrets for the given prefix.
-/// It attempts to delete all secret types regardless of which were actually created,
-/// safely handling cases where secrets don't exist. This approach prevents orphaned
-/// secrets when a pipeline's destination type is changed.
+/// This function deletes PostgreSQL, BigQuery, and Iceberg secrets for the
+/// given prefix. It attempts to delete all secret types regardless of which
+/// were actually created, safely handling cases where secrets don't exist. This
+/// approach prevents orphaned secrets when a pipeline's destination type is
+/// changed.
 async fn delete_dynamic_replicator_secrets(
     k8s_client: &dyn K8sClient,
     prefix: &str,
 ) -> Result<(), PipelineError> {
     k8s_client.delete_postgres_secret(prefix).await?;
 
-    // Although it won't happen that there are both bq and iceberg secrets at the same time
-    // we delete them both here because the state in the db might not be the same as that
-    // running in the k8s cluster. E.g. if a pipeline is updated from bq to iceberg or vice-versa
-    // then there's a risk of wrong secret type being attempted for deletion which might leave
-    // the actual secret behind. So for simplicty we just delete both kinds of secrets. The
+    // Although it won't happen that there are both bq and iceberg secrets at the
+    // same time we delete them both here because the state in the db might not
+    // be the same as that running in the k8s cluster. E.g. if a pipeline is
+    // updated from bq to iceberg or vice-versa then there's a risk of wrong
+    // secret type being attempted for deletion which might leave the actual
+    // secret behind. So for simplicty we just delete both kinds of secrets. The
     // one which doesn't exist will be safely ignored.
     k8s_client.delete_bigquery_secret(prefix).await?;
     k8s_client.delete_iceberg_secret(prefix).await?;

@@ -68,7 +68,8 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let single_destination_namespace = destination_namespace.is_single();
     let raw_destination =
         IcebergDestination::new(client.clone(), destination_namespace, store.clone());
-    // let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    // let raw_destination =
+    // bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -131,7 +132,8 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
         ]),
     ];
 
-    // Sort deterministically by the debug representation as a simple stable key for tests.
+    // Sort deterministically by the debug representation as a simple stable key for
+    // tests.
     actual_users
         .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
     assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
@@ -154,15 +156,16 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
         ]),
     ];
 
-    // Sort deterministically by the debug representation as a simple stable key for tests.
+    // Sort deterministically by the debug representation as a simple stable key for
+    // tests.
     actual_orders
         .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
     assert_table_rows_equal_ignoring_size(&actual_orders, &expected_orders);
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
-    // This feature is planned for future releases. We'll start to use it when it becomes available.
-    // The cleanup is not in a Drop impl because each test has different number of object specitic to
-    // that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
+    // warehouse level This feature is planned for future releases. We'll start
+    // to use it when it becomes available. The cleanup is not in a Drop impl
+    // because each test has different number of object specitic to that test.
     client.drop_table_if_exists(&namespace, users_table).await.unwrap();
     client.drop_table_if_exists(&namespace, orders_table).await.unwrap();
     client.drop_namespace(&namespace).await.unwrap();
@@ -328,8 +331,8 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     }
 
     // Expected CDC rows: 2 inserts (UPSERT), 2 updates (UPSERT), 1 delete (DELETE)
-    // Note: order here is messed up due to limitations in how read_all_rows can't sort, so we sort manually
-    // by id and cdc operation columns
+    // Note: order here is messed up due to limitations in how read_all_rows can't
+    // sort, so we sort manually by id and cdc operation columns
     let expected_users = vec![
         // Initial insert of user 1
         TableRow::new(vec![
@@ -373,7 +376,8 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     let mut actual_orders =
         read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
 
-    // Sort deterministically by the primary key (id) and sequence key for stable assertions
+    // Sort deterministically by the primary key (id) and sequence key for stable
+    // assertions
     actual_orders.sort_by(|a, b| {
         let a_key = format!("{:?}", a.values()[3]);
         let b_key = format!("{:?}", b.values()[3]);
@@ -519,7 +523,8 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
 
     let event_notify = destination.wait_for_events_count(vec![(EventType::Truncate, 2)]).await;
 
-    // Truncate both tables in the source; destination should drop and recreate base + CDC tables.
+    // Truncate both tables in the source; destination should drop and recreate base
+    // + CDC tables.
     database.truncate_table(database_schema.users_schema().name.clone()).await.unwrap();
     database.truncate_table(database_schema.orders_schema().name.clone()).await.unwrap();
 
@@ -562,7 +567,8 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     event_notify.notified().await;
     destination.clear_events().await;
 
-    // After truncate, pre-truncate CDC rows should be gone (tables were dropped). Only post-truncate rows remain.
+    // After truncate, pre-truncate CDC rows should be gone (tables were dropped).
+    // Only post-truncate rows remain.
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
     for row in &mut actual_users {
         let _ = row.values_mut().pop(); // drop sequence_key

@@ -1,12 +1,14 @@
 //! Tokio runtime metrics for Prometheus monitoring.
 //!
-//! Exposes Tokio runtime metrics provided by [`tokio::runtime::Handle::metrics`] as
-//! Prometheus gauges. This includes stable metrics and additional unstable metrics
-//! when compiled with `tokio_unstable`.
+//! Exposes Tokio runtime metrics provided by
+//! [`tokio::runtime::Handle::metrics`] as Prometheus gauges. This includes
+//! stable metrics and additional unstable metrics when compiled with
+//! `tokio_unstable`.
 //!
-//! Metrics are polled on a fixed interval from a background task to match the existing
-//! jemalloc reporting pattern. Monotonic runtime totals are exported as gauges because
-//! Tokio exposes them as absolute snapshots rather than deltas.
+//! Metrics are polled on a fixed interval from a background task to match the
+//! existing jemalloc reporting pattern. Monotonic runtime totals are exported
+//! as gauges because Tokio exposes them as absolute snapshots rather than
+//! deltas.
 
 use std::time::Duration;
 
@@ -65,7 +67,8 @@ const TOKIO_METRICS_WORKER_PARK_UNPARK_TOTAL: &str = "tokio_metrics_worker_park_
 #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
 const TOKIO_METRICS_WORKER_STEAL_TOTAL: &str = "tokio_metrics_worker_steal_total";
 
-/// Total number of steal operations performed by a worker since runtime startup.
+/// Total number of steal operations performed by a worker since runtime
+/// startup.
 #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
 const TOKIO_METRICS_WORKER_STEAL_OPERATIONS_TOTAL: &str =
     "tokio_metrics_worker_steal_operations_total";
@@ -134,7 +137,8 @@ fn log_runtime_metrics(num_workers: usize, alive_tasks: f64, global_queue_depth:
     debug!(num_workers, alive_tasks, global_queue_depth, "tokio runtime stats updated");
 }
 
-/// Registers Tokio runtime metric descriptions with the global metrics recorder.
+/// Registers Tokio runtime metric descriptions with the global metrics
+/// recorder.
 fn register_metrics() {
     describe_gauge!(
         TOKIO_METRICS_WORKERS,
@@ -204,7 +208,8 @@ fn register_metrics() {
     describe_gauge!(
         TOKIO_METRICS_WORKER_PARK_UNPARK_TOTAL,
         Unit::Count,
-        "Total number of park and unpark transitions for a tokio runtime worker since runtime startup"
+        "Total number of park and unpark transitions for a tokio runtime worker since runtime \
+         startup"
     );
     #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
     describe_gauge!(
@@ -222,11 +227,13 @@ fn register_metrics() {
 
 /// Spawns a background task that periodically polls Tokio runtime statistics.
 ///
-/// This function should be called after the metrics recorder is installed and from
-/// within the target Tokio runtime so the task observes the correct runtime handle.
+/// This function should be called after the metrics recorder is installed and
+/// from within the target Tokio runtime so the task observes the correct
+/// runtime handle.
 ///
-/// Stable metrics are always exported. Additional metrics guarded by `tokio_unstable`
-/// are exported only when the binary is compiled with that cfg enabled.
+/// Stable metrics are always exported. Additional metrics guarded by
+/// `tokio_unstable` are exported only when the binary is compiled with that cfg
+/// enabled.
 pub(super) fn spawn_tokio_metrics_task() {
     register_metrics();
 

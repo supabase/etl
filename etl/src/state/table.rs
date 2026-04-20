@@ -15,8 +15,8 @@ use crate::{
 
 /// Represents an error that occurred during table replication.
 ///
-/// Contains diagnostic information including the table that failed, the reason for failure,
-/// an optional solution suggestion, and the retry policy to apply.
+/// Contains diagnostic information including the table that failed, the reason
+/// for failure, an optional solution suggestion, and the retry policy to apply.
 #[derive(Debug)]
 pub struct TableReplicationError {
     table_id: TableId,
@@ -76,12 +76,14 @@ impl TableReplicationError {
         self
     }
 
-    /// Converts an [`EtlError`] to a [`TableReplicationError`] for a specific table.
+    /// Converts an [`EtlError`] to a [`TableReplicationError`] for a specific
+    /// table.
     ///
     /// Determines appropriate retry policies based on the error kind.
     ///
-    /// Note that this conversion is constantly improving since during testing and operation of ETL
-    /// we might notice edge cases that could be manually handled.
+    /// Note that this conversion is constantly improving since during testing
+    /// and operation of ETL we might notice edge cases that could be
+    /// manually handled.
     pub fn from_etl_error(config: &PipelineConfig, table_id: TableId, error: &EtlError) -> Self {
         let retry_duration = Duration::milliseconds(config.table_error_retry_delay_ms as i64);
         let source_err = error.clone();
@@ -130,7 +132,8 @@ impl TableReplicationError {
             ErrorKind::SourceConfigurationLimitExceeded => Self::with_solution(
                 table_id,
                 error,
-                "Verify the configured limits for Postgres, for example, the maximum number of replication slots.",
+                "Verify the configured limits for Postgres, for example, the maximum number of \
+                 replication slots.",
                 RetryPolicy::ManualRetry,
             ),
             ErrorKind::NullValuesNotSupportedInArrayInDestination => Self::with_solution(
@@ -188,7 +191,8 @@ impl TableReplicationError {
             _ => Self::with_solution(
                 table_id,
                 error,
-                "There is no explicit solution for this error, if the issue persists after rollback, please contact support.",
+                "There is no explicit solution for this error, if the issue persists after \
+                 rollback, please contact support.",
                 RetryPolicy::ManualRetry,
             ),
         };
@@ -197,7 +201,8 @@ impl TableReplicationError {
         result
     }
 
-    /// Builds a [`TableReplicationError`] from a shared handling policy and worker retry policy.
+    /// Builds a [`TableReplicationError`] from a shared handling policy and
+    /// worker retry policy.
     pub(crate) fn from_error_policy(
         table_id: TableId,
         error: &EtlError,
@@ -241,7 +246,8 @@ impl RetryPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TableReplicationPhase {
-    /// Set by the pipeline when it first starts and encounters a table for the first time.
+    /// Set by the pipeline when it first starts and encounters a table for the
+    /// first time.
     Init,
     /// Set by table-sync worker just before starting initial table copy.
     DataSync,
@@ -250,35 +256,40 @@ pub enum TableReplicationPhase {
     /// Set by table-sync worker when waiting for the apply worker to pause.
     ///
     /// On every transaction boundary the apply worker checks if any table-sync
-    /// worker is in the `SyncWait` state and pauses itself if it finds any. It resumes
-    /// only when the table sync worker has caught up with the `Catchup`'s LSN.
+    /// worker is in the `SyncWait` state and pauses itself if it finds any. It
+    /// resumes only when the table sync worker has caught up with the
+    /// `Catchup`'s LSN.
     ///
-    /// This phase is stored in memory only and not persisted to the state store.
+    /// This phase is stored in memory only and not persisted to the state
+    /// store.
     SyncWait {
         /// The LSN of the snapshot used for the initial table copy.
         ///
-        /// This LSN represents the consistent point from which the table sync worker
-        /// will start streaming changes. The apply worker will use `max(this lsn, current_lsn)`
-        /// when setting the Catchup LSN to ensure no data loss, following PostgreSQL's pattern.
+        /// This LSN represents the consistent point from which the table sync
+        /// worker will start streaming changes. The apply worker will
+        /// use `max(this lsn, current_lsn)` when setting the Catchup
+        /// LSN to ensure no data loss, following PostgreSQL's pattern.
         #[serde(with = "lsn_serde")]
         lsn: PgLsn,
     },
     /// Set by the apply worker when it is paused. The table-sync worker waits
-    /// for the apply worker to set this state after setting the state to `SyncWait`.
+    /// for the apply worker to set this state after setting the state to
+    /// `SyncWait`.
     ///
     /// This phase is stored in memory only and not persisted to the state store
     Catchup {
-        /// The lsn to catch up before shutting down the table sync worker and handing over streaming
-        /// to the apply worker.
+        /// The lsn to catch up before shutting down the table sync worker and
+        /// handing over streaming to the apply worker.
         #[serde(with = "lsn_serde")]
         lsn: PgLsn,
     },
 
-    /// Set by the table-sync worker when catch-up phase is completed and table-sync
-    /// worker has caught up with the apply worker's lsn position.
+    /// Set by the table-sync worker when catch-up phase is completed and
+    /// table-sync worker has caught up with the apply worker's lsn
+    /// position.
     ///
-    /// The apply worker is waiting on this phase to be reached before continuing to process other
-    /// tables or events in the apply loop.
+    /// The apply worker is waiting on this phase to be reached before
+    /// continuing to process other tables or events in the apply loop.
     SyncDone {
         /// The lsn up to which the table-sync worker has caught up.
         ///
@@ -287,12 +298,13 @@ pub enum TableReplicationPhase {
         lsn: PgLsn,
     },
     /// Set by apply worker when it has caught up with the table-sync worker's
-    /// catch up lsn position. Tables with this state have successfully run their
-    /// initial table copy and catch-up phases and any changes to them will now
-    /// be applied by the apply worker only.
+    /// catch up lsn position. Tables with this state have successfully run
+    /// their initial table copy and catch-up phases and any changes to them
+    /// will now be applied by the apply worker only.
     Ready,
-    /// Set by either the table-sync worker or the apply worker when a table encounters
-    /// an error during replication. Contains diagnostic information and retry policy.
+    /// Set by either the table-sync worker or the apply worker when a table
+    /// encounters an error during replication. Contains diagnostic
+    /// information and retry policy.
     Errored {
         /// Human-readable description of what went wrong.
         reason: String,
@@ -302,11 +314,12 @@ pub enum TableReplicationPhase {
         retry_policy: RetryPolicy,
         /// Original error that triggered the table error state.
         ///
-        /// This field is **not persisted** — it is skipped during serialization and
-        /// replaced with a generic placeholder on deserialization. Code that reads
-        /// phases from the state store should not rely on `source_err` containing
-        /// the original error; it is only meaningful for the in-memory lifetime of
-        /// the phase that produced it.
+        /// This field is **not persisted** — it is skipped during serialization
+        /// and replaced with a generic placeholder on deserialization.
+        /// Code that reads phases from the state store should not rely
+        /// on `source_err` containing the original error; it is only
+        /// meaningful for the in-memory lifetime of the phase that
+        /// produced it.
         #[serde(skip, default = "default_source_err")]
         source_err: EtlError,
     },
@@ -338,7 +351,8 @@ impl TableReplicationPhase {
             bail!(
                 ErrorKind::InvalidState,
                 "In-memory replication phase cannot be persisted",
-                "In-memory table replication phases (SyncWait, Catchup) cannot be saved to state store"
+                "In-memory table replication phases (SyncWait, Catchup) cannot be saved to state \
+                 store"
             );
         }
 
@@ -368,7 +382,8 @@ impl TableReplicationPhase {
         Ok((state_type, metadata))
     }
 
-    /// Deserializes a [`TableReplicationPhase`] from a state store row's metadata.
+    /// Deserializes a [`TableReplicationPhase`] from a state store row's
+    /// metadata.
     pub fn from_state_row(row: state::TableReplicationStateRow) -> EtlResult<Self> {
         let Some(metadata) = row.metadata else {
             bail!(
@@ -383,7 +398,8 @@ impl TableReplicationPhase {
                 ErrorKind::DeserializationError,
                 "Table replication state deserialization failed",
                 format!(
-                    "Failed to deserialize table replication state from metadata column in PostgreSQL: {err}"
+                    "Failed to deserialize table replication state from metadata column in \
+                     PostgreSQL: {err}"
                 )
             )
         })
@@ -416,8 +432,8 @@ impl From<TableReplicationError> for TableReplicationPhase {
     }
 }
 
-/// A variant of [`TableReplicationPhase`] that can be used to determine the current phase of a table
-/// without having to pattern match on the data fields.
+/// A variant of [`TableReplicationPhase`] that can be used to determine the
+/// current phase of a table without having to pattern match on the data fields.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum TableReplicationPhaseType {
     Init,
@@ -431,7 +447,8 @@ pub enum TableReplicationPhaseType {
 }
 
 impl TableReplicationPhaseType {
-    /// Returns `true` if the phase should be saved into the state store, `false` otherwise.
+    /// Returns `true` if the phase should be saved into the state store,
+    /// `false` otherwise.
     pub fn should_store(&self) -> bool {
         match self {
             Self::Init => true,
@@ -445,10 +462,11 @@ impl TableReplicationPhaseType {
         }
     }
 
-    /// Returns `true` if a table with this phase is done processing, `false` otherwise.
+    /// Returns `true` if a table with this phase is done processing, `false`
+    /// otherwise.
     ///
-    /// A table is done processing, when its events are being processed by the apply worker instead
-    /// of a table sync worker or when it has errored.
+    /// A table is done processing, when its events are being processed by the
+    /// apply worker instead of a table sync worker or when it has errored.
     pub fn is_done(&self) -> bool {
         match self {
             Self::Init => false,

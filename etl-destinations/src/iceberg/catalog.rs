@@ -12,15 +12,18 @@ use iceberg_catalog_rest::RestCatalog;
 use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-/// A REST catalog implementation that handles Supabase-specific API incompatibilities.
+/// A REST catalog implementation that handles Supabase-specific API
+/// incompatibilities.
 ///
-/// This catalog acts as a compatibility layer between the standard Iceberg catalog interface
-/// and Supabase's REST API endpoints. For standard-compliant endpoints, it delegates to
-/// the inner [`RestCatalog`]. For endpoints with non-standard behavior, it uses a custom
-/// HTTP client ([`SupabaseClient`]) to ensure proper communication with Supabase services.
+/// This catalog acts as a compatibility layer between the standard Iceberg
+/// catalog interface and Supabase's REST API endpoints. For standard-compliant
+/// endpoints, it delegates to the inner [`RestCatalog`]. For endpoints with
+/// non-standard behavior, it uses a custom HTTP client ([`SupabaseClient`]) to
+/// ensure proper communication with Supabase services.
 ///
-/// The catalog maintains both a standard REST catalog instance and a Supabase-specific
-/// client to provide seamless operation across different endpoint types.
+/// The catalog maintains both a standard REST catalog instance and a
+/// Supabase-specific client to provide seamless operation across different
+/// endpoint types.
 #[derive(Debug)]
 pub(crate) struct SupabaseCatalog {
     /// Standard REST catalog for compatible endpoints.
@@ -32,8 +35,8 @@ pub(crate) struct SupabaseCatalog {
 impl SupabaseCatalog {
     /// Creates a new Supabase catalog instance.
     ///
-    /// Combines a standard REST catalog with a Supabase-specific client to handle
-    /// both compatible and incompatible API endpoints.
+    /// Combines a standard REST catalog with a Supabase-specific client to
+    /// handle both compatible and incompatible API endpoints.
     pub(super) fn new(inner: RestCatalog, client: SupabaseClient) -> Self {
         SupabaseCatalog { inner, client }
     }
@@ -41,9 +44,10 @@ impl SupabaseCatalog {
 
 /// Implementation of the [`Catalog`] trait for Supabase.
 ///
-/// Routes operations to either the standard REST catalog or the Supabase-specific
-/// client based on endpoint compatibility. Table creation and deletion use the
-/// custom client, while other operations delegate to the standard implementation.
+/// Routes operations to either the standard REST catalog or the
+/// Supabase-specific client based on endpoint compatibility. Table creation and
+/// deletion use the custom client, while other operations delegate to the
+/// standard implementation.
 #[async_trait]
 impl Catalog for SupabaseCatalog {
     /// Lists all namespaces under the specified parent namespace.
@@ -120,7 +124,8 @@ impl Catalog for SupabaseCatalog {
         self.client.drop_table(identifier).await
     }
 
-    /// Renames a table from the source identifier to the destination identifier.
+    /// Renames a table from the source identifier to the destination
+    /// identifier.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
     async fn rename_table(&self, src: &TableIdent, dest: &TableIdent) -> Result<()> {
@@ -136,7 +141,8 @@ impl Catalog for SupabaseCatalog {
 
     /// Creates a new table in the specified namespace.
     ///
-    /// Uses the Supabase-specific client due to non-standard request format requirements.
+    /// Uses the Supabase-specific client due to non-standard request format
+    /// requirements.
     async fn create_table(
         &self,
         namespace: &NamespaceIdent,
@@ -152,7 +158,8 @@ impl Catalog for SupabaseCatalog {
         self.inner.update_table(commit).await
     }
 
-    /// Registers an existing table with the catalog using its metadata location.
+    /// Registers an existing table with the catalog using its metadata
+    /// location.
     ///
     /// Delegates to the standard REST catalog as this endpoint is compatible.
     async fn register_table(
@@ -166,9 +173,10 @@ impl Catalog for SupabaseCatalog {
 
 /// HTTP client for Supabase-specific catalog operations.
 ///
-/// Handles authentication and request formatting for Supabase catalog REST endpoints
-/// that deviate from the standard Iceberg catalog API. Maintains connection details
-/// and provides methods for table creation and deletion operations.
+/// Handles authentication and request formatting for Supabase catalog REST
+/// endpoints that deviate from the standard Iceberg catalog API. Maintains
+/// connection details and provides methods for table creation and deletion
+/// operations.
 #[derive(Debug)]
 pub(crate) struct SupabaseClient {
     /// HTTP client for making requests.
@@ -211,9 +219,10 @@ impl SupabaseClient {
 
     /// Creates a new table using Supabase-specific API format.
     ///
-    /// Converts the standard [`TableCreation`] request to Supabase's expected format
-    /// and handles the non-standard response structure. Returns a fully configured
-    /// [`Table`] instance with metadata and file I/O capabilities.
+    /// Converts the standard [`TableCreation`] request to Supabase's expected
+    /// format and handles the non-standard response structure. Returns a
+    /// fully configured [`Table`] instance with metadata and file I/O
+    /// capabilities.
     async fn create_table(
         &self,
         namespace: &NamespaceIdent,
@@ -296,7 +305,8 @@ impl SupabaseClient {
                 reqwest::Method::DELETE,
                 &url,
                 None,
-                Some(&[("purgeRequested", "true")]), // S3 tables doesn't support dropping tables without purging
+                Some(&[("purgeRequested", "true")]), /* S3 tables doesn't support dropping
+                                                      * tables without purging */
             )
             .await?;
 
@@ -339,9 +349,9 @@ impl SupabaseClient {
 
     /// Sends an authenticated HTTP request to the Supabase catalog API.
     ///
-    /// Configures the request with bearer token authentication and JSON content type.
-    /// Includes optional request body and query parameters. Returns an error for
-    /// non-successful HTTP status codes.
+    /// Configures the request with bearer token authentication and JSON content
+    /// type. Includes optional request body and query parameters. Returns
+    /// an error for non-successful HTTP status codes.
     async fn send_request(
         &self,
         method: reqwest::Method,
@@ -401,8 +411,8 @@ pub(crate) async fn deserialize_catalog_response<R: DeserializeOwned>(
 /// Converts an unexpected HTTP response into a detailed error.
 ///
 /// Extracts status code, headers, and response body to create a comprehensive
-/// error message for debugging failed catalog operations. Handles empty response
-/// bodies gracefully.
+/// error message for debugging failed catalog operations. Handles empty
+/// response bodies gracefully.
 pub(crate) async fn deserialize_unexpected_catalog_error(response: Response) -> Error {
     let err = Error::new(ErrorKind::Unexpected, "Received response with unexpected status code")
         .with_context("status", response.status().to_string())

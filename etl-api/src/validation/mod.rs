@@ -1,7 +1,8 @@
 //! Validation framework for ETL sources, destinations, and pipelines.
 //!
 //! Provides a trait-based validation framework for checking configuration
-//! and runtime requirements before creating sources, destinations, or pipelines.
+//! and runtime requirements before creating sources, destinations, or
+//! pipelines.
 
 mod validators;
 
@@ -30,7 +31,8 @@ pub struct ValidationContext {
     /// Runtime environment for environment-specific configuration.
     pub environment: Environment,
     /// Connection pool to the source PostgreSQL database.
-    /// Required for source and pipeline validation, optional for destination validation.
+    /// Required for source and pipeline validation, optional for destination
+    /// validation.
     pub source_pool: Option<PgPool>,
     /// Trusted username used to validate the source role profile.
     pub trusted_username: Option<String>,

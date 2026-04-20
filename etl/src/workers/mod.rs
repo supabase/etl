@@ -1,8 +1,9 @@
 //! Worker implementations for concurrent replication tasks.
 //!
-//! Contains worker types for handling different aspects of replication: apply workers process
-//! replication streams, table sync workers handle initial data copying, and worker pools manage
-//! concurrent execution and lifecycle coordination.
+//! Contains worker types for handling different aspects of replication: apply
+//! workers process replication streams, table sync workers handle initial data
+//! copying, and worker pools manage concurrent execution and lifecycle
+//! coordination.
 
 mod apply;
 mod policy;

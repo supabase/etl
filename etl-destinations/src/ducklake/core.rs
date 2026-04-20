@@ -79,7 +79,8 @@ pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) 
         && message.contains(&format!(r#"attempting to create table "{table_name}""#))
 }
 
-// ── destination ───────────────────────────────────────────────────────────────
+// ── destination
+// ───────────────────────────────────────────────────────────────
 
 /// A DuckLake destination that implements the ETL [`Destination`] trait.
 ///
@@ -105,7 +106,8 @@ pub struct DuckLakeDestination<S> {
     store: S,
     /// Cache of table names whose DDL has already been executed.
     created_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
-    /// Cache tracking whether the ETL batch marker table already exists. If it's set then the table has already been created
+    /// Cache tracking whether the ETL batch marker table already exists. If
+    /// it's set then the table has already been created
     applied_batches_table_created: Arc<AtomicBool>,
 }
 
@@ -197,24 +199,23 @@ where
 
     /// Creates a new DuckLake destination.
     ///
-    /// - `catalog_url`: DuckLake catalog location. Use a PostgreSQL URL
-    ///   (`postgres://user:pass@localhost:5432/mydb`) or a local file URL
-    ///   (`file:///tmp/catalog.ducklake`).
-    /// - `data_path`: Where Parquet files are stored. Use a local file URL
-    ///   (`file:///tmp/lake_data`) or a cloud URL (`s3://bucket/prefix/`,
-    ///   `gs://bucket/prefix/`).
+    /// - `catalog_url`: DuckLake catalog location. Use a PostgreSQL URL (`postgres://user:pass@localhost:5432/mydb`)
+    ///   or a local file URL (`file:///tmp/catalog.ducklake`).
+    /// - `data_path`: Where Parquet files are stored. Use a local file URL (`file:///tmp/lake_data`)
+    ///   or a cloud URL (`s3://bucket/prefix/`, `gs://bucket/prefix/`).
     /// - `pool_size`: Number of warm DuckDB connections maintained in the pool.
     ///   `4` is a reasonable default; higher values allow more tables to be
     ///   written in parallel.
     /// - `s3`: Optional S3 credentials. Required when `data_path` is an S3 URI
     ///   and the bucket is not publicly accessible.
-    /// - `metadata_schema`: Optional Postgres schema for DuckLake metadata tables
-    ///   (e.g. `"ducklake"`). Uses the catalog default schema when not set.
+    /// - `metadata_schema`: Optional Postgres schema for DuckLake metadata
+    ///   tables (e.g. `"ducklake"`). Uses the catalog default schema when not
+    ///   set.
     /// - `duckdb_log`: Optional DuckDB log storage and shutdown dump paths.
     /// - On Linux and macOS, DuckDB extensions are loaded from vendored local
     ///   files when a vendored directory is available. The root directory can
-    ///   be forced with `ETL_DUCKDB_EXTENSION_ROOT`. Otherwise, DuckDB uses
-    ///   the legacy online `INSTALL` flow. On Windows, DuckDB always uses the
+    ///   be forced with `ETL_DUCKDB_EXTENSION_ROOT`. Otherwise, DuckDB uses the
+    ///   legacy online `INSTALL` flow. On Windows, DuckDB always uses the
     ///   legacy online `INSTALL` flow.
     ///
     /// Pool initialization is blocking because DuckDB extensions are loaded and
@@ -371,7 +372,8 @@ where
         .await
     }
 
-    /// Bulk-inserts rows into the destination table inside a single transaction.
+    /// Bulk-inserts rows into the destination table inside a single
+    /// transaction.
     ///
     /// Wrapping all inserts in one `BEGIN` / `COMMIT` ensures they are written
     /// as one atomic DuckLake change rather than one file per row.
@@ -395,7 +397,8 @@ where
         let approx_bytes = table_rows.iter().map(|row| row.size_hint() as u64).sum::<u64>();
         let inserted_rows = table_rows.len() as u64;
 
-        // Here we can have concurrent table writers because it's INSERTs only and CDC (write_events) won't start before the copy phase is complete
+        // Here we can have concurrent table writers because it's INSERTs only and CDC
+        // (write_events) won't start before the copy phase is complete
         self.ensure_applied_batches_table_exists().await?;
         let prepared_batch =
             prepare_copy_table_batch(replicated_table_schema, table_name, table_rows)?;
@@ -625,9 +628,9 @@ where
             }
         }
 
-        // `build_create_table_sql_ducklake` generates `CREATE TABLE IF NOT EXISTS "name" (...)`.
-        // Prefix the table name with the catalog alias so DuckLake knows which
-        // catalog to create the table in.
+        // `build_create_table_sql_ducklake` generates `CREATE TABLE IF NOT EXISTS
+        // "name" (...)`. Prefix the table name with the catalog alias so
+        // DuckLake knows which catalog to create the table in.
         let replicated_column_schemas =
             replicated_table_schema.column_schemas().cloned().collect::<Vec<_>>();
         let ddl = build_create_table_sql_ducklake(&table_name, &replicated_column_schemas);
@@ -685,13 +688,16 @@ where
         .await
     }
 
-    /// Returns the destination table name for `table_id`, creating and persisting a new mapping
-    /// via [`DestinationTableMetadata`] if none exists yet.
+    /// Returns the destination table name for `table_id`, creating and
+    /// persisting a new mapping via [`DestinationTableMetadata`] if none
+    /// exists yet.
     ///
-    /// Existing metadata must already be in the applied state; otherwise the state store returns
-    /// an error and the caller must stop. When a mapping is created for the first time, it is
-    /// stored with [`DestinationTableSchemaStatus::Applying`] status. The caller is responsible
-    /// for transitioning it to [`DestinationTableSchemaStatus::Applied`] once the DDL has been
+    /// Existing metadata must already be in the applied state; otherwise the
+    /// state store returns an error and the caller must stop. When a
+    /// mapping is created for the first time, it is stored with
+    /// [`DestinationTableSchemaStatus::Applying`] status. The caller is
+    /// responsible for transitioning it to
+    /// [`DestinationTableSchemaStatus::Applied`] once the DDL has been
     /// executed successfully.
     async fn get_or_create_applied_table_mapping(
         &self,
@@ -749,7 +755,8 @@ where
         .await
     }
 
-    /// Flushes any remaining inlined rows for known tables before shutdown completes.
+    /// Flushes any remaining inlined rows for known tables before shutdown
+    /// completes.
     async fn flush_known_tables_on_shutdown(&self) {
         let table_names = {
             let cache = self.created_tables.lock();
@@ -1088,8 +1095,8 @@ mod tests {
     fn lake_table_exists(conn: &Connection, table_name: &str) -> bool {
         conn.query_row(
             &format!(
-                "SELECT COUNT(*) FROM information_schema.tables \
-                 WHERE table_catalog = {} AND table_schema = {} AND table_name = {}",
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_catalog = {} AND \
+                 table_schema = {} AND table_name = {}",
                 quote_literal(LAKE_CATALOG),
                 quote_literal("main"),
                 quote_literal(table_name),
@@ -1104,9 +1111,8 @@ mod tests {
     fn lake_table_column_names(conn: &Connection, table_name: &str) -> Vec<String> {
         let mut statement = conn
             .prepare(&format!(
-                "SELECT column_name FROM information_schema.columns \
-                 WHERE table_catalog = {} AND table_schema = {} AND table_name = {} \
-                 ORDER BY ordinal_position",
+                "SELECT column_name FROM information_schema.columns WHERE table_catalog = {} AND \
+                 table_schema = {} AND table_name = {} ORDER BY ordinal_position",
                 quote_literal(LAKE_CATALOG),
                 quote_literal("main"),
                 quote_literal(table_name),
@@ -1169,7 +1175,11 @@ mod tests {
         let error = duckdb::Error::DuckDBFailure(
             duckdb::ffi::Error::new(1),
             Some(
-                "TransactionContext Error: Failed to commit: Failed to commit DuckLake transaction. Transaction conflict - attempting to create table \"public_users\" in schema \"main\" - but this table has been created by another transaction already".to_string(),
+                "TransactionContext Error: Failed to commit: Failed to commit DuckLake \
+                 transaction. Transaction conflict - attempting to create table \"public_users\" \
+                 in schema \"main\" - but this table has been created by another transaction \
+                 already"
+                    .to_string(),
             ),
         );
 

@@ -60,9 +60,9 @@ pub fn table_name_to_iceberg_table_name(
 
 /// CDC operation types for Iceberg changelog tables.
 ///
-/// Represents the type of change operation that occurred in the source database.
-/// These values are stored in the `cdc_operation` column of changelog tables
-/// to distinguish between data modifications and deletions.
+/// Represents the type of change operation that occurred in the source
+/// database. These values are stored in the `cdc_operation` column of changelog
+/// tables to distinguish between data modifications and deletions.
 #[derive(Debug, Clone, Copy)]
 pub enum IcebergOperationType {
     /// Represents insert operations from the source database.
@@ -91,8 +91,8 @@ impl fmt::Display for IcebergOperationType {
 
 /// An iceberg destination that implements the ETL [`Destination`] trait.
 ///
-/// Provides Postgres-to-Iceberg data pipeline functionality including streaming inserts
-/// and CDC operation handling.
+/// Provides Postgres-to-Iceberg data pipeline functionality including streaming
+/// inserts and CDC operation handling.
 ///
 /// Designed for high concurrency with minimal locking:
 /// - Client is accessible without locks
@@ -133,29 +133,32 @@ impl DestinationNamespace {
 
 /// Internal state for the Iceberg destination.
 ///
-/// Contains mutable state that requires synchronization across concurrent operations.
-/// Wrapped in a mutex to ensure thread-safe access while keeping the main
-/// destination struct cloneable.
+/// Contains mutable state that requires synchronization across concurrent
+/// operations. Wrapped in a mutex to ensure thread-safe access while keeping
+/// the main destination struct cloneable.
 #[derive(Debug)]
 struct Inner {
     /// Cache of source tables we already created/verified in the destination.
     ///
     /// Prevents redundant table existence checks and creation attempts.
-    /// Tables are added to this cache after successful creation or verification.
+    /// Tables are added to this cache after successful creation or
+    /// verification.
     ///
-    /// This cache is intentionally keyed by source [`TableId`] instead of the rendered Iceberg
-    /// table name. In a single destination namespace, distinct source tables from different
-    /// schemas can still render to the same destination table name. That collision should surface
+    /// This cache is intentionally keyed by source [`TableId`] instead of the
+    /// rendered Iceberg table name. In a single destination namespace,
+    /// distinct source tables from different schemas can still render to
+    /// the same destination table name. That collision should surface
     /// as a destination error from Iceberg.
     created_tables: HashSet<IcebergTableName>,
     /// Cache of namespaces we already created/verified in the destination
     ///
     /// Prevents redundant namespace existence checks and creation attempts.
-    /// Namespaces are added to this cache after successful creation or verification.
+    /// Namespaces are added to this cache after successful creation or
+    /// verification.
     created_namespaces: HashSet<String>,
-    /// Namespace where the tables will be replicated. Depending on the variant either
-    /// all tables will go in one namespace or there will be one namespace per
-    /// source schema.
+    /// Namespace where the tables will be replicated. Depending on the variant
+    /// either all tables will go in one namespace or there will be one
+    /// namespace per source schema.
     namespace: DestinationNamespace,
 }
 
@@ -187,9 +190,9 @@ where
 
     /// Truncates an Iceberg table by dropping and recreating it.
     ///
-    /// Removes all data from the target table by dropping the existing Iceberg table
-    /// and creating a fresh empty table with the same schema. Updates the internal
-    /// table creation cache to reflect the new table state.
+    /// Removes all data from the target table by dropping the existing Iceberg
+    /// table and creating a fresh empty table with the same schema. Updates
+    /// the internal table creation cache to reflect the new table state.
     async fn truncate_table(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -199,8 +202,9 @@ where
 
         // Check if metadata exists for this table.
         //
-        // If no metadata exists, it means the table was never created in Iceberg (e.g., due to
-        // errors during copy). In this case, we skip the truncate since there's nothing to truncate.
+        // If no metadata exists, it means the table was never created in Iceberg (e.g.,
+        // due to errors during copy). In this case, we skip the truncate since
+        // there's nothing to truncate.
         let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await?
         else {
             warn!(
@@ -228,17 +232,18 @@ where
 
     /// Writes table rows to the Iceberg destination as upsert operations.
     ///
-    /// Prepares the target table for streaming, augments each row with CDC metadata
-    /// (operation type and sequence number), and inserts the rows into the Iceberg table.
-    /// All rows are treated as upsert operations in this context.
+    /// Prepares the target table for streaming, augments each row with CDC
+    /// metadata (operation type and sequence number), and inserts the rows
+    /// into the Iceberg table. All rows are treated as upsert operations in
+    /// this context.
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let (namespace, iceberg_table_name) = {
-            // We hold the lock for the entire preparation to avoid race conditions since the consistency
-            // of this code path is critical.
+            // We hold the lock for the entire preparation to avoid race conditions since
+            // the consistency of this code path is critical.
             let mut inner = self.inner.lock().await;
             self.prepare_table_for_streaming(&mut inner, replicated_table_schema).await?
         };
@@ -263,10 +268,11 @@ where
 
     /// Processes and writes CDC events to Iceberg tables.
     ///
-    /// Handles a stream of CDC events by batching non-truncate events by table ID
-    /// and processing them concurrently. Truncate events are processed separately
-    /// and deduplicated for efficiency. Each event is augmented with CDC metadata
-    /// including operation type and sequence number based on LSN information.
+    /// Handles a stream of CDC events by batching non-truncate events by table
+    /// ID and processing them concurrently. Truncate events are processed
+    /// separately and deduplicated for efficiency. Each event is augmented
+    /// with CDC metadata including operation type and sequence number based
+    /// on LSN information.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut events_iter = events.into_iter().peekable();
 
@@ -338,8 +344,8 @@ where
                                 ErrorKind::CorruptedTableSchema,
                                 "Schema changes not supported",
                                 format!(
-                                    "Iceberg destination does not support schema changes. \
-                                     Table {} schema changed from snapshot_id {} to {}.",
+                                    "Iceberg destination does not support schema changes. Table \
+                                     {} schema changed from snapshot_id {} to {}.",
                                     table_id, metadata.snapshot_id, new_snapshot_id
                                 )
                             ));
@@ -358,8 +364,9 @@ where
 
                 for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
                     let (namespace, iceberg_table_name) = {
-                        // We hold the lock for the entire preparation to avoid race conditions since the consistency
-                        // of this code path is critical.
+                        // We hold the lock for the entire preparation to avoid race conditions
+                        // since the consistency of this code path is
+                        // critical.
                         let mut inner = self.inner.lock().await;
                         self.prepare_table_for_streaming(&mut inner, &replicated_table_schema)
                             .await?
@@ -386,9 +393,10 @@ where
 
             // Collect and deduplicate schemas from all truncate events.
             //
-            // This is done as an optimization since if we have multiple tables being truncated in a
-            // row without applying other events in the meanwhile, it doesn't make any sense to create
-            // new empty tables for each of them.
+            // This is done as an optimization since if we have multiple tables being
+            // truncated in a row without applying other events in the
+            // meanwhile, it doesn't make any sense to create new empty tables
+            // for each of them.
             let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
 
             while let Some(Event::Truncate(_)) = events_iter.peek() {
@@ -407,11 +415,13 @@ where
         Ok(())
     }
 
-    /// Prepares a table for CDC streaming operations with schema-aware table creation.
+    /// Prepares a table for CDC streaming operations with schema-aware table
+    /// creation.
     ///
-    /// Augments the provided schema with CDC columns and ensures the corresponding
-    /// Iceberg table exists in the namespace. Uses caching to avoid redundant table
-    /// creation checks and holds a lock during the entire preparation to prevent race conditions.
+    /// Augments the provided schema with CDC columns and ensures the
+    /// corresponding Iceberg table exists in the namespace. Uses caching to
+    /// avoid redundant table creation checks and holds a lock during the
+    /// entire preparation to prevent race conditions.
     ///
     /// Follows the applying -> applied pattern for crash recovery:
     /// 1. Store metadata with `Applying` status before creating the table
@@ -443,11 +453,12 @@ where
         let namespace = inner.namespace.get_or(&namespace).to_string();
         let namespace = self.create_namespace_if_missing(inner, namespace).await?;
 
-        // If the table is already in the cache, we skip the creation. This works assuming that etl
-        // is the only system managing the underlying tables.
+        // If the table is already in the cache, we skip the creation. This works
+        // assuming that etl is the only system managing the underlying tables.
         if inner.created_tables.contains(&iceberg_table_name) {
             debug!(
-                "iceberg table {iceberg_table_name} found in creation cache, skipping existence check"
+                "iceberg table {iceberg_table_name} found in creation cache, skipping existence \
+                 check"
             );
 
             return Ok((namespace, iceberg_table_name));
@@ -501,9 +512,10 @@ where
 
     /// Builds column schemas with CDC-specific columns added.
     ///
-    /// Takes the replicated columns from the schema and adds two additional columns
-    /// for CDC operations:
-    /// - `cdc_operation`: Tracks whether the row represents an insert, update, or delete
+    /// Takes the replicated columns from the schema and adds two additional
+    /// columns for CDC operations:
+    /// - `cdc_operation`: Tracks whether the row represents an insert, update,
+    ///   or delete
     /// - `sequence_number`: Provides ordering information based on WAL LSN
     ///
     /// These columns enable CDC consumers to understand the chronological order
@@ -596,8 +608,9 @@ where
     }
 }
 
-/// Creates a unique columns name with prefix `new_column_name` to avoid collissions with
-/// existing columns in `column_schemas` by adding a numeric suffix.
+/// Creates a unique columns name with prefix `new_column_name` to avoid
+/// collissions with existing columns in `column_schemas` by adding a numeric
+/// suffix.
 fn find_unique_column_name(column_schemas: &[ColumnSchema], new_column_name: &str) -> String {
     let mut suffix = None;
 
@@ -624,7 +637,8 @@ fn find_unique_column_name(column_schemas: &[ColumnSchema], new_column_name: &st
 /// such that the naming rules of the namespace are followed.
 fn schema_to_namespace(schema: &str) -> String {
     // Convert to lowercase and replace invalid characters with underscores.
-    // S3 Tables namespaces can only contain lowercase letters, numbers, and underscores.
+    // S3 Tables namespaces can only contain lowercase letters, numbers, and
+    // underscores.
     let mut namespace: String = schema
         .to_lowercase()
         .chars()
@@ -665,8 +679,9 @@ mod tests {
 
     /// Creates a test column schema with common defaults.
     ///
-    /// This helper simplifies column schema creation in tests by providing sensible
-    /// defaults for fields that are typically not relevant to the test logic.
+    /// This helper simplifies column schema creation in tests by providing
+    /// sensible defaults for fields that are typically not relevant to the
+    /// test logic.
     fn test_column(
         name: &str,
         typ: Type,
@@ -743,9 +758,11 @@ mod tests {
 
     #[test]
     fn schema_to_namespace_non_ascii_replaced() {
-        // Non-ASCII characters should be replaced with underscores (one char = one underscore).
+        // Non-ASCII characters should be replaced with underscores (one char = one
+        // underscore).
         assert_eq!(schema_to_namespace("schémas"), "sch_mas");
-        // All non-ASCII becomes underscores, then fixed to start/end with letter/number.
+        // All non-ASCII becomes underscores, then fixed to start/end with
+        // letter/number.
         assert_eq!(schema_to_namespace("データ"), "s___e");
         assert_eq!(schema_to_namespace("test_α_beta"), "test___beta");
     }

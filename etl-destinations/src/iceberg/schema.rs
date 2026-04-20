@@ -20,8 +20,8 @@ fn postgres_array_type_to_iceberg_type(typ: &Type, field_id: i32) -> IcebergType
         &Type::INT8_ARRAY => create_iceberg_list_type(PrimitiveType::Long, field_id),
         &Type::FLOAT4_ARRAY => create_iceberg_list_type(PrimitiveType::Float, field_id),
         &Type::FLOAT8_ARRAY => create_iceberg_list_type(PrimitiveType::Double, field_id),
-        // numeric is mapped to string for now because decimal type in Iceberg needs scale and precision
-        // which we don't have in the Type
+        // numeric is mapped to string for now because decimal type in Iceberg needs scale and
+        // precision which we don't have in the Type
         &Type::NUMERIC_ARRAY => create_iceberg_list_type(PrimitiveType::String, field_id),
         &Type::DATE_ARRAY => create_iceberg_list_type(PrimitiveType::Date, field_id),
         &Type::TIME_ARRAY => create_iceberg_list_type(PrimitiveType::Time, field_id),
@@ -48,8 +48,8 @@ fn postgres_scalar_type_to_iceberg_type(typ: &Type) -> IcebergType {
         &Type::INT8 => IcebergType::Primitive(PrimitiveType::Long),
         &Type::FLOAT4 => IcebergType::Primitive(PrimitiveType::Float),
         &Type::FLOAT8 => IcebergType::Primitive(PrimitiveType::Double),
-        // numeric is mapped to string for now because decimal type in Iceberg needs scale and precision
-        // which we don't have in the Type
+        // numeric is mapped to string for now because decimal type in Iceberg needs scale and
+        // precision which we don't have in the Type
         &Type::NUMERIC => IcebergType::Primitive(PrimitiveType::String),
         &Type::DATE => IcebergType::Primitive(PrimitiveType::Date),
         &Type::TIME => IcebergType::Primitive(PrimitiveType::Time),
@@ -81,9 +81,10 @@ fn create_iceberg_list_type(element_type: PrimitiveType, field_id: i32) -> Icebe
 /// Iceberg to understand which columns uniquely identify rows in the table.
 /// Iceberg identifier fields are unordered (stored as a set).
 ///
-/// Field IDs are assigned following iceberg-rust's convention: all outer field IDs
-/// are assigned first, then nested field IDs (e.g., list element fields). This ensures
-/// consistency with how the Iceberg library handles schema evolution.
+/// Field IDs are assigned following iceberg-rust's convention: all outer field
+/// IDs are assigned first, then nested field IDs (e.g., list element fields).
+/// This ensures consistency with how the Iceberg library handles schema
+/// evolution.
 pub(super) fn postgres_to_iceberg_schema(
     column_schemas: &[ColumnSchema],
 ) -> Result<IcebergSchema, iceberg::Error> {
@@ -100,8 +101,8 @@ pub(super) fn postgres_to_iceberg_schema(
         })
         .collect();
 
-    // Second pass: assign IDs to nested fields (list elements) and build the schema.
-    // Nested field IDs start after all outer field IDs.
+    // Second pass: assign IDs to nested fields (list elements) and build the
+    // schema. Nested field IDs start after all outer field IDs.
     let mut nested_field_id = outer_field_id;
     let mut fields = Vec::with_capacity(column_schemas.len());
 

@@ -25,8 +25,8 @@ use url::Url;
 
 use crate::support::ducklake::{ducklake_load_sql, open_verification_connection};
 
-/// Creates a persistent temp directory named after the test and prints its path.
-/// Returns the directory path kept on disk after the test completes.
+/// Creates a persistent temp directory named after the test and prints its
+/// path. Returns the directory path kept on disk after the test completes.
 fn make_test_dir(test_name: &str) -> PathBuf {
     let dir = tempfile::Builder::new()
         .prefix(&format!("etl_ducklake_{test_name}_"))
@@ -56,8 +56,7 @@ fn make_lake_urls(test_name: &str) -> (Url, Url) {
 fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     let conn = open_verification_connection();
     conn.execute_batch(&format!(
-        "{} \
-         ATTACH {} AS {} (DATA_PATH {});",
+        "{} ATTACH {} AS {} (DATA_PATH {});",
         ducklake_load_sql(),
         quote_literal(&format!("ducklake:{}", catalog.as_str())),
         quote_identifier("lake"),
@@ -68,7 +67,8 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     conn
 }
 
-/// Forces DuckLake to checkpoint catalog metadata before cross-connection verification.
+/// Forces DuckLake to checkpoint catalog metadata before cross-connection
+/// verification.
 ///
 /// These end-to-end tests shut the destination down and then attach a fresh
 /// DuckDB connection to verify the final lake state. Without an explicit

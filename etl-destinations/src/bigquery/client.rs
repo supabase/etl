@@ -36,23 +36,26 @@ use crate::bigquery::{
 
 /// Multiplier for calculating max inflight requests from pool size.
 ///
-/// The maximum number of inflight requests is `connection_pool_size * MAX_INFLIGHT_REQUESTS_PER_CONNECTION`.
+/// The maximum number of inflight requests is `connection_pool_size *
+/// MAX_INFLIGHT_REQUESTS_PER_CONNECTION`.
 const MAX_INFLIGHT_REQUESTS_PER_CONNECTION: usize = 100;
 
 /// Maximum safe value for inflight requests to prevent resource exhaustion.
 ///
-/// This upper bound ensures reasonable memory usage and prevents overflow when computing
-/// max inflight requests from connection pool size.
+/// This upper bound ensures reasonable memory usage and prevents overflow when
+/// computing max inflight requests from connection pool size.
 const MAX_SAFE_INFLIGHT_REQUESTS: usize = 100_000;
 /// Maximum time to retry appends while BigQuery propagates a schema change.
 ///
-/// Google documents schema update detection as happening on the order of minutes.
+/// Google documents schema update detection as happening on the order of
+/// minutes.
 const SCHEMA_PROPAGATION_RETRY_TIMEOUT: Duration = Duration::from_secs(180);
 /// Initial backoff when retrying appends during schema propagation.
 const SCHEMA_PROPAGATION_RETRY_DELAY: Duration = Duration::from_secs(1);
 /// Maximum backoff when retrying appends during schema propagation.
 const SCHEMA_PROPAGATION_MAX_RETRY_DELAY: Duration = Duration::from_secs(15);
-/// Protobuf type name for BigQuery storage errors embedded in gRPC status details.
+/// Protobuf type name for BigQuery storage errors embedded in gRPC status
+/// details.
 const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
 
 /// Special column name for Change Data Capture operations in BigQuery.
@@ -119,7 +122,8 @@ enum AppendProcessingResult {
     Error(EtlError),
 }
 
-/// A batch append request that should be retried after schema propagation finishes.
+/// A batch append request that should be retried after schema propagation
+/// finishes.
 #[derive(Debug)]
 struct RetryableAppendRequest {
     request: BatchAppendRequest<BigQueryTableRow>,
@@ -154,11 +158,12 @@ fn create_append_trace_id(pipeline_id: PipelineId, table_id: &str, batch_index: 
     format!("supabase_etl_{pipeline_id}_{table_id}_{batch_index}_{}", random::<u32>())
 }
 
-/// Computes the maximum number of inflight requests for the BigQuery Storage Write API.
+/// Computes the maximum number of inflight requests for the BigQuery Storage
+/// Write API.
 ///
-/// Uses checked arithmetic to safely multiply the connection pool size by the per-connection
-/// limit, clamping the result to [`MAX_SAFE_INFLIGHT_REQUESTS`] to prevent overflow and
-/// resource exhaustion.
+/// Uses checked arithmetic to safely multiply the connection pool size by the
+/// per-connection limit, clamping the result to [`MAX_SAFE_INFLIGHT_REQUESTS`]
+/// to prevent overflow and resource exhaustion.
 fn compute_max_inflight_requests(connection_pool_size: usize) -> usize {
     connection_pool_size
         .checked_mul(MAX_INFLIGHT_REQUESTS_PER_CONNECTION)
@@ -168,8 +173,8 @@ fn compute_max_inflight_requests(connection_pool_size: usize) -> usize {
 
 /// Processes a single batch result and determines success or failure mode.
 ///
-/// Row errors are permanent failures (bad data, schema mismatch) and fail immediately.
-/// Request errors are surfaced for retry decision by the caller.
+/// Row errors are permanent failures (bad data, schema mismatch) and fail
+/// immediately. Request errors are surfaced for retry decision by the caller.
 fn process_single_batch_append_result(
     batch_append_result: BatchAppendResult,
 ) -> BatchProcessResult {
@@ -200,7 +205,8 @@ fn process_single_batch_append_result(
     }
 }
 
-/// Extracts the gRPC status code as a string from a [`BQError`] for metrics labeling.
+/// Extracts the gRPC status code as a string from a [`BQError`] for metrics
+/// labeling.
 fn error_code_label(error: &BQError) -> &'static str {
     match error {
         BQError::TonicStatusError(status) => match status.code() {
@@ -247,11 +253,12 @@ fn append_processing_result_from_request_error(
     }
 }
 
-/// Builds the error returned when local schema-propagation retries are exhausted.
+/// Builds the error returned when local schema-propagation retries are
+/// exhausted.
 ///
-/// The destination absorbs the common short propagation delay locally. If BigQuery still has not
-/// accepted the schema once that bounded window expires, the worker-level timed retry policy should
-/// take over.
+/// The destination absorbs the common short propagation delay locally. If
+/// BigQuery still has not accepted the schema once that bounded window expires,
+/// the worker-level timed retry policy should take over.
 fn schema_propagation_timeout_error(detail: &str) -> EtlError {
     etl_error!(
         ErrorKind::DestinationAtomicBatchRetryable,
@@ -473,11 +480,13 @@ fn decode_storage_error_codes(status: &tonic::Status) -> Vec<&'static str> {
         .collect()
 }
 
-/// Returns true when the request-level BigQuery error matches the documented schema propagation case.
+/// Returns true when the request-level BigQuery error matches the documented
+/// schema propagation case.
 ///
-/// BigQuery documents `StorageErrorCode::SCHEMA_MISMATCH_EXTRA_FIELDS` as the structured signal
-/// for schema mismatch during appends. We fall back to the observed rename-path message only when
-/// BigQuery does not provide a structured storage error code in the gRPC details.
+/// BigQuery documents `StorageErrorCode::SCHEMA_MISMATCH_EXTRA_FIELDS` as the
+/// structured signal for schema mismatch during appends. We fall back to the
+/// observed rename-path message only when BigQuery does not provide a
+/// structured storage error code in the gRPC details.
 fn is_retryable_schema_propagation_error(error: &BQError) -> bool {
     let BQError::TonicStatusError(status) = error else {
         return false;
@@ -514,8 +523,9 @@ pub struct BigQueryClient {
 impl BigQueryClient {
     /// Creates a new [`BigQueryClient`] from a service account key file.
     ///
-    /// Authenticates with BigQuery using the service account key at the specified file path.
-    /// Configures the Storage Write API with the given pool size.
+    /// Authenticates with BigQuery using the service account key at the
+    /// specified file path. Configures the Storage Write API with the given
+    /// pool size.
     pub async fn new_with_key_path(
         project_id: BigQueryProjectId,
         sa_key_file: &str,
@@ -535,8 +545,8 @@ impl BigQueryClient {
 
     /// Creates a new [`BigQueryClient`] from a service account key JSON string.
     ///
-    /// Parses and uses the provided service account key to authenticate with BigQuery.
-    /// Configures the Storage Write API with the given pool size.
+    /// Parses and uses the provided service account key to authenticate with
+    /// BigQuery. Configures the Storage Write API with the given pool size.
     pub async fn new_with_key(
         project_id: BigQueryProjectId,
         sa_key: &str,
@@ -578,7 +588,8 @@ impl BigQueryClient {
         Ok(BigQueryClient { project_id, client })
     }
 
-    /// Creates a new [`BigQueryClient`] using OAuth2 installed flow authentication.
+    /// Creates a new [`BigQueryClient`] using OAuth2 installed flow
+    /// authentication.
     ///
     /// Authenticates with BigQuery using the OAuth2 installed flow.
     /// Configures the Storage Write API with the given pool size.
@@ -602,7 +613,8 @@ impl BigQueryClient {
 
     /// Returns the fully qualified BigQuery table name.
     ///
-    /// Formats the table name as `project_id.dataset_id.table_id` with proper quoting.
+    /// Formats the table name as `project_id.dataset_id.table_id` with proper
+    /// quoting.
     pub fn full_table_name(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -615,13 +627,15 @@ impl BigQueryClient {
         Ok(format!("`{project_id}.{dataset_id}.{table_id}`"))
     }
 
-    /// Creates a table in BigQuery if it doesn't already exist, otherwise efficiently truncates
-    /// and recreates the table with the same schema.
+    /// Creates a table in BigQuery if it doesn't already exist, otherwise
+    /// efficiently truncates and recreates the table with the same schema.
     ///
-    /// This method uses BigQuery's CREATE OR REPLACE TABLE statement which is more efficient
-    /// than dropping and recreating as it preserves table metadata and permissions.
+    /// This method uses BigQuery's CREATE OR REPLACE TABLE statement which is
+    /// more efficient than dropping and recreating as it preserves table
+    /// metadata and permissions.
     ///
-    /// Returns `true` if the table was created fresh, `false` if it already existed and was replaced.
+    /// Returns `true` if the table was created fresh, `false` if it already
+    /// existed and was replaced.
     pub async fn create_or_replace_table(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -678,8 +692,8 @@ impl BigQueryClient {
 
     /// Creates a new table in the BigQuery dataset.
     ///
-    /// Builds and executes a CREATE TABLE statement with the provided column schemas
-    /// and optional staleness configuration for CDC operations.
+    /// Builds and executes a CREATE TABLE statement with the provided column
+    /// schemas and optional staleness configuration for CDC operations.
     pub async fn create_table(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -707,7 +721,8 @@ impl BigQueryClient {
 
     /// Truncates all data from a BigQuery table.
     ///
-    /// Executes a TRUNCATE TABLE statement to remove all rows while preserving the table structure.
+    /// Executes a TRUNCATE TABLE statement to remove all rows while preserving
+    /// the table structure.
     #[allow(dead_code)]
     pub async fn truncate_table(
         &self,
@@ -727,7 +742,8 @@ impl BigQueryClient {
 
     /// Creates or replaces a view that points to the specified versioned table.
     ///
-    /// This is used during truncation operations to redirect the view to a new table version.
+    /// This is used during truncation operations to redirect the view to a new
+    /// table version.
     pub async fn create_or_replace_view(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -769,8 +785,8 @@ impl BigQueryClient {
 
     /// Adds a column to an existing BigQuery table.
     ///
-    /// Executes an ALTER TABLE ADD COLUMN statement to add a new column with the
-    /// specified schema. New columns must be nullable in BigQuery.
+    /// Executes an ALTER TABLE ADD COLUMN statement to add a new column with
+    /// the specified schema. New columns must be nullable in BigQuery.
     pub async fn add_column(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -785,8 +801,9 @@ impl BigQueryClient {
             "adding column `{column_name}` ({column_type}) to table {full_table_name} in BigQuery"
         );
 
-        // BigQuery requires new columns to be nullable (no NOT NULL constraint allowed). Also, we wouldn't
-        // be able to add it nonetheless since we don't have a way to set a default value for past columns.
+        // BigQuery requires new columns to be nullable (no NOT NULL constraint
+        // allowed). Also, we wouldn't be able to add it nonetheless since we
+        // don't have a way to set a default value for past columns.
         let query =
             format!("alter table {full_table_name} add column `{column_name}` {column_type}");
 
@@ -797,7 +814,8 @@ impl BigQueryClient {
 
     /// Drops a column from an existing BigQuery table.
     ///
-    /// Executes an ALTER TABLE DROP COLUMN statement to remove the specified column.
+    /// Executes an ALTER TABLE DROP COLUMN statement to remove the specified
+    /// column.
     pub async fn drop_column(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -818,7 +836,8 @@ impl BigQueryClient {
 
     /// Renames a column in an existing BigQuery table.
     ///
-    /// Executes an ALTER TABLE RENAME COLUMN statement to rename the specified column.
+    /// Executes an ALTER TABLE RENAME COLUMN statement to rename the specified
+    /// column.
     pub async fn rename_column(
         &self,
         dataset_id: &BigQueryDatasetId,
@@ -860,8 +879,9 @@ impl BigQueryClient {
 
     /// Checks whether a dataset exists and is accessible.
     ///
-    /// Returns `true` if the dataset exists and the client has access, `false` if the
-    /// dataset does not exist. Returns an error for authentication or connectivity failures.
+    /// Returns `true` if the dataset exists and the client has access, `false`
+    /// if the dataset does not exist. Returns an error for authentication
+    /// or connectivity failures.
     pub async fn dataset_exists(&self, dataset_id: &BigQueryDatasetId) -> EtlResult<bool> {
         let result = self.client.dataset().get(&self.project_id, dataset_id).await;
 
@@ -872,14 +892,15 @@ impl BigQueryClient {
         }
     }
 
-    /// Appends table batches to BigQuery using the concurrent Storage Write API.
+    /// Appends table batches to BigQuery using the concurrent Storage Write
+    /// API.
     ///
     /// Accepts pre-constructed append requests and processes them concurrently.
     ///
-    /// Retries for transient request and transport failures are handled inside the
-    /// underlying Storage Write API library. This method also retries the narrow class of
-    /// schema propagation failures that can happen after DDL, then converts final failures
-    /// into ETL errors.
+    /// Retries for transient request and transport failures are handled inside
+    /// the underlying Storage Write API library. This method also retries
+    /// the narrow class of schema propagation failures that can happen
+    /// after DDL, then converts final failures into ETL errors.
     pub(super) async fn append_table_batches(
         &self,
         append_requests: Vec<BatchAppendRequest<BigQueryTableRow>>,
@@ -1070,8 +1091,8 @@ impl BigQueryClient {
 
     /// Creates a batch append request for a specific table with validated rows.
     ///
-    /// Converts TableRow instances to BigQueryTableRow and creates a properly configured
-    /// [`BatchAppendRequest`] for efficient append retries.
+    /// Converts TableRow instances to BigQueryTableRow and creates a properly
+    /// configured [`BatchAppendRequest`] for efficient append retries.
     pub(super) fn create_batch_append_request(
         &self,
         pipeline_id: PipelineId,
@@ -1108,9 +1129,10 @@ impl BigQueryClient {
 
     /// Sanitizes a BigQuery identifier for safe backtick quoting.
     ///
-    /// Rejects empty identifiers and identifiers containing control characters. Internal backticks
-    /// are escaped by doubling them so the resulting value can be wrapped in backticks without
-    /// altering the identifier or allowing statement breaks.
+    /// Rejects empty identifiers and identifiers containing control characters.
+    /// Internal backticks are escaped by doubling them so the resulting
+    /// value can be wrapped in backticks without altering the identifier or
+    /// allowing statement breaks.
     fn sanitize_identifier(identifier: &str, context: &str) -> EtlResult<String> {
         if identifier.is_empty() {
             return Err(etl_error!(
@@ -1161,8 +1183,9 @@ impl BigQueryClient {
 
     /// Creates a primary key clause for table creation.
     ///
-    /// Generates a primary key constraint clause from columns marked as primary key,
-    /// sorted by their ordinal position to ensure correct composite key ordering.
+    /// Generates a primary key constraint clause from columns marked as primary
+    /// key, sorted by their ordinal position to ensure correct composite
+    /// key ordering.
     fn add_primary_key_clause(
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<Option<String>> {
@@ -1174,7 +1197,8 @@ impl BigQueryClient {
             return Ok(None);
         }
 
-        // Sort by primary_key_ordinal_position to ensure correct composite key ordering.
+        // Sort by primary_key_ordinal_position to ensure correct composite key
+        // ordering.
         primary_key_columns.sort_by_key(|c| c.primary_key_ordinal_position);
 
         let primary_key_columns: Vec<String> = primary_key_columns
@@ -1257,8 +1281,9 @@ impl BigQueryClient {
 
     /// Converts Postgres column schemas to a BigQuery [`TableDescriptor`].
     ///
-    /// Maps data types and nullability to BigQuery column specifications, setting
-    /// appropriate column modes and automatically adding CDC special columns.
+    /// Maps data types and nullability to BigQuery column specifications,
+    /// setting appropriate column modes and automatically adding CDC
+    /// special columns.
     pub fn column_schemas_to_table_descriptor(
         replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
@@ -1380,8 +1405,9 @@ mod tests {
 
     /// Creates a test column schema with common defaults.
     ///
-    /// This helper simplifies column schema creation in tests by providing sensible
-    /// defaults for fields that are typically not relevant to the test logic.
+    /// This helper simplifies column schema creation in tests by providing
+    /// sensible defaults for fields that are typically not relevant to the
+    /// test logic.
     fn test_column(
         name: &str,
         typ: Type,
@@ -1399,7 +1425,8 @@ mod tests {
         )
     }
 
-    /// Creates a [`ReplicatedTableSchema`] from test columns with all columns replicated.
+    /// Creates a [`ReplicatedTableSchema`] from test columns with all columns
+    /// replicated.
     fn test_replicated_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
         let column_names: HashSet<String> = columns.iter().map(|c| c.name.clone()).collect();
         let table_schema = Arc::new(TableSchema::new(
@@ -1496,8 +1523,9 @@ mod tests {
             .expect("composite pk clause");
         assert_eq!(composite_pk_clause, ", primary key (`tenant_id`,`id`) not enforced");
 
-        // Composite primary key with reversed column order but correct ordinal positions.
-        // The primary key clause should still be ordered by ordinal position.
+        // Composite primary key with reversed column order but correct ordinal
+        // positions. The primary key clause should still be ordered by ordinal
+        // position.
         let columns_with_reversed_pk = vec![
             test_column("id", Type::INT4, 1, false, Some(2)),
             test_column("tenant_id", Type::INT4, 2, false, Some(1)),
@@ -1530,7 +1558,8 @@ mod tests {
         let spec = BigQueryClient::create_columns_spec(&schema).expect("columns spec");
         assert_eq!(
             spec,
-            "(`id` int64 not null,`name` string,`active` bool not null, primary key (`id`) not enforced)"
+            "(`id` int64 not null,`name` string,`active` bool not null, primary key (`id`) not \
+             enforced)"
         );
     }
 
@@ -1645,7 +1674,8 @@ mod tests {
         let columns_spec = BigQueryClient::create_columns_spec(&schema).unwrap();
         let query = format!("create or replace table {full_table_name} {columns_spec}");
 
-        let expected_query = "create or replace table `test-project.test_dataset.test_table` (`id` int64 not null,`name` string, primary key (`id`) not enforced)";
+        let expected_query = "create or replace table `test-project.test_dataset.test_table` \
+                              (`id` int64 not null,`name` string, primary key (`id`) not enforced)";
         assert_eq!(query, expected_query);
     }
 
@@ -1672,7 +1702,9 @@ mod tests {
             "create or replace table {full_table_name} {columns_spec} {max_staleness_option}"
         );
 
-        let expected_query = "create or replace table `test-project.test_dataset.test_table` (`id` int64 not null, primary key (`id`) not enforced) options (max_staleness = interval 15 minute)";
+        let expected_query = "create or replace table `test-project.test_dataset.test_table` \
+                              (`id` int64 not null, primary key (`id`) not enforced) options \
+                              (max_staleness = interval 15 minute)";
         assert_eq!(query, expected_query);
     }
 

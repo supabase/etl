@@ -137,13 +137,15 @@ impl TryFrom<EtlReplicationSlot> for String {
 
 /// Deletes all replication slots for a given pipeline.
 ///
-/// This function deletes both the apply worker slot and all table sync worker slots
-/// for the tables associated with the pipeline.
+/// This function deletes both the apply worker slot and all table sync worker
+/// slots for the tables associated with the pipeline.
 ///
-/// This function forcefully terminates active walsender processes and drops slots even if they
-/// are active. It retries up to 3 times with exponential backoff to handle transient failures.
+/// This function forcefully terminates active walsender processes and drops
+/// slots even if they are active. It retries up to 3 times with exponential
+/// backoff to handle transient failures.
 ///
-/// If the slot name can't be computed, this function will silently skip the deletion of the slot.
+/// If the slot name can't be computed, this function will silently skip the
+/// deletion of the slot.
 pub async fn delete_pipeline_replication_slots(
     pool: &PgPool,
     pipeline_id: u64,
@@ -189,7 +191,8 @@ pub async fn delete_pipeline_replication_slots(
         }
 
         // Phase 2: Drop all replication slots (both active and inactive)
-        // Note: pg_drop_replication_slot will signal walsenders to terminate if still active
+        // Note: pg_drop_replication_slot will signal walsenders to terminate if still
+        // active
         let drop_query = String::from(
             r#"
             select pg_drop_replication_slot(r.slot_name)

@@ -13,7 +13,8 @@ use etl::{
 
 /// BigQuery BIGNUMERIC maximum practical digits for validation.
 ///
-/// The actual number of digits is 77, but the 77th digit is partial as per BigQuery docs.
+/// The actual number of digits is 77, but the 77th digit is partial as per
+/// BigQuery docs.
 const BIGQUERY_BIGNUMERIC_MAX_PRACTICAL_DIGITS: usize = 76;
 
 /// BigQuery BIGNUMERIC maximum decimal places.
@@ -76,31 +77,36 @@ static BIGQUERY_MIN_TIMESTAMP: LazyLock<DateTime<Utc>> =
 static BIGQUERY_MAX_TIMESTAMP: LazyLock<DateTime<Utc>> =
     LazyLock::new(|| Utc.from_utc_datetime(&BIGQUERY_MAX_DATETIME));
 
-/// Validates that a [`PgNumeric`] value is within BigQuery's BIGNUMERIC supported range.
+/// Validates that a [`PgNumeric`] value is within BigQuery's BIGNUMERIC
+/// supported range.
 ///
-/// Returns an error if the value is outside BigQuery's supported range instead of clamping.
-/// BigQuery BIGNUMERIC supports up to ~77 digits of precision with 38 digits after the decimal point.
+/// Returns an error if the value is outside BigQuery's supported range instead
+/// of clamping. BigQuery BIGNUMERIC supports up to ~77 digits of precision with
+/// 38 digits after the decimal point.
 fn validate_numeric_for_bigquery(numeric: &PgNumeric) -> EtlResult<()> {
     match numeric {
         PgNumeric::NaN => {
             bail!(
                 ErrorKind::UnsupportedValueInDestination,
                 "BigQuery NUMERIC/BIGNUMERIC does not support NaN values",
-                "The numeric value NaN cannot be stored in BigQuery. Please provide a finite numeric value"
+                "The numeric value NaN cannot be stored in BigQuery. Please provide a finite \
+                 numeric value"
             );
         }
         PgNumeric::PositiveInfinity => {
             bail!(
                 ErrorKind::UnsupportedValueInDestination,
                 "BigQuery NUMERIC/BIGNUMERIC does not support infinity values",
-                "The numeric value +Infinity cannot be stored in BigQuery. Please provide a finite numeric value"
+                "The numeric value +Infinity cannot be stored in BigQuery. Please provide a \
+                 finite numeric value"
             );
         }
         PgNumeric::NegativeInfinity => {
             bail!(
                 ErrorKind::UnsupportedValueInDestination,
                 "BigQuery NUMERIC/BIGNUMERIC does not support infinity values",
-                "The numeric value -Infinity cannot be stored in BigQuery. Please provide a finite numeric value"
+                "The numeric value -Infinity cannot be stored in BigQuery. Please provide a \
+                 finite numeric value"
             );
         }
         PgNumeric::Value { .. } => {
@@ -109,7 +115,8 @@ fn validate_numeric_for_bigquery(numeric: &PgNumeric) -> EtlResult<()> {
                     ErrorKind::UnsupportedValueInDestination,
                     "Numeric value exceeds BigQuery BIGNUMERIC limits",
                     format!(
-                        "The numeric value '{}' exceeds BigQuery's BIGNUMERIC limits (max ~{} digits, {} decimal places)",
+                        "The numeric value '{}' exceeds BigQuery's BIGNUMERIC limits (max ~{} \
+                         digits, {} decimal places)",
                         numeric,
                         BIGQUERY_BIGNUMERIC_MAX_PRACTICAL_DIGITS,
                         BIGQUERY_BIGNUMERIC_MAX_SCALE
@@ -124,15 +131,16 @@ fn validate_numeric_for_bigquery(numeric: &PgNumeric) -> EtlResult<()> {
 
 /// Validates that a [`NaiveDate`] is within BigQuery's supported range.
 ///
-/// Returns an error if the date is outside BigQuery's supported range instead of clamping.
-/// BigQuery DATE supports values from 0001-01-01 to 9999-12-31.
+/// Returns an error if the date is outside BigQuery's supported range instead
+/// of clamping. BigQuery DATE supports values from 0001-01-01 to 9999-12-31.
 fn validate_date_for_bigquery(date: &NaiveDate) -> EtlResult<()> {
     if *date < *BIGQUERY_MIN_DATE {
         bail!(
             ErrorKind::UnsupportedValueInDestination,
             "Date value is before BigQuery's minimum supported date",
             format!(
-                "The date '{}' is before BigQuery's minimum supported date '{}'. BigQuery DATE supports values from 0001-01-01 to 9999-12-31",
+                "The date '{}' is before BigQuery's minimum supported date '{}'. BigQuery DATE \
+                 supports values from 0001-01-01 to 9999-12-31",
                 date.format(DATE_FORMAT),
                 BIGQUERY_MIN_DATE.format(DATE_FORMAT)
             )
@@ -144,7 +152,8 @@ fn validate_date_for_bigquery(date: &NaiveDate) -> EtlResult<()> {
             ErrorKind::UnsupportedValueInDestination,
             "Date value is after BigQuery's maximum supported date",
             format!(
-                "The date '{}' is after BigQuery's maximum supported date '{}'. BigQuery DATE supports values from 0001-01-01 to 9999-12-31",
+                "The date '{}' is after BigQuery's maximum supported date '{}'. BigQuery DATE \
+                 supports values from 0001-01-01 to 9999-12-31",
                 date.format(DATE_FORMAT),
                 BIGQUERY_MAX_DATE.format(DATE_FORMAT)
             )
@@ -156,15 +165,16 @@ fn validate_date_for_bigquery(date: &NaiveDate) -> EtlResult<()> {
 
 /// Validates that a [`NaiveTime`] is within BigQuery's supported range.
 ///
-/// Returns an error if the time is outside BigQuery's supported range instead of clamping.
-/// BigQuery TIME supports values from 00:00:00 to 23:59:59.999999.
+/// Returns an error if the time is outside BigQuery's supported range instead
+/// of clamping. BigQuery TIME supports values from 00:00:00 to 23:59:59.999999.
 fn validate_time_for_bigquery(time: &NaiveTime) -> EtlResult<()> {
     if *time < *BIGQUERY_MIN_TIME {
         bail!(
             ErrorKind::UnsupportedValueInDestination,
             "Time value is before BigQuery's minimum supported time",
             format!(
-                "The time '{}' is before BigQuery's minimum supported time '{}'. BigQuery TIME supports values from 00:00:00 to 23:59:59.999999",
+                "The time '{}' is before BigQuery's minimum supported time '{}'. BigQuery TIME \
+                 supports values from 00:00:00 to 23:59:59.999999",
                 time.format(TIME_FORMAT),
                 BIGQUERY_MIN_TIME.format(TIME_FORMAT)
             )
@@ -176,7 +186,8 @@ fn validate_time_for_bigquery(time: &NaiveTime) -> EtlResult<()> {
             ErrorKind::UnsupportedValueInDestination,
             "Time value is after BigQuery's maximum supported time",
             format!(
-                "The time '{}' is after BigQuery's maximum supported time '{}'. BigQuery TIME supports values from 00:00:00 to 23:59:59.999999",
+                "The time '{}' is after BigQuery's maximum supported time '{}'. BigQuery TIME \
+                 supports values from 00:00:00 to 23:59:59.999999",
                 time.format(TIME_FORMAT),
                 BIGQUERY_MAX_TIME.format(TIME_FORMAT)
             )
@@ -188,15 +199,17 @@ fn validate_time_for_bigquery(time: &NaiveTime) -> EtlResult<()> {
 
 /// Validates that a [`NaiveDateTime`] is within BigQuery's supported range.
 ///
-/// Returns an error if the datetime is outside BigQuery's supported range instead of clamping.
-/// BigQuery DATETIME supports values from 0001-01-01 00:00:00 to 9999-12-31 23:59:59.999999.
+/// Returns an error if the datetime is outside BigQuery's supported range
+/// instead of clamping. BigQuery DATETIME supports values from 0001-01-01
+/// 00:00:00 to 9999-12-31 23:59:59.999999.
 fn validate_datetime_for_bigquery(datetime: &NaiveDateTime) -> EtlResult<()> {
     if *datetime < *BIGQUERY_MIN_DATETIME {
         bail!(
             ErrorKind::UnsupportedValueInDestination,
             "DateTime value is before BigQuery's minimum supported datetime",
             format!(
-                "The datetime '{}' is before BigQuery's minimum supported datetime '{}'. BigQuery DATETIME supports values from 0001-01-01 00:00:00 to 9999-12-31 23:59:59.999999",
+                "The datetime '{}' is before BigQuery's minimum supported datetime '{}'. BigQuery \
+                 DATETIME supports values from 0001-01-01 00:00:00 to 9999-12-31 23:59:59.999999",
                 datetime.format(TIMESTAMP_FORMAT),
                 BIGQUERY_MIN_DATETIME.format(TIMESTAMP_FORMAT)
             )
@@ -208,7 +221,8 @@ fn validate_datetime_for_bigquery(datetime: &NaiveDateTime) -> EtlResult<()> {
             ErrorKind::UnsupportedValueInDestination,
             "DateTime value is after BigQuery's maximum supported datetime",
             format!(
-                "The datetime '{}' is after BigQuery's maximum supported datetime '{}'. BigQuery DATETIME supports values from 0001-01-01 00:00:00 to 9999-12-31 23:59:59.999999",
+                "The datetime '{}' is after BigQuery's maximum supported datetime '{}'. BigQuery \
+                 DATETIME supports values from 0001-01-01 00:00:00 to 9999-12-31 23:59:59.999999",
                 datetime.format(TIMESTAMP_FORMAT),
                 BIGQUERY_MAX_DATETIME.format(TIMESTAMP_FORMAT)
             )
@@ -220,15 +234,18 @@ fn validate_datetime_for_bigquery(datetime: &NaiveDateTime) -> EtlResult<()> {
 
 /// Validates that a [`DateTime<Utc>`] is within BigQuery's supported range.
 ///
-/// Returns an error if the timestamp is outside BigQuery's supported range instead of clamping.
-/// BigQuery TIMESTAMP supports values from 0001-01-01 00:00:00 UTC to 9999-12-31 23:59:59.999999 UTC.
+/// Returns an error if the timestamp is outside BigQuery's supported range
+/// instead of clamping. BigQuery TIMESTAMP supports values from 0001-01-01
+/// 00:00:00 UTC to 9999-12-31 23:59:59.999999 UTC.
 fn validate_timestamptz_for_bigquery(timestamptz: &DateTime<Utc>) -> EtlResult<()> {
     if *timestamptz < *BIGQUERY_MIN_TIMESTAMP {
         bail!(
             ErrorKind::UnsupportedValueInDestination,
             "Timestamp value is before BigQuery's minimum supported timestamp",
             format!(
-                "The timestamp '{}' is before BigQuery's minimum supported timestamp '{}'. BigQuery TIMESTAMP supports values from 0001-01-01 00:00:00 UTC to 9999-12-31 23:59:59.999999 UTC",
+                "The timestamp '{}' is before BigQuery's minimum supported timestamp '{}'. \
+                 BigQuery TIMESTAMP supports values from 0001-01-01 00:00:00 UTC to 9999-12-31 \
+                 23:59:59.999999 UTC",
                 timestamptz.format(TIMESTAMPTZ_FORMAT_HH_MM),
                 BIGQUERY_MIN_TIMESTAMP.format(TIMESTAMPTZ_FORMAT_HH_MM)
             )
@@ -240,7 +257,9 @@ fn validate_timestamptz_for_bigquery(timestamptz: &DateTime<Utc>) -> EtlResult<(
             ErrorKind::UnsupportedValueInDestination,
             "Timestamp value is after BigQuery's maximum supported timestamp",
             format!(
-                "The timestamp '{}' is after BigQuery's maximum supported timestamp '{}'. BigQuery TIMESTAMP supports values from 0001-01-01 00:00:00 UTC to 9999-12-31 23:59:59.999999 UTC",
+                "The timestamp '{}' is after BigQuery's maximum supported timestamp '{}'. \
+                 BigQuery TIMESTAMP supports values from 0001-01-01 00:00:00 UTC to 9999-12-31 \
+                 23:59:59.999999 UTC",
                 timestamptz.format(TIMESTAMPTZ_FORMAT_HH_MM),
                 BIGQUERY_MAX_TIMESTAMP.format(TIMESTAMPTZ_FORMAT_HH_MM)
             )
@@ -250,10 +269,12 @@ fn validate_timestamptz_for_bigquery(timestamptz: &DateTime<Utc>) -> EtlResult<(
     Ok(())
 }
 
-/// Validates that a [`CellNonOptional`] value is within BigQuery's supported ranges.
+/// Validates that a [`CellNonOptional`] value is within BigQuery's supported
+/// ranges.
 ///
-/// Returns an error if any value is outside BigQuery's supported range for its type.
-/// This function checks all temporal types and numeric types for BigQuery compatibility.
+/// Returns an error if any value is outside BigQuery's supported range for its
+/// type. This function checks all temporal types and numeric types for BigQuery
+/// compatibility.
 pub(super) fn validate_cell_for_bigquery(cell: &CellNonOptional) -> EtlResult<()> {
     match cell {
         CellNonOptional::Null => Ok(()),
@@ -277,9 +298,11 @@ pub(super) fn validate_cell_for_bigquery(cell: &CellNonOptional) -> EtlResult<()
     }
 }
 
-/// Validates that an [`ArrayCellNonOptional`] contains values within BigQuery's supported ranges.
+/// Validates that an [`ArrayCellNonOptional`] contains values within BigQuery's
+/// supported ranges.
 ///
-/// Returns an error if any array element is outside BigQuery's supported range for its type.
+/// Returns an error if any array element is outside BigQuery's supported range
+/// for its type.
 fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> EtlResult<()> {
     match array_cell {
         ArrayCellNonOptional::Bool(_) => Ok(()),
@@ -358,10 +381,11 @@ fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> EtlRes
 
 /// Checks if a [`PgNumeric`] as string is within BigQuery's BIGNUMERIC limits.
 ///
-/// BIGNUMERIC supports up to ~77 digits of precision with up to 38 decimal places.
+/// BIGNUMERIC supports up to ~77 digits of precision with up to 38 decimal
+/// places.
 ///
-/// The rationale for checking only for BIGNUMERIC is that this is the type conversion that we perform
-/// in `postgres_to_bigquery_type`.
+/// The rationale for checking only for BIGNUMERIC is that this is the type
+/// conversion that we perform in `postgres_to_bigquery_type`.
 fn is_numeric_within_bigquery_bignumeric_limits(pg_numeric: &PgNumeric) -> bool {
     let numeric_str = pg_numeric.to_string();
 

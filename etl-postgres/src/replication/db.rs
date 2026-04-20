@@ -21,8 +21,9 @@ pub enum TableLookupError {
 /// Creates a Postgres connection pool with the specified minimum and maximum
 /// connection counts for accessing the source database.
 ///
-/// The `options` parameter allows specifying connection-specific Postgres settings.
-/// Pass `None` to use server defaults, or `Some(&options)` to apply custom settings.
+/// The `options` parameter allows specifying connection-specific Postgres
+/// settings. Pass `None` to use server defaults, or `Some(&options)` to apply
+/// custom settings.
 #[cfg(feature = "replication")]
 pub async fn connect_to_source_database(
     config: &PgConnectionConfig,
@@ -43,9 +44,9 @@ pub async fn connect_to_source_database(
 
 /// Retrieves table names for multiple table ids in a single query.
 ///
-/// Looks up the schema and table names for all given table OIDs using Postgres's
-/// pg_class and pg_namespace system tables. Returns a HashMap mapping each TableId
-/// to its corresponding TableName.
+/// Looks up the schema and table names for all given table OIDs using
+/// Postgres's pg_class and pg_namespace system tables. Returns a HashMap
+/// mapping each TableId to its corresponding TableName.
 pub async fn get_table_names_from_table_ids<'c, E>(
     executor: E,
     table_ids: &[TableId],

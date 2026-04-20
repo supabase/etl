@@ -68,15 +68,17 @@ struct BackpressureMonitorInner {
 
 /// Shared memory backpressure controller.
 ///
-/// This component owns a periodic task that samples memory usage and updates a boolean backpressure
-/// signal. Consumers can subscribe and pause polling when backpressure is active.
+/// This component owns a periodic task that samples memory usage and updates a
+/// boolean backpressure signal. Consumers can subscribe and pause polling when
+/// backpressure is active.
 #[derive(Debug, Clone)]
 pub(crate) struct MemoryMonitor {
     inner: Arc<MemoryMonitorInner>,
 }
 
 impl MemoryMonitor {
-    /// Creates a new memory backpressure controller and starts the refresh task.
+    /// Creates a new memory backpressure controller and starts the refresh
+    /// task.
     pub(crate) fn new(
         mut shutdown_rx: ShutdownRx,
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
@@ -85,7 +87,8 @@ impl MemoryMonitor {
         // sysinfo docs suggest to use a single instance of `System` across the program.
         let mut system = sysinfo::System::new();
 
-        // Initialize from a real memory snapshot so startup state reflects current pressure.
+        // Initialize from a real memory snapshot so startup state reflects current
+        // pressure.
         let startup_snapshot = MemorySnapshot::from_system(&mut system);
         let backpressure = memory_backpressure_config.map(|config| {
             let startup_backpressure_active = compute_next_backpressure_active(
@@ -206,9 +209,9 @@ impl MemoryMonitor {
     pub(crate) fn subscribe(&self) -> Option<MemoryMonitorSubscription> {
         let backpressure = self.inner.backpressure.as_ref()?;
 
-        // We snapshot the current state of the watch channel and create a stream out of it. The
-        // stream will return the new values from this point onward, independently of when it will be
-        // polled.
+        // We snapshot the current state of the watch channel and create a stream out of
+        // it. The stream will return the new values from this point onward,
+        // independently of when it will be polled.
         let rx = backpressure.active_tx.subscribe();
         let updates = WatchStream::from_changes(rx.clone());
 
@@ -220,7 +223,8 @@ impl MemoryMonitor {
         self.inner.total_memory_bytes.load(Ordering::Relaxed)
     }
 
-    /// Updates the backpressure active state and notifies subscribers when it changes.
+    /// Updates the backpressure active state and notifies subscribers when it
+    /// changes.
     fn set_backpressure_active(&self, backpressure_active: bool) {
         let Some(backpressure) = self.inner.backpressure.as_ref() else {
             return;
@@ -238,7 +242,8 @@ impl MemoryMonitor {
     }
 }
 
-/// Computes the next backpressure active state given the current state and memory usage.
+/// Computes the next backpressure active state given the current state and
+/// memory usage.
 fn compute_next_backpressure_active(
     currently_backpressure_active: bool,
     used_percent: f32,
@@ -270,7 +275,8 @@ fn emit_activation_duration_metric(duration: Duration) {
 
 #[cfg(test)]
 impl MemoryMonitor {
-    /// Creates a new memory backpressure controller without spawning a refresh task.
+    /// Creates a new memory backpressure controller without spawning a refresh
+    /// task.
     pub(crate) fn new_for_test() -> Self {
         Self {
             inner: Arc::new(MemoryMonitorInner {
@@ -297,8 +303,8 @@ impl MemoryMonitor {
 
 /// Subscription to memory backpressure updates.
 ///
-/// This type provides wake-safe polling semantics so streams can return `Pending` while memory is
-/// active without risking missed wakeups.
+/// This type provides wake-safe polling semantics so streams can return
+/// `Pending` while memory is active without risking missed wakeups.
 #[derive(Debug)]
 pub(crate) struct MemoryMonitorSubscription {
     current_rx: watch::Receiver<bool>,
@@ -318,7 +324,8 @@ impl Stream for MemoryMonitorSubscription {
     /// Polls for a new backpressure update.
     ///
     /// Returns:
-    /// - `Poll::Ready(Some(backpressure_active))` when there is an unseen update.
+    /// - `Poll::Ready(Some(backpressure_active))` when there is an unseen
+    ///   update.
     /// - `Poll::Ready(None)` when the underlying signal channel is closed.
     /// - `Poll::Pending` when no update is available yet.
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

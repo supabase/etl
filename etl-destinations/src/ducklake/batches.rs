@@ -551,7 +551,8 @@ fn apply_table_batches(
 ) -> EtlResult<()> {
     for batch in batches {
         // This is useful in case it fails in the middle of the process.
-        // As we have a batch id we can check if it was already committed or not and only replay if not.
+        // As we have a batch id we can check if it was already committed or not and
+        // only replay if not.
         if applied_batch_marker_exists(conn, batch)? {
             counter!(
                 ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL,
@@ -858,7 +859,8 @@ fn build_batch_identity(
     }
 }
 
-/// Hashes a row using its SQL literal form so retries are independent of appender encoding.
+/// Hashes a row using its SQL literal form so retries are independent of
+/// appender encoding.
 fn hash_table_row_ref(hasher: &mut BatchIdHasher, row: &TableRow) {
     table_row_to_sql_literal_ref(row).hash(hasher);
 }
@@ -1280,13 +1282,15 @@ static FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE: LazyLock<Mutex<Option<String>>> =
 static FAIL_AFTER_COPY_BATCH_COMMIT_TABLE: LazyLock<Mutex<Option<String>>> =
     LazyLock::new(|| Mutex::new(None));
 
-/// Arms a test hook that injects one post-commit failure for the next atomic batch.
+/// Arms a test hook that injects one post-commit failure for the next atomic
+/// batch.
 #[cfg(feature = "test-utils")]
 pub fn arm_fail_after_atomic_batch_commit_once_for_tests(table_name: &str) {
     *FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_string());
 }
 
-/// Arms a test hook that injects one post-commit failure for the next copy batch.
+/// Arms a test hook that injects one post-commit failure for the next copy
+/// batch.
 #[cfg(feature = "test-utils")]
 pub fn arm_fail_after_copy_batch_commit_once_for_tests(table_name: &str) {
     *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = Some(table_name.to_string());
@@ -1299,7 +1303,8 @@ pub fn reset_ducklake_test_hooks() {
     *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = None;
 }
 
-/// Injects a synthetic failure after commit so retries must rely on the correct marker path.
+/// Injects a synthetic failure after commit so retries must rely on the correct
+/// marker path.
 #[cfg(feature = "test-utils")]
 fn maybe_fail_after_committed_batch_for_tests(
     batch_kind: DuckLakeTableBatchKind,
@@ -1313,7 +1318,8 @@ fn maybe_fail_after_committed_batch_for_tests(
     }
 }
 
-/// Injects a synthetic failure after commit so retries must rely on the marker table.
+/// Injects a synthetic failure after commit so retries must rely on the marker
+/// table.
 #[cfg(feature = "test-utils")]
 fn maybe_fail_after_atomic_batch_commit_for_tests(table_name: &str) -> EtlResult<()> {
     let mut fail_table = FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock();
@@ -1328,7 +1334,8 @@ fn maybe_fail_after_atomic_batch_commit_for_tests(table_name: &str) -> EtlResult
     Ok(())
 }
 
-/// Injects a synthetic failure after commit so copy retries must rely on the marker table.
+/// Injects a synthetic failure after commit so copy retries must rely on the
+/// marker table.
 #[cfg(feature = "test-utils")]
 fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<()> {
     let mut fail_table = FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock();

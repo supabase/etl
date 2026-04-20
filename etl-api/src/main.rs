@@ -27,12 +27,13 @@ fn install_crypto_provider() {
 
 /// Entry point for the ETL API service.
 ///
-/// Initializes tracing, Sentry, and starts the Actix web server with command-line
-/// argument handling for both server mode and database migration.
+/// Initializes tracing, Sentry, and starts the Actix web server with
+/// command-line argument handling for both server mode and database migration.
 fn main() -> anyhow::Result<()> {
     // Install rustls crypto provider before any TLS operations.
     // This is needed because Cargo's feature unification causes rustls to have both
-    // ring and aws-lc-rs features enabled, and we must explicitly choose which to use.
+    // ring and aws-lc-rs features enabled, and we must explicitly choose which to
+    // use.
     install_crypto_provider();
 
     // Initialize tracing from the binary name
@@ -47,9 +48,11 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Main async function that handles command-line arguments and starts the service.
+/// Main async function that handles command-line arguments and starts the
+/// service.
 ///
-/// Supports two modes: server mode (no arguments) and migration mode ("migrate" argument).
+/// Supports two modes: server mode (no arguments) and migration mode ("migrate"
+/// argument).
 async fn async_main() -> anyhow::Result<()> {
     let mut args = env::args();
     match args.len() {

@@ -31,25 +31,29 @@ impl Environment {
     ///
     /// Defaults to [`Environment::Prod`] if the variable is not set.
     pub fn load() -> Result<Environment, Error> {
-        // TODO: maybe we want to wrap this error with its own type to make the interface more usable.
+        // TODO: maybe we want to wrap this error with its own type to make the
+        // interface more usable.
         std::env::var(APP_ENVIRONMENT_ENV_NAME).unwrap_or_else(|_| PROD_ENV_NAME.into()).try_into()
     }
 
-    /// Sets the `APP_ENVIRONMENT` environment variable to this environment's value.
+    /// Sets the `APP_ENVIRONMENT` environment variable to this environment's
+    /// value.
     pub fn set(&self) {
         unsafe { std::env::set_var(APP_ENVIRONMENT_ENV_NAME, self.to_string()) }
     }
 
     /// Returns whether this is a production-like environment.
     ///
-    /// Returns `true` for both [`Environment::Prod`] and [`Environment::Staging`].
+    /// Returns `true` for both [`Environment::Prod`] and
+    /// [`Environment::Staging`].
     pub fn is_prod(&self) -> bool {
         matches!(self, Self::Prod | Self::Staging)
     }
 
     /// Returns the Supabase domain for the given environment.
     ///
-    /// We can assume that this URL is stable and thus encoding it in code is enough.
+    /// We can assume that this URL is stable and thus encoding it in code is
+    /// enough.
     #[cfg(feature = "supabase")]
     pub fn get_supabase_domain(&self) -> &'static str {
         match self {
@@ -74,14 +78,16 @@ impl TryFrom<String> for Environment {
 
     /// Creates an [`Environment`] from a string, case-insensitively.
     ///
-    /// Accepts "dev", "staging", or "prod". Returns an error for unsupported values.
+    /// Accepts "dev", "staging", or "prod". Returns an error for unsupported
+    /// values.
     fn try_from(s: String) -> Result<Self, Self::Error> {
         match s.to_lowercase().as_str() {
             PROD_ENV_NAME => Ok(Self::Prod),
             STAGING_ENV_NAME => Ok(Self::Staging),
             DEV_ENV_NAME => Ok(Self::Dev),
             other => Err(Error::other(format!(
-                "{other} is not a supported environment. Use either `{PROD_ENV_NAME}`/`{STAGING_ENV_NAME}`/`{DEV_ENV_NAME}`.",
+                "{other} is not a supported environment. Use either \
+                 `{PROD_ENV_NAME}`/`{STAGING_ENV_NAME}`/`{DEV_ENV_NAME}`.",
             ))),
         }
     }

@@ -12,7 +12,8 @@ use crate::environment::Environment;
 /// Directory containing configuration files relative to the application root.
 const CONFIGURATION_DIR: &str = "configuration";
 
-/// Environment variable for specifying an absolute path to the configuration directory.
+/// Environment variable for specifying an absolute path to the configuration
+/// directory.
 const CONFIG_DIR_ENV_VAR: &str = "APP_CONFIG_DIR";
 
 /// Supported extensions for base and environment configuration files.
@@ -30,9 +31,11 @@ const ENV_SEPARATOR: &str = "__";
 /// Separator for list elements in environment variables.
 const LIST_SEPARATOR: &str = ",";
 
-/// Trait implemented by configuration structures that require list parsing help.
+/// Trait implemented by configuration structures that require list parsing
+/// help.
 pub trait Config {
-    /// Keys whose values should be parsed as lists when loading the configuration.
+    /// Keys whose values should be parsed as lists when loading the
+    /// configuration.
     const LIST_PARSE_KEYS: &'static [&'static str];
 }
 
@@ -53,7 +56,8 @@ impl ConfigFileKind {
         }
     }
 
-    /// Returns a static string describing this configuration file kind for error messages.
+    /// Returns a static string describing this configuration file kind for
+    /// error messages.
     fn as_str(&self) -> &'static str {
         match self {
             ConfigFileKind::Base => "base",
@@ -96,16 +100,19 @@ pub enum LoadConfigError {
     Builder(#[source] config::ConfigError),
 }
 
-/// Loads hierarchical configuration from base, environment, and environment-variable sources.
+/// Loads hierarchical configuration from base, environment, and
+/// environment-variable sources.
 ///
 /// The configuration directory is determined by:
-/// - First checking the `APP_CONFIG_DIR` environment variable for an absolute path
+/// - First checking the `APP_CONFIG_DIR` environment variable for an absolute
+///   path
 /// - If not set, using `<current_dir>/configuration`
 ///
 /// Loads files from `base.(yaml|yml|json)` and `{environment}.(yaml|yml|json)`
 /// before applying overrides from `APP_`-prefixed environment variables.
 ///
-/// Nested keys use double underscores (`APP_SERVICE__HOST`), and list values are comma-separated.
+/// Nested keys use double underscores (`APP_SERVICE__HOST`), and list values
+/// are comma-separated.
 pub fn load_config<T>() -> Result<T, LoadConfigError>
 where
     T: Config + DeserializeOwned,
@@ -156,7 +163,8 @@ where
     settings.try_deserialize::<T>().map_err(LoadConfigError::Deserialization)
 }
 
-/// Finds the configuration file that matches the requested kind and supported extensions.
+/// Finds the configuration file that matches the requested kind and supported
+/// extensions.
 fn find_configuration_file(
     directory: &Path,
     kind: ConfigFileKind,
@@ -198,7 +206,8 @@ mod tests {
 
     use super::*;
 
-    /// Mutex to serialize tests that modify environment variables or current directory.
+    /// Mutex to serialize tests that modify environment variables or current
+    /// directory.
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -253,8 +262,9 @@ mod tests {
         let env_content = match extension {
             "json" => serde_json::to_string_pretty(&original_config).unwrap(),
             "yaml" | "yml" => {
-                // YAML serialization for externally tagged enums doesn't match what config crate expects
-                // For now, manually construct YAML that config crate can deserialize
+                // YAML serialization for externally tagged enums doesn't match what config
+                // crate expects For now, manually construct YAML that config
+                // crate can deserialize
                 format!(
                     "name: \"{}\"\nmode:\n  disk:\n    path: \"{}\"\n    max_size: {}\n",
                     original_config.name,

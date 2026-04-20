@@ -241,7 +241,8 @@ async fn can_delete_non_default_image_after_switching_default() {
     let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
     let image2_id = response.id;
 
-    // Make the second image default (this should succeed and make the first one non-default)
+    // Make the second image default (this should succeed and make the first one
+    // non-default)
     let update = UpdateImageRequest { name: "non-default-image".to_string(), is_default: true };
     let response = app.update_image(image2_id, &update).await;
     assert!(response.status().is_success());

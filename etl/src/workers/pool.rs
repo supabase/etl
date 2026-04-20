@@ -26,7 +26,8 @@ use crate::{
 pub(crate) struct TableSyncWorkerId {
     /// Identifier of the table being synchronized by this worker.
     pub(crate) table_id: TableId,
-    /// Monotonically increasing identifier distinguishing individual worker runs for the same table.
+    /// Monotonically increasing identifier distinguishing individual worker
+    /// runs for the same table.
     pub(crate) run_id: u64,
 }
 
@@ -38,18 +39,19 @@ impl std::fmt::Display for TableSyncWorkerId {
 
 /// Pool for managing multiple table synchronization workers.
 ///
-/// [`TableSyncWorkerPool`] coordinates the execution of multiple table sync workers
-/// that run in parallel during the initial synchronization phase of ETL pipelines.
-/// It provides methods for spawning workers, tracking their progress, and waiting
-/// for completion of all synchronization operations.
+/// [`TableSyncWorkerPool`] coordinates the execution of multiple table sync
+/// workers that run in parallel during the initial synchronization phase of ETL
+/// pipelines. It provides methods for spawning workers, tracking their
+/// progress, and waiting for completion of all synchronization operations.
 ///
 /// The pool uses a two-lock design:
 /// - A [`Mutex`] protects the [`JoinSet`] for task spawning and waiting.
-/// - An [`RwLock`] protects the workers map for cheap read access to worker state.
+/// - An [`RwLock`] protects the workers map for cheap read access to worker
+///   state.
 ///
-/// Locking order during spawn is: workers_join_set lock -> workers write lock. This ensures
-/// that [`wait_all`] (which holds the workers_join_set lock) blocks any new spawns until
-/// all existing workers have completed.
+/// Locking order during spawn is: workers_join_set lock -> workers write lock.
+/// This ensures that [`wait_all`] (which holds the workers_join_set lock)
+/// blocks any new spawns until all existing workers have completed.
 #[derive(Debug)]
 pub(crate) struct TableSyncWorkerPool {
     /// Monotonically increasing counter for generating unique run IDs.
@@ -70,14 +72,17 @@ impl TableSyncWorkerPool {
         }
     }
 
-    /// Spawns a new worker into the pool if no active worker exists for the table.
+    /// Spawns a new worker into the pool if no active worker exists for the
+    /// table.
     ///
-    /// If a worker for the given table already exists and is still running, logs
-    /// a warning and skips spawning. If no worker exists or the previous worker
-    /// has finished, spawns a new worker with a unique run ID.
+    /// If a worker for the given table already exists and is still running,
+    /// logs a warning and skips spawning. If no worker exists or the
+    /// previous worker has finished, spawns a new worker with a unique run
+    /// ID.
     ///
-    /// The locking order is: workers_join_set -> workers (write). This ensures that if
-    /// [`wait_all`] is in progress, this method blocks until it completes.
+    /// The locking order is: workers_join_set -> workers (write). This ensures
+    /// that if [`wait_all`] is in progress, this method blocks until it
+    /// completes.
     pub(crate) async fn spawn<F>(&self, table_id: TableId, state: TableSyncWorkerState, future: F)
     where
         F: Future<Output = EtlResult<TableSyncWorkerResult>> + Send + 'static,
@@ -117,8 +122,8 @@ impl TableSyncWorkerPool {
 
     /// Retrieves the state handle for an active worker by table ID.
     ///
-    /// Returns `None` if no worker exists for the table or if the worker has finished.
-    /// This method only acquires a read lock on the workers map.
+    /// Returns `None` if no worker exists for the table or if the worker has
+    /// finished. This method only acquires a read lock on the workers map.
     pub(crate) async fn get_active_worker_state(
         &self,
         table_id: TableId,
@@ -138,11 +143,13 @@ impl TableSyncWorkerPool {
 
     /// Waits for all workers in the pool to complete.
     ///
-    /// This method holds the workers_join_set lock while draining all tasks, which blocks
-    /// any new spawn attempts. For each completed task, it briefly acquires a write
-    /// lock on the workers map to remove the entry only if the worker_id matches.
+    /// This method holds the workers_join_set lock while draining all tasks,
+    /// which blocks any new spawn attempts. For each completed task, it
+    /// briefly acquires a write lock on the workers map to remove the entry
+    /// only if the worker_id matches.
     ///
-    /// If any workers encounter supervision errors, those errors are collected and returned.
+    /// If any workers encounter supervision errors, those errors are collected
+    /// and returned.
     pub(crate) async fn wait_all(&self) -> EtlResult<()> {
         let mut errors = Vec::new();
         let mut workers_join_set = self.workers_join_set.lock().await;

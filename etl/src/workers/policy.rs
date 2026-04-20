@@ -40,12 +40,13 @@ impl ErrorHandlingPolicy {
     }
 }
 
-/// Builds an [`ErrorHandlingPolicy`] from an [`EtlError`] to determine in a unified way how errors
-/// should be handled.
+/// Builds an [`ErrorHandlingPolicy`] from an [`EtlError`] to determine in a
+/// unified way how errors should be handled.
 pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
     match error.kind() {
-        // Automatically retriable errors. Keep this list narrow and limited to transient source or destination
-        // connectivity/capacity failures that are expected to recover without operator intervention.
+        // Automatically retriable errors. Keep this list narrow and limited to transient source or
+        // destination connectivity/capacity failures that are expected to recover without
+        // operator intervention.
         ErrorKind::SourceConnectionFailed
         | ErrorKind::DestinationConnectionFailed
         | ErrorKind::DestinationAtomicBatchRetryable
@@ -78,7 +79,8 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
         ErrorKind::SourceConfigurationLimitExceeded => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some(
-                "Verify the configured limits for Postgres, for example, the maximum number of replication slots.",
+                "Verify the configured limits for Postgres, for example, the maximum number of \
+                 replication slots.",
             ),
         ),
         ErrorKind::ReplicationSlotNotCreated => ErrorHandlingPolicy::new(
@@ -110,7 +112,9 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
         _ => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some(
-                "There is no single prescribed solution for this error. The issue may still be recoverable with manual intervention based on the specific context. If it persists after rollback and targeted fixes, please contact support.",
+                "There is no single prescribed solution for this error. The issue may still be \
+                 recoverable with manual intervention based on the specific context. If it \
+                 persists after rollback and targeted fixes, please contact support.",
             ),
         ),
     }

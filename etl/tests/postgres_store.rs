@@ -723,7 +723,8 @@ async fn test_replication_mask_loads_correctly_from_string_bytea() {
         .expect("Failed to connect to source database with sqlx");
 
     // Manually insert a row with a specific replication mask bytea.
-    // The mask [1, 0, 1, 1, 0] represents columns: replicated, not replicated, replicated, replicated, not replicated.
+    // The mask [1, 0, 1, 1, 0] represents columns: replicated, not replicated,
+    // replicated, replicated, not replicated.
     let expected_mask_bytes: Vec<u8> = vec![1, 0, 1, 1, 0];
 
     sqlx::query(
