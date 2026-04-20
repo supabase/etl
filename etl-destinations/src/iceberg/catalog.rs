@@ -370,7 +370,7 @@ impl SupabaseClient {
         }
 
         if let Some(query) = query {
-            request = request.query(query)
+            request = request.query(query);
         }
 
         let response = request

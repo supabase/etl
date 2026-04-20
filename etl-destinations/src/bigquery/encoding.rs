@@ -180,11 +180,11 @@ fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes::Buf
         }
         CellNonOptional::Uuid(u) => {
             let s = u.to_string();
-            prost::encoding::string::encode(tag, &s, buf)
+            prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::Json(j) => {
             let s = j.to_string();
-            prost::encoding::string::encode(tag, &s, buf)
+            prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::U32(i) => {
             prost::encoding::uint32::encode(tag, i, buf);
