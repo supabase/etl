@@ -155,6 +155,7 @@ impl From<crate::k8s::core::K8sCoreError> for PipelineError {
 
 impl PipelineError {
     fn to_message(&self) -> String {
+        #[allow(clippy::match_same_arms)]
         match self {
             // Do not expose internal database details in error messages.
             PipelineError::SourcesDb(SourcesDbError::Database(_))
