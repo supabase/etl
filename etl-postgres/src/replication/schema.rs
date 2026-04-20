@@ -179,7 +179,7 @@ pub async fn store_table_schema(
         .await?;
 
     // Insert all columns
-    for column_schema in table_schema.column_schemas.iter() {
+    for column_schema in &table_schema.column_schemas {
         sqlx::query(
             r#"
             insert into etl.table_columns

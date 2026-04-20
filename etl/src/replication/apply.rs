@@ -1915,7 +1915,7 @@ where
 
         // Collect the replicated schemas for tables this worker currently owns.
         let mut truncated_tables = Vec::with_capacity(message.rel_ids().len());
-        for &rel_id in message.rel_ids().iter() {
+        for &rel_id in message.rel_ids() {
             let table_id = TableId::new(rel_id);
 
             // Exactly one worker owns protocol interpretation for a table at a time, so

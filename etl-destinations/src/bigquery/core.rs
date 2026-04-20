@@ -527,8 +527,10 @@ where
             self.prepare_table_for_streaming(replicated_table_schema, false).await?;
 
         // Add the CDC operation type to all rows (no lock needed).
-        for table_row in table_rows.iter_mut() {
-            table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
+        for table_row in &mut table_rows {
+            table_row
+                .values_mut()
+                .push(BigQueryOperationType::Upsert.into_cell());
         }
         let table_rows = table_rows
             .into_iter()
