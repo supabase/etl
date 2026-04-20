@@ -689,6 +689,7 @@ pub async fn update_pipeline(
     ),
     responses(
         (status = 200, description = "Pipeline deleted successfully"),
+        (status = 409, description = "Pipeline is active", body = ErrorMessage),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
