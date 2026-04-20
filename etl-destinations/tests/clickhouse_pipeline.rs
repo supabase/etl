@@ -1,5 +1,3 @@
-#![cfg(all(feature = "clickhouse", feature = "test-utils"))]
-
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::notifying_store::NotifyingStore;
@@ -19,8 +17,6 @@ use tokio::time::sleep;
 use url::Url;
 
 use crate::support::clickhouse::{AllTypesRow, BoundaryValuesRow};
-
-mod support;
 
 /// Ensures the rustls crypto provider is only installed once across all tests.
 static INIT_CRYPTO: Once = Once::new();
@@ -351,7 +347,7 @@ async fn all_types_table_copy() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(pipeline_id, store.clone());
+    let destination = ch_db.build_destination();
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -495,7 +491,7 @@ async fn updates_are_streamed_to_clickhouse() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(pipeline_id, store.clone());
+    let destination = ch_db.build_destination();
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -654,7 +650,7 @@ async fn boundary_values_table_copy() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(pipeline_id, store.clone());
+    let destination = ch_db.build_destination();
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -794,7 +790,7 @@ async fn deletes_are_streamed_to_clickhouse() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(pipeline_id, store.clone());
+    let destination = ch_db.build_destination();
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -908,7 +904,7 @@ async fn pipeline_restart_resumes_streaming() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(pipeline_id, store.clone());
+    let destination = ch_db.build_destination();
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -933,7 +929,7 @@ async fn pipeline_restart_resumes_streaming() {
     assert_eq!(rows[0].value, "before_restart");
 
     // --- WHEN: rebuild destination and pipeline, then stream a new insert ---
-    let destination = ch_db.build_destination(pipeline_id, store.clone());
+    let destination = ch_db.build_destination();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1031,7 +1027,7 @@ async fn truncate_clears_table_and_accepts_new_inserts() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(pipeline_id, store.clone());
+    let destination = ch_db.build_destination();
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -1145,10 +1141,7 @@ async fn intermediate_flush_preserves_all_rows() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination_with_config(
-        pipeline_id,
-        store.clone(),
-        ClickHouseInserterConfig {
+    let destination = ch_db.build_destination_with_config(ClickHouseInserterConfig {
             // 1 byte -- forces a new INSERT after every row.
             max_bytes_per_insert: 1,
         },
@@ -1254,7 +1247,7 @@ async fn multiple_tables_receive_independent_writes() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(pipeline_id, store.clone());
+    let destination = ch_db.build_destination();
 
     let table_a_ready = store
         .notify_on_table_state_type(table_a_id, TableReplicationPhaseType::Ready)
@@ -1401,7 +1394,7 @@ async fn sequential_transactions_preserve_commit_order() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(pipeline_id, store.clone());
+    let destination = ch_db.build_destination();
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -1535,7 +1528,7 @@ async fn delete_with_default_replica_identity() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(pipeline_id, store.clone());
+    let destination = ch_db.build_destination();
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -1681,7 +1674,7 @@ async fn large_batch_table_copy() {
     let ch_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let destination = ch_db.build_destination(pipeline_id, store.clone());
+    let destination = ch_db.build_destination();
 
     let table_ready = store
         .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
@@ -1728,7 +1721,7 @@ async fn large_batch_table_copy() {
 #[tokio::test(flavor = "multi_thread")]
 async fn ping_succeeds_against_running_clickhouse() {
     let client = ClickHouseClient::new(
-        Url::parse(&get_clickhouse_url()).unwrap(),
+        get_clickhouse_url(),
         get_clickhouse_user(),
         get_clickhouse_password(),
         "default",

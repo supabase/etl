@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::clickhouse::client::ClickHouseClient;
 use crate::clickhouse::encoding::{ClickHouseValue, cell_to_clickhouse_value};
@@ -12,9 +9,7 @@ use etl::destination::async_result::{
 };
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
-use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
-use etl::types::{Cell, Event, TableId, TableRow, is_array_type};
+use etl::types::{Cell, Event, ReplicatedTableSchema, TableId, TableRow, is_array_type};
 use etl::{destination::Destination, types::PgLsn};
 use parking_lot::RwLock;
 use std::time::Instant;
@@ -68,16 +63,15 @@ pub struct ClickHouseInserterConfig {
 ///
 /// Uses append-only MergeTree tables with two CDC columns (`cdc_operation`, `cdc_lsn`)
 /// appended to each row. Rows are encoded as RowBinary and sent via
-/// `INSERT INTO "table" FORMAT RowBinary` — no column-name header required.
+/// `INSERT INTO "table" FORMAT RowBinary` -- no column-name header required.
 ///
 /// The struct is cheaply cloneable: `client` wraps an `Arc` internally, and
-/// `table_cache` is wrapped in `Arc<RwLock<…>>`.
+/// `table_cache` is wrapped in `Arc<RwLock<...>>`.
 #[derive(Clone)]
-pub struct ClickHouseDestination<S> {
+pub struct ClickHouseDestination {
     client: ClickHouseClient,
     inserter_config: Arc<ClickHouseInserterConfig>,
-    store: Arc<S>,
-    /// Cache: ClickHouse table name → `Arc<[bool]>` (nullable flags per column,
+    /// Cache: ClickHouse table name -> `Arc<[bool]>` (nullable flags per column,
     /// including the two trailing CDC columns which are always `false`).
     ///
     /// `std::sync::RwLock` is appropriate here: both reads (hot path) and writes (rare,
@@ -87,10 +81,7 @@ pub struct ClickHouseDestination<S> {
     table_cache: Arc<RwLock<HashMap<String, Arc<[bool]>>>>,
 }
 
-impl<S> ClickHouseDestination<S>
-where
-    S: StateStore + SchemaStore + Send + Sync,
-{
+impl ClickHouseDestination {
     /// Creates a new `ClickHouseDestination`.
     ///
     /// When using an `https://` URL, TLS is handled automatically by the `rustls-tls`
@@ -101,51 +92,29 @@ where
         password: Option<String>,
         database: impl Into<String>,
         inserter_config: ClickHouseInserterConfig,
-        store: S,
     ) -> EtlResult<Self> {
         register_metrics();
         Ok(Self {
             client: ClickHouseClient::new(url, user, password, database),
             inserter_config: Arc::new(inserter_config),
-            store: Arc::new(store),
             table_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
-    /// Ensures the ClickHouse table for `table_id` exists, returning
+    /// Ensures the ClickHouse table for the given schema exists, returning
     /// `(ch_table_name, nullable_flags)`.
     ///
     /// Uses a two-phase locking strategy:
-    /// 1. Fast-path read (no await) → return cached entry if present.
+    /// 1. Fast-path read (no await) -- return cached entry if present.
     /// 2. Slow-path: compute DDL, run `CREATE TABLE IF NOT EXISTS` (await, no lock held),
     ///    then write-lock to insert (using `or_insert` for the concurrent first-writer race).
-    async fn ensure_table_exists(&self, table_id: TableId) -> EtlResult<(String, Arc<[bool]>)> {
-        let table_schema = self
-            .store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found",
-                    format!("No schema found for table {table_id}")
-                )
-            })?;
-
-        let ch_table_name = {
-            if let Some(name) = self.store.get_table_mapping(&table_id).await? {
-                name
-            } else {
-                let name = table_name_to_clickhouse_table_name(
-                    &table_schema.name.schema,
-                    &table_schema.name.name,
-                );
-                self.store
-                    .store_table_mapping(table_id, name.clone())
-                    .await?;
-                name
-            }
-        };
+    async fn ensure_table_exists(
+        &self,
+        schema: &ReplicatedTableSchema,
+    ) -> EtlResult<(String, Arc<[bool]>)> {
+        let table_name = schema.name();
+        let ch_table_name =
+            table_name_to_clickhouse_table_name(&table_name.schema, &table_name.name);
 
         {
             let guard = self.table_cache.read();
@@ -162,7 +131,7 @@ where
         // `nullable_flags[i] = true` for an array column, `rb_encode_nullable` would prepend a
         // spurious `0x00` byte that ClickHouse reads as `varint(0)` (empty array), causing every
         // subsequent column to be read from the wrong offset and ultimately "Cannot read all data".
-        let column_schemas = &table_schema.column_schemas;
+        let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
         let mut nullable_flags_vec: Vec<bool> = column_schemas
             .iter()
             .map(|c| c.nullable && !is_array_type(&c.typ))
@@ -172,7 +141,7 @@ where
         let nullable_flags: Arc<[bool]> = nullable_flags_vec.into();
 
         // Execute DDL (no lock held during this await).
-        let ddl = build_create_table_sql(&ch_table_name, column_schemas);
+        let ddl = build_create_table_sql(&ch_table_name, &column_schemas);
         let ddl_start = Instant::now();
         self.client.execute_ddl(&ddl).await?;
         metrics::histogram!(ETL_CH_DDL_DURATION_SECONDS, "table" => ch_table_name.clone())
@@ -191,17 +160,17 @@ where
         Ok((ch_table_name, stored_flags))
     }
 
-    async fn truncate_table_inner(&self, table_id: TableId) -> EtlResult<()> {
-        let (ch_table_name, _) = self.ensure_table_exists(table_id).await?;
+    async fn truncate_table_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
+        let (ch_table_name, _) = self.ensure_table_exists(schema).await?;
         self.client.truncate_table(&ch_table_name).await
     }
 
     async fn write_table_rows_inner(
         &self,
-        table_id: TableId,
+        schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let (ch_table_name, nullable_flags) = self.ensure_table_exists(table_id).await?;
+        let (ch_table_name, nullable_flags) = self.ensure_table_exists(schema).await?;
 
         let rows: Vec<Vec<ClickHouseValue>> = table_rows
             .into_iter()
@@ -234,7 +203,7 @@ where
     /// 2. Writes those rows concurrently.
     /// 3. Drains consecutive Truncate events (deduplicated) and executes them.
     ///
-    /// Breaking at a Truncate never skips events — the outer loop resumes from that
+    /// Breaking at a Truncate never skips events -- the outer loop resumes from that
     /// position, so rows accumulated before the Truncate are flushed first, then the
     /// Truncate fires, then subsequent events (including inserts on the same table)
     /// are processed in the next pass.
@@ -243,6 +212,8 @@ where
 
         while event_iter.peek().is_some() {
             // Accumulate non-truncate events grouped by table_id.
+            // We also track the ReplicatedTableSchema per table for ensure_table_exists.
+            let mut table_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
             let mut table_id_to_rows: HashMap<TableId, Vec<PendingRow>> = HashMap::new();
 
             while let Some(event) = event_iter.peek() {
@@ -255,8 +226,12 @@ where
                     .expect("event iterator should not be empty, we peeked at the next event; qed");
                 match event {
                     Event::Insert(insert) => {
+                        let table_id = insert.replicated_table_schema.id();
+                        table_schemas
+                            .entry(table_id)
+                            .or_insert_with(|| insert.replicated_table_schema.clone());
                         table_id_to_rows
-                            .entry(insert.table_id)
+                            .entry(table_id)
                             .or_default()
                             .push(PendingRow {
                                 operation: CdcOperation::Insert,
@@ -265,8 +240,12 @@ where
                             });
                     }
                     Event::Update(update) => {
+                        let table_id = update.replicated_table_schema.id();
+                        table_schemas
+                            .entry(table_id)
+                            .or_insert_with(|| update.replicated_table_schema.clone());
                         table_id_to_rows
-                            .entry(update.table_id)
+                            .entry(table_id)
                             .or_default()
                             .push(PendingRow {
                                 operation: CdcOperation::Update,
@@ -279,8 +258,12 @@ where
                             info!("delete event has no row data, skipping");
                             continue;
                         };
+                        let table_id = delete.replicated_table_schema.id();
+                        table_schemas
+                            .entry(table_id)
+                            .or_insert_with(|| delete.replicated_table_schema.clone());
                         table_id_to_rows
-                            .entry(delete.table_id)
+                            .entry(table_id)
                             .or_default()
                             .push(PendingRow {
                                 operation: CdcOperation::Delete,
@@ -302,8 +285,8 @@ where
                 // Phase 1: ensure all tables exist (must happen outside JoinSet spawns
                 // since ensure_table_exists holds &self which is not 'static).
                 let mut table_meta: HashMap<TableId, (String, Arc<[bool]>)> = HashMap::new();
-                for &table_id in table_id_to_rows.keys() {
-                    let (name, flags) = self.ensure_table_exists(table_id).await?;
+                for (&table_id, schema) in &table_schemas {
+                    let (name, flags) = self.ensure_table_exists(schema).await?;
                     table_meta.insert(table_id, (name, flags));
                 }
 
@@ -358,19 +341,19 @@ where
             }
 
             // Collect and deduplicate truncate events.
-            let mut truncate_table_ids = HashSet::new();
+            let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate_event)) = event_iter.next() {
-                    for table_id in truncate_event.rel_ids {
-                        truncate_table_ids.insert(TableId::new(table_id));
+                    for schema in truncate_event.truncated_tables {
+                        truncate_schemas.entry(schema.id()).or_insert(schema);
                     }
                 }
             }
 
             futures::future::try_join_all(
-                truncate_table_ids
-                    .into_iter()
-                    .map(|table_id| self.truncate_table_inner(table_id)),
+                truncate_schemas
+                    .values()
+                    .map(|schema| self.truncate_table_inner(schema)),
             )
             .await?;
         }
@@ -379,31 +362,30 @@ where
     }
 }
 
-impl<S> Destination for ClickHouseDestination<S>
-where
-    S: StateStore + SchemaStore + Send + Sync,
-{
+impl Destination for ClickHouseDestination {
     fn name() -> &'static str {
         "clickhouse"
     }
 
     async fn truncate_table(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
-        let result = self.truncate_table_inner(table_id).await;
+        let result = self.truncate_table_inner(replicated_table_schema).await;
         async_result.send(result);
         Ok(())
     }
 
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        let result = self.write_table_rows_inner(table_id, table_rows).await;
+        let result = self
+            .write_table_rows_inner(replicated_table_schema, table_rows)
+            .await;
         async_result.send(result);
         Ok(())
     }

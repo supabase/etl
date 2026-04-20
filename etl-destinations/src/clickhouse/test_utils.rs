@@ -1,9 +1,6 @@
 //! Test utilities for ClickHouse destinations.
 
 use clickhouse::Client;
-use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
-use etl::types::PipelineId;
 use tokio::runtime::Handle;
 use url::Url;
 use uuid::Uuid;
@@ -21,9 +18,12 @@ pub const CLICKHOUSE_PASSWORD_ENV: &str = "TESTS_CLICKHOUSE_PASSWORD";
 ///
 /// # Panics
 ///
-/// Panics if [`CLICKHOUSE_URL_ENV`] is not set.
-pub fn get_clickhouse_url() -> String {
-    std::env::var(CLICKHOUSE_URL_ENV).unwrap_or_else(|_| panic!("{CLICKHOUSE_URL_ENV} must be set"))
+/// Panics if [`CLICKHOUSE_URL_ENV`] is not set or is not a valid URL.
+pub fn get_clickhouse_url() -> Url {
+    let value = std::env::var(CLICKHOUSE_URL_ENV)
+        .unwrap_or_else(|_| panic!("{CLICKHOUSE_URL_ENV} must be set"));
+    Url::parse(&value)
+        .unwrap_or_else(|error| panic!("{CLICKHOUSE_URL_ENV} must be a valid URL: {error}"))
 }
 
 /// Returns the ClickHouse user name from the environment.
@@ -56,16 +56,16 @@ pub struct ClickHouseTestDatabase {
     root_client: Client,
     /// Client scoped to the test database for queries.
     db_client: Client,
-    url: String,
+    url: Url,
     user: String,
     password: Option<String>,
     database: String,
 }
 
 impl ClickHouseTestDatabase {
-    fn new(url: String, user: String, password: Option<String>, database: String) -> Self {
+    fn new(url: Url, user: String, password: Option<String>, database: String) -> Self {
         let build_client = |db: Option<&str>| {
-            let mut c = Client::default().with_url(&url).with_user(&user);
+            let mut c = Client::default().with_url(url.as_str()).with_user(&user);
             if let Some(db) = db {
                 c = c.with_database(db);
             }
@@ -109,41 +109,24 @@ impl ClickHouseTestDatabase {
     /// Builds a [`ClickHouseDestination`] scoped to this test database with
     /// default inserter config (100 MiB per INSERT -- large enough that tests
     /// never hit an intermediate flush).
-    pub fn build_destination<S>(
-        &self,
-        pipeline_id: PipelineId,
-        store: S,
-    ) -> ClickHouseDestination<S>
-    where
-        S: StateStore + SchemaStore + Send + Sync,
-    {
-        self.build_destination_with_config(
-            pipeline_id,
-            store,
-            ClickHouseInserterConfig {
-                max_bytes_per_insert: 100 * 1024 * 1024,
-            },
-        )
+    pub fn build_destination(&self) -> ClickHouseDestination {
+        self.build_destination_with_config(ClickHouseInserterConfig {
+            max_bytes_per_insert: 100 * 1024 * 1024,
+        })
     }
 
     /// Builds a [`ClickHouseDestination`] scoped to this test database with
     /// a caller-supplied [`ClickHouseInserterConfig`].
-    pub fn build_destination_with_config<S>(
+    pub fn build_destination_with_config(
         &self,
-        _pipeline_id: PipelineId,
-        store: S,
         config: ClickHouseInserterConfig,
-    ) -> ClickHouseDestination<S>
-    where
-        S: StateStore + SchemaStore + Send + Sync,
-    {
+    ) -> ClickHouseDestination {
         ClickHouseDestination::new(
-            Url::parse(&self.url).expect("failed to parse test ClickHouse URL"),
+            self.url.clone(),
             &self.user,
             self.password.clone(),
             &self.database,
             config,
-            store,
         )
         .expect("Failed to create ClickHouseDestination for test")
     }

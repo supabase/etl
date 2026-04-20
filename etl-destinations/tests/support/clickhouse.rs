@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-#![cfg(all(feature = "clickhouse", feature = "test-utils"))]
 
 /// A row read back from the ClickHouse `all_types_encoding` test table.
 ///
