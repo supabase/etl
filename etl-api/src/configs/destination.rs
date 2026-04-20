@@ -98,6 +98,20 @@ pub enum FullApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         metadata_schema: Option<String>,
+        #[schema(example = "50MB")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        duckdb_memory_cache_limit: Option<String>,
+        #[schema(example = "10MB")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::utils::trim_option_string"
+        )]
+        maintenance_target_file_size: Option<String>,
     },
 }
 
@@ -166,6 +180,8 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                duckdb_memory_cache_limit,
+                maintenance_target_file_size,
             } => Self::Ducklake {
                 catalog_url,
                 data_path,
@@ -177,6 +193,8 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                duckdb_memory_cache_limit,
+                maintenance_target_file_size,
             },
         }
     }
@@ -205,6 +223,8 @@ pub enum StoredDestinationConfig {
         s3_url_style: Option<String>,
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
+        duckdb_memory_cache_limit: Option<String>,
+        maintenance_target_file_size: Option<String>,
     },
 }
 
@@ -273,6 +293,8 @@ impl StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                duckdb_memory_cache_limit,
+                maintenance_target_file_size,
             } => DestinationConfig::Ducklake {
                 catalog_url,
                 data_path,
@@ -284,6 +306,8 @@ impl StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                duckdb_memory_cache_limit,
+                maintenance_target_file_size,
             },
         }
     }
@@ -355,6 +379,8 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                duckdb_memory_cache_limit,
+                maintenance_target_file_size,
             } => Self::Ducklake {
                 catalog_url,
                 data_path,
@@ -366,6 +392,8 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                duckdb_memory_cache_limit,
+                maintenance_target_file_size,
             },
         }
     }
@@ -464,6 +492,8 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                duckdb_memory_cache_limit,
+                maintenance_target_file_size,
             } => {
                 let s3_access_key_id = s3_access_key_id
                     .map(|value| encrypt_text(value.expose_secret().to_owned(), encryption_key))
@@ -483,6 +513,8 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     s3_url_style,
                     s3_use_ssl,
                     metadata_schema,
+                    duckdb_memory_cache_limit,
+                    maintenance_target_file_size,
                 })
             }
         }
@@ -516,6 +548,8 @@ pub enum EncryptedStoredDestinationConfig {
         s3_url_style: Option<String>,
         s3_use_ssl: Option<bool>,
         metadata_schema: Option<String>,
+        duckdb_memory_cache_limit: Option<String>,
+        maintenance_target_file_size: Option<String>,
     },
 }
 
@@ -625,6 +659,8 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                duckdb_memory_cache_limit,
+                maintenance_target_file_size,
             } => Ok(StoredDestinationConfig::Ducklake {
                 catalog_url,
                 data_path,
@@ -644,6 +680,8 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                duckdb_memory_cache_limit,
+                maintenance_target_file_size,
             }),
         }
     }
@@ -1113,6 +1151,8 @@ mod tests {
             s3_url_style: Some("path".to_string()),
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_string()),
+            duckdb_memory_cache_limit: Some("50MB".to_string()),
+            maintenance_target_file_size: Some("10MB".to_string()),
         };
 
         let key = EncryptionKey {
@@ -1136,6 +1176,8 @@ mod tests {
                     s3_url_style: u1,
                     s3_use_ssl: ssl1,
                     metadata_schema: m1,
+                    duckdb_memory_cache_limit: memory1,
+                    maintenance_target_file_size: target1,
                 },
                 StoredDestinationConfig::Ducklake {
                     catalog_url: c2,
@@ -1148,6 +1190,8 @@ mod tests {
                     s3_url_style: u2,
                     s3_use_ssl: ssl2,
                     metadata_schema: m2,
+                    duckdb_memory_cache_limit: memory2,
+                    maintenance_target_file_size: target2,
                 },
             ) => {
                 assert_eq!(c1, c2);
@@ -1166,6 +1210,8 @@ mod tests {
                 assert_eq!(u1, u2);
                 assert_eq!(ssl1, ssl2);
                 assert_eq!(m1, m2);
+                assert_eq!(memory1, memory2);
+                assert_eq!(target1, target2);
             }
             _ => panic!("Config types don't match"),
         }
@@ -1184,6 +1230,8 @@ mod tests {
             s3_url_style: None,
             s3_use_ssl: None,
             metadata_schema: Some("ducklake".to_string()),
+            duckdb_memory_cache_limit: None,
+            maintenance_target_file_size: None,
         };
 
         let stored: StoredDestinationConfig = full_config.clone().into();
@@ -1196,6 +1244,8 @@ mod tests {
                     data_path: d1,
                     pool_size: p1,
                     metadata_schema: m1,
+                    duckdb_memory_cache_limit: memory1,
+                    maintenance_target_file_size: target1,
                     ..
                 },
                 FullApiDestinationConfig::Ducklake {
@@ -1203,6 +1253,8 @@ mod tests {
                     data_path: d2,
                     pool_size: p2,
                     metadata_schema: m2,
+                    duckdb_memory_cache_limit: memory2,
+                    maintenance_target_file_size: target2,
                     ..
                 },
             ) => {
@@ -1211,6 +1263,8 @@ mod tests {
                 assert_eq!(p1, None);
                 assert_eq!(p2, Some(DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE));
                 assert_eq!(m1, m2);
+                assert_eq!(memory1, memory2);
+                assert_eq!(target1, target2);
             }
             _ => panic!("Config types don't match"),
         }
@@ -1229,6 +1283,8 @@ mod tests {
             s3_url_style: Some("path".to_string()),
             s3_use_ssl: Some(false),
             metadata_schema: Some("ducklake".to_string()),
+            duckdb_memory_cache_limit: Some("50MB".to_string()),
+            maintenance_target_file_size: Some("10MB".to_string()),
         };
 
         assert_json_snapshot!(full_config);
@@ -1248,6 +1304,8 @@ mod tests {
                     s3_url_style: u1,
                     s3_use_ssl: ssl1,
                     metadata_schema: m1,
+                    duckdb_memory_cache_limit: memory1,
+                    maintenance_target_file_size: target1,
                 },
                 FullApiDestinationConfig::Ducklake {
                     catalog_url: c2,
@@ -1260,6 +1318,8 @@ mod tests {
                     s3_url_style: u2,
                     s3_use_ssl: ssl2,
                     metadata_schema: m2,
+                    duckdb_memory_cache_limit: memory2,
+                    maintenance_target_file_size: target2,
                 },
             ) => {
                 assert_eq!(c1, &c2);
@@ -1278,6 +1338,8 @@ mod tests {
                 assert_eq!(u1, &u2);
                 assert_eq!(ssl1, &ssl2);
                 assert_eq!(m1, &m2);
+                assert_eq!(memory1, &memory2);
+                assert_eq!(target1, &target2);
             }
             _ => panic!("Deserialization failed or variant mismatch"),
         }

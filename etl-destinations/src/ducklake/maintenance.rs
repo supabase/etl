@@ -17,7 +17,7 @@ use crate::ducklake::client::{
     DuckDbBlockingOperationKind, DuckLakeConnectionManager, LazyDuckLakePool,
     format_query_error_detail, run_duckdb_blocking,
 };
-use crate::ducklake::config::{MAINTENANCE_TARGET_FILE_SIZE, TARGET_FILE_SIZE_OPTION_NAME};
+use crate::ducklake::config::maintenance_target_file_size_sql;
 use crate::ducklake::inline_size::{
     DuckLakePendingInlineDataSizes, DuckLakePendingInlineSizeSampler,
 };
@@ -762,6 +762,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
     checkpoint_requested: Arc<AtomicBool>,
     merge_adjacent_files_requested: Arc<AtomicBool>,
     merge_adjacent_files_dirty: Arc<AtomicBool>,
+    maintenance_target_file_size: Arc<str>,
     pending_inline_size_sampler: Option<DuckLakePendingInlineSizeSampler>,
 ) -> EtlResult<DuckLakeMaintenanceWorker> {
     let mut pool = LazyDuckLakePool::new(manager, MAINTENANCE_POOL_SIZE, "maintenance");
@@ -777,6 +778,7 @@ pub(super) fn spawn_ducklake_maintenance_worker(
         checkpoint_requested,
         merge_adjacent_files_requested,
         merge_adjacent_files_dirty,
+        maintenance_target_file_size,
         pending_inline_size_sampler,
         notification_rx,
         shutdown_rx,
@@ -800,6 +802,7 @@ async fn run_ducklake_maintenance_worker(
     checkpoint_requested: Arc<AtomicBool>,
     merge_adjacent_files_requested: Arc<AtomicBool>,
     merge_adjacent_files_dirty: Arc<AtomicBool>,
+    maintenance_target_file_size: Arc<str>,
     pending_inline_size_sampler: Option<DuckLakePendingInlineSizeSampler>,
     mut notification_rx: mpsc::Receiver<TableMaintenanceNotification>,
     mut shutdown_rx: watch::Receiver<()>,
@@ -914,6 +917,7 @@ async fn run_ducklake_maintenance_worker(
                                 Arc::clone(&table_write_slots),
                                 table_name.clone(),
                                 plan,
+                                Arc::clone(&maintenance_target_file_size),
                             )
                             .await
                             {
@@ -954,6 +958,7 @@ async fn run_ducklake_maintenance_worker(
                             Arc::clone(&table_write_slots),
                             table_name.clone(),
                             plan,
+                            Arc::clone(&maintenance_target_file_size),
                         )
                         .await
                         {
@@ -1027,6 +1032,7 @@ async fn run_targeted_table_maintenance(
     table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     table_name: DuckLakeTableName,
     plan: TargetedMaintenancePlan,
+    maintenance_target_file_size: Arc<str>,
 ) -> EtlResult<MaintenanceOutcome> {
     let Some(table_write_permit) = try_acquire_table_write_slot(&table_write_slots, &table_name)
     else {
@@ -1035,6 +1041,7 @@ async fn run_targeted_table_maintenance(
     };
     let table_name_for_query = table_name.clone();
     let plan_for_query = plan;
+    let maintenance_target_file_size_for_query = maintenance_target_file_size;
     let _checkpoint_guard = checkpoint_gate.read_owned().await;
 
     run_duckdb_blocking(
@@ -1043,7 +1050,12 @@ async fn run_targeted_table_maintenance(
         DuckDbBlockingOperationKind::Maintenance,
         move |conn| {
             let _table_write_permit = table_write_permit;
-            run_targeted_table_maintenance_blocking(conn, &table_name_for_query, plan_for_query)
+            run_targeted_table_maintenance_blocking(
+                conn,
+                &table_name_for_query,
+                plan_for_query,
+                maintenance_target_file_size_for_query.as_ref(),
+            )
         },
     )
     .await
@@ -1133,6 +1145,7 @@ pub(super) async fn maybe_run_requested_merge_adjacent_files(
     blocking_slots: Arc<Semaphore>,
     merge_adjacent_files_requested: &AtomicBool,
     merge_adjacent_files_dirty: &AtomicBool,
+    maintenance_target_file_size: &str,
 ) -> EtlResult<bool> {
     if !merge_adjacent_files_requested.swap(false, AtomicOrdering::AcqRel) {
         return Ok(false);
@@ -1147,12 +1160,17 @@ pub(super) async fn maybe_run_requested_merge_adjacent_files(
         );
         return Ok(false);
     };
+    let maintenance_target_file_size = maintenance_target_file_size.to_owned();
     let outcome = run_duckdb_blocking(
         pool,
         blocking_slots,
         DuckDbBlockingOperationKind::Maintenance,
         move |conn| {
-            run_requested_merge_adjacent_files_blocking(conn, MaintenanceReason::MergeInterval)
+            run_requested_merge_adjacent_files_blocking(
+                conn,
+                MaintenanceReason::MergeInterval,
+                &maintenance_target_file_size,
+            )
         },
     )
     .await?;
@@ -1230,6 +1248,7 @@ fn run_targeted_table_maintenance_blocking(
     conn: &duckdb::Connection,
     table_name: &str,
     plan: TargetedMaintenancePlan,
+    maintenance_target_file_size: &str,
 ) -> EtlResult<MaintenanceOutcome> {
     let mut rewritten_files = 0u64;
     let mut merged_files = 0u64;
@@ -1270,7 +1289,8 @@ fn run_targeted_table_maintenance_blocking(
             MaintenanceOperation::MergeAdjacentFiles,
             reason,
         );
-        merged_files = merge_adjacent_table_files(conn, table_name).inspect_err(|_error| {
+        merged_files = merge_adjacent_table_files(conn, table_name, maintenance_target_file_size)
+            .inspect_err(|_error| {
             record_ducklake_maintenance_duration(
                 MAINTENANCE_TASK_TARGETED_MAINTENANCE,
                 MaintenanceOperation::MergeAdjacentFiles,
@@ -1354,6 +1374,7 @@ pub(super) fn flush_table_inlined_data(
 fn run_requested_merge_adjacent_files_blocking(
     conn: &duckdb::Connection,
     reason: MaintenanceReason,
+    maintenance_target_file_size: &str,
 ) -> EtlResult<MaintenanceOutcome> {
     let merge_started = Instant::now();
     let _in_progress_guard = DuckLakeMaintenanceInProgressGuard::start(
@@ -1361,15 +1382,16 @@ fn run_requested_merge_adjacent_files_blocking(
         MaintenanceOperation::MergeAdjacentFiles,
         reason,
     );
-    let merged_files = merge_adjacent_all_tables_tier_zero(conn).inspect_err(|_error| {
-        record_ducklake_maintenance_duration(
-            MAINTENANCE_TASK_SCHEDULED_MAINTENANCE,
-            MaintenanceOperation::MergeAdjacentFiles,
-            reason,
-            MaintenanceOutcome::Failed,
-            merge_started.elapsed().as_secs_f64(),
-        );
-    })?;
+    let merged_files = merge_adjacent_all_tables_tier_zero(conn, maintenance_target_file_size)
+        .inspect_err(|_error| {
+            record_ducklake_maintenance_duration(
+                MAINTENANCE_TASK_SCHEDULED_MAINTENANCE,
+                MaintenanceOperation::MergeAdjacentFiles,
+                reason,
+                MaintenanceOutcome::Failed,
+                merge_started.elapsed().as_secs_f64(),
+            );
+        })?;
     let outcome = MaintenanceOutcome::from(merged_files);
     record_ducklake_maintenance_duration(
         MAINTENANCE_TASK_SCHEDULED_MAINTENANCE,
@@ -1473,13 +1495,8 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
 }
 
 /// Builds the SQL that pins DuckLake compaction to the configured target size.
-fn configure_tier_zero_merge_sql() -> String {
-    format!(
-        "CALL ducklake_set_option({}, {}, {});",
-        quote_literal(LAKE_CATALOG),
-        quote_literal(TARGET_FILE_SIZE_OPTION_NAME),
-        quote_literal(MAINTENANCE_TARGET_FILE_SIZE),
-    )
+fn configure_tier_zero_merge_sql(maintenance_target_file_size: &str) -> String {
+    maintenance_target_file_size_sql(Some(maintenance_target_file_size))
 }
 
 /// Builds the tier-0 merge query for either one table or all auto-compacted tables.
@@ -1505,8 +1522,9 @@ fn merge_adjacent_files_tier_zero_sql(table_name: Option<&str>) -> String {
 fn merge_adjacent_files_tier_zero(
     conn: &duckdb::Connection,
     table_name: Option<&str>,
+    maintenance_target_file_size: &str,
 ) -> EtlResult<u64> {
-    let configure_sql = configure_tier_zero_merge_sql();
+    let configure_sql = configure_tier_zero_merge_sql(maintenance_target_file_size);
     conn.execute_batch(&configure_sql).map_err(|error| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
@@ -1532,13 +1550,20 @@ fn merge_adjacent_files_tier_zero(
 }
 
 /// Merges all eligible tables with the tier-0 adjacent-file strategy.
-fn merge_adjacent_all_tables_tier_zero(conn: &duckdb::Connection) -> EtlResult<u64> {
-    merge_adjacent_files_tier_zero(conn, None)
+fn merge_adjacent_all_tables_tier_zero(
+    conn: &duckdb::Connection,
+    maintenance_target_file_size: &str,
+) -> EtlResult<u64> {
+    merge_adjacent_files_tier_zero(conn, None, maintenance_target_file_size)
 }
 
 /// Merges one table's adjacent files and returns created file count.
-fn merge_adjacent_table_files(conn: &duckdb::Connection, table_name: &str) -> EtlResult<u64> {
-    merge_adjacent_files_tier_zero(conn, Some(table_name))
+fn merge_adjacent_table_files(
+    conn: &duckdb::Connection,
+    table_name: &str,
+    maintenance_target_file_size: &str,
+) -> EtlResult<u64> {
+    merge_adjacent_files_tier_zero(conn, Some(table_name), maintenance_target_file_size)
 }
 
 #[cfg(test)]
@@ -1713,15 +1738,10 @@ mod tests {
     }
 
     #[test]
-    fn test_configure_tier_zero_merge_sql_sets_target_file_size_to_5mb() {
+    fn test_configure_tier_zero_merge_sql_sets_configured_target_file_size() {
         assert_eq!(
-            configure_tier_zero_merge_sql(),
-            format!(
-                "CALL ducklake_set_option({}, {}, {});",
-                quote_literal(LAKE_CATALOG),
-                quote_literal(TARGET_FILE_SIZE_OPTION_NAME),
-                quote_literal(MAINTENANCE_TARGET_FILE_SIZE),
-            )
+            configure_tier_zero_merge_sql("5MB"),
+            maintenance_target_file_size_sql(Some("5MB"))
         );
     }
 
@@ -2423,6 +2443,7 @@ mod tests {
                 rewrite_reason: Some(MaintenanceReason::IdleRewriteMetricsThreshold),
                 merge_reason: Some(MaintenanceReason::IdleMergeMetricsThreshold),
             },
+            "10MB",
         )
         .expect_err("targeted maintenance should fail without ducklake functions");
 
@@ -2498,6 +2519,7 @@ mod tests {
                 rewrite_reason: Some(MaintenanceReason::IdleRewriteMetricsThreshold),
                 merge_reason: None,
             },
+            Arc::<str>::from("10MB"),
         )
         .await
         .expect("known DuckLake compaction bug should be suppressed");
@@ -2759,6 +2781,7 @@ mod tests {
             Arc::new(Semaphore::new(1)),
             merge_requested.as_ref(),
             merge_dirty.as_ref(),
+            "10MB",
         )
         .await
         .expect("merge should be skipped while mutation work is active");

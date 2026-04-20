@@ -21,7 +21,39 @@ const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 pub(super) const TARGET_FILE_SIZE_OPTION_NAME: &str = "target_file_size";
 pub(super) const MAINTENANCE_TARGET_FILE_SIZE: &str = "10MB";
-pub(super) const DUCKDB_MEMORY_CACHE_LIMIT: &str = "50MB";
+pub(super) const DUCKDB_MEMORY_CACHE_LIMIT: &str = "150MB";
+
+/// Resolves the configured DuckDB memory limit or falls back to the default.
+fn resolve_duckdb_memory_cache_limit(duckdb_memory_cache_limit: Option<&str>) -> &str {
+    duckdb_memory_cache_limit.unwrap_or(DUCKDB_MEMORY_CACHE_LIMIT)
+}
+
+/// Builds the SQL that sets DuckDB's per-connection memory limit.
+fn configure_memory_limit_sql(duckdb_memory_cache_limit: Option<&str>) -> String {
+    format!(
+        "SET memory_limit = {};",
+        quote_literal(resolve_duckdb_memory_cache_limit(duckdb_memory_cache_limit)),
+    )
+}
+
+/// Resolves the configured maintenance target file size or falls back to the default.
+fn resolve_maintenance_target_file_size(maintenance_target_file_size: Option<&str>) -> &str {
+    maintenance_target_file_size.unwrap_or(MAINTENANCE_TARGET_FILE_SIZE)
+}
+
+/// Builds the SQL that sets DuckLake's maintenance target file size.
+pub(super) fn maintenance_target_file_size_sql(
+    maintenance_target_file_size: Option<&str>,
+) -> String {
+    format!(
+        "CALL ducklake_set_option({}, {}, {});",
+        quote_literal(LAKE_CATALOG),
+        quote_literal(TARGET_FILE_SIZE_OPTION_NAME),
+        quote_literal(resolve_maintenance_target_file_size(
+            maintenance_target_file_size,
+        )),
+    )
+}
 
 /// One named DuckDB setup phase for a DuckLake connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -530,8 +562,16 @@ pub(super) fn build_setup_sql(
     data_path: &Url,
     s3: Option<&S3Config>,
     metadata_schema: Option<&str>,
+    duckdb_memory_cache_limit: Option<&str>,
 ) -> EtlResult<String> {
-    Ok(build_setup_plan(catalog_url, data_path, s3, metadata_schema)?.combined_sql())
+    Ok(build_setup_plan(
+        catalog_url,
+        data_path,
+        s3,
+        metadata_schema,
+        duckdb_memory_cache_limit,
+    )?
+    .combined_sql())
 }
 
 /// Builds the ordered setup phases executed for each new pool connection.
@@ -540,6 +580,7 @@ pub(super) fn build_setup_plan(
     data_path: &Url,
     s3: Option<&S3Config>,
     metadata_schema: Option<&str>,
+    duckdb_memory_cache_limit: Option<&str>,
 ) -> EtlResult<DuckLakeSetupPlan> {
     let strategy = current_duckdb_extension_strategy()?;
     let vendored_root = match strategy {
@@ -558,22 +599,21 @@ pub(super) fn build_setup_plan(
         data_path,
         s3,
         metadata_schema,
+        duckdb_memory_cache_limit,
         strategy,
         vendored_root.as_deref(),
     )
 }
 
 /// Appends the maintenance-specific setup phase for DuckLake compaction sizing.
-pub(super) fn build_maintenance_setup_plan(base_plan: &DuckLakeSetupPlan) -> DuckLakeSetupPlan {
+pub(super) fn build_maintenance_setup_plan(
+    base_plan: &DuckLakeSetupPlan,
+    maintenance_target_file_size: Option<&str>,
+) -> DuckLakeSetupPlan {
     let mut steps = base_plan.steps.clone();
     steps.push(DuckLakeSetupStep {
         label: "configure_maintenance",
-        sql: format!(
-            "CALL ducklake_set_option({}, {}, {});",
-            quote_literal(LAKE_CATALOG),
-            quote_literal(TARGET_FILE_SIZE_OPTION_NAME),
-            quote_literal(MAINTENANCE_TARGET_FILE_SIZE),
-        ),
+        sql: maintenance_target_file_size_sql(maintenance_target_file_size),
     });
     DuckLakeSetupPlan { steps }
 }
@@ -584,6 +624,7 @@ fn build_setup_sql_with_strategy(
     data_path: &Url,
     s3: Option<&S3Config>,
     metadata_schema: Option<&str>,
+    duckdb_memory_cache_limit: Option<&str>,
     strategy: DuckDbExtensionStrategy,
     vendored_root: Option<&Path>,
 ) -> EtlResult<String> {
@@ -592,6 +633,7 @@ fn build_setup_sql_with_strategy(
         data_path,
         s3,
         metadata_schema,
+        duckdb_memory_cache_limit,
         strategy,
         vendored_root,
     )?
@@ -603,6 +645,7 @@ fn build_setup_plan_with_strategy(
     data_path: &Url,
     s3: Option<&S3Config>,
     metadata_schema: Option<&str>,
+    duckdb_memory_cache_limit: Option<&str>,
     strategy: DuckDbExtensionStrategy,
     vendored_root: Option<&Path>,
 ) -> EtlResult<DuckLakeSetupPlan> {
@@ -614,7 +657,7 @@ fn build_setup_plan_with_strategy(
     let lake_catalog = quote_identifier(LAKE_CATALOG);
     let mut steps = vec![DuckLakeSetupStep {
         label: "Limit memory cache",
-        sql: format!("SET memory_limit = '{DUCKDB_MEMORY_CACHE_LIMIT}';"),
+        sql: configure_memory_limit_sql(duckdb_memory_cache_limit),
     }];
     let mut secret_options = BTreeMap::from([
         (
@@ -830,6 +873,7 @@ mod tests {
             &Url::parse("https://example.com/lake").unwrap(),
             None,
             None,
+            None,
         )
         .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ConfigError);
@@ -837,6 +881,7 @@ mod tests {
         let err = build_setup_sql(
             &Url::from_file_path("/tmp/catalog.ducklake").unwrap(),
             &Url::parse("az://container/lake").unwrap(),
+            None,
             None,
             None,
         )
@@ -1016,6 +1061,7 @@ mod tests {
             &data_url,
             None,
             None,
+            None,
             DuckDbExtensionStrategy::VendoredLocal {
                 platform_dir: "linux_amd64",
             },
@@ -1062,6 +1108,7 @@ mod tests {
             &data_url,
             None,
             None,
+            None,
             DuckDbExtensionStrategy::VendoredLocal {
                 platform_dir: "osx_arm64",
             },
@@ -1085,6 +1132,7 @@ mod tests {
         let sql = build_setup_sql_with_strategy(
             &catalog_url,
             &data_url,
+            None,
             None,
             None,
             DuckDbExtensionStrategy::InstallFromRepository,
@@ -1121,6 +1169,7 @@ mod tests {
         let sql = build_setup_sql_with_strategy(
             &catalog_url,
             &data_url,
+            None,
             None,
             None,
             DuckDbExtensionStrategy::VendoredLocal {
@@ -1167,6 +1216,7 @@ mod tests {
             &data_url,
             Some(&s3),
             Some("ducklake"),
+            None,
             DuckDbExtensionStrategy::VendoredLocal {
                 platform_dir: "linux_arm64",
             },
@@ -1174,16 +1224,45 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(plan.steps().len(), 3);
-        assert_eq!(plan.steps()[0].label, "load_extensions");
-        assert_eq!(plan.steps()[1].label, "configure_object_store");
-        assert_eq!(plan.steps()[2].label, "attach_catalog");
-        assert!(plan.steps()[0].sql.contains(HTTPFS_EXTENSION_FILE));
-        assert!(!plan.steps()[0].sql.contains("json"));
-        assert!(!plan.steps()[0].sql.contains("parquet"));
-        assert!(plan.steps()[1].sql.contains("CREATE OR REPLACE SECRET"));
-        assert!(plan.steps()[2].sql.contains("ATTACH"));
-        assert!(plan.steps()[2].sql.contains("METADATA_SCHEMA 'ducklake'"));
+        assert_eq!(plan.steps().len(), 4);
+        assert_eq!(plan.steps()[0].label, "Limit memory cache");
+        assert_eq!(plan.steps()[1].label, "load_extensions");
+        assert_eq!(plan.steps()[2].label, "configure_object_store");
+        assert_eq!(plan.steps()[3].label, "attach_catalog");
+        assert_eq!(
+            plan.steps()[0].sql,
+            format!(
+                "SET memory_limit = {};",
+                quote_literal(DUCKDB_MEMORY_CACHE_LIMIT)
+            )
+        );
+        assert!(plan.steps()[1].sql.contains(HTTPFS_EXTENSION_FILE));
+        assert!(!plan.steps()[1].sql.contains("json"));
+        assert!(!plan.steps()[1].sql.contains("parquet"));
+        assert!(plan.steps()[2].sql.contains("CREATE OR REPLACE SECRET"));
+        assert!(plan.steps()[3].sql.contains("ATTACH"));
+        assert!(plan.steps()[3].sql.contains("METADATA_SCHEMA 'ducklake'"));
+    }
+
+    #[test]
+    fn test_build_setup_plan_uses_configured_memory_limit() {
+        let catalog_url = Url::parse("file:///tmp/catalog.ducklake").unwrap();
+        let data_url = Url::parse("file:///tmp/data").unwrap();
+        let plan = build_setup_plan_with_strategy(
+            &catalog_url,
+            &data_url,
+            None,
+            None,
+            Some("256MB"),
+            DuckDbExtensionStrategy::InstallFromRepository,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.steps()[0].sql,
+            format!("SET memory_limit = {};", quote_literal("256MB"))
+        );
     }
 
     #[test]
@@ -1195,12 +1274,13 @@ mod tests {
             &data_url,
             None,
             None,
+            None,
             DuckDbExtensionStrategy::InstallFromRepository,
             None,
         )
         .unwrap();
 
-        let maintenance_plan = build_maintenance_setup_plan(&plan);
+        let maintenance_plan = build_maintenance_setup_plan(&plan, None);
 
         assert_eq!(maintenance_plan.steps().len(), plan.steps().len() + 1);
         let last_step = maintenance_plan
@@ -1208,14 +1288,33 @@ mod tests {
             .last()
             .expect("maintenance setup should append one step");
         assert_eq!(last_step.label, "configure_maintenance");
+        assert_eq!(last_step.sql, maintenance_target_file_size_sql(None));
+    }
+
+    #[test]
+    fn test_build_maintenance_setup_plan_uses_configured_target_file_size() {
+        let catalog_url = Url::parse("file:///tmp/catalog.ducklake").unwrap();
+        let data_url = Url::parse("file:///tmp/data").unwrap();
+        let plan = build_setup_plan_with_strategy(
+            &catalog_url,
+            &data_url,
+            None,
+            None,
+            None,
+            DuckDbExtensionStrategy::InstallFromRepository,
+            None,
+        )
+        .unwrap();
+
+        let maintenance_plan = build_maintenance_setup_plan(&plan, Some("32MB"));
+        let last_step = maintenance_plan
+            .steps()
+            .last()
+            .expect("maintenance setup should append one step");
+
         assert_eq!(
             last_step.sql,
-            format!(
-                "CALL ducklake_set_option({}, {}, {});",
-                quote_literal(LAKE_CATALOG),
-                quote_literal(TARGET_FILE_SIZE_OPTION_NAME),
-                quote_literal(MAINTENANCE_TARGET_FILE_SIZE),
-            )
+            maintenance_target_file_size_sql(Some("32MB"))
         );
     }
 
@@ -1243,8 +1342,14 @@ mod tests {
             use_ssl: false,
         };
         let metadata_schema = "duck'lake";
-        let sql =
-            build_setup_sql(&catalog_url, &data_url, Some(&s3), Some(metadata_schema)).unwrap();
+        let sql = build_setup_sql(
+            &catalog_url,
+            &data_url,
+            Some(&s3),
+            Some(metadata_schema),
+            None,
+        )
+        .unwrap();
 
         assert!(sql.contains(&format!("KEY_ID {}", quote_literal(&s3.access_key_id))));
         assert!(sql.contains(&format!("SECRET {}", quote_literal(&s3.secret_access_key))));

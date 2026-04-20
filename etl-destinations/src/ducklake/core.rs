@@ -43,7 +43,8 @@ use crate::ducklake::client::{
     format_query_error_detail, run_duckdb_blocking,
 };
 use crate::ducklake::config::{
-    build_maintenance_setup_plan, build_setup_plan, current_duckdb_extension_strategy,
+    MAINTENANCE_TARGET_FILE_SIZE, build_maintenance_setup_plan, build_setup_plan,
+    current_duckdb_extension_strategy,
 };
 use crate::ducklake::inline_size::DuckLakePendingInlineSizeSampler;
 use crate::ducklake::maintenance::{
@@ -112,6 +113,8 @@ pub struct DuckLakeDestination<S> {
     inline_flush_requests: Arc<PendingInlineFlushRequests>,
     /// Signals that a checkpoint should run before the next streaming batch when safe.
     checkpoint_requested: Arc<AtomicBool>,
+    /// Configured DuckLake maintenance target file size for tier-0 merges.
+    maintenance_target_file_size: Arc<str>,
 }
 
 impl<S> Destination for DuckLakeDestination<S>
@@ -222,6 +225,10 @@ where
     ///   and the bucket is not publicly accessible.
     /// - `metadata_schema`: Optional Postgres schema for DuckLake metadata tables
     ///   (e.g. `"ducklake"`). Uses the catalog default schema when not set.
+    /// - `duckdb_memory_cache_limit`: Optional DuckDB `memory_limit` value
+    ///   (e.g. `"50MB"`). Defaults to `50MB`.
+    /// - `maintenance_target_file_size`: Optional DuckLake maintenance
+    ///   `target_file_size` value (e.g. `"10MB"`). Defaults to `10MB`.
     /// - `duckdb_log`: Optional DuckDB log storage and shutdown dump paths.
     /// - On Linux and macOS, DuckDB extensions are loaded from vendored local
     ///   files when a vendored directory is available. The root directory can
@@ -232,12 +239,15 @@ where
     /// Pool initialization is blocking because DuckDB extensions are loaded and
     /// the lake catalog is attached synchronously. This constructor offloads
     /// that warm-up work to Tokio's blocking pool.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         catalog_url: Url,
         data_path: Url,
         pool_size: u32,
         s3: Option<S3Config>,
         metadata_schema: Option<String>,
+        duckdb_memory_cache_limit: Option<String>,
+        maintenance_target_file_size: Option<String>,
         store: S,
     ) -> EtlResult<Self> {
         register_metrics();
@@ -252,6 +262,10 @@ where
 
         let extension_strategy = current_duckdb_extension_strategy()?;
         let disable_extension_autoload = extension_strategy.disables_autoload();
+        let maintenance_target_file_size = Arc::<str>::from(
+            maintenance_target_file_size
+                .unwrap_or_else(|| MAINTENANCE_TARGET_FILE_SIZE.to_string()),
+        );
         if let crate::ducklake::config::DuckDbExtensionStrategy::VendoredLocal { platform_dir } =
             extension_strategy
         {
@@ -262,8 +276,12 @@ where
             &data_path,
             s3.as_ref(),
             metadata_schema.as_deref(),
+            duckdb_memory_cache_limit.as_deref(),
         )?);
-        let maintenance_setup_plan = Arc::new(build_maintenance_setup_plan(setup_plan.as_ref()));
+        let maintenance_setup_plan = Arc::new(build_maintenance_setup_plan(
+            setup_plan.as_ref(),
+            Some(maintenance_target_file_size.as_ref()),
+        ));
 
         let manager = Arc::new(DuckLakeConnectionManager {
             setup_plan: Arc::clone(&setup_plan),
@@ -326,6 +344,7 @@ where
             inline_flush_requested: Arc::clone(&inline_flush_requested),
             inline_flush_requests: Arc::clone(&inline_flush_requests),
             checkpoint_requested: Arc::clone(&checkpoint_requested),
+            maintenance_target_file_size: Arc::clone(&maintenance_target_file_size),
         };
         gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
         destination.ensure_applied_batches_table_exists().await?;
@@ -345,6 +364,7 @@ where
                 Arc::clone(&checkpoint_requested),
                 Arc::clone(&merge_adjacent_files_requested),
                 Arc::clone(&merge_adjacent_files_dirty),
+                Arc::clone(&maintenance_target_file_size),
                 pending_inline_size_sampler,
             )?
             .into(),
@@ -927,6 +947,7 @@ where
             Arc::clone(&self.blocking_slots),
             self.merge_adjacent_files_requested.as_ref(),
             self.merge_adjacent_files_dirty.as_ref(),
+            self.maintenance_target_file_size.as_ref(),
         )
         .await
     }
@@ -1323,10 +1344,18 @@ mod tests {
             .await
             .expect("failed to seed schema");
 
-        let destination =
-            DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, store)
-                .await
-                .expect("failed to create destination");
+        let destination = DuckLakeDestination::new(
+            catalog.clone(),
+            data.clone(),
+            1,
+            None,
+            None,
+            None,
+            None,
+            store,
+        )
+        .await
+        .expect("failed to create destination");
 
         destination
             .write_table_rows(
@@ -1376,10 +1405,18 @@ mod tests {
             .await
             .expect("failed to seed schema");
 
-        let destination =
-            DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, store)
-                .await
-                .expect("failed to create destination");
+        let destination = DuckLakeDestination::new(
+            catalog.clone(),
+            data.clone(),
+            1,
+            None,
+            None,
+            None,
+            None,
+            store,
+        )
+        .await
+        .expect("failed to create destination");
 
         destination
             .write_table_rows(
@@ -1426,10 +1463,18 @@ mod tests {
             .await
             .expect("failed to seed schema");
 
-        let destination =
-            DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, store)
-                .await
-                .expect("failed to create destination");
+        let destination = DuckLakeDestination::new(
+            catalog.clone(),
+            data.clone(),
+            1,
+            None,
+            None,
+            None,
+            None,
+            store,
+        )
+        .await
+        .expect("failed to create destination");
 
         destination
             .write_table_rows(

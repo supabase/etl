@@ -547,6 +547,8 @@ mod tests {
             s3_url_style: None,
             s3_use_ssl: None,
             metadata_schema: None,
+            duckdb_memory_cache_limit: None,
+            maintenance_target_file_size: None,
         };
 
         let secrets = build_secrets_from_configs(&source_config, &destination_config);
@@ -585,6 +587,8 @@ mod tests {
             s3_url_style: None,
             s3_use_ssl: None,
             metadata_schema: None,
+            duckdb_memory_cache_limit: None,
+            maintenance_target_file_size: None,
         };
 
         let secrets = build_secrets_from_configs(&source_config, &destination_config);

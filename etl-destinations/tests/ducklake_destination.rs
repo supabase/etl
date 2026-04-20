@@ -309,10 +309,18 @@ async fn test_write_table_rows_basic() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
     destination
         .write_table_rows(
             table_id,
@@ -361,10 +369,18 @@ async fn test_write_table_rows_small_batch_stays_inlined_after_return() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     destination
         .write_table_rows(
@@ -401,6 +417,8 @@ async fn test_ducklake_rejects_zero_pool_size() {
         0,
         None,
         None,
+        None,
+        None,
         MemoryStore::new(),
     )
     .await
@@ -432,10 +450,18 @@ async fn test_write_table_rows_reuses_warm_pooled_connection() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(destination.connection_open_count_for_tests(), 1);
 
@@ -489,10 +515,18 @@ async fn test_write_table_rows_replaces_broken_pooled_connection_after_retry() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(destination.connection_open_count_for_tests(), 1);
 
@@ -549,10 +583,18 @@ async fn test_write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     arm_fail_after_copy_batch_commit_once_for_tests(&table_name);
     destination
@@ -592,9 +634,18 @@ async fn test_concurrent_same_table_copy_batches_complete() {
     store.store_table_schema(schema).await.unwrap();
 
     let destination = Arc::new(
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap(),
+        DuckLakeDestination::new(
+            catalog_url.clone(),
+            data_url.clone(),
+            1,
+            None,
+            None,
+            None,
+            None,
+            store,
+        )
+        .await
+        .unwrap(),
     );
 
     // Create the replay marker table ahead of the concurrent scenario so this
@@ -658,10 +709,18 @@ async fn test_write_table_rows_empty_creates_table() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
     destination
         .write_table_rows(table_id, vec![])
         .await
@@ -693,10 +752,18 @@ async fn test_truncate_clears_rows() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
     destination
         .write_table_rows(
             table_id,
@@ -758,10 +825,18 @@ async fn test_truncate_clears_copy_markers_for_recopy() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let rows = vec![
         TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())]),
@@ -800,10 +875,18 @@ async fn test_write_events() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(100u64);
     destination
@@ -887,10 +970,18 @@ async fn test_trait_write_events_dispatches_asynchronously_for_ducklake() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let reached_rx = arm_pause_next_streaming_write_for_tests();
     let metadata = ApplyLoopAsyncResultMetadata {
@@ -968,10 +1059,18 @@ async fn test_write_events_small_batch_stays_inlined_after_return() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(700u64);
     destination
@@ -1016,10 +1115,18 @@ async fn test_write_events_with_old_row_update() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(200u64);
     destination
@@ -1084,10 +1191,18 @@ async fn test_write_events_replay_is_idempotent() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(300u64);
     let batch = vec![
@@ -1171,10 +1286,18 @@ async fn test_write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(350u64);
     destination
@@ -1246,6 +1369,8 @@ async fn test_write_events_restart_overlap_rebatches_only_pending_suffix() {
         1,
         None,
         None,
+        None,
+        None,
         store.clone(),
     )
     .await
@@ -1275,10 +1400,18 @@ async fn test_write_events_restart_overlap_rebatches_only_pending_suffix() {
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     destination
         .write_events(
@@ -1346,10 +1479,18 @@ async fn test_write_events_reuses_one_staging_table_per_atomic_batch() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(360u64);
     destination
@@ -1427,10 +1568,18 @@ async fn test_applied_batches_table_uses_data_inlining() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     destination
         .write_table_rows(
@@ -1467,10 +1616,18 @@ async fn test_shutdown_flushes_inlined_copy_rows() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     destination
         .write_table_rows(
@@ -1539,10 +1696,18 @@ async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
     store.store_table_schema(schema_a).await.unwrap();
     store.store_table_schema(schema_b).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(900u64);
     destination
@@ -1639,10 +1804,18 @@ async fn test_write_events_mixed_multi_table_batches() {
     store.store_table_schema(schema_a).await.unwrap();
     store.store_table_schema(schema_b).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(400u64);
     destination
@@ -1764,10 +1937,18 @@ async fn test_write_events_truncate_retry_after_post_commit_failure_is_idempoten
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     destination
         .write_table_rows(
@@ -1853,10 +2034,18 @@ async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     arm_fail_after_atomic_batch_commit_once_for_tests(&table_name);
 
@@ -1947,9 +2136,18 @@ async fn test_concurrent_writes_with_single_slot_complete() {
     store.store_table_schema(schema_b).await.unwrap();
 
     let destination = Arc::new(
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap(),
+        DuckLakeDestination::new(
+            catalog_url.clone(),
+            data_url.clone(),
+            1,
+            None,
+            None,
+            None,
+            None,
+            store,
+        )
+        .await
+        .unwrap(),
     );
 
     let rows_a: Vec<TableRow> = (0..50)
@@ -1999,10 +2197,18 @@ async fn test_type_mapping_round_trip() {
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
     destination
         .write_table_rows(
             table_id,
