@@ -28,7 +28,8 @@ use etl::error::ErrorKind;
 use etl::store::both::memory::MemoryStore;
 use etl::store::schema::SchemaStore;
 use etl::types::{
-    Cell, ColumnSchema, Event, TableId, TableName, TableRow, TableSchema, Type as PgType,
+    Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow, TableSchema,
+    Type as PgType,
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
 #[cfg(feature = "test-utils")]
@@ -89,8 +90,8 @@ fn make_schema(table_id: u32, schema: &str, table: &str) -> TableSchema {
         TableId::new(table_id),
         TableName::new(schema.to_string(), table.to_string()),
         vec![
-            ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
-            ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+            ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 2, None, true),
         ],
     )
 }
@@ -100,11 +101,11 @@ fn make_rich_schema(table_id: u32) -> TableSchema {
         TableId::new(table_id),
         TableName::new("public".to_string(), "rich".to_string()),
         vec![
-            ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
-            ColumnSchema::new("label".to_string(), PgType::VARCHAR, -1, true, false),
-            ColumnSchema::new("score".to_string(), PgType::FLOAT8, -1, true, false),
-            ColumnSchema::new("active".to_string(), PgType::BOOL, -1, true, false),
-            ColumnSchema::new("birthday".to_string(), PgType::DATE, -1, true, false),
+            ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+            ColumnSchema::new("label".to_string(), PgType::VARCHAR, -1, 2, None, true),
+            ColumnSchema::new("score".to_string(), PgType::FLOAT8, -1, 3, None, true),
+            ColumnSchema::new("active".to_string(), PgType::BOOL, -1, 4, None, true),
+            ColumnSchema::new("birthday".to_string(), PgType::DATE, -1, 5, None, true),
         ],
     )
 }
@@ -264,8 +265,8 @@ async fn test_write_table_rows_basic() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(1);
     let schema = make_schema(1, "public", "users");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -277,7 +278,7 @@ async fn test_write_table_rows_basic() {
             .unwrap();
     destination
         .write_table_rows(
-            table_id,
+            &replicated_schema,
             vec![
                 TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_string())]),
                 TableRow::new(vec![Cell::I32(2), Cell::String("Bob".to_string())]),
@@ -316,8 +317,8 @@ async fn test_write_table_rows_small_batch_stays_inlined_after_return() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(16);
     let schema = make_schema(16, "public", "copy_flush");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -330,7 +331,7 @@ async fn test_write_table_rows_small_batch_stays_inlined_after_return() {
 
     destination
         .write_table_rows(
-            table_id,
+            &replicated_schema,
             vec![TableRow::new(vec![
                 Cell::I32(1),
                 Cell::String("first".to_string()),
@@ -387,8 +388,8 @@ async fn test_write_table_rows_reuses_warm_pooled_connection() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(21);
     let schema = make_schema(21, "public", "pooled_copy");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -403,7 +404,7 @@ async fn test_write_table_rows_reuses_warm_pooled_connection() {
 
     destination
         .write_table_rows(
-            table_id,
+            &replicated_schema,
             vec![TableRow::new(vec![
                 Cell::I32(1),
                 Cell::String("first".to_string()),
@@ -415,7 +416,7 @@ async fn test_write_table_rows_reuses_warm_pooled_connection() {
 
     destination
         .write_table_rows(
-            table_id,
+            &replicated_schema,
             vec![TableRow::new(vec![
                 Cell::I32(2),
                 Cell::String("second".to_string()),
@@ -444,8 +445,8 @@ async fn test_write_table_rows_replaces_broken_pooled_connection_after_retry() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(22);
     let schema = make_schema(22, "public", "pooled_retry");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -461,7 +462,7 @@ async fn test_write_table_rows_replaces_broken_pooled_connection_after_retry() {
     arm_fail_after_copy_batch_commit_once_for_tests(&table_name);
     destination
         .write_table_rows(
-            table_id,
+            &replicated_schema,
             vec![TableRow::new(vec![
                 Cell::I32(1),
                 Cell::String("first".to_string()),
@@ -473,7 +474,7 @@ async fn test_write_table_rows_replaces_broken_pooled_connection_after_retry() {
 
     destination
         .write_table_rows(
-            table_id,
+            &replicated_schema,
             vec![TableRow::new(vec![
                 Cell::I32(2),
                 Cell::String("second".to_string()),
@@ -504,8 +505,8 @@ async fn test_write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(13);
     let schema = make_schema(13, "public", "copy_retry");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -519,7 +520,7 @@ async fn test_write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     arm_fail_after_copy_batch_commit_once_for_tests(&table_name);
     destination
         .write_table_rows(
-            table_id,
+            &replicated_schema,
             vec![
                 TableRow::new(vec![Cell::I32(1), Cell::String("alpha".to_string())]),
                 TableRow::new(vec![Cell::I32(2), Cell::String("beta".to_string())]),
@@ -546,8 +547,8 @@ async fn test_concurrent_same_table_copy_batches_complete() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(14);
     let schema = make_schema(14, "public", "parallel_copy");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -564,7 +565,7 @@ async fn test_concurrent_same_table_copy_batches_complete() {
     // marker-table initialization.
     destination
         .write_table_rows(
-            table_id,
+            &replicated_schema,
             vec![TableRow::new(vec![
                 Cell::I32(-1),
                 Cell::String("seed".to_string()),
@@ -572,7 +573,10 @@ async fn test_concurrent_same_table_copy_batches_complete() {
         )
         .await
         .unwrap();
-    destination.truncate_table(table_id).await.unwrap();
+    destination
+        .truncate_table(&replicated_schema)
+        .await
+        .unwrap();
 
     let first_batch: Vec<TableRow> = (0..50)
         .map(|id| TableRow::new(vec![Cell::I32(id), Cell::String(format!("first-{id}"))]))
@@ -583,11 +587,20 @@ async fn test_concurrent_same_table_copy_batches_complete() {
 
     let task_a = {
         let destination = Arc::clone(&destination);
-        tokio::spawn(async move { destination.write_table_rows(table_id, first_batch).await })
+        let replicated_schema = replicated_schema.clone();
+        tokio::spawn(async move {
+            destination
+                .write_table_rows(&replicated_schema, first_batch)
+                .await
+        })
     };
     let task_b = {
         let destination = Arc::clone(&destination);
-        tokio::spawn(async move { destination.write_table_rows(table_id, second_batch).await })
+        tokio::spawn(async move {
+            destination
+                .write_table_rows(&replicated_schema, second_batch)
+                .await
+        })
     };
 
     task_a.await.unwrap().unwrap();
@@ -613,8 +626,8 @@ async fn test_write_table_rows_empty_creates_table() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(2);
     let schema = make_schema(2, "public", "events");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -625,7 +638,7 @@ async fn test_write_table_rows_empty_creates_table() {
             .await
             .unwrap();
     destination
-        .write_table_rows(table_id, vec![])
+        .write_table_rows(&replicated_schema, vec![])
         .await
         .expect("empty write failed");
 
@@ -648,8 +661,8 @@ async fn test_truncate_clears_rows() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(3);
     let schema = make_schema(3, "public", "logs");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -661,7 +674,7 @@ async fn test_truncate_clears_rows() {
             .unwrap();
     destination
         .write_table_rows(
-            table_id,
+            &replicated_schema,
             vec![
                 TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())]),
                 TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())]),
@@ -671,7 +684,7 @@ async fn test_truncate_clears_rows() {
         .unwrap();
 
     destination
-        .truncate_table(table_id)
+        .truncate_table(&replicated_schema)
         .await
         .expect("truncate failed");
 
@@ -713,8 +726,8 @@ async fn test_truncate_clears_copy_markers_for_recopy() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(15);
     let schema = make_schema(15, "public", "recopy_logs");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -731,11 +744,17 @@ async fn test_truncate_clears_copy_markers_for_recopy() {
     ];
 
     destination
-        .write_table_rows(table_id, rows.clone())
+        .write_table_rows(&replicated_schema, rows.clone())
         .await
         .unwrap();
-    destination.truncate_table(table_id).await.unwrap();
-    destination.write_table_rows(table_id, rows).await.unwrap();
+    destination
+        .truncate_table(&replicated_schema)
+        .await
+        .unwrap();
+    destination
+        .write_table_rows(&replicated_schema, rows)
+        .await
+        .unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);
@@ -755,8 +774,8 @@ async fn test_write_events() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(4);
     let schema = make_schema(4, "public", "products");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -774,14 +793,14 @@ async fn test_write_events() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                table_id,
+                replicated_table_schema: replicated_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                table_id,
+                replicated_table_schema: replicated_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Gadget".to_string())]),
                 old_table_row: None,
             }),
@@ -789,14 +808,14 @@ async fn test_write_events() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
-                table_id,
+                replicated_table_schema: replicated_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_string())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 3,
-                table_id,
+                replicated_table_schema: replicated_schema,
                 old_table_row: Some((
                     false,
                     TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_string())]),
@@ -837,8 +856,8 @@ async fn test_write_events_small_batch_stays_inlined_after_return() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(17);
     let schema = make_schema(17, "public", "cdc_flush");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -855,7 +874,7 @@ async fn test_write_events_small_batch_stays_inlined_after_return() {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 0,
-            table_id,
+            replicated_table_schema: replicated_schema,
             table_row: TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())]),
         })])
         .await
@@ -884,8 +903,8 @@ async fn test_write_events_with_old_row_update() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(8);
     let schema = make_schema(8, "public", "inventory");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -903,14 +922,14 @@ async fn test_write_events_with_old_row_update() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                table_id,
+                replicated_table_schema: replicated_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                table_id,
+                replicated_table_schema: replicated_schema,
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Gadget".to_string())]),
                 old_table_row: Some((
                     false,
@@ -952,8 +971,8 @@ async fn test_write_events_replay_is_idempotent() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(9);
     let schema = make_schema(9, "public", "orders");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -970,14 +989,14 @@ async fn test_write_events_replay_is_idempotent() {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 0,
-            table_id,
+            replicated_table_schema: replicated_schema.clone(),
             table_row: TableRow::new(vec![Cell::I32(1), Cell::String("draft".to_string())]),
         }),
         Event::Update(UpdateEvent {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 1,
-            table_id,
+            replicated_table_schema: replicated_schema.clone(),
             table_row: TableRow::new(vec![Cell::I32(1), Cell::String("paid".to_string())]),
             old_table_row: Some((
                 false,
@@ -988,14 +1007,14 @@ async fn test_write_events_replay_is_idempotent() {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 2,
-            table_id,
+            replicated_table_schema: replicated_schema.clone(),
             table_row: TableRow::new(vec![Cell::I32(2), Cell::String("temp".to_string())]),
         }),
         Event::Delete(DeleteEvent {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 3,
-            table_id,
+            replicated_table_schema: replicated_schema,
             old_table_row: Some((
                 false,
                 TableRow::new(vec![Cell::I32(2), Cell::String("temp".to_string())]),
@@ -1038,8 +1057,8 @@ async fn test_applied_batches_table_uses_data_inlining() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(13);
     let schema = make_schema(13, "public", "audit");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -1056,7 +1075,7 @@ async fn test_applied_batches_table_uses_data_inlining() {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 0,
-            table_id,
+            replicated_table_schema: replicated_schema,
             table_row: TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())]),
         })])
         .await
@@ -1079,8 +1098,8 @@ async fn test_shutdown_flushes_inlined_copy_rows() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(34);
     let schema = make_schema(34, "public", "shutdown_copy_flush");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -1093,7 +1112,7 @@ async fn test_shutdown_flushes_inlined_copy_rows() {
 
     destination
         .write_table_rows(
-            table_id,
+            &replicated_schema,
             vec![TableRow::new(vec![
                 Cell::I32(1),
                 Cell::String("pending copy row".to_string()),
@@ -1147,10 +1166,10 @@ async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id_a = TableId::new(35);
-    let table_id_b = TableId::new(36);
     let schema_a = make_schema(35, "public", "shutdown_cdc_alpha");
     let schema_b = make_schema(36, "public", "shutdown_cdc_beta");
+    let replicated_schema_a = ReplicatedTableSchema::all(Arc::new(schema_a.clone()));
+    let replicated_schema_b = ReplicatedTableSchema::all(Arc::new(schema_b.clone()));
     let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
     let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
 
@@ -1170,14 +1189,14 @@ async fn test_shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                table_id: table_id_a,
+                replicated_table_schema: replicated_schema_a,
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("alpha".to_string())]),
             }),
             Event::Insert(InsertEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                table_id: table_id_b,
+                replicated_table_schema: replicated_schema_b,
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("beta".to_string())]),
             }),
         ])
@@ -1247,10 +1266,10 @@ async fn test_write_events_mixed_multi_table_batches() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id_a = TableId::new(10);
-    let table_id_b = TableId::new(11);
     let schema_a = make_schema(10, "public", "alpha_events");
     let schema_b = make_schema(11, "public", "beta_events");
+    let replicated_schema_a = ReplicatedTableSchema::all(Arc::new(schema_a.clone()));
+    let replicated_schema_b = ReplicatedTableSchema::all(Arc::new(schema_b.clone()));
     let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
     let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
 
@@ -1270,21 +1289,21 @@ async fn test_write_events_mixed_multi_table_batches() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                table_id: table_id_a,
+                replicated_table_schema: replicated_schema_a.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("a-one".to_string())]),
             }),
             Event::Insert(InsertEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                table_id: table_id_b,
+                replicated_table_schema: replicated_schema_b.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("b-one".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
-                table_id: table_id_a,
+                replicated_table_schema: replicated_schema_a,
                 table_row: TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("a-one-updated".to_string()),
@@ -1298,14 +1317,14 @@ async fn test_write_events_mixed_multi_table_batches() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 3,
-                table_id: table_id_b,
+                replicated_table_schema: replicated_schema_b.clone(),
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("b-two".to_string())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 4,
-                table_id: table_id_b,
+                replicated_table_schema: replicated_schema_b,
                 old_table_row: Some((
                     false,
                     TableRow::new(vec![Cell::I32(1), Cell::String("b-one".to_string())]),
@@ -1374,8 +1393,8 @@ async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(12);
     let schema = make_schema(12, "public", "payments");
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -1395,14 +1414,14 @@ async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                table_id,
+                replicated_table_schema: replicated_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                table_id,
+                replicated_table_schema: replicated_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("posted".to_string())]),
                 old_table_row: Some((
                     false,
@@ -1413,14 +1432,14 @@ async fn test_write_events_retry_after_post_commit_failure_is_idempotent() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
-                table_id,
+                replicated_table_schema: replicated_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_string())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 3,
-                table_id,
+                replicated_table_schema: replicated_schema,
                 old_table_row: Some((
                     false,
                     TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_string())]),
@@ -1461,10 +1480,10 @@ async fn test_concurrent_writes_with_single_slot_complete() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id_a = TableId::new(6);
-    let table_id_b = TableId::new(7);
     let schema_a = make_schema(6, "public", "alpha");
     let schema_b = make_schema(7, "public", "beta");
+    let replicated_schema_a = ReplicatedTableSchema::all(Arc::new(schema_a.clone()));
+    let replicated_schema_b = ReplicatedTableSchema::all(Arc::new(schema_b.clone()));
     let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
     let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
 
@@ -1487,11 +1506,20 @@ async fn test_concurrent_writes_with_single_slot_complete() {
 
     let task_a = {
         let destination = Arc::clone(&destination);
-        tokio::spawn(async move { destination.write_table_rows(table_id_a, rows_a).await })
+        let replicated_schema_a = replicated_schema_a.clone();
+        tokio::spawn(async move {
+            destination
+                .write_table_rows(&replicated_schema_a, rows_a)
+                .await
+        })
     };
     let task_b = {
         let destination = Arc::clone(&destination);
-        tokio::spawn(async move { destination.write_table_rows(table_id_b, rows_b).await })
+        tokio::spawn(async move {
+            destination
+                .write_table_rows(&replicated_schema_b, rows_b)
+                .await
+        })
     };
 
     task_a.await.unwrap().unwrap();
@@ -1518,8 +1546,8 @@ async fn test_type_mapping_round_trip() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
-    let table_id = TableId::new(5);
     let schema = make_rich_schema(5);
+    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -1531,7 +1559,7 @@ async fn test_type_mapping_round_trip() {
             .unwrap();
     destination
         .write_table_rows(
-            table_id,
+            &replicated_schema,
             vec![TableRow::new(vec![
                 Cell::I32(42),
                 Cell::String("hello".to_string()),

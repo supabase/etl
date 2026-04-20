@@ -6,4 +6,5 @@
 pub mod apply;
 pub mod client;
 pub mod stream;
+pub mod table_cache;
 pub mod table_sync;

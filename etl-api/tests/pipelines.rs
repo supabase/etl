@@ -558,15 +558,38 @@ async fn non_existing_pipeline_cannot_be_deleted() {
 #[tokio::test(flavor = "multi_thread")]
 async fn deleting_a_pipeline_succeeds() {
     init_test_tracing();
-    let (app, tenant_id, pipeline_id, _, source_db_config) = setup_pipeline_with_source_db().await;
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
 
-    // The deletion should fail.
+    // The deletion should succeed.
     let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::OK);
 
-    // The pipeline should still be there.
+    // The pipeline should no longer be there.
     let response = app.read_pipeline(&tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let etl_schema_exists: bool =
+        sqlx::query_scalar("select exists(select 1 from pg_namespace where nspname = 'etl')")
+            .fetch_one(&source_db_pool)
+            .await
+            .expect("failed to check etl schema");
+    assert!(etl_schema_exists);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_an_active_pipeline_fails() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, _, source_db_config) = setup_pipeline_with_source_db().await;
+
+    let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let response = app.read_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
 
     drop_pg_database(&source_db_config).await;
 }
@@ -1021,21 +1044,21 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .await
     .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) values ($1, 'id', 'INT4', -1, false, true, 0)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1)")
         .bind(table_schema_id)
         .execute(&source_db_pool)
         .await
         .unwrap();
 
-    // Insert a table mapping for this table
-    sqlx::query("insert into etl.table_mappings (pipeline_id, source_table_id, destination_table_id) values ($1, $2, 'dest_test_users')")
+    // Insert destination metadata for this table
+    sqlx::query("insert into etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
         .bind(pipeline_id)
         .bind(table_oid)
         .execute(&source_db_pool)
         .await
         .unwrap();
 
-    // Verify table schema and mapping exist before reset
+    // Verify table schema and metadata exist before reset
     let schema_count_before: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
     )
@@ -1046,15 +1069,15 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .unwrap();
     assert_eq!(schema_count_before, 1);
 
-    let mapping_count_before: i64 = sqlx::query_scalar(
-        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    let metadata_count_before: i64 = sqlx::query_scalar(
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(mapping_count_before, 1);
+    assert_eq!(metadata_count_before, 1);
 
     let response = test_rollback(
         &app,
@@ -1097,22 +1120,22 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .unwrap();
     assert_eq!(schema_count_after, 1);
 
-    // Verify table mapping was also preserved
-    let mapping_count_after: i64 = sqlx::query_scalar(
-        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    // Verify destination metadata was not deleted.
+    let metadata_count_after: i64 = sqlx::query_scalar(
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(mapping_count_after, 1);
+    assert_eq!(metadata_count_after, 1);
 
     drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_to_init_keeps_schemas_and_mappings() {
+async fn rollback_to_init_keeps_schemas_and_metadata() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1142,13 +1165,13 @@ async fn rollback_to_init_keeps_schemas_and_mappings() {
     .await
     .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) values ($1, 'id', 'INT4', -1, false, true, 0)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1)")
         .bind(table_schema_id)
         .execute(&source_db_pool)
         .await
         .unwrap();
 
-    sqlx::query("insert into etl.table_mappings (pipeline_id, source_table_id, destination_table_id) values ($1, $2, 'dest_test_users')")
+    sqlx::query("insert into etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
         .bind(pipeline_id)
         .bind(table_oid)
         .execute(&source_db_pool)
@@ -1184,22 +1207,22 @@ async fn rollback_to_init_keeps_schemas_and_mappings() {
     .unwrap();
     assert_eq!(schema_count, 1);
 
-    // Verify table mapping was also preserved
-    let mapping_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    // Verify destination metadata was not deleted.
+    let metadata_count: i64 = sqlx::query_scalar(
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(mapping_count, 1);
+    assert_eq!(metadata_count, 1);
 
     drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_to_non_starting_state_keeps_schemas_and_mappings() {
+async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1229,13 +1252,13 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_mappings() {
     .await
     .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) values ($1, 'id', 'INT4', -1, false, true, 0)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1)")
         .bind(table_schema_id)
         .execute(&source_db_pool)
         .await
         .unwrap();
 
-    sqlx::query("insert into etl.table_mappings (pipeline_id, source_table_id, destination_table_id) values ($1, $2, 'dest_test_users')")
+    sqlx::query("insert into etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
         .bind(pipeline_id)
         .bind(table_oid)
         .execute(&source_db_pool)
@@ -1271,16 +1294,16 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_mappings() {
     .unwrap();
     assert_eq!(schema_count, 1);
 
-    // Verify table mapping was NOT deleted
-    let mapping_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.table_mappings where pipeline_id = $1 and source_table_id = $2",
+    // Verify destination metadata was NOT deleted
+    let metadata_count: i64 = sqlx::query_scalar(
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
     .fetch_one(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(mapping_count, 1);
+    assert_eq!(metadata_count, 1);
 
     drop_pg_database(&source_db_config).await;
 }
@@ -1309,6 +1332,7 @@ async fn deleting_pipeline_removes_replication_state_from_source_database() {
             .unwrap();
     assert_eq!(count_before, 2);
 
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
     let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::OK);
 
@@ -1343,10 +1367,10 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
     ).bind(pipeline_id).bind(table2_oid).fetch_one(&source_db_pool).await.unwrap();
 
     // Insert multiple columns for each table to test CASCADE behavior
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) values ($1, 'id', 'INT4', -1, false, true, 0), ($1, 'name', 'TEXT', -1, true, false, 1)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1), ($1, 'name', 'TEXT', -1, true, 2, NULL)")
         .bind(table_schema_id_1).execute(&source_db_pool).await.unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, primary_key, column_order) values ($1, 'order_id', 'INT8', -1, false, true, 0), ($1, 'amount', 'NUMERIC', -1, false, false, 1)")
+    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'order_id', 'INT8', -1, false, 1, 1), ($1, 'amount', 'NUMERIC', -1, false, 2, NULL)")
         .bind(table_schema_id_2).execute(&source_db_pool).await.unwrap();
 
     // Verify data exists before deletion
@@ -1367,6 +1391,7 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
     assert_eq!(schema_count, 2);
     assert_eq!(column_count, 4);
 
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
     let response = app.delete_pipeline(&tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::OK);
 

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
+use etl_config::shared::PipelineConfig;
 use etl_postgres::replication::state;
 use etl_postgres::types::TableId;
 use serde::{Deserialize, Serialize};
@@ -26,33 +27,33 @@ impl TableReplicationError {
     /// Creates a new [`TableReplicationError`] with a suggested solution.
     pub fn with_solution(
         table_id: TableId,
-        reason: String,
-        solution: String,
+        reason: impl ToString,
+        solution: impl ToString,
         retry_policy: RetryPolicy,
-        source_err: EtlError,
     ) -> Self {
+        let reason = reason.to_string();
         Self {
             table_id,
-            reason,
-            solution: Some(solution),
+            reason: reason.clone(),
+            solution: Some(solution.to_string()),
             retry_policy,
-            source_err,
+            source_err: etl_error!(ErrorKind::Unknown, "table replication error", reason),
         }
     }
 
     /// Creates a new [`TableReplicationError`] without a suggested solution.
     pub fn without_solution(
         table_id: TableId,
-        reason: String,
+        reason: impl ToString,
         retry_policy: RetryPolicy,
-        source_err: EtlError,
     ) -> Self {
+        let reason = reason.to_string();
         Self {
             table_id,
-            reason,
+            reason: reason.clone(),
             solution: None,
             retry_policy,
-            source_err,
+            source_err: etl_error!(ErrorKind::Unknown, "table replication error", reason),
         }
     }
 
@@ -72,23 +73,147 @@ impl TableReplicationError {
         self
     }
 
+    /// Converts an [`EtlError`] to a [`TableReplicationError`] for a specific table.
+    ///
+    /// Determines appropriate retry policies based on the error kind.
+    ///
+    /// Note that this conversion is constantly improving since during testing and operation of ETL
+    /// we might notice edge cases that could be manually handled.
+    pub fn from_etl_error(config: &PipelineConfig, table_id: TableId, error: &EtlError) -> Self {
+        let retry_duration = Duration::milliseconds(config.table_error_retry_delay_ms as i64);
+        let source_err = error.clone();
+        let mut result = match error.kind() {
+            // Errors that can be retried automatically
+            ErrorKind::SourceConnectionFailed
+            | ErrorKind::DestinationConnectionFailed
+            | ErrorKind::SourceOperationCanceled
+            | ErrorKind::SourceDatabaseShutdown
+            | ErrorKind::SourceLockTimeout
+            | ErrorKind::SourceDatabaseInRecovery => {
+                Self::without_solution(table_id, error, RetryPolicy::retry_in(retry_duration))
+            }
+
+            // Errors with manual retry and explicit solution
+            ErrorKind::SourceAuthenticationError => Self::with_solution(
+                table_id,
+                error,
+                "Verify database credentials and authentication token validity.",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::SourceSchemaError => Self::with_solution(
+                table_id,
+                error,
+                "Update the Postgres database schema to resolve compatibility issues.",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::ConfigError => Self::with_solution(
+                table_id,
+                error,
+                "Update the application or service configuration settings.",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::ReplicationSlotAlreadyExists => Self::with_solution(
+                table_id,
+                error,
+                "Remove the existing replication slot from the Postgres database.",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::ReplicationSlotNotCreated => Self::with_solution(
+                table_id,
+                error,
+                "Verify the Postgres database allows creation of new replication slots.",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::SourceConfigurationLimitExceeded => Self::with_solution(
+                table_id,
+                error,
+                "Verify the configured limits for Postgres, for example, the maximum number of replication slots.",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::NullValuesNotSupportedInArrayInDestination => Self::with_solution(
+                table_id,
+                error,
+                "Remove NULL values from array columns in the Postgres tables.",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::UnsupportedValueInDestination => Self::with_solution(
+                table_id,
+                error,
+                "Update the value in the Postgres table.",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::SourceSnapshotTooOld => Self::with_solution(
+                table_id,
+                error,
+                "Check replication slot status and database configuration.",
+                RetryPolicy::ManualRetry,
+            ),
+            ErrorKind::CorruptedTableSchema => Self::with_solution(
+                table_id,
+                error,
+                "Reset the table state and restart the replication.",
+                RetryPolicy::ManualRetry,
+            ),
+
+            // Special handling for error kinds used during failure injection.
+            #[cfg(feature = "failpoints")]
+            ErrorKind::WithNoRetry => Self::with_solution(
+                table_id,
+                error,
+                "Cannot retry this error.",
+                RetryPolicy::NoRetry,
+            ),
+            #[cfg(feature = "failpoints")]
+            ErrorKind::WithManualRetry => Self::with_solution(
+                table_id,
+                error,
+                "Manually trigger retry after resolving the issue.",
+                RetryPolicy::ManualRetry,
+            ),
+            #[cfg(feature = "failpoints")]
+            ErrorKind::WithTimedRetry => Self::with_solution(
+                table_id,
+                error,
+                "Will automatically retry after the configured delay.",
+                RetryPolicy::retry_in(retry_duration),
+            ),
+
+            // By default, all errors are retriable but without a solution. The reason for why we do
+            // this is to let customers fix the system on their own, since right now we don't have
+            // a clean understanding of all possible recoverable cases of the system (since we can't
+            // infer that only by looking at the statically defined errors).
+            _ => Self::with_solution(
+                table_id,
+                error,
+                "There is no explicit solution for this error, if the issue persists after rollback, please contact support.",
+                RetryPolicy::ManualRetry,
+            ),
+        };
+
+        result.source_err = source_err;
+        result
+    }
+
     /// Builds a [`TableReplicationError`] from a shared handling policy and worker retry policy.
     pub fn from_error_policy(
         table_id: TableId,
-        err: EtlError,
+        error: &EtlError,
         policy: &ErrorHandlingPolicy,
         retry_policy: RetryPolicy,
     ) -> Self {
         match policy.solution() {
-            Some(solution) => Self::with_solution(
-                table_id,
-                err.to_string(),
-                solution.to_string(),
-                retry_policy,
-                err,
-            ),
-            None => Self::without_solution(table_id, err.to_string(), retry_policy, err),
+            Some(solution) => Self::with_solution(table_id, error, solution, retry_policy)
+                .with_source_err(error.clone()),
+            None => {
+                Self::without_solution(table_id, error, retry_policy).with_source_err(error.clone())
+            }
         }
+    }
+
+    /// Returns a copy of the error with the provided source error attached.
+    pub fn with_source_err(mut self, source_err: EtlError) -> Self {
+        self.source_err = source_err;
+        self
     }
 }
 

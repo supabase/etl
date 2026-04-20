@@ -23,6 +23,7 @@ pub enum DestinationsDbError {
     DbDeserialization(#[from] DbDeserializationError),
 }
 
+#[derive(Debug)]
 pub struct Destination {
     pub id: i64,
     pub tenant_id: String,

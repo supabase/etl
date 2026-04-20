@@ -3,8 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
-#[cfg(test)]
-use std::time::Duration;
 
 use etl::destination::Destination;
 use etl::destination::async_result::{
@@ -12,11 +10,10 @@ use etl::destination::async_result::{
 };
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
+use etl::state::destination_metadata::DestinationTableMetadata;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
-#[cfg(test)]
-use etl::types::Cell;
-use etl::types::{Event, SizeHint, TableId, TableName, TableRow, TableSchema};
+use etl::types::{Event, ReplicatedTableSchema, SizeHint, TableId, TableName, TableRow};
 use metrics::{gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
@@ -123,10 +120,10 @@ where
 
     async fn truncate_table(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
-        let result = self.truncate_table(table_id).await;
+        let result = self.truncate_table_inner(replicated_table_schema).await;
         async_result.send(result);
 
         Ok(())
@@ -134,11 +131,13 @@ where
 
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        let result = self.write_table_rows(table_id, table_rows).await;
+        let result = self
+            .write_table_rows_inner(replicated_table_schema, table_rows)
+            .await;
         async_result.send(result);
 
         Ok(())
@@ -164,8 +163,11 @@ where
     ///
     /// This convenience wrapper preserves the pre-async-result direct-call API
     /// by awaiting the truncate work inline.
-    pub async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table_inner(table_id).await
+    pub async fn truncate_table(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        self.truncate_table_inner(replicated_table_schema).await
     }
 
     /// Writes an initial-copy batch directly to the destination table.
@@ -174,10 +176,11 @@ where
     /// by awaiting the write inline.
     pub async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.write_table_rows_inner(table_id, table_rows).await
+        self.write_table_rows_inner(replicated_table_schema, table_rows)
+            .await
     }
 
     /// Writes one streaming CDC batch directly to the destination.
@@ -313,8 +316,11 @@ where
     }
 
     /// Deletes all rows from the destination table without dropping it.
-    async fn truncate_table_inner(&self, table_id: TableId) -> EtlResult<()> {
-        let table_name = self.ensure_table_exists(table_id).await?;
+    async fn truncate_table_inner(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_name = self.ensure_table_exists(replicated_table_schema).await?;
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.ensure_applied_batches_table_exists().await?;
         self.run_duckdb_blocking(DuckDbBlockingOperationKind::Foreground, move |conn| -> EtlResult<()> {
@@ -373,10 +379,10 @@ where
     /// worker materializes them after we emit the maintenance notification.
     async fn write_table_rows_inner(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let table_name = self.ensure_table_exists(table_id).await?;
+        let table_name = self.ensure_table_exists(replicated_table_schema).await?;
 
         if table_rows.is_empty() {
             return Ok(());
@@ -390,8 +396,8 @@ where
 
         // Here we can have concurrent table writers because it's INSERTs only and CDC (write_events) won't start before the copy phase is complete
         self.ensure_applied_batches_table_exists().await?;
-        let table_schema = self.get_table_schema(table_id).await?;
-        let prepared_batch = prepare_copy_table_batch(&table_schema, table_name, table_rows)?;
+        let prepared_batch =
+            prepare_copy_table_batch(replicated_table_schema, table_name, table_rows)?;
         let table_name = prepared_batch.table_name().to_owned();
         apply_table_batch_with_retry(
             Arc::clone(&self.pool),
@@ -424,6 +430,7 @@ where
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
+            let mut table_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
             let mut table_id_to_mutations: HashMap<TableId, Vec<TrackedTableMutation>> =
                 HashMap::new();
             let mut table_id_to_stats: HashMap<TableId, TableWriteActivity> = HashMap::new();
@@ -439,23 +446,29 @@ where
                 match event {
                     Event::Insert(insert) => {
                         let approx_bytes = insert.table_row.size_hint() as u64;
-                        table_id_to_mutations
-                            .entry(insert.table_id)
-                            .or_default()
-                            .push(TrackedTableMutation::new(
+                        let table_id = insert.replicated_table_schema.id();
+                        table_schemas
+                            .entry(table_id)
+                            .or_insert(insert.replicated_table_schema);
+                        table_id_to_mutations.entry(table_id).or_default().push(
+                            TrackedTableMutation::new(
                                 insert.start_lsn,
                                 insert.commit_lsn,
                                 TableMutation::Insert(insert.table_row),
-                            ));
-                        let stats = table_id_to_stats.entry(insert.table_id).or_default();
+                            ),
+                        );
+                        let stats = table_id_to_stats.entry(table_id).or_default();
                         stats.approx_bytes = stats.approx_bytes.saturating_add(approx_bytes);
                         stats.inserted_rows = stats.inserted_rows.saturating_add(1);
                     }
                     Event::Update(update) => {
-                        let table_id = update.table_id;
+                        let table_id = update.replicated_table_schema.id();
                         let table_row = update.table_row;
                         let old_table_row = update.old_table_row;
                         let upsert_bytes = table_row.size_hint() as u64;
+                        table_schemas
+                            .entry(table_id)
+                            .or_insert(update.replicated_table_schema);
                         let mutations = table_id_to_mutations.entry(table_id).or_default();
                         if let Some((_, old_row)) = old_table_row {
                             mutations.push(TrackedTableMutation::new(
@@ -485,14 +498,17 @@ where
                             debug!("delete event has no old row, skipping");
                             continue;
                         };
-                        table_id_to_mutations
-                            .entry(delete.table_id)
-                            .or_default()
-                            .push(TrackedTableMutation::new(
+                        let table_id = delete.replicated_table_schema.id();
+                        table_schemas
+                            .entry(table_id)
+                            .or_insert(delete.replicated_table_schema);
+                        table_id_to_mutations.entry(table_id).or_default().push(
+                            TrackedTableMutation::new(
                                 delete.start_lsn,
                                 delete.commit_lsn,
                                 TableMutation::Delete(old_row),
-                            ));
+                            ),
+                        );
                     }
                     event => {
                         debug!(event_type = %event.event_type(), "skipping unsupported event type");
@@ -505,13 +521,15 @@ where
                 let mut join_set = JoinSet::new();
 
                 for (table_id, mutations) in table_id_to_mutations {
-                    let table_name = self.ensure_table_exists(table_id).await?;
-                    let table_schema = self.get_table_schema(table_id).await?;
+                    let replicated_schema = table_schemas
+                        .remove(&table_id)
+                        .expect("schema must be present for every table_id collected from events");
+                    let table_name = self.ensure_table_exists(&replicated_schema).await?;
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
                     let pool = Arc::clone(&self.pool);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
                     let prepared_batches =
-                        prepare_mutation_table_batches(&table_schema, table_name, mutations)?;
+                        prepare_mutation_table_batches(&replicated_schema, table_name, mutations)?;
                     let maintenance_notification =
                         table_id_to_stats.remove(&table_id).map(|mut stats| {
                             stats.table_name = prepared_batches[0].table_name().to_owned();
@@ -541,29 +559,31 @@ where
             }
 
             // Collect contiguous truncate events while preserving table-local order.
-            let mut truncate_table_ids: HashMap<TableId, Vec<TrackedTruncateEvent>> =
-                HashMap::new();
+            let mut truncate_tables: HashMap<
+                TableId,
+                (ReplicatedTableSchema, Vec<TrackedTruncateEvent>),
+            > = HashMap::new();
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate)) = event_iter.next() {
-                    for rel_id in truncate.rel_ids {
-                        truncate_table_ids
-                            .entry(TableId::new(rel_id))
-                            .or_default()
-                            .push(TrackedTruncateEvent::new(
-                                truncate.start_lsn,
-                                truncate.commit_lsn,
-                                truncate.options,
-                            ));
+                    for replicated_table_schema in truncate.truncated_tables {
+                        let entry = truncate_tables
+                            .entry(replicated_table_schema.id())
+                            .or_insert_with(|| (replicated_table_schema, Vec::new()));
+                        entry.1.push(TrackedTruncateEvent::new(
+                            truncate.start_lsn,
+                            truncate.commit_lsn,
+                            truncate.options,
+                        ));
                     }
                 }
             }
 
-            if !truncate_table_ids.is_empty() {
+            if !truncate_tables.is_empty() {
                 self.ensure_applied_batches_table_exists().await?;
                 let mut join_set = JoinSet::new();
 
-                for (table_id, truncates) in truncate_table_ids {
-                    let table_name = self.ensure_table_exists(table_id).await?;
+                for (_table_id, (replicated_schema, truncates)) in truncate_tables {
+                    let table_name = self.ensure_table_exists(&replicated_schema).await?;
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
                     let pool = Arc::clone(&self.pool);
                     let blocking_slots = Arc::clone(&self.blocking_slots);
@@ -589,21 +609,14 @@ where
     }
 
     /// Ensures the destination table exists, creating it (DDL) if necessary.
-    async fn ensure_table_exists(&self, table_id: TableId) -> EtlResult<DuckLakeTableName> {
-        let table_schema = self
-            .store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found",
-                    format!("No schema found for table {table_id}")
-                )
-            })?;
+    async fn ensure_table_exists(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<DuckLakeTableName> {
+        let table_id = replicated_table_schema.id();
 
         let table_name = self
-            .get_or_create_table_mapping(table_id, &table_schema.name)
+            .get_or_create_applied_table_mapping(replicated_table_schema)
             .await?;
 
         // Fast path: already created.
@@ -636,7 +649,11 @@ where
         // `build_create_table_sql_ducklake` generates `CREATE TABLE IF NOT EXISTS "name" (...)`.
         // Prefix the table name with the catalog alias so DuckLake knows which
         // catalog to create the table in.
-        let ddl = build_create_table_sql_ducklake(&table_name, &table_schema.column_schemas);
+        let replicated_column_schemas = replicated_table_schema
+            .column_schemas()
+            .cloned()
+            .collect::<Vec<_>>();
+        let ddl = build_create_table_sql_ducklake(&table_name, &replicated_column_schemas);
         let quoted_table_name = quote_identifier(&table_name).into_owned();
         let qualified_ddl = ddl.replace(
             &quoted_table_name,
@@ -672,6 +689,15 @@ where
         )
         .await?;
 
+        // Transition from applying to applied now that DDL has succeeded.
+        if let Some(metadata) = self.store.get_destination_table_metadata(table_id).await?
+            && metadata.is_applying()
+        {
+            self.store
+                .store_destination_table_metadata(table_id, metadata.to_applied())
+                .await?;
+        }
+
         Ok(table_name)
     }
 
@@ -686,35 +712,47 @@ where
         .await
     }
 
-    /// Returns the current source schema for `table_id`.
-    async fn get_table_schema(&self, table_id: TableId) -> EtlResult<Arc<TableSchema>> {
-        self.store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found",
-                    format!("No schema found for table {table_id}")
-                )
-            })
-    }
-
-    /// Returns the stored destination table name for `table_id`, creating and
-    /// persisting a new mapping if none exists yet.
-    async fn get_or_create_table_mapping(
+    /// Returns the destination table name for `table_id`, creating and persisting a new mapping
+    /// via [`DestinationTableMetadata`] if none exists yet.
+    ///
+    /// Existing metadata must already be in the applied state; otherwise the state store returns
+    /// an error and the caller must stop. When a mapping is created for the first time, it is
+    /// stored with [`DestinationTableSchemaStatus::Applying`] status. The caller is responsible
+    /// for transitioning it to [`DestinationTableSchemaStatus::Applied`] once the DDL has been
+    /// executed successfully.
+    async fn get_or_create_applied_table_mapping(
         &self,
-        table_id: TableId,
-        table_name: &TableName,
+        replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<DuckLakeTableName> {
-        if let Some(existing) = self.store.get_table_mapping(&table_id).await? {
-            return Ok(existing);
+        let table_id = replicated_table_schema.id();
+        if let Some(existing) = self
+            .store
+            .get_applied_destination_table_metadata(table_id)
+            .await?
+        {
+            return existing
+                .destination_table_id
+                .parse::<DuckLakeTableName>()
+                .map_err(|e| {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "Invalid DuckLake table name in metadata",
+                        e.to_string()
+                    )
+                });
         }
 
-        let ducklake_table_name = table_name_to_ducklake_table_name(table_name)?;
+        let ducklake_table_name =
+            table_name_to_ducklake_table_name(replicated_table_schema.name())?;
+        let metadata = DestinationTableMetadata::new_applying(
+            ducklake_table_name.to_string(),
+            replicated_table_schema.inner().snapshot_id,
+            replicated_table_schema.replication_mask().clone(),
+        );
         self.store
-            .store_table_mapping(table_id, ducklake_table_name.clone())
+            .store_destination_table_metadata(table_id, metadata)
             .await?;
+
         Ok(ducklake_table_name)
     }
 
@@ -965,10 +1003,15 @@ pub(super) fn flush_table_inlined_data(
 mod tests {
     use super::*;
 
+    use std::time::Duration;
+
     use duckdb::{Config, Connection};
     use etl::store::both::memory::MemoryStore;
     use etl::store::schema::SchemaStore;
-    use etl::types::{ColumnSchema, Type as PgType};
+    use etl::types::{
+        Cell, ColumnSchema, ReplicatedTableSchema, ReplicationMask, TableId, TableName, TableRow,
+        TableSchema, Type as PgType,
+    };
     use pg_escape::{quote_identifier, quote_literal};
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
@@ -983,8 +1026,8 @@ mod tests {
             TableId::new(table_id),
             TableName::new(schema.to_string(), table.to_string()),
             vec![
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
-                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 2, None, true),
             ],
         )
     }
@@ -1095,6 +1138,32 @@ mod tests {
         .unwrap_or(false)
     }
 
+    fn lake_table_column_names(conn: &Connection, table_name: &str) -> Vec<String> {
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT column_name FROM information_schema.columns \
+                 WHERE table_catalog = {} AND table_schema = {} AND table_name = {} \
+                 ORDER BY ordinal_position",
+                quote_literal(LAKE_CATALOG),
+                quote_literal("main"),
+                quote_literal(table_name),
+            ))
+            .expect("failed to prepare DuckLake column query");
+        let mut rows = statement
+            .query([])
+            .expect("failed to query DuckLake table columns");
+        let mut column_names = Vec::new();
+
+        while let Some(row) = rows.next().expect("failed to read DuckLake column row") {
+            column_names.push(
+                row.get::<_, String>(0)
+                    .expect("failed to read DuckLake column name"),
+            );
+        }
+
+        column_names
+    }
+
     async fn open_lake_conn_when_table_visible(
         catalog: &Url,
         data: &Url,
@@ -1156,6 +1225,7 @@ mod tests {
         let data = path_to_file_url(&dir.path().join("data"));
         let store = MemoryStore::new();
         let schema = make_schema(1, "public", "users");
+        let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
         let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
         store
@@ -1170,7 +1240,7 @@ mod tests {
 
         destination
             .write_table_rows(
-                schema.id,
+                &replicated_schema,
                 vec![
                     TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
                     TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
@@ -1204,12 +1274,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_write_table_rows_creates_only_replicated_columns() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
+        let data = path_to_file_url(&dir.path().join("data"));
+        let store = MemoryStore::new();
+        let schema = TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 2, None, true),
+                ColumnSchema::new("email".to_string(), PgType::TEXT, -1, 3, None, true),
+            ],
+        );
+        let replicated_schema = ReplicatedTableSchema::from_mask(
+            Arc::new(schema.clone()),
+            ReplicationMask::from_bytes(vec![1, 1, 0]),
+        );
+        let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+        store
+            .store_table_schema(schema)
+            .await
+            .expect("failed to seed schema");
+
+        let destination =
+            DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, store.clone())
+                .await
+                .expect("failed to create destination");
+
+        destination
+            .write_table_rows(
+                &replicated_schema,
+                vec![TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("alice".to_string()),
+                ])],
+            )
+            .await
+            .expect("failed to write filtered rows");
+
+        let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
+        assert_eq!(
+            lake_table_column_names(&conn, &table_name),
+            vec!["id".to_string(), "name".to_string()]
+        );
+
+        let metadata = store
+            .get_destination_table_metadata(TableId::new(1))
+            .await
+            .expect("failed to load destination metadata")
+            .expect("expected destination metadata to exist");
+        assert_eq!(metadata.replication_mask.as_slice(), &[1, 1, 0]);
+    }
+
+    #[tokio::test]
     async fn test_query_catalog_maintenance_metrics_reports_active_data_files_total() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
         let data = path_to_file_url(&dir.path().join("data"));
         let store = MemoryStore::new();
         let schema = make_schema(1, "public", "users");
+        let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
         let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
         store
@@ -1224,7 +1351,7 @@ mod tests {
 
         destination
             .write_table_rows(
-                schema.id,
+                &replicated_schema,
                 vec![
                     TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
                     TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
@@ -1261,6 +1388,7 @@ mod tests {
         let data = path_to_file_url(&dir.path().join("data"));
         let store = MemoryStore::new();
         let schema = make_schema(1, "public", "users");
+        let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
         let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
         store
@@ -1275,7 +1403,7 @@ mod tests {
 
         destination
             .write_table_rows(
-                schema.id,
+                &replicated_schema,
                 vec![TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("alice".to_string()),
@@ -1284,7 +1412,7 @@ mod tests {
             .await
             .expect("failed to write rows");
         destination
-            .truncate_table(schema.id)
+            .truncate_table(&replicated_schema)
             .await
             .expect("failed to truncate table");
 
