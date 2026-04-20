@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use etl::store::both::memory::MemoryStore;
-use etl_config::parse_ducklake_url;
+use etl_config::{SerializableSecretString, parse_ducklake_url};
 use etl_destinations::bigquery::BigQueryClient;
 use etl_destinations::clickhouse::ClickHouseClient;
 use etl_destinations::ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config};
@@ -659,12 +659,17 @@ impl Validator for BigQueryValidator {
 struct ClickHouseValidator {
     url: Url,
     user: String,
-    password: Option<String>,
+    password: Option<SerializableSecretString>,
     database: String,
 }
 
 impl ClickHouseValidator {
-    fn new(url: Url, user: String, password: Option<String>, database: String) -> Self {
+    fn new(
+        url: Url,
+        user: String,
+        password: Option<SerializableSecretString>,
+        database: String,
+    ) -> Self {
         Self {
             url,
             user,
@@ -683,7 +688,9 @@ impl Validator for ClickHouseValidator {
         let client = ClickHouseClient::new(
             self.url.clone(),
             self.user.clone(),
-            self.password.clone(),
+            self.password
+                .as_ref()
+                .map(|password| password.expose_secret().to_owned()),
             self.database.clone(),
         );
         match client.ping().await {
@@ -963,7 +970,7 @@ impl Validator for DestinationValidator {
                 let validator = ClickHouseValidator::new(
                     url.clone(),
                     user.clone(),
-                    password.as_ref().map(|p| p.expose_secret().to_string()),
+                    password.clone(),
                     database.clone(),
                 );
                 validator.validate(ctx).await
