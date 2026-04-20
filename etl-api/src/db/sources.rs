@@ -1,4 +1,4 @@
-use sqlx::PgExecutor;
+use sqlx::{PgConnection, PgExecutor};
 use std::fmt::Debug;
 use thiserror::Error;
 
@@ -16,6 +16,12 @@ pub struct Source {
     pub id: i64,
     pub tenant_id: String,
     pub name: String,
+    pub config: StoredSourceConfig,
+}
+
+#[derive(Debug)]
+pub struct SourceConnection {
+    pub id: i64,
     pub config: StoredSourceConfig,
 }
 
@@ -94,6 +100,45 @@ where
                 id: record.id,
                 tenant_id: record.tenant_id,
                 name: record.name,
+                config,
+            })
+        }
+        None => None,
+    };
+
+    Ok(source)
+}
+
+pub async fn read_source_connection<'c, E>(
+    executor: E,
+    tenant_id: &str,
+    source_id: i64,
+    encryption_key: &EncryptionKey,
+) -> Result<Option<SourceConnection>, SourcesDbError>
+where
+    E: PgExecutor<'c>,
+{
+    let record = sqlx::query!(
+        r#"
+        select id, config
+        from app.sources
+        where tenant_id = $1 and id = $2
+        "#,
+        tenant_id,
+        source_id,
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    let source = match record {
+        Some(record) => {
+            let config = decrypt_and_deserialize_from_value::<
+                EncryptedStoredSourceConfig,
+                StoredSourceConfig,
+            >(record.config, encryption_key)?;
+
+            Some(SourceConnection {
+                id: record.id,
                 config,
             })
         }
@@ -184,7 +229,7 @@ where
         let config = decrypt_and_deserialize_from_value::<
             EncryptedStoredSourceConfig,
             StoredSourceConfig,
-        >(record.config.clone(), encryption_key)?;
+        >(record.config, encryption_key)?;
         let source = Source {
             id: record.id,
             tenant_id: record.tenant_id,
@@ -218,4 +263,66 @@ where
     .await?;
 
     Ok(record.exists)
+}
+
+pub async fn read_all_source_connections<'c, E>(
+    executor: E,
+    tenant_id: &str,
+    encryption_key: &EncryptionKey,
+) -> Result<Vec<SourceConnection>, SourcesDbError>
+where
+    E: PgExecutor<'c>,
+{
+    let records = sqlx::query!(
+        r#"
+        select id, config
+        from app.sources
+        where tenant_id = $1
+        "#,
+        tenant_id,
+    )
+    .fetch_all(executor)
+    .await?;
+
+    let mut sources = Vec::with_capacity(records.len());
+    for record in records {
+        let config = decrypt_and_deserialize_from_value::<
+            EncryptedStoredSourceConfig,
+            StoredSourceConfig,
+        >(record.config, encryption_key)?;
+
+        sources.push(SourceConnection {
+            id: record.id,
+            config,
+        });
+    }
+
+    Ok(sources)
+}
+
+pub async fn uninstall_source_installation(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    drop_current_user_owned_etl_schema(conn).await
+}
+
+async fn drop_current_user_owned_etl_schema(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    let etl_schema_owned_by_current_user: bool = sqlx::query_scalar(
+        r#"
+        select exists(
+            select 1
+            from pg_namespace
+            where nspname = 'etl'
+              and nspowner = (select oid from pg_roles where rolname = current_user)
+        )
+        "#,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
+    if etl_schema_owned_by_current_user {
+        sqlx::query("drop schema if exists etl cascade")
+            .execute(&mut *conn)
+            .await?;
+    }
+
+    Ok(())
 }

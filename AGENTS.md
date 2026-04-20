@@ -39,6 +39,7 @@
 - Before adding new patterns, inspect nearby code and follow the local style first.
 - Do not add dependencies unless they are justified by the task.
 - If you change workflow assumptions, build or test the smallest relevant target and report what actually ran.
+- Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
 
 ## Rust Style
 - Follow default Rust formatting and idioms.

@@ -1,8 +1,10 @@
 use crate::config::ApiConfig;
 use crate::configs::encryption::EncryptionKey;
 use crate::configs::source::{FullApiSourceConfig, StoredSourceConfig, StrippedApiSourceConfig};
-use crate::db::sources::SourcesDbError;
-use crate::k8s::TrustedRootCertsCache;
+use crate::db::pipelines::{PipelinesDbError, read_pipelines_for_source_for_deletion};
+use crate::db::sources::{SourcesDbError, source_exists};
+use crate::k8s::core::{K8sCoreError, first_active_pipeline_id};
+use crate::k8s::{K8sClient, TrustedRootCertsCache};
 use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
 use crate::validation::{FailureType, ValidationError, ValidationFailure};
 use crate::{db, routes::common, routes::utils};
@@ -31,14 +33,23 @@ pub enum SourceError {
     #[error(transparent)]
     SourcesDb(#[from] SourcesDbError),
 
-    #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    #[error(transparent)]
+    PipelinesDb(#[from] PipelinesDbError),
 
     #[error(transparent)]
     Validation(#[from] ValidationError),
 
     #[error("{0}")]
     ValidationFailed(String),
+
+    #[error(transparent)]
+    K8sCore(#[from] K8sCoreError),
+
+    #[error("The pipeline with id {0} is active. Stop it before deleting it.")]
+    ActivePipeline(i64),
+
+    #[error("The source with id {0} is still used by pipelines. Delete those pipelines first.")]
+    SourceInUse(i64),
 }
 
 impl SourceError {
@@ -46,8 +57,9 @@ impl SourceError {
         match self {
             // Do not expose internal database details in error messages
             SourceError::SourcesDb(SourcesDbError::Database(_))
-            | SourceError::Database(_)
-            | SourceError::Validation(_) => "internal server error".to_string(),
+            | SourceError::PipelinesDb(PipelinesDbError::Database(_))
+            | SourceError::Validation(_)
+            | SourceError::K8sCore(_) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information
             e => e.to_string(),
         }
@@ -58,11 +70,13 @@ impl ResponseError for SourceError {
     fn status_code(&self) -> StatusCode {
         match self {
             SourceError::SourcesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SourceError::PipelinesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SourceError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             SourceError::TenantId(_) => StatusCode::BAD_REQUEST,
-            SourceError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SourceError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SourceError::ValidationFailed(_) => StatusCode::FORBIDDEN,
+            SourceError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SourceError::ActivePipeline(_) | SourceError::SourceInUse(_) => StatusCode::CONFLICT,
         }
     }
 
@@ -348,6 +362,7 @@ pub async fn update_source(
     ),
     responses(
         (status = 200, description = "Source deleted successfully"),
+        (status = 409, description = "Source has an active pipeline or is still used by pipelines", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -357,11 +372,32 @@ pub async fn update_source(
 pub async fn delete_source(
     req: HttpRequest,
     pool: Data<PgPool>,
+    k8s_client: Data<dyn K8sClient>,
     source_id: Path<i64>,
 ) -> Result<impl Responder, SourceError> {
     let tenant_id = extract_tenant_id(&req)?;
     let source_id = source_id.into_inner();
 
+    if !source_exists(&**pool, tenant_id, source_id).await? {
+        return Err(SourceError::SourceNotFound(source_id));
+    }
+
+    let pipelines = read_pipelines_for_source_for_deletion(&**pool, tenant_id, source_id).await?;
+    if let Some(pipeline_id) =
+        first_active_pipeline_id(k8s_client.as_ref(), tenant_id, &pipelines).await?
+    {
+        return Err(SourceError::ActivePipeline(pipeline_id));
+    }
+
+    if !pipelines.is_empty() {
+        return Err(SourceError::SourceInUse(source_id));
+    }
+
+    // We intentionally keep this endpoint simple: the checks above provide the
+    // normal user-facing guard rails, but we do not try to serialize against
+    // concurrent pipeline creation here. A pipeline can still appear between
+    // the check and the final delete, in which case the database constraints
+    // are the last line of defense.
     db::sources::delete_source(&**pool, tenant_id, source_id)
         .await?
         .ok_or(SourceError::SourceNotFound(source_id))?;
