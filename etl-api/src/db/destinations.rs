@@ -1,14 +1,17 @@
-use sqlx::PgExecutor;
 use std::fmt::Debug;
+
+use sqlx::PgExecutor;
 use thiserror::Error;
 
-use crate::configs::destination::{
-    EncryptedStoredDestinationConfig, FullApiDestinationConfig, StoredDestinationConfig,
-};
-use crate::configs::encryption::EncryptionKey;
-use crate::configs::serde::{
-    DbDeserializationError, DbSerializationError, decrypt_and_deserialize_from_value,
-    encrypt_and_serialize,
+use crate::configs::{
+    destination::{
+        EncryptedStoredDestinationConfig, FullApiDestinationConfig, StoredDestinationConfig,
+    },
+    encryption::EncryptionKey,
+    serde::{
+        DbDeserializationError, DbSerializationError, decrypt_and_deserialize_from_value,
+        encrypt_and_serialize,
+    },
 };
 
 #[derive(Debug, Error)]
@@ -181,12 +184,8 @@ where
             StoredDestinationConfig,
         >(record.config.clone(), encryption_key)?;
 
-        let destination = Destination {
-            id: record.id,
-            tenant_id: record.tenant_id,
-            name: record.name,
-            config,
-        };
+        let destination =
+            Destination { id: record.id, tenant_id: record.tenant_id, name: record.name, config };
         destinations.push(destination);
     }
 

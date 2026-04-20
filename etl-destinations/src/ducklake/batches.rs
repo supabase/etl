@@ -5,43 +5,52 @@
 //! after ambiguous failures, while bounded batch sizes preserve table-local
 //! ordering without letting one transaction grow unbounded.
 
-use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 #[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::{
+    hash::{Hash, Hasher},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
-use etl::error::{ErrorKind, EtlResult};
-use etl::etl_error;
-use etl::types::{Cell, ReplicatedTableSchema, TableRow};
+use etl::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    types::{Cell, ReplicatedTableSchema, TableRow},
+};
 use metrics::{counter, histogram};
 #[cfg(feature = "test-utils")]
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
 use rand::Rng;
-use tokio::sync::Semaphore;
-use tokio::time::Instant;
+use tokio::{sync::Semaphore, time::Instant};
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, trace, warn};
 
-use crate::ducklake::client::{
-    DuckDbBlockingOperationKind, DuckLakeConnectionManager, format_query_error_detail,
-    run_duckdb_blocking,
+use crate::{
+    ducklake::{
+        DuckLakeTableName, LAKE_CATALOG,
+        client::{
+            DuckDbBlockingOperationKind, DuckLakeConnectionManager, format_query_error_detail,
+            run_duckdb_blocking,
+        },
+        core::is_create_table_conflict,
+        encoding::{
+            PreparedRows, cell_to_sql_literal_ref, prepare_rows, table_row_to_sql_literal_ref,
+        },
+        metrics::{
+            BATCH_KIND_LABEL, DELETE_ORIGIN_LABEL, ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS,
+            ETL_DUCKLAKE_BATCH_PREPARED_MUTATIONS, ETL_DUCKLAKE_DELETE_PREDICATES,
+            ETL_DUCKLAKE_FAILED_BATCHES_TOTAL, ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL,
+            ETL_DUCKLAKE_RETRIES_TOTAL, ETL_DUCKLAKE_UPSERT_ROWS, PREPARED_ROWS_KIND_LABEL,
+            RETRY_SCOPE_LABEL, SUB_BATCH_KIND_LABEL,
+        },
+    },
+    retry::{RetryAttempt, RetryDecision, RetryPolicy, retry_with_backoff},
 };
-use crate::ducklake::core::is_create_table_conflict;
-use crate::ducklake::encoding::{
-    PreparedRows, cell_to_sql_literal_ref, prepare_rows, table_row_to_sql_literal_ref,
-};
-use crate::ducklake::metrics::{
-    BATCH_KIND_LABEL, DELETE_ORIGIN_LABEL, ETL_DUCKLAKE_BATCH_COMMIT_DURATION_SECONDS,
-    ETL_DUCKLAKE_BATCH_PREPARED_MUTATIONS, ETL_DUCKLAKE_DELETE_PREDICATES,
-    ETL_DUCKLAKE_FAILED_BATCHES_TOTAL, ETL_DUCKLAKE_REPLAYED_BATCHES_TOTAL,
-    ETL_DUCKLAKE_RETRIES_TOTAL, ETL_DUCKLAKE_UPSERT_ROWS, PREPARED_ROWS_KIND_LABEL,
-    RETRY_SCOPE_LABEL, SUB_BATCH_KIND_LABEL,
-};
-use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG};
-use crate::retry::{RetryAttempt, RetryDecision, RetryPolicy, retry_with_backoff};
 
 /// Maximum number of rows per SQL `INSERT ... VALUES` batch when nested values
 /// force the staging path to bypass DuckDB's appender API.
@@ -76,10 +85,7 @@ const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
 pub(super) enum TableMutation {
     Insert(TableRow),
     Delete(TableRow),
-    Update {
-        delete_row: TableRow,
-        upsert_row: TableRow,
-    },
+    Update { delete_row: TableRow, upsert_row: TableRow },
     Replace(TableRow),
 }
 
@@ -104,11 +110,7 @@ pub(super) struct TrackedTableMutation {
 impl TrackedTableMutation {
     /// Creates one tracked mutation preserved for retry-safe replay.
     pub(super) fn new(start_lsn: PgLsn, commit_lsn: PgLsn, mutation: TableMutation) -> Self {
-        Self {
-            start_lsn,
-            commit_lsn,
-            mutation,
-        }
+        Self { start_lsn, commit_lsn, mutation }
     }
 }
 
@@ -123,11 +125,7 @@ pub(super) struct TrackedTruncateEvent {
 impl TrackedTruncateEvent {
     /// Creates one tracked truncate event preserved for retry-safe replay.
     pub(super) fn new(start_lsn: PgLsn, commit_lsn: PgLsn, options: i8) -> Self {
-        Self {
-            start_lsn,
-            commit_lsn,
-            options,
-        }
+        Self { start_lsn, commit_lsn, options }
     }
 }
 
@@ -222,10 +220,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
     }
 
     let _table_creation_permit = table_creation_slots.acquire_owned().await.map_err(|_| {
-        etl_error!(
-            ErrorKind::InvalidState,
-            "DuckLake table creation semaphore closed"
-        )
+        etl_error!(ErrorKind::InvalidState, "DuckLake table creation semaphore closed")
     })?;
 
     if applied_batches_table_created.load(Ordering::Relaxed) {
@@ -603,10 +598,7 @@ fn push_prepared_mutation_batch(
 
     let identity =
         build_mutation_batch_identity(table_name, replicated_table_schema, &tracked_mutations)?;
-    let mutations = tracked_mutations
-        .into_iter()
-        .map(|tracked| tracked.mutation)
-        .collect();
+    let mutations = tracked_mutations.into_iter().map(|tracked| tracked.mutation).collect();
 
     prepared_batches.push(PreparedDuckLakeTableBatch {
         table_name: table_name.to_string(),
@@ -651,10 +643,7 @@ fn prepare_table_mutations(
                 }
                 delete_predicates.push(delete_predicate_from_row(replicated_table_schema, &row)?);
             }
-            TableMutation::Update {
-                delete_row,
-                upsert_row,
-            } => {
+            TableMutation::Update { delete_row, upsert_row } => {
                 if !upsert_rows.is_empty() {
                     prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(
                         std::mem::take(&mut upsert_rows),
@@ -674,9 +663,8 @@ fn prepare_table_mutations(
                     )?],
                     origin: "update",
                 });
-                prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(vec![
-                    upsert_row,
-                ])));
+                prepared_mutations
+                    .push(PreparedTableMutation::Upsert(prepare_rows(vec![upsert_row])));
             }
             TableMutation::Replace(row) => {
                 if !upsert_rows.is_empty() {
@@ -788,10 +776,7 @@ fn build_mutation_batch_identity(
                 "delete".hash(&mut hasher);
                 delete_predicate_from_row(replicated_table_schema, row)?.hash(&mut hasher);
             }
-            TableMutation::Update {
-                delete_row,
-                upsert_row,
-            } => {
+            TableMutation::Update { delete_row, upsert_row } => {
                 "update".hash(&mut hasher);
                 delete_predicate_from_row(replicated_table_schema, delete_row)?.hash(&mut hasher);
                 hash_table_row_ref(&mut hasher, upsert_row);
@@ -806,12 +791,8 @@ fn build_mutation_batch_identity(
 
     Ok(build_batch_identity(
         DuckLakeTableBatchKind::Mutation,
-        tracked_mutations
-            .first()
-            .map(|tracked_mutation| tracked_mutation.start_lsn),
-        tracked_mutations
-            .last()
-            .map(|tracked_mutation| tracked_mutation.commit_lsn),
+        tracked_mutations.first().map(|tracked_mutation| tracked_mutation.start_lsn),
+        tracked_mutations.last().map(|tracked_mutation| tracked_mutation.commit_lsn),
         hasher.finish(),
     ))
 }
@@ -831,12 +812,7 @@ fn build_copy_batch_identity(
         hash_table_row_ref(&mut hasher, row);
     }
 
-    Ok(build_batch_identity(
-        DuckLakeTableBatchKind::Copy,
-        None,
-        None,
-        hasher.finish(),
-    ))
+    Ok(build_batch_identity(DuckLakeTableBatchKind::Copy, None, None, hasher.finish()))
 }
 
 /// Builds a deterministic identity for one ordered truncate batch.
@@ -856,12 +832,8 @@ fn build_truncate_batch_identity(
 
     build_batch_identity(
         DuckLakeTableBatchKind::Truncate,
-        tracked_truncates
-            .first()
-            .map(|tracked_truncate| tracked_truncate.start_lsn),
-        tracked_truncates
-            .last()
-            .map(|tracked_truncate| tracked_truncate.commit_lsn),
+        tracked_truncates.first().map(|tracked_truncate| tracked_truncate.start_lsn),
+        tracked_truncates.last().map(|tracked_truncate| tracked_truncate.commit_lsn),
         hasher.finish(),
     )
 }
@@ -1052,8 +1024,7 @@ fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> E
 
 /// Formats an optional LSN for marker-table inserts.
 fn optional_lsn_to_sql_literal(lsn: Option<PgLsn>) -> String {
-    lsn.map(|value| u64::from(value).to_string())
-        .unwrap_or_else(|| "NULL".to_string())
+    lsn.map(|value| u64::from(value).to_string()).unwrap_or_else(|| "NULL".to_string())
 }
 
 /// Applies one prepared table mutation inside an open transaction.
@@ -1131,16 +1102,16 @@ fn apply_upsert_mutation(
                 )
             })?;
             for values in all_values {
-                appender
-                    .append_row(duckdb::appender_params_from_iter(values))
-                    .map_err(|error| {
+                appender.append_row(duckdb::appender_params_from_iter(values)).map_err(
+                    |error| {
                         tracing::error!(?error, "error append row");
                         etl_error!(
                             ErrorKind::DestinationQueryFailed,
                             "DuckLake staging append_row failed",
                             source: error
                         )
-                    })?;
+                    },
+                )?;
             }
             appender.flush().map_err(|error| {
                 tracing::error!(?error, "error flush");
@@ -1202,11 +1173,8 @@ fn apply_delete_mutation(
     }
 
     for chunk in predicates.chunks(SQL_DELETE_BATCH_SIZE) {
-        let where_clause = chunk
-            .iter()
-            .map(|predicate| format!("({predicate})"))
-            .collect::<Vec<_>>()
-            .join(" OR ");
+        let where_clause =
+            chunk.iter().map(|predicate| format!("({predicate})")).collect::<Vec<_>>().join(" OR ");
 
         let sql_query =
             format!(r#"DELETE FROM {LAKE_CATALOG}."{table_name}" WHERE {where_clause};"#);
@@ -1291,18 +1259,15 @@ fn insert_rows_into_staging_with_sql(
     row_literals: &[String],
 ) -> EtlResult<()> {
     for chunk in row_literals.chunks(SQL_INSERT_BATCH_SIZE) {
-        conn.execute_batch(&format!(
-            "INSERT INTO {staging:?} VALUES {};",
-            chunk.join(", ")
-        ))
-        .map_err(|error| {
-            tracing::error!(?error, "error insert_rows_into_staging_with_sql");
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake staging row insert failed",
-                source: error
-            )
-        })?;
+        conn.execute_batch(&format!("INSERT INTO {staging:?} VALUES {};", chunk.join(", ")))
+            .map_err(|error| {
+                tracing::error!(?error, "error insert_rows_into_staging_with_sql");
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake staging row insert failed",
+                    source: error
+                )
+            })?;
     }
 
     Ok(())
@@ -1380,13 +1345,13 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &str) -> EtlResult<(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use std::sync::Arc;
 
     use etl::types::{
         ColumnSchema, ReplicationMask, TableId, TableName, TableSchema, Type as PgType,
     };
+
+    use super::*;
 
     fn make_schema() -> TableSchema {
         TableSchema::new(
@@ -1414,11 +1379,8 @@ mod tests {
                 ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 3, None, true),
             ],
         );
-        let row = TableRow::new(vec![
-            Cell::I32(7),
-            Cell::I32(42),
-            Cell::String("alice".to_string()),
-        ]);
+        let row =
+            TableRow::new(vec![Cell::I32(7), Cell::I32(42), Cell::String("alice".to_string())]);
         let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(table_schema));
 
         assert_eq!(
@@ -1444,10 +1406,7 @@ mod tests {
         );
         let row = TableRow::new(vec![Cell::I32(42), Cell::String("alice".to_string())]);
 
-        assert_eq!(
-            delete_predicate_from_row(&replicated_table_schema, &row).unwrap(),
-            "id = 42"
-        );
+        assert_eq!(delete_predicate_from_row(&replicated_table_schema, &row).unwrap(), "id = 42");
     }
 
     #[test]
@@ -1643,10 +1602,7 @@ mod tests {
                 match &prepared[0] {
                     PreparedTableMutation::Delete { predicates, origin } => {
                         assert_eq!(origin, &"delete");
-                        assert_eq!(
-                            predicates,
-                            &vec!["id = 1".to_string(), "id = 2".to_string()]
-                        );
+                        assert_eq!(predicates, &vec!["id = 1".to_string(), "id = 2".to_string()]);
                     }
                     PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
                 }
@@ -1927,19 +1883,11 @@ mod tests {
     fn test_build_truncate_batch_identity_changes_with_lsn() {
         let first = build_truncate_batch_identity(
             "public_users",
-            &[TrackedTruncateEvent::new(
-                PgLsn::from(300),
-                PgLsn::from(400),
-                0,
-            )],
+            &[TrackedTruncateEvent::new(PgLsn::from(300), PgLsn::from(400), 0)],
         );
         let second = build_truncate_batch_identity(
             "public_users",
-            &[TrackedTruncateEvent::new(
-                PgLsn::from(301),
-                PgLsn::from(401),
-                0,
-            )],
+            &[TrackedTruncateEvent::new(PgLsn::from(301), PgLsn::from(401), 0)],
         );
 
         assert_ne!(first.batch_id, second.batch_id);

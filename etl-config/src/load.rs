@@ -77,11 +77,7 @@ pub enum LoadConfigError {
 
     /// Could not locate one of the required configuration files.
     #[error("could not locate {kind} configuration in `{directory}`; attempted: {attempted}")]
-    ConfigurationFileMissing {
-        kind: &'static str,
-        directory: PathBuf,
-        attempted: String,
-    },
+    ConfigurationFileMissing { kind: &'static str, directory: PathBuf, attempted: String },
 
     /// Environment variable overrides failed to merge into the configuration.
     #[error("failed to load configuration from environment variables")]
@@ -124,9 +120,7 @@ where
     };
 
     if !configuration_directory.is_dir() {
-        return Err(LoadConfigError::MissingConfigurationDirectory(
-            configuration_directory,
-        ));
+        return Err(LoadConfigError::MissingConfigurationDirectory(configuration_directory));
     }
 
     let environment = Environment::load().map_err(LoadConfigError::Environment)?;
@@ -142,9 +136,7 @@ where
         .separator(ENV_SEPARATOR);
 
     if !T::LIST_PARSE_KEYS.is_empty() {
-        environment_source = environment_source
-            .try_parsing(true)
-            .list_separator(LIST_SEPARATOR);
+        environment_source = environment_source.try_parsing(true).list_separator(LIST_SEPARATOR);
 
         for key in <T as Config>::LIST_PARSE_KEYS {
             environment_source = environment_source.with_list_parse_key(key);
@@ -161,9 +153,7 @@ where
 
     let settings = builder.build().map_err(LoadConfigError::Builder)?;
 
-    settings
-        .try_deserialize::<T>()
-        .map_err(LoadConfigError::Deserialization)
+    settings.try_deserialize::<T>().map_err(LoadConfigError::Deserialization)
 }
 
 /// Finds the configuration file that matches the requested kind and supported extensions.
@@ -198,11 +188,15 @@ fn find_configuration_file(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        fs,
+        sync::{Mutex, OnceLock},
+    };
+
     use serde::{Deserialize, Serialize};
-    use std::fs;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    use super::*;
 
     /// Mutex to serialize tests that modify environment variables or current directory.
     fn env_lock() -> &'static Mutex<()> {
@@ -232,10 +226,7 @@ mod tests {
     fn create_mock_config() -> ApplicationConfig {
         ApplicationConfig {
             name: "test-app".to_string(),
-            mode: StorageMode::Disk {
-                path: "/tmp/data".to_string(),
-                max_size: 1024,
-            },
+            mode: StorageMode::Disk { path: "/tmp/data".to_string(), max_size: 1024 },
         }
     }
 

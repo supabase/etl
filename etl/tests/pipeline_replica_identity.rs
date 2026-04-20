@@ -1,15 +1,18 @@
-use etl::state::table::TableReplicationPhaseType;
-use etl::test_utils::database::{spawn_source_database, test_table_name};
-use etl::test_utils::materialize::{FromTableRow, materialize_events};
-use etl::test_utils::memory_destination::MemoryDestination;
-use etl::test_utils::notifying_store::NotifyingStore;
-use etl::test_utils::pipeline::create_pipeline;
-use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::types::{Cell, EventType, PipelineId};
+use etl::{
+    state::table::TableReplicationPhaseType,
+    test_utils::{
+        database::{spawn_source_database, test_table_name},
+        materialize::{FromTableRow, materialize_events},
+        memory_destination::MemoryDestination,
+        notifying_store::NotifyingStore,
+        pipeline::create_pipeline,
+        test_destination_wrapper::TestDestinationWrapper,
+    },
+    types::{Cell, EventType, PipelineId},
+};
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
-use rand::distr::Alphanumeric;
-use rand::{Rng, random};
+use rand::{Rng, distr::Alphanumeric, random};
 
 /// Simple struct to represent a row in our toast test table
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -21,11 +24,7 @@ struct ToastTable {
 
 impl ToastTable {
     pub fn new(id: i64, large_text: &str, small_int: i32) -> Self {
-        Self {
-            id,
-            large_text: large_text.to_owned(),
-            small_int,
-        }
+        Self { id, large_text: large_text.to_owned(), small_int }
     }
 }
 
@@ -71,10 +70,7 @@ impl FromTableRow for ToastTable {
 /// ensuring they trigger Postgres's TOAST storage mechanism.
 fn generate_random_ascii_string(length: usize) -> String {
     let rng = rand::rng();
-    rng.sample_iter(Alphanumeric)
-        .take(length)
-        .map(char::from)
-        .collect()
+    rng.sample_iter(Alphanumeric).take(length).map(char::from).collect()
 }
 
 const LARGE_TEXT_SIZE_BYTES: usize = 8192;
@@ -138,9 +134,8 @@ async fn update_non_toast_values_with_default_replica_identity() {
         destination.clone(),
     );
 
-    let table_ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -151,9 +146,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
     let large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
     let initial_int_value = 100;
 
-    let insert_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .insert_values(
@@ -178,9 +171,7 @@ async fn update_non_toast_values_with_default_replica_identity() {
     // for the large_text column
     let updated_int_value = 200;
 
-    let update_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Update, 1)])
-        .await;
+    let update_event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
 
     database
         .update_values(table_name.clone(), &["small_int"], &[&updated_int_value])
@@ -243,10 +234,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
     // Set replica identity on the table to full to test that TOAST values are sent
     // even if non-TOAST columns are updated
     database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::ReplicaIdentity { value: "full" }],
-        )
+        .alter_table(table_name.clone(), &[TableModification::ReplicaIdentity { value: "full" }])
         .await
         .unwrap();
 
@@ -269,9 +257,8 @@ async fn update_non_toast_values_with_full_replica_identity() {
         destination.clone(),
     );
 
-    let table_ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -282,9 +269,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
     let large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
     let initial_int_value = 100;
 
-    let insert_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .insert_values(
@@ -309,9 +294,7 @@ async fn update_non_toast_values_with_full_replica_identity() {
     // for the large_text column
     let updated_int_value = 200;
 
-    let update_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Update, 1)])
-        .await;
+    let update_event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
 
     database
         .update_values(table_name.clone(), &["small_int"], &[&updated_int_value])
@@ -391,9 +374,8 @@ async fn update_toast_values_with_default_replica_identity() {
         destination.clone(),
     );
 
-    let table_ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -404,9 +386,7 @@ async fn update_toast_values_with_default_replica_identity() {
     let large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
     let initial_int_value = 100;
 
-    let insert_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .insert_values(
@@ -427,17 +407,11 @@ async fn update_toast_values_with_default_replica_identity() {
     assert_eq!(parsed_table_rows, vec![expected_initial_row]);
 
     // Test update to the toast column does set it to that value
-    let update_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Update, 1)])
-        .await;
+    let update_event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
 
     let updated_large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
     database
-        .update_values(
-            table_name.clone(),
-            &["large_text"],
-            &[&updated_large_text_value],
-        )
+        .update_values(table_name.clone(), &["large_text"], &[&updated_large_text_value])
         .await
         .unwrap();
 
@@ -497,10 +471,7 @@ async fn update_non_toast_values_with_none_replica_identity() {
     // Set replica identity on the table to none to test that Postgres rejects
     // update operations when there's insufficient replica identity information
     database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::ReplicaIdentity { value: "nothing" }],
-        )
+        .alter_table(table_name.clone(), &[TableModification::ReplicaIdentity { value: "nothing" }])
         .await
         .unwrap();
 
@@ -523,9 +494,8 @@ async fn update_non_toast_values_with_none_replica_identity() {
         destination.clone(),
     );
 
-    let table_ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -536,9 +506,7 @@ async fn update_non_toast_values_with_none_replica_identity() {
     let large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
     let initial_int_value = 100;
 
-    let insert_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .insert_values(
@@ -565,15 +533,11 @@ async fn update_non_toast_values_with_none_replica_identity() {
     // because the table does not have sufficient replica identity information for updates
     let updated_int_value = 200;
 
-    let result = database
-        .update_values(table_name.clone(), &["small_int"], &[&updated_int_value])
-        .await;
+    let result =
+        database.update_values(table_name.clone(), &["small_int"], &[&updated_int_value]).await;
 
     // Verify that the update operation fails with the expected error
-    assert!(
-        result.is_err(),
-        "Update should fail when replica identity is none"
-    );
+    assert!(result.is_err(), "Update should fail when replica identity is none");
     let err = result.unwrap_err();
     let db_err = err.as_db_error().unwrap();
 
@@ -642,9 +606,7 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::ReplicaIdentity {
-                value: &format!("using index {index_name}"),
-            }],
+            &[TableModification::ReplicaIdentity { value: &format!("using index {index_name}") }],
         )
         .await
         .unwrap();
@@ -668,9 +630,8 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
         destination.clone(),
     );
 
-    let table_ready_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -682,9 +643,7 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
     let large_text_value = generate_random_ascii_string(large_text_size_bytes);
     let initial_int_value = 100;
 
-    let insert_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .insert_values(
@@ -709,9 +668,7 @@ async fn update_non_toast_values_with_unique_index_replica_identity() {
     // for the large_text column, since the replica identity includes the column being updated
     let updated_int_value = 200;
 
-    let update_event_notify = destination
-        .wait_for_events_count(vec![(EventType::Update, 1)])
-        .await;
+    let update_event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
 
     database
         .update_values(table_name.clone(), &["small_int"], &[&updated_int_value])

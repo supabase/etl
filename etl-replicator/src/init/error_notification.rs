@@ -6,8 +6,8 @@ use crate::error_notification::ErrorNotificationClient;
 
 /// Initializes the optional error notification client from replicator config.
 pub(crate) fn init(replicator_config: &ReplicatorConfig) -> Option<ErrorNotificationClient> {
-    replicator_config.supabase.as_ref().and_then(
-        |supabase_config| match (&supabase_config.api_url, &supabase_config.api_key) {
+    replicator_config.supabase.as_ref().and_then(|supabase_config| {
+        match (&supabase_config.api_url, &supabase_config.api_key) {
             (Some(api_url), Some(api_key)) => Some(ErrorNotificationClient::new(
                 api_url.clone(),
                 api_key.expose_secret().to_owned(),
@@ -21,6 +21,6 @@ pub(crate) fn init(replicator_config: &ReplicatorConfig) -> Option<ErrorNotifica
 
                 None
             }
-        },
-    )
+        }
+    })
 }

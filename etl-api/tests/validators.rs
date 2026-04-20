@@ -1,37 +1,38 @@
-use crate::support::database::get_test_db_config;
-use etl_api::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
-use etl_api::configs::pipeline::FullApiPipelineConfig;
-use etl_api::validation::{
-    FailureType, ValidationContext, validate_destination, validate_pipeline, validate_source,
+use etl_api::{
+    configs::{
+        destination::{FullApiDestinationConfig, FullApiIcebergConfig},
+        pipeline::FullApiPipelineConfig,
+    },
+    validation::{
+        FailureType, ValidationContext, validate_destination, validate_pipeline, validate_source,
+    },
 };
-use etl_config::shared::BatchConfig;
-use etl_config::{Environment, SerializableSecretString};
-use etl_destinations::bigquery::test_utils::{
-    setup_bigquery_database, setup_bigquery_database_without_dataset,
-    skip_if_missing_bigquery_env_vars,
-};
-use etl_destinations::iceberg::test_utils::{
-    LAKEKEEPER_URL, LakekeeperClient, MINIO_PASSWORD, MINIO_URL, MINIO_USERNAME,
+use etl_config::{Environment, SerializableSecretString, shared::BatchConfig};
+use etl_destinations::{
+    bigquery::test_utils::{
+        setup_bigquery_database, setup_bigquery_database_without_dataset,
+        skip_if_missing_bigquery_env_vars,
+    },
+    iceberg::test_utils::{
+        LAKEKEEPER_URL, LakekeeperClient, MINIO_PASSWORD, MINIO_URL, MINIO_USERNAME,
+    },
 };
 use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use sqlx::Executor;
+
+use crate::support::database::get_test_db_config;
 
 fn create_validation_context() -> ValidationContext {
     let environment = Environment::load().expect("Failed to load environment");
     ValidationContext::builder(environment).build()
 }
 
-async fn create_validation_context_with_source() -> (
-    ValidationContext,
-    sqlx::PgPool,
-    etl_config::shared::PgConnectionConfig,
-) {
+async fn create_validation_context_with_source()
+-> (ValidationContext, sqlx::PgPool, etl_config::shared::PgConnectionConfig) {
     let config = get_test_db_config();
     let pool = create_pg_database(&config).await;
     let environment = Environment::load().expect("Failed to load environment");
-    let ctx = ValidationContext::builder(environment)
-        .source_pool(pool.clone())
-        .build();
+    let ctx = ValidationContext::builder(environment).source_pool(pool.clone()).build();
 
     (ctx, pool, config)
 }
@@ -85,10 +86,8 @@ fn create_pipeline_config(publication_name: &str) -> FullApiPipelineConfig {
 #[tokio::test]
 async fn validate_iceberg_connection_success() {
     let lakekeeper = LakekeeperClient::new(LAKEKEEPER_URL);
-    let (warehouse_name, warehouse_id) = lakekeeper
-        .create_warehouse()
-        .await
-        .expect("Failed to create warehouse");
+    let (warehouse_name, warehouse_id) =
+        lakekeeper.create_warehouse().await.expect("Failed to create warehouse");
 
     let ctx = create_validation_context();
     let config = create_iceberg_config(&warehouse_name);
@@ -163,21 +162,14 @@ async fn validate_bigquery_invalid_credentials() {
 async fn validate_pipeline_wal_level_success() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
-    pool.execute("create table test_table (id serial primary key)")
-        .await
-        .unwrap();
-    pool.execute("create publication test_pub for table test_table")
-        .await
-        .unwrap();
+    pool.execute("create table test_table (id serial primary key)").await.unwrap();
+    pool.execute("create publication test_pub for table test_table").await.unwrap();
 
     let pipeline_config = create_pipeline_config("test_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
     let wal_failure = failures.iter().find(|f| f.name == "Invalid WAL Level");
-    assert!(
-        wal_failure.is_none(),
-        "WAL level should be logical in test DB"
-    );
+    assert!(wal_failure.is_none(), "WAL level should be logical in test DB");
 
     drop_pg_database(&config).await;
 }
@@ -206,27 +198,17 @@ async fn validate_destination_includes_source_validation() {
     let (ctx, _pool, config) = create_validation_context_with_source().await;
     let environment = Environment::load().expect("Failed to load environment");
     let ctx = ValidationContext::builder(environment)
-        .source_pool(
-            ctx.source_pool
-                .expect("source pool should be present for validation"),
-        )
+        .source_pool(ctx.source_pool.expect("source pool should be present for validation"))
         .trusted_username(Some("different_user".to_string()))
         .build();
 
-    let failures = validate_destination(
-        &ctx,
-        &create_bigquery_config("fake-project", "fake-dataset", "{}"),
-    )
-    .await
-    .unwrap();
+    let failures =
+        validate_destination(&ctx, &create_bigquery_config("fake-project", "fake-dataset", "{}"))
+            .await
+            .unwrap();
 
-    let source_failure = failures
-        .iter()
-        .find(|failure| failure.name == "Invalid source username");
-    assert!(
-        source_failure.is_some(),
-        "Expected source validation failure"
-    );
+    let source_failure = failures.iter().find(|failure| failure.name == "Invalid source username");
+    assert!(source_failure.is_some(), "Expected source validation failure");
 
     drop_pg_database(&config).await;
 }
@@ -236,24 +218,14 @@ async fn validate_pipeline_includes_source_validation() {
     let (ctx, _pool, config) = create_validation_context_with_source().await;
     let environment = Environment::load().expect("Failed to load environment");
     let ctx = ValidationContext::builder(environment)
-        .source_pool(
-            ctx.source_pool
-                .expect("source pool should be present for validation"),
-        )
+        .source_pool(ctx.source_pool.expect("source pool should be present for validation"))
         .trusted_username(Some("different_user".to_string()))
         .build();
 
-    let failures = validate_pipeline(&ctx, &create_pipeline_config("test_pub"))
-        .await
-        .unwrap();
+    let failures = validate_pipeline(&ctx, &create_pipeline_config("test_pub")).await.unwrap();
 
-    let source_failure = failures
-        .iter()
-        .find(|failure| failure.name == "Invalid source username");
-    assert!(
-        source_failure.is_some(),
-        "Expected source validation failure"
-    );
+    let source_failure = failures.iter().find(|failure| failure.name == "Invalid source username");
+    assert!(source_failure.is_some(), "Expected source validation failure");
 
     drop_pg_database(&config).await;
 }
@@ -266,10 +238,7 @@ async fn validate_pipeline_publication_not_found() {
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
     let pub_failure = failures.iter().find(|f| f.name == "Publication Not Found");
-    assert!(
-        pub_failure.is_some(),
-        "Should fail for nonexistent publication"
-    );
+    assert!(pub_failure.is_some(), "Should fail for nonexistent publication");
     assert_eq!(pub_failure.unwrap().failure_type, FailureType::Critical);
 
     drop_pg_database(&config).await;
@@ -295,23 +264,14 @@ async fn validate_pipeline_publication_empty() {
 async fn validate_pipeline_tables_without_primary_keys() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
-    pool.execute("create table no_pk_table (id int, name text)")
-        .await
-        .unwrap();
-    pool.execute("create publication pk_test_pub for table no_pk_table")
-        .await
-        .unwrap();
+    pool.execute("create table no_pk_table (id int, name text)").await.unwrap();
+    pool.execute("create publication pk_test_pub for table no_pk_table").await.unwrap();
 
     let pipeline_config = create_pipeline_config("pk_test_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let pk_failure = failures
-        .iter()
-        .find(|f| f.name == "Tables Missing Primary Keys");
-    assert!(
-        pk_failure.is_some(),
-        "Should warn for table without primary key"
-    );
+    let pk_failure = failures.iter().find(|f| f.name == "Tables Missing Primary Keys");
+    assert!(pk_failure.is_some(), "Should warn for table without primary key");
     assert_eq!(pk_failure.unwrap().failure_type, FailureType::Warning);
     assert!(
         pk_failure.unwrap().reason.contains("no_pk_table"),
@@ -325,23 +285,14 @@ async fn validate_pipeline_tables_without_primary_keys() {
 async fn validate_pipeline_tables_with_primary_keys_passes() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
-    pool.execute("create table pk_table (id serial primary key, name text)")
-        .await
-        .unwrap();
-    pool.execute("create publication pk_pass_pub for table pk_table")
-        .await
-        .unwrap();
+    pool.execute("create table pk_table (id serial primary key, name text)").await.unwrap();
+    pool.execute("create publication pk_pass_pub for table pk_table").await.unwrap();
 
     let pipeline_config = create_pipeline_config("pk_pass_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let pk_failure = failures
-        .iter()
-        .find(|f| f.name == "Tables Missing Primary Keys");
-    assert!(
-        pk_failure.is_none(),
-        "Should pass for table with primary key"
-    );
+    let pk_failure = failures.iter().find(|f| f.name == "Tables Missing Primary Keys");
+    assert!(pk_failure.is_none(), "Should pass for table with primary key");
 
     drop_pg_database(&config).await;
 }
@@ -361,20 +312,13 @@ async fn validate_pipeline_generated_columns() {
     .await
     .unwrap();
 
-    pool.execute("create publication gen_col_pub for table gen_col_table")
-        .await
-        .unwrap();
+    pool.execute("create publication gen_col_pub for table gen_col_table").await.unwrap();
 
     let pipeline_config = create_pipeline_config("gen_col_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let gen_failure = failures
-        .iter()
-        .find(|f| f.name == "Tables With Generated Columns");
-    assert!(
-        gen_failure.is_some(),
-        "Should warn about table with generated columns"
-    );
+    let gen_failure = failures.iter().find(|f| f.name == "Tables With Generated Columns");
+    assert!(gen_failure.is_some(), "Should warn about table with generated columns");
     assert_eq!(gen_failure.unwrap().failure_type, FailureType::Warning);
     assert!(
         gen_failure.unwrap().reason.contains("gen_col_table"),
@@ -388,23 +332,14 @@ async fn validate_pipeline_generated_columns() {
 async fn validate_pipeline_no_generated_columns_passes() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
-    pool.execute("create table normal_table (id serial primary key, name text)")
-        .await
-        .unwrap();
-    pool.execute("create publication normal_pub for table normal_table")
-        .await
-        .unwrap();
+    pool.execute("create table normal_table (id serial primary key, name text)").await.unwrap();
+    pool.execute("create publication normal_pub for table normal_table").await.unwrap();
 
     let pipeline_config = create_pipeline_config("normal_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let gen_failure = failures
-        .iter()
-        .find(|f| f.name == "Tables With Generated Columns");
-    assert!(
-        gen_failure.is_none(),
-        "Should not warn for table without generated columns"
-    );
+    let gen_failure = failures.iter().find(|f| f.name == "Tables With Generated Columns");
+    assert!(gen_failure.is_none(), "Should not warn for table without generated columns");
 
     drop_pg_database(&config).await;
 }
@@ -413,12 +348,8 @@ async fn validate_pipeline_no_generated_columns_passes() {
 async fn validate_pipeline_all_checks_pass() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
-    pool.execute("create table good_table (id serial primary key, data text)")
-        .await
-        .unwrap();
-    pool.execute("create publication good_pub for table good_table")
-        .await
-        .unwrap();
+    pool.execute("create table good_table (id serial primary key, data text)").await.unwrap();
+    pool.execute("create publication good_pub for table good_table").await.unwrap();
 
     let pipeline_config = create_pipeline_config("good_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();

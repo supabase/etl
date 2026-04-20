@@ -1,7 +1,9 @@
-use sqlx::postgres::PgRow;
-use sqlx::postgres::types::Oid as SqlxTableId;
-use sqlx::{PgExecutor, PgPool, Row};
 use std::collections::HashMap;
+
+use sqlx::{
+    PgExecutor, PgPool, Row,
+    postgres::{PgRow, types::Oid as SqlxTableId},
+};
 use tokio_postgres::types::Type as PgType;
 
 use crate::types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
@@ -424,8 +426,9 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio_postgres::types::Type;
+
+    use super::*;
 
     #[test]
     fn test_type_string_conversion() {
@@ -447,10 +450,7 @@ mod tests {
         for (original_type, _) in &test_types {
             let type_string = postgres_type_to_string(original_type);
             let converted_back = string_to_postgres_type(&type_string);
-            assert_eq!(
-                converted_back, *original_type,
-                "Roundtrip failed for: {original_type:?}"
-            );
+            assert_eq!(converted_back, *original_type, "Roundtrip failed for: {original_type:?}");
         }
 
         // Test unknown type fallback

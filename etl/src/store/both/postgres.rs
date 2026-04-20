@@ -1,28 +1,39 @@
+use std::{
+    collections::{BTreeMap, HashMap},
+    ops::DerefMut,
+    sync::Arc,
+    time::Duration,
+};
+
 use etl_postgres::replication::{destination_metadata, schema, state};
 use metrics::gauge;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, Executor, PgConnection, PgPool};
-use std::collections::{BTreeMap, HashMap};
-use std::ops::DerefMut;
-use std::sync::Arc;
-use std::time::Duration;
+use sqlx::{
+    Connection, Executor, PgConnection, PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
-use crate::config::{
-    ETL_MIGRATION_OPTIONS, ETL_STATE_MANAGEMENT_OPTIONS, IntoConnectOptions, PgConnectionConfig,
+use crate::{
+    config::{
+        ETL_MIGRATION_OPTIONS, ETL_STATE_MANAGEMENT_OPTIONS, IntoConnectOptions, PgConnectionConfig,
+    },
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    metrics::{ETL_TABLES_TOTAL, PHASE_LABEL},
+    state::{
+        destination_metadata::{
+            AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
+        },
+        table::TableReplicationPhase,
+    },
+    store::{
+        cleanup::CleanupStore,
+        schema::SchemaStore,
+        state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
+    },
+    types::{PipelineId, ReplicationMask, SnapshotId, TableId, TableSchema},
 };
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
-use crate::metrics::{ETL_TABLES_TOTAL, PHASE_LABEL};
-use crate::state::destination_metadata::{
-    AppliedDestinationTableMetadata, DestinationTableMetadata, DestinationTableSchemaStatus,
-};
-use crate::state::table::TableReplicationPhase;
-use crate::store::cleanup::CleanupStore;
-use crate::store::schema::SchemaStore;
-use crate::store::state::{DestinationTablesMetadata, StateStore, TableReplicationStates};
-use crate::types::{PipelineId, ReplicationMask, SnapshotId, TableId, TableSchema};
 
 /// Maximum number of connections in the pool.
 ///
@@ -123,9 +134,7 @@ impl Inner {
     fn init_phase_counts(&mut self, table_states: &BTreeMap<TableId, TableReplicationPhase>) {
         let mut phase_counts = HashMap::new();
         for phase in table_states.values() {
-            *phase_counts
-                .entry(phase.as_type().as_static_str())
-                .or_insert(0u64) += 1;
+            *phase_counts.entry(phase.as_type().as_static_str()).or_insert(0u64) += 1;
         }
         self.phase_counts = phase_counts;
     }
@@ -170,8 +179,7 @@ impl Inner {
         let snapshot_id = table_schema.snapshot_id;
 
         // Insert the new schema.
-        self.table_schemas
-            .insert((table_id, snapshot_id), table_schema);
+        self.table_schemas.insert((table_id, snapshot_id), table_schema);
 
         // Collect all snapshot_ids for this table.
         let mut snapshots_for_table: Vec<SnapshotId> = self
@@ -240,11 +248,7 @@ impl PostgresStore {
         source_config: PgConnectionConfig,
     ) -> EtlResult<Self> {
         apply_migrations(&source_config).await.map_err(|err| {
-            etl_error!(
-                ErrorKind::SourceError,
-                "Failed to run Postgres state store migrations",
-                err
-            )
+            etl_error!(ErrorKind::SourceError, "Failed to run Postgres state store migrations", err)
         })?;
 
         let pool = create_database_pool(&source_config);
@@ -255,11 +259,7 @@ impl PostgresStore {
             destination_tables_metadata: Arc::new(HashMap::new()),
         };
 
-        Ok(Self {
-            pipeline_id,
-            pool,
-            inner: Arc::new(Mutex::new(inner)),
-        })
+        Ok(Self { pipeline_id, pool, inner: Arc::new(Mutex::new(inner)) })
     }
 }
 
@@ -437,10 +437,7 @@ impl StateStore for PostgresStore {
             etl_error!(
                 ErrorKind::SourceQueryFailed,
                 "Destination tables metadata loading failed",
-                format!(
-                    "Failed to load destination tables metadata from PostgreSQL: {}",
-                    err
-                )
+                format!("Failed to load destination tables metadata from PostgreSQL: {}", err)
             )
         })?;
 
@@ -462,10 +459,7 @@ impl StateStore for PostgresStore {
         let mut inner = self.inner.lock().await;
         inner.destination_tables_metadata = Arc::new(metadata);
 
-        info!(
-            count = metadata_len,
-            "loaded destination tables metadata from postgres state store"
-        );
+        info!(count = metadata_len, "loaded destination tables metadata from postgres state store");
 
         Ok(metadata_len)
     }
@@ -497,10 +491,7 @@ impl StateStore for PostgresStore {
             etl_error!(
                 ErrorKind::SourceQueryFailed,
                 "Destination table metadata storage failed",
-                format!(
-                    "Failed to store destination table metadata in PostgreSQL: {}",
-                    err
-                )
+                format!("Failed to store destination table metadata in PostgreSQL: {}", err)
             )
         })?;
 
@@ -606,12 +597,12 @@ impl SchemaStore for PostgresStore {
         let table_schemas = schema::load_table_schemas(&self.pool, self.pipeline_id as i64)
             .await
             .map_err(|err| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
-                    "Table schemas loading failed",
-                    format!("Failed to load table schemas from PostgreSQL: {}", err)
-                )
-            })?;
+            etl_error!(
+                ErrorKind::SourceQueryFailed,
+                "Table schemas loading failed",
+                format!("Failed to load table schemas from PostgreSQL: {}", err)
+            )
+        })?;
         let table_schemas_len = table_schemas.len();
 
         let mut inner = self.inner.lock().await;
@@ -621,10 +612,7 @@ impl SchemaStore for PostgresStore {
             inner.table_schemas.insert(key, Arc::new(table_schema));
         }
 
-        info!(
-            count = table_schemas_len,
-            "loaded table schemas from postgres state store"
-        );
+        info!(count = table_schemas_len, "loaded table schemas from postgres state store");
 
         Ok(table_schemas_len)
     }
@@ -670,10 +658,7 @@ impl CleanupStore for PostgresStore {
             etl_error!(
                 ErrorKind::SourceQueryFailed,
                 "Destination table metadata deletion failed",
-                format!(
-                    "Failed to delete destination table metadata in PostgreSQL: {}",
-                    err
-                )
+                format!("Failed to delete destination table metadata in PostgreSQL: {}", err)
             )
         })?;
 

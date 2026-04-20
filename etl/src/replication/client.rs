@@ -1,30 +1,28 @@
-use crate::config::{ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig};
-use crate::conversions::{ColumnSchemaMessage, IdentityMessage, build_table_schema};
-use crate::error::{ErrorKind, EtlResult};
-use crate::types::{ColumnSchema, PgLsn, SnapshotId, TableId, TableName, TableSchema};
-use crate::utils::MakeRustlsConnect;
-use crate::{bail, etl_error};
-use etl_postgres::below_version;
-use etl_postgres::replication::extract_server_version;
-use etl_postgres::version::POSTGRES_15;
+use std::{collections::HashSet, fmt, num::NonZeroI32, sync::Arc, time::Duration};
+
+use etl_postgres::{below_version, replication::extract_server_version, version::POSTGRES_15};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
-use rustls::ClientConfig;
-use rustls::pki_types::{CertificateDer, pem::PemObject};
-use std::collections::HashSet;
-use std::fmt;
-use std::num::NonZeroI32;
-use std::sync::Arc;
-use std::time::Duration;
+use rustls::{
+    ClientConfig,
+    pki_types::{CertificateDer, pem::PemObject},
+};
 use tokio::sync::watch;
-
-use tokio_postgres::error::SqlState;
-use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
     Client, Config, Connection, CopyOutStream, NoTls, SimpleQueryMessage, SimpleQueryRow, Socket,
-    config::ReplicationMode,
+    config::ReplicationMode, error::SqlState, tls::MakeTlsConnect,
 };
 use tracing::{Instrument, error, info, warn};
+
+use crate::{
+    bail,
+    config::{ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig},
+    conversions::{ColumnSchemaMessage, IdentityMessage, build_table_schema},
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    types::{ColumnSchema, PgLsn, SnapshotId, TableId, TableName, TableSchema},
+    utils::MakeRustlsConnect,
+};
 
 /// Maximum time to wait for a replication slot deletion to complete.
 ///
@@ -85,9 +83,7 @@ pub enum PostgresConnectionUpdate {
 impl PostgresConnectionUpdate {
     /// Creates an error update from an error message.
     pub(crate) fn errored(error: impl Into<Arc<str>>) -> Self {
-        Self::Errored {
-            error: error.into(),
-        }
+        Self::Errored { error: error.into() }
     }
 }
 
@@ -221,9 +217,7 @@ impl PgReplicationTransaction {
         table_schema: &TableSchema,
         publication_name: &str,
     ) -> EtlResult<HashSet<String>> {
-        self.client
-            .get_replicated_column_names(table_id, table_schema, publication_name)
-            .await
+        self.client.get_replicated_column_names(table_id, table_schema, publication_name).await
     }
 
     /// Creates a COPY stream for reading data from the specified table.
@@ -235,9 +229,7 @@ impl PgReplicationTransaction {
         column_schemas: &[ColumnSchema],
         publication_name: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
-        self.client
-            .get_table_copy_stream(table_id, column_schemas, publication_name)
-            .await
+        self.client.get_table_copy_stream(table_id, column_schemas, publication_name).await
     }
 
     /// Exports the current transaction snapshot so child connections can share it.
@@ -255,9 +247,7 @@ impl PgReplicationTransaction {
         table_id: TableId,
         num_partitions: u16,
     ) -> EtlResult<Vec<CtidPartition>> {
-        self.client
-            .plan_ctid_partitions(table_id, num_partitions)
-            .await
+        self.client.plan_ctid_partitions(table_id, num_partitions).await
     }
 
     /// Checks whether the given table is a partitioned parent (`relkind = 'p'`).
@@ -318,10 +308,7 @@ impl PgReplicationChildTransaction {
         column_schemas: &[ColumnSchema],
         publication_name: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
-        self.client
-            .client
-            .get_table_copy_stream(table_id, column_schemas, publication_name)
-            .await
+        self.client.client.get_table_copy_stream(table_id, column_schemas, publication_name).await
     }
 
     /// Creates a COPY stream for a ctid partition range of the specified table.
@@ -397,16 +384,14 @@ impl PgReplicationClient {
     ///
     /// The connection is configured for logical replication mode.
     async fn connect_no_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
-        let mut config: Config = pg_connection_config
-            .clone()
-            .with_db(Some(&ETL_REPLICATION_OPTIONS));
+        let mut config: Config =
+            pg_connection_config.clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
         config.replication_mode(ReplicationMode::Logical);
 
         let (client, connection) = config.connect(NoTls).await?;
 
-        let server_version = connection
-            .parameter("server_version")
-            .and_then(extract_server_version);
+        let server_version =
+            connection.parameter("server_version").and_then(extract_server_version);
 
         let connection_updates_rx = spawn_postgres_connection::<NoTls>(connection);
 
@@ -424,9 +409,8 @@ impl PgReplicationClient {
     ///
     /// The connection is configured for logical replication mode
     async fn connect_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
-        let mut config: Config = pg_connection_config
-            .clone()
-            .with_db(Some(&ETL_REPLICATION_OPTIONS));
+        let mut config: Config =
+            pg_connection_config.clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
         config.replication_mode(ReplicationMode::Logical);
 
         let mut root_store = rustls::RootCertStore::empty();
@@ -439,15 +423,13 @@ impl PgReplicationClient {
             }
         };
 
-        let tls_config = ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+        let tls_config =
+            ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
 
         let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
 
-        let server_version = connection
-            .parameter("server_version")
-            .and_then(extract_server_version);
+        let server_version =
+            connection.parameter("server_version").and_then(extract_server_version);
 
         let connection_updates_rx = spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
@@ -463,11 +445,8 @@ impl PgReplicationClient {
 
     /// Creates a non-replication, non-TLS child connection.
     async fn connect_child_no_tls(&self) -> EtlResult<ChildPgReplicationClient> {
-        let config: Config = self
-            .pg_connection_config
-            .as_ref()
-            .clone()
-            .with_db(Some(&ETL_REPLICATION_OPTIONS));
+        let config: Config =
+            self.pg_connection_config.as_ref().clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
 
         let (client, connection) = config.connect(NoTls).await?;
         let connection_updates_rx = spawn_postgres_connection::<NoTls>(connection);
@@ -479,19 +458,13 @@ impl PgReplicationClient {
             connection_updates_rx,
         };
 
-        Ok(ChildPgReplicationClient {
-            _parent: self.clone(),
-            client,
-        })
+        Ok(ChildPgReplicationClient { _parent: self.clone(), client })
     }
 
     /// Creates a non-replication, TLS-encrypted child connection.
     async fn connect_child_tls(&self) -> EtlResult<ChildPgReplicationClient> {
-        let config: Config = self
-            .pg_connection_config
-            .as_ref()
-            .clone()
-            .with_db(Some(&ETL_REPLICATION_OPTIONS));
+        let config: Config =
+            self.pg_connection_config.as_ref().clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
 
         let mut root_store = rustls::RootCertStore::empty();
         for cert in CertificateDer::pem_slice_iter(
@@ -501,9 +474,8 @@ impl PgReplicationClient {
             root_store.add(cert)?;
         }
 
-        let tls_config = ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+        let tls_config =
+            ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
 
         let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
         let connection_updates_rx = spawn_postgres_connection::<MakeRustlsConnect>(connection);
@@ -515,10 +487,7 @@ impl PgReplicationClient {
             connection_updates_rx,
         };
 
-        Ok(ChildPgReplicationClient {
-            _parent: self.clone(),
-            client,
-        })
+        Ok(ChildPgReplicationClient { _parent: self.clone(), client })
     }
 
     /// Creates a non-replication child connection that inherits this client's connection settings.
@@ -554,9 +523,7 @@ impl PgReplicationClient {
                     return Ok(None);
                 }
 
-                let unit = row
-                    .try_get("unit")?
-                    .unwrap_or(PG_SETTINGS_DEFAULT_DURATION_UNIT);
+                let unit = row.try_get("unit")?.unwrap_or(PG_SETTINGS_DEFAULT_DURATION_UNIT);
 
                 let duration = match unit {
                     "ms" => Duration::from_millis(setting),
@@ -604,17 +571,14 @@ impl PgReplicationClient {
 
         // USE_SNAPSHOT requires being inside a transaction.
         let transaction = PgReplicationTransaction::new(self.clone()).await?;
-        let slot = self
-            .create_slot_internal(slot_name, SnapshotAction::Use)
-            .await?;
+        let slot = self.create_slot_internal(slot_name, SnapshotAction::Use).await?;
 
         Ok((transaction, slot))
     }
 
     /// Creates a new logical replication slot with the specified name and no snapshot.
     pub async fn create_slot(&self, slot_name: &str) -> EtlResult<CreateSlotResult> {
-        self.create_slot_internal(slot_name, SnapshotAction::NoExport)
-            .await
+        self.create_slot_internal(slot_name, SnapshotAction::NoExport).await
     }
 
     /// Gets the state of a replication slot by name.
@@ -671,9 +635,7 @@ impl PgReplicationClient {
                     "confirmed_flush_lsn",
                     "pg_replication_slots",
                 )?;
-                let slot = GetSlotResult {
-                    confirmed_flush_lsn,
-                };
+                let slot = GetSlotResult { confirmed_flush_lsn };
 
                 return Ok(slot);
             }
@@ -730,10 +692,7 @@ impl PgReplicationClient {
         info!(slot_name, "deleting replication slot");
 
         // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
-        let query = format!(
-            r#"DROP_REPLICATION_SLOT {} WAIT;"#,
-            quote_identifier(slot_name)
-        );
+        let query = format!(r#"DROP_REPLICATION_SLOT {} WAIT;"#, quote_identifier(slot_name));
 
         let delete_result =
             match tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
@@ -758,10 +717,7 @@ impl PgReplicationClient {
             Err(err) => {
                 if let Some(&SqlState::UNDEFINED_OBJECT) = err.code() {
                     if fail_if_missing {
-                        warn!(
-                            slot_name,
-                            "attempted to delete non-existent replication slot"
-                        );
+                        warn!(slot_name, "attempted to delete non-existent replication slot");
 
                         bail!(
                             ErrorKind::ReplicationSlotNotFound,
@@ -860,11 +816,8 @@ impl PgReplicationClient {
             return Ok(false);
         }
 
-        let table_oids_list = table_ids
-            .iter()
-            .map(|id| id.0.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let table_oids_list =
+            table_ids.iter().map(|id| id.0.to_string()).collect::<Vec<_>>().join(", ");
 
         let query = format!(
             "select 1 from pg_class where oid in ({table_oids_list}) and relkind = 'p' limit 1;"
@@ -1105,9 +1058,7 @@ impl PgReplicationClient {
     /// The transaction doesn't make any assumptions about the snapshot in use, since this is a
     /// concern of the statements issued within the transaction.
     async fn begin_tx(&self) -> EtlResult<()> {
-        self.client
-            .simple_query("begin read only isolation level repeatable read;")
-            .await?;
+        self.client.simple_query("begin read only isolation level repeatable read;").await?;
 
         Ok(())
     }
@@ -1115,10 +1066,7 @@ impl PgReplicationClient {
     /// Sets the snapshot id on the running transaction.
     async fn set_tx_snapshot(&self, snapshot_id: &str) -> EtlResult<()> {
         self.client
-            .simple_query(&format!(
-                "set transaction snapshot {};",
-                quote_literal(snapshot_id)
-            ))
+            .simple_query(&format!("set transaction snapshot {};", quote_literal(snapshot_id)))
             .await?;
 
         Ok(())
@@ -1174,10 +1122,7 @@ impl PgReplicationClient {
                     bail!(
                         ErrorKind::ReplicationSlotAlreadyExists,
                         "Replication slot already exists",
-                        format!(
-                            "Replication slot '{}' already exists in database",
-                            slot_name
-                        )
+                        format!("Replication slot '{}' already exists in database", slot_name)
                     );
                 }
 
@@ -1185,10 +1130,7 @@ impl PgReplicationClient {
             }
         }
 
-        Err(etl_error!(
-            ErrorKind::ReplicationSlotNotCreated,
-            "Replication slot creation failed"
-        ))
+        Err(etl_error!(ErrorKind::ReplicationSlotNotCreated, "Replication slot creation failed"))
     }
 
     /// Retrieves the full schema for a single table.
@@ -1225,10 +1167,7 @@ impl PgReplicationClient {
                     Self::get_row_value::<String>(&row, "schema_name", "pg_namespace")?;
                 let table_name = Self::get_row_value::<String>(&row, "table_name", "pg_class")?;
 
-                return Ok(TableName {
-                    schema: schema_name,
-                    name: table_name,
-                });
+                return Ok(TableName { schema: schema_name, name: table_name });
             }
         }
 
@@ -1255,11 +1194,7 @@ impl PgReplicationClient {
             ) as has_generated;"#
         );
 
-        for message in self
-            .client
-            .simple_query(&generated_columns_check_query)
-            .await?
-        {
+        for message in self.client.simple_query(&generated_columns_check_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let has_generated_columns =
                     Self::get_row_value::<String>(&row, "has_generated", "pg_attribute")? == "t";
@@ -1530,10 +1465,7 @@ impl PgReplicationClient {
     /// Calls `pg_export_snapshot()` so that child connections can use
     /// `SET TRANSACTION SNAPSHOT` to read from the same consistent point.
     async fn export_snapshot(&self) -> EtlResult<String> {
-        let results = self
-            .client
-            .simple_query("select pg_export_snapshot();")
-            .await?;
+        let results = self.client.simple_query("select pg_export_snapshot();").await?;
 
         for msg in results {
             if let SimpleQueryMessage::Row(row) = msg {
@@ -1547,10 +1479,7 @@ impl PgReplicationClient {
             }
         }
 
-        Err(etl_error!(
-            ErrorKind::InvalidState,
-            "pg_export_snapshot returned no rows"
-        ))
+        Err(etl_error!(ErrorKind::InvalidState, "pg_export_snapshot returned no rows"))
     }
 
     /// Computes balanced ctid partition ranges using relation-size-based blocks.
@@ -1622,17 +1551,11 @@ impl PgReplicationClient {
             let end_block_exclusive = ((i + 1) * blocks_per_partition).min(table_blocks);
 
             let partition = if effective_partitions == 1 {
-                CtidPartition::OpenEnd {
-                    start_tid: "(0,1)".to_string(),
-                }
+                CtidPartition::OpenEnd { start_tid: "(0,1)".to_string() }
             } else if i == 0 {
-                CtidPartition::OpenStart {
-                    end_tid: format!("({end_block_exclusive},1)"),
-                }
+                CtidPartition::OpenStart { end_tid: format!("({end_block_exclusive},1)") }
             } else if i == effective_partitions - 1 {
-                CtidPartition::OpenEnd {
-                    start_tid: format!("({start_block},1)"),
-                }
+                CtidPartition::OpenEnd { start_tid: format!("({start_block},1)") }
             } else {
                 CtidPartition::Closed {
                     start_tid: format!("({start_block},1)"),
@@ -1660,10 +1583,7 @@ impl PgReplicationClient {
         let value = row.try_get(column_name)?.ok_or(etl_error!(
             ErrorKind::SourceSchemaError,
             "Column not found in source table",
-            format!(
-                "Column '{}' not found in table '{}'",
-                column_name, table_name
-            )
+            format!("Column '{}' not found in table '{}'", column_name, table_name)
         ))?;
 
         value.parse().map_err(|e: T::Err| {
@@ -1681,8 +1601,9 @@ impl PgReplicationClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{CtidPartition, PgReplicationClient};
     use etl_postgres::types::TableName;
+
+    use super::{CtidPartition, PgReplicationClient};
 
     #[test]
     fn build_ctid_copy_query_quotes_mixed_case_table_names() {
@@ -1690,9 +1611,7 @@ mod tests {
             &TableName::new("public".to_string(), "User".to_string()),
             "\"id\", \"email\"",
             None,
-            &CtidPartition::OpenEnd {
-                start_tid: "(0,1)".to_string(),
-            },
+            &CtidPartition::OpenEnd { start_tid: "(0,1)".to_string() },
         );
 
         assert!(query.contains("from public.\"User\""));
@@ -1705,9 +1624,7 @@ mod tests {
             &TableName::new("public".to_string(), "CommentReadStatus".to_string()),
             "\"id\"",
             Some("\"tenantId\" is not null"),
-            &CtidPartition::OpenStart {
-                end_tid: "(10,1)".to_string(),
-            },
+            &CtidPartition::OpenStart { end_tid: "(10,1)".to_string() },
         );
 
         assert!(query.contains("from public.\"CommentReadStatus\""));

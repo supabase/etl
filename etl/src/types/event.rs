@@ -1,6 +1,6 @@
+use std::{fmt, mem::size_of};
+
 use etl_postgres::types::{ReplicatedTableSchema, TableId};
-use std::fmt;
-use std::mem::size_of;
 use tokio_postgres::types::PgLsn;
 
 use crate::types::{SizeHint, TableRow};
@@ -239,10 +239,7 @@ pub struct EventSequenceKey {
 impl EventSequenceKey {
     /// Creates a new sequence key from commit LSN and transaction-local ordinal.
     pub fn new(commit_lsn: PgLsn, tx_ordinal: u64) -> Self {
-        Self {
-            commit_lsn,
-            tx_ordinal,
-        }
+        Self { commit_lsn, tx_ordinal }
     }
 }
 

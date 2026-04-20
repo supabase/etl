@@ -17,8 +17,7 @@ pub mod cleanup;
 pub mod schema;
 pub mod state;
 
-pub use both::memory::MemoryStore;
-pub use both::postgres::PostgresStore;
+pub use both::{memory::MemoryStore, postgres::PostgresStore};
 pub use cleanup::CleanupStore;
 pub use schema::SchemaStore;
 pub use state::{StateStore, TableReplicationStates};

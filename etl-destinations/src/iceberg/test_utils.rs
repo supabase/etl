@@ -106,9 +106,7 @@ struct CreateWarehouseRequest {
 impl Default for CreateWarehouseRequest {
     fn default() -> Self {
         CreateWarehouseRequest {
-            delete_profile: DeleteProfile {
-                r#type: DeleteProfileType::Hard,
-            },
+            delete_profile: DeleteProfile { r#type: DeleteProfileType::Hard },
             storage_credential: StorageCredential {
                 aws_access_key_id: MINIO_USERNAME.to_string(),
                 aws_secret_access_key: MINIO_PASSWORD.to_string(),

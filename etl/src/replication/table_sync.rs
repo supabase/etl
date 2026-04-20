@@ -1,26 +1,32 @@
-use etl_config::shared::PipelineConfig;
-use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId};
-use metrics::histogram;
 use std::sync::Arc;
+
+use etl_config::shared::PipelineConfig;
+use etl_postgres::{
+    replication::slots::EtlReplicationSlot,
+    types::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
+};
+use metrics::histogram;
 use tokio_postgres::types::PgLsn;
 use tracing::{info, warn};
 
-use crate::concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx};
-use crate::destination::Destination;
-use crate::destination::async_result::{TruncateTableResult, WriteTableRowsResult};
-use crate::error::{ErrorKind, EtlResult};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, etl_fail_point};
-use crate::metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL};
-use crate::replication::client::PgReplicationClient;
-use crate::replication::table_cache::SharedTableCache;
-use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
-use crate::types::PipelineId;
-use crate::workers::{TableCopyResult, TableSyncWorkerState, table_copy};
-use crate::{bail, etl_error};
+use crate::{
+    bail,
+    concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx},
+    destination::{
+        Destination,
+        async_result::{TruncateTableResult, WriteTableRowsResult},
+    },
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    metrics::{ETL_TABLE_COPY_DURATION_SECONDS, PARTITIONING_LABEL},
+    replication::{client::PgReplicationClient, table_cache::SharedTableCache},
+    state::table::{TableReplicationPhase, TableReplicationPhaseType},
+    store::{schema::SchemaStore, state::StateStore},
+    types::PipelineId,
+    workers::{TableCopyResult, TableSyncWorkerState, table_copy},
+};
 
 /// Result type for table synchronization operations.
 ///
@@ -160,9 +166,8 @@ where
                         );
                     }
                     Ok(applied_metadata) => {
-                        if let Some(table_schema) = store
-                            .get_table_schema(&table_id, applied_metadata.snapshot_id)
-                            .await?
+                        if let Some(table_schema) =
+                            store.get_table_schema(&table_id, applied_metadata.snapshot_id).await?
                         {
                             let replicated_table_schema = ReplicatedTableSchema::from_mask(
                                 table_schema,
@@ -203,9 +208,7 @@ where
             info!(table_id = table_id.0, "starting data copy");
             {
                 let mut inner = table_sync_worker_state.lock().await;
-                inner
-                    .set_and_store(TableReplicationPhase::DataSync, &store)
-                    .await?;
+                inner.set_and_store(TableReplicationPhase::DataSync, &store).await?;
             }
 
             // Fail point to test when the table sync fails before copying data.
@@ -217,9 +220,8 @@ where
             //
             // If a slot already exists at this point, we could delete it and try to recover, but it means
             // that the state was somehow reset without the slot being deleted, and we want to surface this.
-            let (transaction, slot) = replication_client
-                .create_slot_with_transaction(&slot_name)
-                .await?;
+            let (transaction, slot) =
+                replication_client.create_slot_with_transaction(&slot_name).await?;
 
             // We copy the table schema and write it both to the state store and destination.
             //
@@ -263,11 +265,7 @@ where
                     },
                 )?;
             shared_table_cache
-                .upsert(
-                    table_id,
-                    table_schema.snapshot_id,
-                    Some(replication_mask.clone()),
-                )
+                .upsert(table_id, table_schema.snapshot_id, Some(replication_mask.clone()))
                 .await;
 
             // Create the replicated table schema with the replication mask.
@@ -278,10 +276,7 @@ where
             let mut total_table_copy_duration_secs = 0.0;
 
             // We check if the table should be copied, or we can skip it.
-            if config
-                .table_sync_copy
-                .should_copy_table(table_id.into_inner())
-            {
+            if config.table_sync_copy.should_copy_table(table_id.into_inner()) {
                 let result = table_copy(
                     &transaction,
                     table_id,
@@ -297,10 +292,7 @@ where
                 .await?;
 
                 match result {
-                    TableCopyResult::Completed {
-                        total_rows,
-                        total_duration_secs,
-                    } => {
+                    TableCopyResult::Completed { total_rows, total_duration_secs } => {
                         total_table_copy_rows = total_rows as usize;
                         total_table_copy_duration_secs = total_duration_secs;
                     }
@@ -328,10 +320,7 @@ where
                     .write_table_rows(&replicated_table_schema, vec![], flush_result)
                     .await?;
                 pending_flush_result.await.into_result()?;
-                info!(
-                    table_id = table_id.0,
-                    "writing empty table rows for empty table"
-                );
+                info!(table_id = table_id.0, "writing empty table rows for empty table");
             }
 
             // Record the table copy duration.
@@ -350,9 +339,7 @@ where
             // We mark that we finished the copy of the table schema and data.
             {
                 let mut inner = table_sync_worker_state.lock().await;
-                inner
-                    .set_and_store(TableReplicationPhase::FinishedCopy, &store)
-                    .await?;
+                inner.set_and_store(TableReplicationPhase::FinishedCopy, &store).await?;
             }
 
             slot.consistent_point
@@ -371,9 +358,7 @@ where
     // max(snapshot_lsn, current_lsn) when setting the Catchup LSN.
     {
         let mut inner = table_sync_worker_state.lock().await;
-        inner
-            .set_and_store(TableReplicationPhase::SyncWait { lsn: start_lsn }, &store)
-            .await?;
+        inner.set_and_store(TableReplicationPhase::SyncWait { lsn: start_lsn }, &store).await?;
     }
 
     // We also wait to be signaled to catch up with the main apply worker up to a specific lsn.
@@ -384,18 +369,12 @@ where
     // If we are told to shut down while waiting for a phase change, we will signal this to
     // the caller.
     if result.should_shutdown() {
-        info!(
-            table_id = table_id.0,
-            "shutting down table sync while waiting for catchup"
-        );
+        info!(table_id = table_id.0, "shutting down table sync while waiting for catchup");
 
         return Ok(TableSyncResult::Stopped);
     }
 
-    info!(
-        table_id = table_id.0,
-        "table sync completed, starting streaming"
-    );
+    info!(table_id = table_id.0, "table sync completed, starting streaming");
 
     Ok(TableSyncResult::Completed { start_lsn })
 }

@@ -1,7 +1,3 @@
-use crate::config::K8sConfig;
-use crate::configs::log::LogLevel;
-use crate::k8s::{DestinationType, PodStatus, ReplicatorConfigMapFile};
-use crate::k8s::{K8sClient, K8sError, PodPhase};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Utc;
@@ -16,6 +12,12 @@ use kube::{
 };
 use serde_json::json;
 use tracing::debug;
+
+use crate::{
+    config::K8sConfig,
+    configs::log::LogLevel,
+    k8s::{DestinationType, K8sClient, K8sError, PodPhase, PodStatus, ReplicatorConfigMapFile},
+};
 
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
@@ -127,24 +129,19 @@ impl ReplicatorResourceConfig {
     ) -> Result<Self, K8sError> {
         let (default_replicator_memory_request, default_replicator_cpu_request) = match environment
         {
-            Environment::Prod => (
-                REPLICATOR_MEMORY_REQUEST_PROD_DEFAULT,
-                REPLICATOR_CPU_REQUEST_PROD_DEFAULT,
-            ),
+            Environment::Prod => {
+                (REPLICATOR_MEMORY_REQUEST_PROD_DEFAULT, REPLICATOR_CPU_REQUEST_PROD_DEFAULT)
+            }
             _ => (
                 REPLICATOR_MEMORY_REQUEST_NON_PROD_DEFAULT,
                 REPLICATOR_CPU_REQUEST_NON_PROD_DEFAULT,
             ),
         };
         let (default_vector_memory_request, default_vector_cpu_request) = match environment {
-            Environment::Prod => (
-                VECTOR_MEMORY_REQUEST_PROD_DEFAULT,
-                VECTOR_CPU_REQUEST_PROD_DEFAULT,
-            ),
-            _ => (
-                VECTOR_MEMORY_REQUEST_NON_PROD_DEFAULT,
-                VECTOR_CPU_REQUEST_NON_PROD_DEFAULT,
-            ),
+            Environment::Prod => {
+                (VECTOR_MEMORY_REQUEST_PROD_DEFAULT, VECTOR_CPU_REQUEST_PROD_DEFAULT)
+            }
+            _ => (VECTOR_MEMORY_REQUEST_NON_PROD_DEFAULT, VECTOR_CPU_REQUEST_NON_PROD_DEFAULT),
         };
         let replicator_memory_request = k8s_config
             .replicator_resources
@@ -209,13 +206,7 @@ impl HttpK8sClient {
             Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let pods_api: Api<Pod> = Api::namespaced(client, DATA_PLANE_NAMESPACE);
 
-        Ok(HttpK8sClient {
-            secrets_api,
-            config_maps_api,
-            stateful_sets_api,
-            pods_api,
-            k8s_config,
-        })
+        Ok(HttpK8sClient { secrets_api, config_maps_api, stateful_sets_api, pods_api, k8s_config })
     }
 
     /// Helper function to handle delete operations that should ignore 404 errors
@@ -234,15 +225,9 @@ impl HttpK8sClient {
     fn has_replicator_container_error(pod: &Pod, replicator_container_name: &str) -> bool {
         // Find the replicator container status
         let container_status = pod.status.as_ref().and_then(|status| {
-            status
-                .container_statuses
-                .as_ref()
-                .and_then(|container_statuses| {
-                    container_statuses
-                        .iter()
-                        .find(|cs| cs.name == replicator_container_name)
-                        .cloned()
-                })
+            status.container_statuses.as_ref().and_then(|container_statuses| {
+                container_statuses.iter().find(|cs| cs.name == replicator_container_name).cloned()
+            })
         });
 
         let Some(container_status) = container_status else {
@@ -309,9 +294,7 @@ impl K8sClient for HttpK8sClient {
         // there is an override (likely during an incident or SREs intervention), we want to override
         // their changes. The API database is the source of truth for credentials.
         let pp = PatchParams::apply(&postgres_secret_name).force();
-        self.secrets_api
-            .patch(&postgres_secret_name, &pp, &Patch::Apply(secret))
-            .await?;
+        self.secrets_api.patch(&postgres_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
     }
@@ -337,9 +320,7 @@ impl K8sClient for HttpK8sClient {
         // there is an override (likely during an incident or SREs intervention), we want to override
         // their changes. The API database is the source of truth for credentials.
         let pp = PatchParams::apply(&bq_secret_name).force();
-        self.secrets_api
-            .patch(&bq_secret_name, &pp, &Patch::Apply(secret))
-            .await?;
+        self.secrets_api.patch(&bq_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
     }
@@ -372,9 +353,7 @@ impl K8sClient for HttpK8sClient {
         // there is an override (likely during an incident or SREs intervention), we want to override
         // their changes. The API database is the source of truth for credentials.
         let pp = PatchParams::apply(&iceberg_secret_name).force();
-        self.secrets_api
-            .patch(&iceberg_secret_name, &pp, &Patch::Apply(secret))
-            .await?;
+        self.secrets_api.patch(&iceberg_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
     }
@@ -401,9 +380,7 @@ impl K8sClient for HttpK8sClient {
         let secret: Secret = serde_json::from_value(ducklake_secret_json)?;
 
         let pp = PatchParams::apply(&ducklake_secret_name).force();
-        self.secrets_api
-            .patch(&ducklake_secret_name, &pp, &Patch::Apply(secret))
-            .await?;
+        self.secrets_api.patch(&ducklake_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
     }
@@ -501,9 +478,7 @@ impl K8sClient for HttpK8sClient {
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
-            self.config_maps_api
-                .delete(&replicator_config_map_name, &dp)
-                .await,
+            self.config_maps_api.delete(&replicator_config_map_name, &dp).await,
         )?;
 
         Ok(())
@@ -554,9 +529,7 @@ impl K8sClient for HttpK8sClient {
         // there is an override (likely during an incident or SREs intervention), we want to override
         // their changes.
         let pp = PatchParams::apply(&stateful_set_name).force();
-        self.stateful_sets_api
-            .patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set))
-            .await?;
+        self.stateful_sets_api.patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set)).await?;
 
         Ok(())
     }
@@ -1208,14 +1181,14 @@ fn get_restarted_at_annotation_value() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use etl_config::shared::{
         BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
         TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     };
     use insta::assert_json_snapshot;
+
+    use super::*;
 
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
 
@@ -1308,10 +1281,7 @@ mod tests {
                     tls: TlsConfig::disabled(),
                     keepalive: TcpKeepaliveConfig::default(),
                 },
-                batch: BatchConfig {
-                    max_fill_ms: 1_000,
-                    memory_budget_ratio: 0.2,
-                },
+                batch: BatchConfig { max_fill_ms: 1_000, memory_budget_ratio: 0.2 },
                 table_error_retry_delay_ms: 500,
                 table_error_retry_max_attempts: 3,
                 max_table_sync_workers: 4,

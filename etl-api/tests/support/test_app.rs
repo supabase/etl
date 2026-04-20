@@ -1,40 +1,44 @@
 #![allow(dead_code)]
 
-use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
-use aws_lc_rs::rand::fill;
+use std::{io, net::TcpListener, sync::Arc, time::Duration};
+
+use aws_lc_rs::{
+    aead::{AES_256_GCM, RandomizedNonceKey},
+    rand::fill,
+};
 use base64::prelude::*;
-use etl_api::config::{
-    ApiConfig, ApplicationSettings, EncryptionKey as ConfigEncryptionKey, K8sConfig, SourceConfig,
+use etl_api::{
+    config::{
+        ApiConfig, ApplicationSettings, EncryptionKey as ConfigEncryptionKey, K8sConfig,
+        SourceConfig,
+    },
+    configs::encryption,
+    k8s::{K8sClient, TrustedRootCertsCache},
+    routes::{
+        destinations::{CreateDestinationRequest, UpdateDestinationRequest},
+        destinations_pipelines::{
+            CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
+        },
+        images::{CreateImageRequest, UpdateImageRequest},
+        pipelines::{
+            CreatePipelineRequest, RollbackTablesRequest, UpdatePipelineRequest,
+            UpdatePipelineVersionRequest,
+        },
+        sources::{CreateSourceRequest, UpdateSourceRequest, ValidateSourceRequest},
+        tenants::{CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest},
+        tenants_sources::CreateTenantSourceRequest,
+    },
+    startup::run,
 };
-use etl_api::k8s::{K8sClient, TrustedRootCertsCache};
-use etl_api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
-use etl_api::routes::destinations_pipelines::{
-    CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
-};
-use etl_api::routes::images::{CreateImageRequest, UpdateImageRequest};
-use etl_api::routes::pipelines::{
-    CreatePipelineRequest, RollbackTablesRequest, UpdatePipelineRequest,
-    UpdatePipelineVersionRequest,
-};
-use etl_api::routes::sources::{CreateSourceRequest, UpdateSourceRequest, ValidateSourceRequest};
-use etl_api::routes::tenants::{
-    CreateOrUpdateTenantRequest, CreateTenantRequest, UpdateTenantRequest,
-};
-use etl_api::routes::tenants_sources::CreateTenantSourceRequest;
-use etl_api::{configs::encryption, startup::run};
-use etl_config::Environment;
-use etl_config::shared::PgConnectionConfig;
+use etl_config::{Environment, shared::PgConnectionConfig};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use reqwest::{IntoUrl, RequestBuilder};
-use std::io;
-use std::net::TcpListener;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::runtime::Handle;
-use tokio::time::sleep;
+use tokio::{runtime::Handle, time::sleep};
 
-use crate::support::database::{create_etl_api_database, get_test_db_config};
-use crate::support::k8s_client::{MockK8sClient, MockK8sState};
+use crate::support::{
+    database::{create_etl_api_database, get_test_db_config},
+    k8s_client::{MockK8sClient, MockK8sState},
+};
 
 pub struct TestApp {
     pub address: String,
@@ -59,9 +63,7 @@ impl TestApp {
     }
 
     fn delete_authenticated<U: IntoUrl>(&self, url: U) -> RequestBuilder {
-        self.api_client
-            .delete(url)
-            .bearer_auth(self.api_key.clone())
+        self.api_client.delete(url).bearer_auth(self.api_key.clone())
     }
 
     pub fn database_config(&self) -> &PgConnectionConfig {
@@ -214,14 +216,11 @@ impl TestApp {
         tenant_id: &str,
         destination_id: i64,
     ) -> reqwest::Response {
-        self.get_authenticated(format!(
-            "{}/v1/destinations/{destination_id}",
-            &self.address
-        ))
-        .header("tenant_id", tenant_id)
-        .send()
-        .await
-        .expect("failed to execute request")
+        self.get_authenticated(format!("{}/v1/destinations/{destination_id}", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
     }
 
     pub async fn update_destination(
@@ -230,15 +229,12 @@ impl TestApp {
         destination_id: i64,
         destination: &UpdateDestinationRequest,
     ) -> reqwest::Response {
-        self.post_authenticated(format!(
-            "{}/v1/destinations/{destination_id}",
-            &self.address
-        ))
-        .header("tenant_id", tenant_id)
-        .json(destination)
-        .send()
-        .await
-        .expect("failed to execute request")
+        self.post_authenticated(format!("{}/v1/destinations/{destination_id}", &self.address))
+            .header("tenant_id", tenant_id)
+            .json(destination)
+            .send()
+            .await
+            .expect("failed to execute request")
     }
 
     pub async fn delete_destination(
@@ -246,14 +242,11 @@ impl TestApp {
         tenant_id: &str,
         destination_id: i64,
     ) -> reqwest::Response {
-        self.delete_authenticated(format!(
-            "{}/v1/destinations/{destination_id}",
-            &self.address
-        ))
-        .header("tenant_id", tenant_id)
-        .send()
-        .await
-        .expect("Failed to execute request.")
+        self.delete_authenticated(format!("{}/v1/destinations/{destination_id}", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("Failed to execute request.")
     }
 
     pub async fn read_all_destinations(&self, tenant_id: &str) -> reqwest::Response {
@@ -308,14 +301,11 @@ impl TestApp {
     }
 
     pub async fn start_pipeline(&self, tenant_id: &str, pipeline_id: i64) -> reqwest::Response {
-        self.post_authenticated(format!(
-            "{}/v1/pipelines/{pipeline_id}/start",
-            &self.address
-        ))
-        .header("tenant_id", tenant_id)
-        .send()
-        .await
-        .expect("failed to execute request")
+        self.post_authenticated(format!("{}/v1/pipelines/{pipeline_id}/start", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
     }
 
     pub async fn stop_pipeline(&self, tenant_id: &str, pipeline_id: i64) -> reqwest::Response {
@@ -436,15 +426,12 @@ impl TestApp {
         pipeline_id: i64,
         update_request: &UpdatePipelineVersionRequest,
     ) -> reqwest::Response {
-        self.post_authenticated(format!(
-            "{}/v1/pipelines/{pipeline_id}/version",
-            &self.address
-        ))
-        .header("tenant_id", tenant_id)
-        .json(update_request)
-        .send()
-        .await
-        .expect("Failed to execute request.")
+        self.post_authenticated(format!("{}/v1/pipelines/{pipeline_id}/version", &self.address))
+            .header("tenant_id", tenant_id)
+            .json(update_request)
+            .send()
+            .await
+            .expect("Failed to execute request.")
     }
 
     pub async fn get_pipeline_replication_status(
@@ -467,14 +454,11 @@ impl TestApp {
         tenant_id: &str,
         pipeline_id: i64,
     ) -> reqwest::Response {
-        self.get_authenticated(format!(
-            "{}/v1/pipelines/{}/version",
-            &self.address, pipeline_id
-        ))
-        .header("tenant_id", tenant_id)
-        .send()
-        .await
-        .expect("failed to execute request")
+        self.get_authenticated(format!("{}/v1/pipelines/{}/version", &self.address, pipeline_id))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .expect("failed to execute request")
     }
 
     pub async fn rollback_tables(
@@ -576,23 +560,14 @@ async fn spawn_test_app_with_services(
 
     let config = ApiConfig {
         database: database_config,
-        application: ApplicationSettings {
-            host: base_address.to_string(),
-            port,
-        },
+        application: ApplicationSettings { host: base_address.to_string(), port },
         k8s: K8sConfig::default(),
-        encryption_key: ConfigEncryptionKey {
-            id: 0,
-            key: BASE64_STANDARD.encode(key_bytes),
-        },
+        encryption_key: ConfigEncryptionKey { id: 0, key: BASE64_STANDARD.encode(key_bytes) },
         api_keys: vec![api_key.clone()],
         sentry: None,
         supabase_api_url: None,
         configcat_sdk_key: None,
-        source: SourceConfig {
-            tls_enabled: false,
-            trusted_username: trusted_source_username,
-        },
+        source: SourceConfig { tls_enabled: false, trusted_username: trusted_source_username },
     };
 
     let server = run(

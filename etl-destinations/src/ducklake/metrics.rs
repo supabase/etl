@@ -1,25 +1,33 @@
-use std::collections::HashSet;
-use std::sync::{Arc, Once, OnceLock};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Once, OnceLock},
+};
 
 use chrono::Utc;
-use etl::error::{ErrorKind, EtlResult};
-use etl::etl_error;
+use etl::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+};
 use metrics::{Unit, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
-use tokio::sync::{Semaphore, mpsc, watch};
-use tokio::task::JoinHandle;
-use tokio::time::{Duration, Instant, MissedTickBehavior};
+use tokio::{
+    sync::{Semaphore, mpsc, watch},
+    task::JoinHandle,
+    time::{Duration, Instant, MissedTickBehavior},
+};
 use tracing::{info, warn};
 
-use crate::ducklake::client::{
-    DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
-    format_query_error_detail, run_duckdb_blocking,
+use crate::ducklake::{
+    DuckLakeTableName, LAKE_CATALOG,
+    client::{
+        DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
+        format_query_error_detail, run_duckdb_blocking,
+    },
+    maintenance::{
+        TableMaintenanceNotification, TableMetricsSample, send_maintenance_notification,
+    },
 };
-use crate::ducklake::maintenance::{
-    TableMaintenanceNotification, TableMetricsSample, send_maintenance_notification,
-};
-use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG};
 
 static REGISTER_METRICS: Once = Once::new();
 
@@ -310,10 +318,7 @@ pub(super) async fn spawn_ducklake_metrics_sampler(
         shutdown_rx,
     ));
 
-    Ok(DuckLakeMetricsSampler {
-        shutdown_tx,
-        handle: Mutex::new(handle.into()),
-    })
+    Ok(DuckLakeMetricsSampler { shutdown_tx, handle: Mutex::new(handle.into()) })
 }
 
 /// Periodically samples DuckLake metadata on a dedicated connection pool.
@@ -436,12 +441,9 @@ async fn query_table_storage_metrics(
     table_name: DuckLakeTableName,
 ) -> EtlResult<DuckLakeTableStorageMetrics> {
     let table_name_for_query = table_name.clone();
-    run_duckdb_blocking(
-        pool,
-        blocking_slots,
-        DuckDbBlockingOperationKind::Metrics,
-        move |conn| query_table_storage_metrics_blocking(conn, &table_name_for_query),
-    )
+    run_duckdb_blocking(pool, blocking_slots, DuckDbBlockingOperationKind::Metrics, move |conn| {
+        query_table_storage_metrics_blocking(conn, &table_name_for_query)
+    })
     .await
 }
 
@@ -587,9 +589,7 @@ pub(super) fn query_catalog_maintenance_metrics_blocking(
 }
 
 fn epoch_age_seconds(now_epoch_ms: i64, oldest_epoch_ms: Option<i64>) -> i64 {
-    oldest_epoch_ms
-        .map(|epoch_ms| now_epoch_ms.saturating_sub(epoch_ms) / 1_000)
-        .unwrap_or(0)
+    oldest_epoch_ms.map(|epoch_ms| now_epoch_ms.saturating_sub(epoch_ms) / 1_000).unwrap_or(0)
 }
 
 /// Returns the fully-qualified hidden DuckLake metadata namespace.
@@ -622,20 +622,14 @@ fn resolve_ducklake_metadata_namespace(conn: &duckdb::Connection) -> EtlResult<S
            LIMIT 1;"#,
         quote_literal(&metadata_catalog),
     );
-    let table_schema = conn
-        .query_row(&sql, [], |row| row.get::<_, String>(0))
-        .map_err(|e| {
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake metadata namespace query failed",
-                format_query_error_detail(&sql, &e),
-                source: e
-            )
-        })?;
+    let table_schema = conn.query_row(&sql, [], |row| row.get::<_, String>(0)).map_err(|e| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake metadata namespace query failed",
+            format_query_error_detail(&sql, &e),
+            source: e
+        )
+    })?;
 
-    Ok(format!(
-        "{}.{}",
-        quote_identifier(&metadata_catalog),
-        quote_identifier(&table_schema),
-    ))
+    Ok(format!("{}.{}", quote_identifier(&metadata_catalog), quote_identifier(&table_schema),))
 }

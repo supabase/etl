@@ -1,30 +1,33 @@
+use std::{sync::Arc, time::Duration};
+
 use etl_config::shared::{InvalidatedSlotBehavior, PipelineConfig};
 use etl_postgres::replication::slots::EtlReplicationSlot;
 use metrics::counter;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Semaphore;
-use tokio::task::JoinHandle;
+use tokio::{sync::Semaphore, task::JoinHandle};
 use tokio_postgres::types::PgLsn;
 use tracing::{Instrument, error, info, warn};
 
-use crate::bail;
-use crate::concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx};
-use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::etl_error;
-use crate::metrics::{
-    ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL,
+use crate::{
+    bail,
+    concurrency::{BatchBudgetController, MemoryMonitor, ShutdownRx},
+    destination::Destination,
+    error::{ErrorKind, EtlError, EtlResult},
+    etl_error,
+    metrics::{
+        ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL,
+    },
+    replication::{
+        ApplyLoop, ApplyLoopResult, ApplyWorkerContext, SharedTableCache, WorkerContext,
+        client::{GetOrCreateSlotResult, PgReplicationClient, SlotState},
+    },
+    state::table::{TableReplicationPhase, TableReplicationPhaseType},
+    store::{schema::SchemaStore, state::StateStore},
+    types::PipelineId,
+    workers::{
+        TableSyncWorkerPool,
+        policy::{RetryDirective, build_error_handling_policy},
+    },
 };
-use crate::replication::SharedTableCache;
-use crate::replication::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState};
-use crate::replication::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext};
-use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
-use crate::types::PipelineId;
-use crate::workers::TableSyncWorkerPool;
-use crate::workers::policy::{RetryDirective, build_error_handling_policy};
 
 /// Handle for monitoring and controlling the apply worker.
 ///
@@ -49,11 +52,7 @@ impl ApplyWorkerHandle {
 
         handle.await.map_err(|err| {
             if err.is_cancelled() {
-                etl_error!(
-                    ErrorKind::ApplyWorkerCancelled,
-                    "Apply worker was cancelled",
-                    err
-                )
+                etl_error!(ErrorKind::ApplyWorkerCancelled, "Apply worker was cancelled", err)
             } else {
                 etl_error!(ErrorKind::ApplyWorkerPanic, "Apply worker panicked", err)
             }
@@ -209,15 +208,12 @@ where
             pipeline_id = self.pipeline_id,
             publication_name = self.config.publication_name
         );
-        let apply_worker = self
-            .guarded_run_apply_worker()
-            .instrument(apply_worker_span.or_current());
+        let apply_worker =
+            self.guarded_run_apply_worker().instrument(apply_worker_span.or_current());
 
         let handle = tokio::spawn(apply_worker);
 
-        Ok(ApplyWorkerHandle {
-            handle: Some(handle),
-        })
+        Ok(ApplyWorkerHandle { handle: Some(handle) })
     }
 
     /// Runs the apply worker with retry handling for timed-retriable errors.
@@ -455,14 +451,9 @@ async fn handle_invalidated_slot<S: StateStore>(
                 .map(|table_id| (*table_id, TableReplicationPhase::Init))
                 .collect();
             let reset_count = table_states_updates.len();
-            store
-                .update_table_replication_states(table_states_updates)
-                .await?;
+            store.update_table_replication_states(table_states_updates).await?;
 
-            info!(
-                reset_count,
-                "reset table replication states to init for resync"
-            );
+            info!(reset_count, "reset table replication states to init for resync");
 
             // We delete and recreate the main apply worker slot.
             replication_client.delete_slot_if_exists(slot_name).await?;
@@ -497,10 +488,8 @@ async fn validate_tables_in_init_state<S: StateStore>(store: &S) -> EtlResult<()
         return Ok(());
     }
 
-    let table_details: Vec<String> = non_init_tables
-        .iter()
-        .map(|(id, phase)| format!("table {id} in state {phase}"))
-        .collect();
+    let table_details: Vec<String> =
+        non_init_tables.iter().map(|(id, phase)| format!("table {id} in state {phase}")).collect();
 
     bail!(
         ErrorKind::InvalidState,

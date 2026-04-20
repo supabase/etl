@@ -2,6 +2,13 @@
 // available under the MIT License, which provides Rustls-based TLS support for secure asynchronous
 // Postgres connections using the tokio-postgres client.
 
+use std::{
+    io,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
+
 use aws_lc_rs::digest;
 use const_oid::db::{
     rfc5912::{
@@ -13,13 +20,8 @@ use const_oid::db::{
 };
 use futures::FutureExt;
 use rustls::{ClientConfig, pki_types::ServerName};
-use std::io;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio_postgres::tls::MakeTlsConnect;
-use tokio_postgres::tls::{ChannelBinding, TlsConnect};
+use tokio_postgres::tls::{ChannelBinding, MakeTlsConnect, TlsConnect};
 use tokio_rustls::{TlsConnector, client::TlsStream};
 use x509_cert::{TbsCertificate, der::Decode};
 
@@ -35,9 +37,7 @@ impl MakeRustlsConnect {
     /// Creates a new `MakeRustlsConnect` from the provided `ClientConfig`.
     #[must_use]
     pub(crate) fn new(config: ClientConfig) -> Self {
-        Self {
-            config: Arc::new(config),
-        }
+        Self { config: Arc::new(config) }
     }
 }
 
@@ -90,9 +90,7 @@ where
     type Future = TlsConnectFuture<S>;
 
     fn connect(self, stream: S) -> Self::Future {
-        TlsConnectFuture {
-            inner: self.0.connector.connect(self.0.hostname, stream),
-        }
+        TlsConnectFuture { inner: self.0.connector.connect(self.0.hostname, stream) }
     }
 }
 
@@ -178,11 +176,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use rustls::pki_types::{CertificateDer, UnixTime};
     use rustls::{
         Error, SignatureScheme,
-        client::danger::ServerCertVerifier,
-        client::danger::{HandshakeSignatureValid, ServerCertVerified},
+        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        pki_types::{CertificateDer, UnixTime},
     };
 
     use super::*;
@@ -242,9 +239,7 @@ mod tests {
         let mut config = ClientConfig::builder()
             .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
-        config
-            .dangerous()
-            .set_certificate_verifier(Arc::new(AcceptAllVerifier {}));
+        config.dangerous().set_certificate_verifier(Arc::new(AcceptAllVerifier {}));
 
         let tls = MakeRustlsConnect::new(config);
 
@@ -254,9 +249,8 @@ mod tests {
             std::env::var("TESTS_DATABASE_USERNAME").unwrap_or_else(|_| "postgres".to_string());
         let connection_string = format!("sslmode=require host={host} port={port} user={user}");
 
-        let (client, conn) = tokio_postgres::connect(&connection_string, tls)
-            .await
-            .expect("connect");
+        let (client, conn) =
+            tokio_postgres::connect(&connection_string, tls).await.expect("connect");
 
         tokio::task::spawn(async move { conn.await.map_err(|e| panic!("{e:?}")) });
 

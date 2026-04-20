@@ -1,9 +1,11 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use uuid::Uuid;
 
-use crate::bail;
-use crate::conversions::PgNumeric;
-use crate::error::{ErrorKind, EtlError};
+use crate::{
+    bail,
+    conversions::PgNumeric,
+    error::{ErrorKind, EtlError},
+};
 
 macro_rules! convert_array_variant {
     ($variant:ident, $vec:expr) => {
@@ -17,9 +19,7 @@ macro_rules! convert_array_variant {
                 )
             )
         } else {
-            Ok(ArrayCellNonOptional::$variant(
-                $vec.into_iter().flatten().collect(),
-            ))
+            Ok(ArrayCellNonOptional::$variant($vec.into_iter().flatten().collect()))
         }
     };
 }
@@ -372,20 +372,15 @@ mod tests {
 
     #[test]
     fn array_cell_try_from_with_nulls() {
-        let array_cell = ArrayCell::String(vec![
-            Some("test".to_string()),
-            None,
-            Some("hello".to_string()),
-        ]);
+        let array_cell =
+            ArrayCell::String(vec![Some("test".to_string()), None, Some("hello".to_string())]);
 
         let result = ArrayCellNonOptional::try_from(array_cell);
         assert!(result.is_err());
 
         let error = result.unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("NULL values in arrays not supported in this destination")
+            error.to_string().contains("NULL values in arrays not supported in this destination")
         );
     }
 
@@ -407,14 +402,8 @@ mod tests {
         assert_eq!(Cell::I32(42), Cell::I32(42));
         assert_ne!(Cell::I32(42), Cell::I32(43));
 
-        assert_eq!(
-            Cell::String("test".to_string()),
-            Cell::String("test".to_string())
-        );
-        assert_ne!(
-            Cell::String("test".to_string()),
-            Cell::String("different".to_string())
-        );
+        assert_eq!(Cell::String("test".to_string()), Cell::String("test".to_string()));
+        assert_ne!(Cell::String("test".to_string()), Cell::String("different".to_string()));
 
         assert_eq!(Cell::Null, Cell::Null);
         assert_ne!(Cell::Null, Cell::I32(0));

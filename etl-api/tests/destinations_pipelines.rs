@@ -1,27 +1,29 @@
-use etl_api::routes::destinations::ReadDestinationResponse;
-use etl_api::routes::destinations_pipelines::{
-    CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
-    UpdateDestinationPipelineRequest,
+use etl_api::routes::{
+    destinations::ReadDestinationResponse,
+    destinations_pipelines::{
+        CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
+        UpdateDestinationPipelineRequest,
+    },
+    pipelines::ReadPipelineResponse,
 };
-use etl_api::routes::pipelines::ReadPipelineResponse;
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
-use crate::support::database::{
-    create_test_source_database, run_etl_migrations_on_source_database,
-};
-use crate::{
-    support::mocks::create_default_image,
-    support::mocks::destinations::{
-        create_destination, new_bigquery_destination_config,
-        new_iceberg_supabase_destination_config, new_name, updated_destination_config,
-        updated_iceberg_supabase_destination_config, updated_name,
+use crate::support::{
+    database::{create_test_source_database, run_etl_migrations_on_source_database},
+    mocks::{
+        create_default_image,
+        destinations::{
+            create_destination, new_bigquery_destination_config,
+            new_iceberg_supabase_destination_config, new_name, updated_destination_config,
+            updated_iceberg_supabase_destination_config, updated_name,
+        },
+        pipelines::{new_pipeline_config, updated_pipeline_config},
+        sources::create_source,
+        tenants::{create_tenant, create_tenant_with_id_and_name},
     },
-    support::mocks::pipelines::{new_pipeline_config, updated_pipeline_config},
-    support::mocks::sources::create_source,
-    support::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
-    support::test_app::spawn_test_app,
+    test_app::spawn_test_app,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -40,16 +42,12 @@ async fn bigquery_destination_and_pipeline_can_be_created() {
         source_id,
         pipeline_config: new_pipeline_config(),
     };
-    let response = app
-        .create_destination_pipeline(tenant_id, &destination_pipeline)
-        .await;
+    let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
 
     // Assert
     assert!(response.status().is_success());
-    let response: CreateDestinationPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.destination_id, 1);
     assert_eq!(response.pipeline_id, 1);
 
@@ -57,19 +55,15 @@ async fn bigquery_destination_and_pipeline_can_be_created() {
     let pipeline_id = response.pipeline_id;
 
     let response = app.read_destination(tenant_id, destination_id).await;
-    let response: ReadDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, destination_id);
     assert_eq!(response.name, destination_pipeline.destination_name);
     insta::assert_debug_snapshot!(response.config);
 
     let response = app.read_pipeline(tenant_id, pipeline_id).await;
-    let response: ReadPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, pipeline_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.source_id, source_id);
@@ -94,16 +88,12 @@ async fn iceberg_supabase_destination_and_pipeline_can_be_created() {
         source_id,
         pipeline_config: new_pipeline_config(),
     };
-    let response = app
-        .create_destination_pipeline(tenant_id, &destination_pipeline)
-        .await;
+    let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
 
     // Assert
     assert!(response.status().is_success());
-    let response: CreateDestinationPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.destination_id, 1);
     assert_eq!(response.pipeline_id, 1);
 
@@ -111,19 +101,15 @@ async fn iceberg_supabase_destination_and_pipeline_can_be_created() {
     let pipeline_id = response.pipeline_id;
 
     let response = app.read_destination(tenant_id, destination_id).await;
-    let response: ReadDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, destination_id);
     assert_eq!(response.name, destination_pipeline.destination_name);
     insta::assert_debug_snapshot!(response.config);
 
     let response = app.read_pipeline(tenant_id, pipeline_id).await;
-    let response: ReadPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, pipeline_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.source_id, source_id);
@@ -151,9 +137,7 @@ async fn tenant_cannot_create_more_than_max_destinations_pipelines() {
             source_id,
             pipeline_config: new_pipeline_config(),
         };
-        let response = app
-            .create_destination_pipeline(tenant_id, &destination_pipeline)
-            .await;
+        let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
         assert!(response.status().is_success());
     }
 
@@ -164,9 +148,7 @@ async fn tenant_cannot_create_more_than_max_destinations_pipelines() {
         source_id,
         pipeline_config: new_pipeline_config(),
     };
-    let response = app
-        .create_destination_pipeline(tenant_id, &destination_pipeline)
-        .await;
+    let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
 
     // Assert
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -198,9 +180,7 @@ async fn destination_and_pipeline_with_another_tenants_source_cannot_be_created(
         source_id: source2_id,
         pipeline_config: new_pipeline_config(),
     };
-    let response = app
-        .create_destination_pipeline(tenant1_id, &destination_pipeline)
-        .await;
+    let response = app.create_destination_pipeline(tenant1_id, &destination_pipeline).await;
 
     // Assert
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -220,17 +200,10 @@ async fn an_existing_bigquery_destination_and_pipeline_can_be_updated() {
         source_id,
         pipeline_config: new_pipeline_config(),
     };
-    let response = app
-        .create_destination_pipeline(tenant_id, &destination_pipeline)
-        .await;
-    let response: CreateDestinationPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    let CreateDestinationPipelineResponse {
-        destination_id,
-        pipeline_id,
-    } = response;
+    let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    let CreateDestinationPipelineResponse { destination_id, pipeline_id } = response;
     let new_source_id = create_source(&app, tenant_id).await;
 
     // Act
@@ -241,31 +214,22 @@ async fn an_existing_bigquery_destination_and_pipeline_can_be_updated() {
         pipeline_config: updated_pipeline_config(),
     };
     let response = app
-        .update_destination_pipeline(
-            tenant_id,
-            destination_id,
-            pipeline_id,
-            &destination_pipeline,
-        )
+        .update_destination_pipeline(tenant_id, destination_id, pipeline_id, &destination_pipeline)
         .await;
 
     // Assert
     assert!(response.status().is_success());
 
     let response = app.read_destination(tenant_id, destination_id).await;
-    let response: ReadDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, destination_id);
     assert_eq!(response.name, destination_pipeline.destination_name);
     insta::assert_debug_snapshot!(response.config);
 
     let response = app.read_pipeline(tenant_id, pipeline_id).await;
-    let response: ReadPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, pipeline_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.source_id, destination_pipeline.source_id);
@@ -288,17 +252,10 @@ async fn an_existing_iceberg_supabase_destination_and_pipeline_can_be_updated() 
         source_id,
         pipeline_config: new_pipeline_config(),
     };
-    let response = app
-        .create_destination_pipeline(tenant_id, &destination_pipeline)
-        .await;
-    let response: CreateDestinationPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    let CreateDestinationPipelineResponse {
-        destination_id,
-        pipeline_id,
-    } = response;
+    let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    let CreateDestinationPipelineResponse { destination_id, pipeline_id } = response;
     let new_source_id = create_source(&app, tenant_id).await;
 
     // Act
@@ -309,31 +266,22 @@ async fn an_existing_iceberg_supabase_destination_and_pipeline_can_be_updated() 
         pipeline_config: updated_pipeline_config(),
     };
     let response = app
-        .update_destination_pipeline(
-            tenant_id,
-            destination_id,
-            pipeline_id,
-            &destination_pipeline,
-        )
+        .update_destination_pipeline(tenant_id, destination_id, pipeline_id, &destination_pipeline)
         .await;
 
     // Assert
     assert!(response.status().is_success());
 
     let response = app.read_destination(tenant_id, destination_id).await;
-    let response: ReadDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, destination_id);
     assert_eq!(response.name, destination_pipeline.destination_name);
     insta::assert_debug_snapshot!(response.config);
 
     let response = app.read_pipeline(tenant_id, pipeline_id).await;
-    let response: ReadPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, pipeline_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.source_id, destination_pipeline.source_id);
@@ -368,17 +316,10 @@ async fn destination_and_pipeline_with_another_tenants_source_cannot_be_updated(
         source_id: source1_id,
         pipeline_config: new_pipeline_config(),
     };
-    let response = app
-        .create_destination_pipeline(tenant1_id, &destination_pipeline)
-        .await;
-    let response: CreateDestinationPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    let CreateDestinationPipelineResponse {
-        destination_id,
-        pipeline_id,
-    } = response;
+    let response = app.create_destination_pipeline(tenant1_id, &destination_pipeline).await;
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    let CreateDestinationPipelineResponse { destination_id, pipeline_id } = response;
 
     // Act
     let source2_id = create_source(&app, tenant2_id).await;
@@ -389,12 +330,7 @@ async fn destination_and_pipeline_with_another_tenants_source_cannot_be_updated(
         pipeline_config: updated_pipeline_config(),
     };
     let response = app
-        .update_destination_pipeline(
-            tenant1_id,
-            destination_id,
-            pipeline_id,
-            &destination_pipeline,
-        )
+        .update_destination_pipeline(tenant1_id, destination_id, pipeline_id, &destination_pipeline)
         .await;
 
     // Assert
@@ -427,13 +363,9 @@ async fn destination_and_pipeline_with_another_tenants_destination_cannot_be_upd
         source_id: source1_id,
         pipeline_config: new_pipeline_config(),
     };
-    let response = app
-        .create_destination_pipeline(tenant1_id, &destination_pipeline)
-        .await;
-    let response: CreateDestinationPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response = app.create_destination_pipeline(tenant1_id, &destination_pipeline).await;
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     let CreateDestinationPipelineResponse { pipeline_id, .. } = response;
 
     // Act
@@ -483,17 +415,10 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cannot_be_update
         source_id: source1_id,
         pipeline_config: new_pipeline_config(),
     };
-    let response = app
-        .create_destination_pipeline(tenant1_id, &destination_pipeline)
-        .await;
-    let response: CreateDestinationPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    let CreateDestinationPipelineResponse {
-        destination_id: destination1_id,
-        ..
-    } = response;
+    let response = app.create_destination_pipeline(tenant1_id, &destination_pipeline).await;
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    let CreateDestinationPipelineResponse { destination_id: destination1_id, .. } = response;
 
     let source2_id = create_source(&app, tenant2_id).await;
     let destination_pipeline = CreateDestinationPipelineRequest {
@@ -502,17 +427,10 @@ async fn destination_and_pipeline_with_another_tenants_pipeline_cannot_be_update
         source_id: source2_id,
         pipeline_config: new_pipeline_config(),
     };
-    let response = app
-        .create_destination_pipeline(tenant2_id, &destination_pipeline)
-        .await;
-    let response: CreateDestinationPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
-    let CreateDestinationPipelineResponse {
-        pipeline_id: pipeline2_id,
-        ..
-    } = response;
+    let response = app.create_destination_pipeline(tenant2_id, &destination_pipeline).await;
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
+    let CreateDestinationPipelineResponse { pipeline_id: pipeline2_id, .. } = response;
 
     // Act
     let destination_pipeline = UpdateDestinationPipelineRequest {
@@ -594,14 +512,10 @@ async fn destination_and_pipeline_can_be_deleted() {
         source_id,
         pipeline_config: new_pipeline_config(),
     };
-    let response = app
-        .create_destination_pipeline(tenant_id, &destination_pipeline)
-        .await;
+    let response = app.create_destination_pipeline(tenant_id, &destination_pipeline).await;
     assert!(response.status().is_success());
-    let response: CreateDestinationPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateDestinationPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     let destination_id = response.destination_id;
     let pipeline_id = response.pipeline_id;
 
@@ -613,9 +527,7 @@ async fn destination_and_pipeline_can_be_deleted() {
     assert!(pipeline_response.status().is_success());
 
     // Act - Delete destination and pipeline
-    let response = app
-        .delete_destination_pipeline(tenant_id, destination_id, pipeline_id)
-        .await;
+    let response = app.delete_destination_pipeline(tenant_id, destination_id, pipeline_id).await;
 
     // Assert
     let status = response.status();

@@ -1,15 +1,19 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::Instant;
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Instant,
+};
 
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
 use tracing::warn;
 
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
-use crate::types::PgLsn;
+use crate::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    types::PgLsn,
+};
 
 /// Async completion handle used for [`crate::destination::Destination::write_table_rows`].
 ///
@@ -73,13 +77,7 @@ impl<T> AsyncResult<T> {
     pub(crate) fn new<M>(metadata: M) -> (Self, PendingAsyncResult<T, M>) {
         let (tx, rx) = oneshot::channel();
 
-        (
-            Self { tx: Some(tx) },
-            PendingAsyncResult {
-                metadata: Some(metadata),
-                rx,
-            },
-        )
+        (Self { tx: Some(tx) }, PendingAsyncResult { metadata: Some(metadata), rx })
     }
 
     /// Sends the final result to the waiting receiver.
@@ -174,10 +172,7 @@ mod tests {
     async fn async_result_round_trips_success() {
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: Some(PgLsn::from(42)),
-            metrics: DispatchMetrics {
-                items_count: 1,
-                dispatched_at: Instant::now(),
-            },
+            metrics: DispatchMetrics { items_count: 1, dispatched_at: Instant::now() },
         };
         let (result_tx, pending_result) = WriteEventsResult::new(metadata);
 
@@ -197,9 +192,6 @@ mod tests {
 
         let err = pending_result.await.into_result().unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationError);
-        assert_eq!(
-            err.description(),
-            Some("Async result dropped without sending")
-        );
+        assert_eq!(err.description(), Some("Async result dropped without sending"));
     }
 }

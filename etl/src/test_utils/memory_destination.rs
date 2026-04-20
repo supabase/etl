@@ -1,16 +1,18 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
+
 use tokio::sync::Mutex;
 use tracing::info;
 
-use crate::destination::Destination;
-use crate::destination::async_result::{
-    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+use crate::{
+    destination::{
+        Destination,
+        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+    },
+    error::EtlResult,
+    state::destination_metadata::DestinationTableMetadata,
+    store::state::StateStore,
+    types::{Event, ReplicatedTableSchema, TableId, TableRow},
 };
-use crate::error::EtlResult;
-use crate::state::destination_metadata::DestinationTableMetadata;
-use crate::store::state::StateStore;
-use crate::types::{Event, ReplicatedTableSchema, TableId, TableRow};
 
 #[derive(Debug)]
 struct Inner {
@@ -42,15 +44,9 @@ where
     /// The state store is used to track table metadata (snapshot IDs and replication masks),
     /// mirroring the behavior of real destinations like BigQuery and Iceberg.
     pub fn new(store: S) -> Self {
-        let inner = Inner {
-            events: Vec::new(),
-            table_rows: HashMap::new(),
-        };
+        let inner = Inner { events: Vec::new(), table_rows: HashMap::new() };
 
-        Self {
-            inner: Arc::new(Mutex::new(inner)),
-            store,
-        }
+        Self { inner: Arc::new(Mutex::new(inner)), store }
     }
 
     /// Returns a copy of all events stored in this destination.
@@ -94,9 +90,7 @@ where
         let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
         if existing_metadata.is_none() {
             let metadata = Self::build_destination_table_metadata(replicated_table_schema);
-            self.store
-                .store_destination_table_metadata(table_id, metadata)
-                .await?;
+            self.store.store_destination_table_metadata(table_id, metadata).await?;
         }
 
         Ok(())
@@ -141,9 +135,7 @@ where
             if let Event::Truncate(truncate_event) = event
                 && has_table_id
             {
-                truncate_event
-                    .truncated_tables
-                    .retain(|s| s.id() != table_id);
+                truncate_event.truncated_tables.retain(|s| s.id() != table_id);
                 if truncate_event.truncated_tables.is_empty() {
                     return false;
                 }
@@ -168,8 +160,7 @@ where
         let table_id = replicated_table_schema.id();
 
         // Store destination metadata on first write, like real destinations (BigQuery, Iceberg) do.
-        self.ensure_destination_table_metadata(replicated_table_schema)
-            .await?;
+        self.ensure_destination_table_metadata(replicated_table_schema).await?;
 
         let mut inner = self.inner.lock().await;
         info!(%table_id, row_count = table_rows.len(), "writing table rows");
@@ -214,10 +205,8 @@ where
                 }
                 Event::Truncate(event) => {
                     for replicated_table_schema in &event.truncated_tables {
-                        table_schemas.insert(
-                            replicated_table_schema.id(),
-                            replicated_table_schema.clone(),
-                        );
+                        table_schemas
+                            .insert(replicated_table_schema.id(), replicated_table_schema.clone());
                     }
                 }
                 Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
@@ -225,8 +214,7 @@ where
         }
 
         for replicated_table_schema in table_schemas.into_values() {
-            self.ensure_destination_table_metadata(&replicated_table_schema)
-                .await?;
+            self.ensure_destination_table_metadata(&replicated_table_schema).await?;
         }
 
         let mut inner = self.inner.lock().await;

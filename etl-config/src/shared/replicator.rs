@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-use crate::Config;
-use crate::shared::pipeline::PipelineConfig;
-use crate::shared::{
-    DestinationConfig, DestinationConfigWithoutSecrets, PipelineConfigWithoutSecrets, SentryConfig,
-    SupabaseConfig, SupabaseConfigWithoutSecrets, ValidationError,
+use crate::{
+    Config,
+    shared::{
+        DestinationConfig, DestinationConfigWithoutSecrets, PipelineConfigWithoutSecrets,
+        SentryConfig, SupabaseConfig, SupabaseConfigWithoutSecrets, ValidationError,
+        pipeline::PipelineConfig,
+    },
 };
 
 /// Complete configuration for the replicator service.

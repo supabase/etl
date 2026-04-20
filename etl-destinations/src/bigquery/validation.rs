@@ -1,11 +1,15 @@
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-use etl::error::{ErrorKind, EtlResult};
-use etl::types::{
-    ArrayCellNonOptional, CellNonOptional, DATE_FORMAT, PgNumeric, TIME_FORMAT, TIMESTAMP_FORMAT,
-    TIMESTAMPTZ_FORMAT_HH_MM,
-};
-use etl::{bail, etl_error};
 use std::sync::LazyLock;
+
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
+use etl::{
+    bail,
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    types::{
+        ArrayCellNonOptional, CellNonOptional, DATE_FORMAT, PgNumeric, TIME_FORMAT,
+        TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM,
+    },
+};
 
 /// BigQuery BIGNUMERIC maximum practical digits for validation.
 ///
@@ -29,32 +33,20 @@ const BIGQUERY_TIME_MAX: (u32, u32, u32, u32) = (23, 59, 59, 999999);
 
 /// Static minimum BigQuery date value (0001-01-01).
 static BIGQUERY_MIN_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
-    NaiveDate::from_ymd_opt(
-        BIGQUERY_DATE_MIN.0,
-        BIGQUERY_DATE_MIN.1,
-        BIGQUERY_DATE_MIN.2,
-    )
-    .expect("BigQuery minimum date should be valid")
+    NaiveDate::from_ymd_opt(BIGQUERY_DATE_MIN.0, BIGQUERY_DATE_MIN.1, BIGQUERY_DATE_MIN.2)
+        .expect("BigQuery minimum date should be valid")
 });
 
 /// Static maximum BigQuery date value (9999-12-31).
 static BIGQUERY_MAX_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
-    NaiveDate::from_ymd_opt(
-        BIGQUERY_DATE_MAX.0,
-        BIGQUERY_DATE_MAX.1,
-        BIGQUERY_DATE_MAX.2,
-    )
-    .expect("BigQuery maximum date should be valid")
+    NaiveDate::from_ymd_opt(BIGQUERY_DATE_MAX.0, BIGQUERY_DATE_MAX.1, BIGQUERY_DATE_MAX.2)
+        .expect("BigQuery maximum date should be valid")
 });
 
 /// Static minimum BigQuery time value (00:00:00).
 static BIGQUERY_MIN_TIME: LazyLock<NaiveTime> = LazyLock::new(|| {
-    NaiveTime::from_hms_opt(
-        BIGQUERY_TIME_MIN.0,
-        BIGQUERY_TIME_MIN.1,
-        BIGQUERY_TIME_MIN.2,
-    )
-    .expect("BigQuery minimum time should be valid")
+    NaiveTime::from_hms_opt(BIGQUERY_TIME_MIN.0, BIGQUERY_TIME_MIN.1, BIGQUERY_TIME_MIN.2)
+        .expect("BigQuery minimum time should be valid")
 });
 
 /// Static maximum BigQuery time value (23:59:59.999999).
@@ -397,8 +389,9 @@ fn is_numeric_within_bigquery_bignumeric_limits(pg_numeric: &PgNumeric) -> bool 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::str::FromStr;
+
+    use super::*;
 
     #[test]
     fn test_validate_numeric_within_bounds() {
@@ -412,11 +405,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
-        assert!(
-            err.detail()
-                .unwrap()
-                .contains("NaN cannot be stored in BigQuery")
-        );
+        assert!(err.detail().unwrap().contains("NaN cannot be stored in BigQuery"));
     }
 
     #[test]
@@ -425,11 +414,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
-        assert!(
-            err.detail()
-                .unwrap()
-                .contains("Infinity cannot be stored in BigQuery")
-        );
+        assert!(err.detail().unwrap().contains("Infinity cannot be stored in BigQuery"));
     }
 
     #[test]
@@ -438,11 +423,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
-        assert!(
-            err.detail()
-                .unwrap()
-                .contains("Infinity cannot be stored in BigQuery")
-        );
+        assert!(err.detail().unwrap().contains("Infinity cannot be stored in BigQuery"));
     }
 
     #[test]
@@ -453,10 +434,7 @@ mod tests {
 
     #[test]
     fn test_validate_date_before_min_fails() {
-        let date = NaiveDate::from_ymd_opt(1, 1, 1)
-            .unwrap()
-            .pred_opt()
-            .unwrap();
+        let date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap();
         let result = validate_date_for_bigquery(&date);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -487,10 +465,7 @@ mod tests {
         let cell = CellNonOptional::Numeric(PgNumeric::NaN);
         let result = validate_cell_for_bigquery(&cell);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().kind(),
-            ErrorKind::UnsupportedValueInDestination
-        );
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::UnsupportedValueInDestination);
     }
 
     #[test]

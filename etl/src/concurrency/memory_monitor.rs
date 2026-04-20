@@ -1,22 +1,26 @@
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll};
-use std::time::Duration;
-use std::time::Instant;
+use std::{
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
 
 use etl_config::shared::MemoryBackpressureConfig;
 use futures::Stream;
 use metrics::{counter, gauge, histogram};
-use tokio::sync::watch;
-use tokio::time::MissedTickBehavior;
+use tokio::{sync::watch, time::MissedTickBehavior};
 use tokio_stream::wrappers::WatchStream;
 use tracing::{info, trace};
 
-use crate::concurrency::shutdown::ShutdownRx;
-use crate::metrics::{
-    DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
-    ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
+use crate::{
+    concurrency::shutdown::ShutdownRx,
+    metrics::{
+        DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
+        ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
+    },
 };
 /// Represents a memory snapshot.
 #[derive(Debug, Clone, Copy)]
@@ -31,14 +35,8 @@ impl MemorySnapshot {
         system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
 
         match system.cgroup_limits() {
-            Some(cgroup) => MemorySnapshot {
-                used: cgroup.rss,
-                total: cgroup.total_memory,
-            },
-            None => MemorySnapshot {
-                used: system.used_memory(),
-                total: system.total_memory(),
-            },
+            Some(cgroup) => MemorySnapshot { used: cgroup.rss, total: cgroup.total_memory },
+            None => MemorySnapshot { used: system.used_memory(), total: system.total_memory() },
         }
     }
 
@@ -214,10 +212,7 @@ impl MemoryMonitor {
         let rx = backpressure.active_tx.subscribe();
         let updates = WatchStream::from_changes(rx.clone());
 
-        Some(MemoryMonitorSubscription {
-            current_rx: rx,
-            updates,
-        })
+        Some(MemoryMonitorSubscription { current_rx: rx, updates })
     }
 
     /// Returns the shared atomic that stores total memory in bytes.
@@ -296,9 +291,7 @@ impl MemoryMonitor {
 
     /// Updates the total memory snapshot in bytes for tests.
     pub(crate) fn set_total_memory_bytes_for_test(&self, total_memory_bytes: u64) {
-        self.inner
-            .total_memory_bytes
-            .store(total_memory_bytes, Ordering::Relaxed);
+        self.inner.total_memory_bytes.store(total_memory_bytes, Ordering::Relaxed);
     }
 }
 
@@ -339,19 +332,13 @@ mod tests {
 
     #[test]
     fn memory_used_percent_handles_zero_total() {
-        let snapshot = MemorySnapshot {
-            used: 100,
-            total: 0,
-        };
+        let snapshot = MemorySnapshot { used: 100, total: 0 };
         assert_eq!(snapshot.used_percent(), 1.0);
     }
 
     #[test]
     fn memory_used_percent_half() {
-        let snapshot = MemorySnapshot {
-            used: 50,
-            total: 100,
-        };
+        let snapshot = MemorySnapshot { used: 50, total: 100 };
         assert_eq!(snapshot.used_percent(), 0.5);
     }
 
@@ -388,9 +375,7 @@ mod tests {
     #[tokio::test]
     async fn subscription_receives_backpressure_transitions() {
         let signal = MemoryMonitor::new_for_test();
-        let mut sub = signal
-            .subscribe()
-            .expect("backpressure subscription should exist in tests");
+        let mut sub = signal.subscribe().expect("backpressure subscription should exist in tests");
 
         signal.set_backpressure_active_for_test(true);
         let backpressure_active =

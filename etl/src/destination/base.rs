@@ -1,10 +1,10 @@
 use std::future::Future;
 
-use crate::destination::async_result::{
-    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+use crate::{
+    destination::async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+    error::EtlResult,
+    types::{Event, ReplicatedTableSchema, TableRow},
 };
-use crate::error::EtlResult;
-use crate::types::{Event, ReplicatedTableSchema, TableRow};
 
 /// Trait for systems that can receive replicated data from ETL pipelines.
 ///

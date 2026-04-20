@@ -1,5 +1,7 @@
-use crate::error::{ErrorKind, EtlResult};
-use crate::types::{ReplicationMask, SnapshotId};
+use crate::{
+    error::{ErrorKind, EtlResult},
+    types::{ReplicationMask, SnapshotId},
+};
 
 /// Status of the schema at a destination.
 ///

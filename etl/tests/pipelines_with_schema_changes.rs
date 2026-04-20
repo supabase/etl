@@ -1,20 +1,23 @@
 #![cfg(feature = "test-utils")]
 
-use etl::state::table::TableReplicationPhaseType;
-use etl::test_utils::database::{spawn_source_database, test_table_name};
-use etl::test_utils::event::group_events_by_type_and_table_id;
-use etl::test_utils::memory_destination::MemoryDestination;
-use etl::test_utils::notifying_store::NotifyingStore;
-use etl::test_utils::pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline};
-use etl::test_utils::schema::{
-    assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
-    assert_table_schema_column_names_types,
+use etl::{
+    state::table::TableReplicationPhaseType,
+    test_utils::{
+        database::{spawn_source_database, test_table_name},
+        event::group_events_by_type_and_table_id,
+        memory_destination::MemoryDestination,
+        notifying_store::NotifyingStore,
+        pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline},
+        schema::{
+            assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
+            assert_table_schema_column_names_types,
+        },
+        test_destination_wrapper::TestDestinationWrapper,
+        test_schema::create_partitioned_table,
+    },
+    types::{Event, EventType, PipelineId, Type},
 };
-use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::create_partitioned_table;
-use etl::types::{Event, EventType, PipelineId, Type};
-use etl_postgres::tokio::test_utils::TableModification;
-use etl_postgres::types::TableId;
+use etl_postgres::{tokio::test_utils::TableModification, types::TableId};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
@@ -52,10 +55,7 @@ async fn relation_message_updates_when_column_added() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn {
-                name: "email",
-                data_type: "text not null",
-            }],
+            &[TableModification::AddColumn { name: "email", data_type: "text not null" }],
         )
         .await
         .unwrap();
@@ -75,26 +75,15 @@ async fn relation_message_updates_when_column_added() {
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    assert_eq!(
-        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
-        1
-    );
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        1
-    );
+    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
+    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
 
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
     assert_replicated_schema_column_names_types(
         &r.replicated_table_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-            ("email", Type::TEXT),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
@@ -110,22 +99,13 @@ async fn relation_message_updates_when_column_added() {
     let (_, first_schema) = &snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
     );
 
     let (_, second_schema) = &snapshots[1];
     assert_table_schema_column_names_types(
         second_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-            ("email", Type::TEXT),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
 }
 
@@ -145,17 +125,11 @@ async fn relation_message_updates_when_column_removed() {
         .await;
 
     database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::DropColumn { name: "age" }],
-        )
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
         .await
         .unwrap();
 
-    database
-        .insert_values(table_name.clone(), &["name"], &[&"Bob"])
-        .await
-        .unwrap();
+    database.insert_values(table_name.clone(), &["name"], &[&"Bob"]).await.unwrap();
 
     events_received.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
@@ -163,14 +137,8 @@ async fn relation_message_updates_when_column_removed() {
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    assert_eq!(
-        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
-        1
-    );
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        1
-    );
+    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
+    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
 
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
@@ -193,11 +161,7 @@ async fn relation_message_updates_when_column_removed() {
     let (_, first_schema) = &snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
     );
 
     let (_, second_schema) = &snapshots[1];
@@ -225,10 +189,7 @@ async fn relation_message_updates_when_column_renamed() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn {
-                old_name: "name",
-                new_name: "full_name",
-            }],
+            &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
         )
         .await
         .unwrap();
@@ -244,25 +205,15 @@ async fn relation_message_updates_when_column_renamed() {
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    assert_eq!(
-        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
-        1
-    );
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        1
-    );
+    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
+    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
 
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
     assert_replicated_schema_column_names_types(
         &r.replicated_table_schema,
-        &[
-            ("id", Type::INT8),
-            ("full_name", Type::TEXT),
-            ("age", Type::INT4),
-        ],
+        &[("id", Type::INT8), ("full_name", Type::TEXT), ("age", Type::INT4)],
     );
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
@@ -278,21 +229,13 @@ async fn relation_message_updates_when_column_renamed() {
     let (_, first_schema) = &snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
     );
 
     let (_, second_schema) = &snapshots[1];
     assert_table_schema_column_names_types(
         second_schema,
-        &[
-            ("id", Type::INT8),
-            ("full_name", Type::TEXT),
-            ("age", Type::INT4),
-        ],
+        &[("id", Type::INT8), ("full_name", Type::TEXT), ("age", Type::INT4)],
     );
 }
 
@@ -314,10 +257,7 @@ async fn relation_message_updates_when_column_type_changes() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AlterColumn {
-                name: "age",
-                alteration: "type bigint",
-            }],
+            &[TableModification::AlterColumn { name: "age", alteration: "type bigint" }],
         )
         .await
         .unwrap();
@@ -333,25 +273,15 @@ async fn relation_message_updates_when_column_type_changes() {
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    assert_eq!(
-        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
-        1
-    );
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        1
-    );
+    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
+    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
 
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
     assert_replicated_schema_column_names_types(
         &r.replicated_table_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT8),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT8)],
     );
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
@@ -367,21 +297,13 @@ async fn relation_message_updates_when_column_type_changes() {
     let (_, first_schema) = &snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
     );
 
     let (_, second_schema) = &snapshots[1];
     assert_table_schema_column_names_types(
         second_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT8),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT8)],
     );
 }
 
@@ -422,22 +344,13 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
     let (_, first_schema) = &snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
     );
 
     let (_, second_schema) = &snapshots[1];
     assert_table_schema_column_names_types(
         second_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-            ("email", Type::TEXT),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
 
     destination.clear_events().await;
@@ -471,26 +384,15 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    assert_eq!(
-        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
-        1
-    );
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        1
-    );
+    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
+    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
 
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
     assert_replicated_schema_column_names_types(
         &r.replicated_table_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-            ("email", Type::TEXT),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
 
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
@@ -506,22 +408,13 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
     let (_, first_schema) = &snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
     );
 
     let (_, second_schema) = &snapshots[1];
     assert_table_schema_column_names_types(
         second_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-            ("email", Type::TEXT),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
 }
 
@@ -532,11 +425,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
         create_database_and_ready_pipeline_with_table(
             "schema_multi_change_restart",
-            &[
-                ("name", "text not null"),
-                ("age", "integer not null"),
-                ("status", "text not null"),
-            ],
+            &[("name", "text not null"), ("age", "integer not null"), ("status", "text not null")],
         )
         .await;
 
@@ -548,10 +437,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AddColumn {
-                name: "email",
-                data_type: "text not null",
-            }],
+            &[TableModification::AddColumn { name: "email", data_type: "text not null" }],
         )
         .await
         .unwrap();
@@ -588,10 +474,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn {
-                old_name: "age",
-                new_name: "years",
-            }],
+            &[TableModification::RenameColumn { old_name: "age", new_name: "years" }],
         )
         .await
         .unwrap();
@@ -599,10 +482,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::AlterColumn {
-                name: "years",
-                alteration: "type bigint",
-            }],
+            &[TableModification::AlterColumn { name: "years", alteration: "type bigint" }],
         )
         .await
         .unwrap();
@@ -637,10 +517,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await;
 
     database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::DropColumn { name: "status" }],
-        )
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "status" }])
         .await
         .unwrap();
 
@@ -687,10 +564,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn {
-                old_name: "email",
-                new_name: "contact_email",
-            }],
+            &[TableModification::RenameColumn { old_name: "email", new_name: "contact_email" }],
         )
         .await
         .unwrap();
@@ -744,12 +618,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     let (_, schema) = &snapshots[0];
     assert_table_schema_column_names_types(
         schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-            ("status", Type::TEXT),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("status", Type::TEXT)],
     );
 
     let (_, schema) = &snapshots[1];
@@ -791,12 +660,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     let (_, schema) = &snapshots[4];
     assert_table_schema_column_names_types(
         schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("years", Type::INT8),
-            ("email", Type::TEXT),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("years", Type::INT8), ("email", Type::TEXT)],
     );
 
     let (_, schema) = &snapshots[5];
@@ -833,9 +697,7 @@ async fn partitioned_table_schema_change_updates_relation_message() {
     let partition_specs = [("p1", "from (1) to (100)"), ("p2", "from (100) to (200)")];
 
     let (parent_table_id, _partition_table_ids) =
-        create_partitioned_table(&database, table_name.clone(), &partition_specs)
-            .await
-            .unwrap();
+        create_partitioned_table(&database, table_name.clone(), &partition_specs).await.unwrap();
 
     // Insert initial data into partitions.
     database
@@ -905,20 +767,8 @@ async fn partitioned_table_schema_change_updates_relation_message() {
     let grouped = group_events_by_type_and_table_id(&events);
 
     // Verify we received exactly 1 Relation event for the parent table.
-    assert_eq!(
-        grouped
-            .get(&(EventType::Relation, parent_table_id))
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        grouped
-            .get(&(EventType::Insert, parent_table_id))
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(grouped.get(&(EventType::Relation, parent_table_id)).unwrap().len(), 1);
+    assert_eq!(grouped.get(&(EventType::Insert, parent_table_id)).unwrap().len(), 1);
 
     // Verify the Relation event has the updated schema with the new column.
     let Event::Relation(r) = get_last_relation_event(&events, parent_table_id) else {
@@ -949,11 +799,7 @@ async fn partitioned_table_schema_change_updates_relation_message() {
     let (_, first_schema) = &snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
-        &[
-            ("id", Type::INT8),
-            ("data", Type::TEXT),
-            ("partition_key", Type::INT4),
-        ],
+        &[("id", Type::INT8), ("data", Type::TEXT), ("partition_key", Type::INT4)],
     );
 
     let (_, second_schema) = &snapshots[1];

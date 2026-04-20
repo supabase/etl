@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::num::NonZeroI32;
+use std::{collections::HashMap, num::NonZeroI32};
 
 use etl_config::shared::{IntoConnectOptions, PgConnectionConfig, PgConnectionOptions};
 use sqlx::{PgExecutor, PgPool, Row, postgres::PgPoolOptions};
@@ -73,13 +72,8 @@ where
         let schema_name: String = row.try_get("schema_name")?;
         let table_name: String = row.try_get("table_name")?;
 
-        result.insert(
-            TableId::new(oid as u32),
-            TableName {
-                schema: schema_name,
-                name: table_name,
-            },
-        );
+        result
+            .insert(TableId::new(oid as u32), TableName { schema: schema_name, name: table_name });
     }
 
     Ok(result)
@@ -96,26 +90,13 @@ where
 /// Returns `None` if the version string cannot be parsed or results in zero.
 pub fn extract_server_version(server_version_str: impl AsRef<str>) -> Option<NonZeroI32> {
     // Parse version string like "15.5 (Homebrew)" or "14.2"
-    let version_part = server_version_str
-        .as_ref()
-        .split_whitespace()
-        .next()
-        .unwrap_or("0.0");
+    let version_part = server_version_str.as_ref().split_whitespace().next().unwrap_or("0.0");
 
     let version_components: Vec<&str> = version_part.split('.').collect();
 
-    let major = version_components
-        .first()
-        .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(0);
-    let minor = version_components
-        .get(1)
-        .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(0);
-    let patch = version_components
-        .get(2)
-        .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(0);
+    let major = version_components.first().and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+    let minor = version_components.get(1).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+    let patch = version_components.get(2).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
 
     let version = major * 10000 + minor * 100 + patch;
 
@@ -136,22 +117,13 @@ mod tests {
 
     #[test]
     fn test_extract_server_version_with_suffixes() {
-        assert_eq!(
-            extract_server_version("15.5 (Homebrew)"),
-            NonZeroI32::new(150500)
-        );
-        assert_eq!(
-            extract_server_version("14.2 on x86_64-pc-linux-gnu"),
-            NonZeroI32::new(140200)
-        );
+        assert_eq!(extract_server_version("15.5 (Homebrew)"), NonZeroI32::new(150500));
+        assert_eq!(extract_server_version("14.2 on x86_64-pc-linux-gnu"), NonZeroI32::new(140200));
         assert_eq!(
             extract_server_version("13.7 (Ubuntu 13.7-1.pgdg20.04+1)"),
             NonZeroI32::new(130700)
         );
-        assert_eq!(
-            extract_server_version("16.0 devel"),
-            NonZeroI32::new(160000)
-        );
+        assert_eq!(extract_server_version("16.0 devel"), NonZeroI32::new(160000));
     }
 
     #[test]
@@ -181,10 +153,7 @@ mod tests {
     #[test]
     fn test_extract_server_version_whitespace_handling() {
         assert_eq!(extract_server_version("  15.5  "), NonZeroI32::new(150500));
-        assert_eq!(
-            extract_server_version("15.5\t(Homebrew)"),
-            NonZeroI32::new(150500)
-        );
+        assert_eq!(extract_server_version("15.5\t(Homebrew)"), NonZeroI32::new(150500));
         assert_eq!(extract_server_version("15.5\n"), NonZeroI32::new(150500));
     }
 }

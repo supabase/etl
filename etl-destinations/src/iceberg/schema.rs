@@ -67,11 +67,8 @@ fn postgres_scalar_type_to_iceberg_type(typ: &Type) -> IcebergType {
 fn create_iceberg_list_type(element_type: PrimitiveType, field_id: i32) -> IcebergType {
     // Create the element field with a standard name
     // Use the provided field_id for the element field to ensure uniqueness
-    let element_field = Arc::new(NestedField::list_element(
-        field_id,
-        IcebergType::Primitive(element_type),
-        false,
-    ));
+    let element_field =
+        Arc::new(NestedField::list_element(field_id, IcebergType::Primitive(element_type), false));
 
     let list_type = ListType { element_field };
 

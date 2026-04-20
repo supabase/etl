@@ -19,9 +19,7 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> PgPool {
         .expect("Failed to create database");
 
     // Create a connection pool to the database.
-    PgPool::connect_with(config.with_db(None))
-        .await
-        .expect("Failed to connect to Postgres")
+    PgPool::connect_with(config.with_db(None)).await.expect("Failed to connect to Postgres")
 }
 
 /// Drops a Postgres database and terminates all connections.
@@ -54,16 +52,12 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
         ))
         .await
     {
-        eprintln!(
-            "warning: failed to terminate connections for database {}: {}",
-            config.name, e
-        );
+        eprintln!("warning: failed to terminate connections for database {}: {}", config.name, e);
     }
 
     // Drop the database.
-    if let Err(e) = connection
-        .execute(&*format!(r#"drop database if exists "{}";"#, config.name))
-        .await
+    if let Err(e) =
+        connection.execute(&*format!(r#"drop database if exists "{}";"#, config.name)).await
     {
         eprintln!("warning: failed to drop database {}: {}", config.name, e);
     }

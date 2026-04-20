@@ -5,8 +5,10 @@
 
 use fail::fail_point;
 
-use crate::bail;
-use crate::error::{ErrorKind, EtlResult};
+use crate::{
+    bail,
+    error::{ErrorKind, EtlResult},
+};
 
 pub const START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP: &str =
     "start_table_sync.before_data_sync_slot_creation_fp";

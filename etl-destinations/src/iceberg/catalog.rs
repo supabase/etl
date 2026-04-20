@@ -160,9 +160,7 @@ impl Catalog for SupabaseCatalog {
         identifier: &TableIdent,
         metadata_location: String,
     ) -> Result<Table> {
-        self.inner
-            .register_table(identifier, metadata_location)
-            .await
+        self.inner.register_table(identifier, metadata_location).await
     }
 }
 
@@ -190,12 +188,7 @@ impl SupabaseClient {
     /// communicating with Supabase catalog REST endpoints.
     pub(super) fn new(base_uri: String, warehouse: String, auth_token: String) -> Self {
         let client = Client::new();
-        Self {
-            client,
-            base_uri,
-            warehouse,
-            auth_token,
-        }
+        Self { client, base_uri, warehouse, auth_token }
     }
 
     /// Constructs the API URL for a specific table.
@@ -204,10 +197,7 @@ impl SupabaseClient {
     /// warehouse identifier, namespace, and table name.
     fn table_url(&self, namespace: &str, table: &str) -> String {
         let base = self.base_uri.trim_end_matches('/');
-        format!(
-            "{base}/v1/{}/namespaces/{namespace}/tables/{table}",
-            self.warehouse
-        )
+        format!("{base}/v1/{}/namespaces/{namespace}/tables/{table}", self.warehouse)
     }
 
     /// Constructs the API URL for namespace table operations.
@@ -216,10 +206,7 @@ impl SupabaseClient {
     /// namespace, such as listing or creating tables.
     fn tables_url(&self, namespace_path: &str) -> String {
         let base = self.base_uri.trim_end_matches('/');
-        format!(
-            "{base}/v1/{}/namespaces/{namespace_path}/tables",
-            self.warehouse
-        )
+        format!("{base}/v1/{}/namespaces/{namespace_path}/tables", self.warehouse)
     }
 
     /// Creates a new table using Supabase-specific API format.
@@ -250,15 +237,11 @@ impl SupabaseClient {
         let url = self.tables_url(&namespace_path);
 
         let body = serde_json::to_value(supabase_request).map_err(|e| {
-            Error::new(
-                ErrorKind::DataInvalid,
-                format!("JSON serialization failed: {e}"),
-            )
+            Error::new(ErrorKind::DataInvalid, format!("JSON serialization failed: {e}"))
         })?;
 
-        let http_response = self
-            .send_request(reqwest::Method::POST, &url, Some(body), None)
-            .await?;
+        let http_response =
+            self.send_request(reqwest::Method::POST, &url, Some(body), None).await?;
 
         let response = match http_response.status() {
             StatusCode::OK => {
@@ -271,10 +254,7 @@ impl SupabaseClient {
                 ));
             }
             StatusCode::CONFLICT => {
-                return Err(Error::new(
-                    ErrorKind::Unexpected,
-                    "The table already exists",
-                ));
+                return Err(Error::new(ErrorKind::Unexpected, "The table already exists"));
             }
             _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
         };
@@ -322,10 +302,9 @@ impl SupabaseClient {
 
         match http_response.status() {
             StatusCode::NO_CONTENT | StatusCode::OK => Ok(()),
-            StatusCode::NOT_FOUND => Err(Error::new(
-                ErrorKind::Unexpected,
-                "Tried to drop a table that does not exist",
-            )),
+            StatusCode::NOT_FOUND => {
+                Err(Error::new(ErrorKind::Unexpected, "Tried to drop a table that does not exist"))
+            }
             _ => Err(deserialize_unexpected_catalog_error(http_response).await),
         }
     }
@@ -413,12 +392,9 @@ pub(crate) async fn deserialize_catalog_response<R: DeserializeOwned>(
     let bytes = response.bytes().await?;
 
     serde_json::from_slice::<R>(&bytes).map_err(|e| {
-        Error::new(
-            ErrorKind::Unexpected,
-            "Failed to parse response from rest catalog server",
-        )
-        .with_context("json", String::from_utf8_lossy(&bytes))
-        .with_source(e)
+        Error::new(ErrorKind::Unexpected, "Failed to parse response from rest catalog server")
+            .with_context("json", String::from_utf8_lossy(&bytes))
+            .with_source(e)
     })
 }
 
@@ -428,12 +404,9 @@ pub(crate) async fn deserialize_catalog_response<R: DeserializeOwned>(
 /// error message for debugging failed catalog operations. Handles empty response
 /// bodies gracefully.
 pub(crate) async fn deserialize_unexpected_catalog_error(response: Response) -> Error {
-    let err = Error::new(
-        ErrorKind::Unexpected,
-        "Received response with unexpected status code",
-    )
-    .with_context("status", response.status().to_string())
-    .with_context("headers", format!("{:?}", response.headers()));
+    let err = Error::new(ErrorKind::Unexpected, "Received response with unexpected status code")
+        .with_context("status", response.status().to_string())
+        .with_context("headers", format!("{:?}", response.headers()));
 
     let bytes = match response.bytes().await {
         Ok(bytes) => bytes,

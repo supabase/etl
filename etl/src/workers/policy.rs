@@ -21,10 +21,7 @@ pub(crate) struct ErrorHandlingPolicy {
 impl ErrorHandlingPolicy {
     /// Creates a new policy with all directives.
     const fn new(retry_directive: RetryDirective, solution: Option<&'static str>) -> Self {
-        Self {
-            retry_directive,
-            solution,
-        }
+        Self { retry_directive, solution }
     }
 
     /// Returns `true` if this policy involves a retry.

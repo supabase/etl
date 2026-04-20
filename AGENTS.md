@@ -19,7 +19,9 @@
 - Build everything:
   - `cargo build --workspace --all-targets --all-features`
 - Format:
-  - `cargo fmt --all`
+  - `./scripts/fmt`
+- Check formatting:
+  - `./scripts/fmt-check`
 - Lint:
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Run unit tests (no Postgres required):
@@ -39,6 +41,7 @@
 - Before adding new patterns, inspect nearby code and follow the local style first.
 - Do not add dependencies unless they are justified by the task.
 - If you change workflow assumptions, build or test the smallest relevant target and report what actually ran.
+- Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `./scripts/fmt` and `./scripts/fmt-check`.
 
 ## Rust Style
 - Follow default Rust formatting and idioms.

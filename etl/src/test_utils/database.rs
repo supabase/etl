@@ -19,9 +19,9 @@
 //! See `scripts/docker-compose.yaml` for the test database configuration.
 
 use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
-use etl_postgres::replication::connect_to_source_database;
-use etl_postgres::tokio::test_utils::PgDatabase;
-use etl_postgres::types::TableName;
+use etl_postgres::{
+    replication::connect_to_source_database, tokio::test_utils::PgDatabase, types::TableName,
+};
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 use uuid::Uuid;
@@ -38,10 +38,7 @@ pub const TEST_DATABASE_SCHEMA: &str = "test";
 /// and the provided name as the table name. It's used to ensure consistent table naming
 /// across test scenarios.
 pub fn test_table_name(name: &str) -> TableName {
-    TableName {
-        schema: TEST_DATABASE_SCHEMA.to_owned(),
-        name: name.to_owned(),
-    }
+    TableName { schema: TEST_DATABASE_SCHEMA.to_owned(), name: name.to_owned() }
 }
 
 /// Generates Postgres connection configuration for isolated test databases.
@@ -66,13 +63,8 @@ fn local_pg_connection_config() -> PgConnectionConfig {
         name: Uuid::new_v4().to_string(),
         username: std::env::var("TESTS_DATABASE_USERNAME")
             .expect("TESTS_DATABASE_USERNAME must be set"),
-        password: std::env::var("TESTS_DATABASE_PASSWORD")
-            .ok()
-            .map(Into::into),
-        tls: TlsConfig {
-            trusted_root_certs: String::new(),
-            enabled: false,
-        },
+        password: std::env::var("TESTS_DATABASE_PASSWORD").ok().map(Into::into),
+        tls: TlsConfig { trusted_root_certs: String::new(), enabled: false },
         keepalive: TcpKeepaliveConfig::default(),
     }
 }
@@ -96,18 +88,14 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
         .client
         .as_ref()
         .expect("database client should be initialized")
-        .execute(
-            &format!("create schema {}", quote_identifier(TEST_DATABASE_SCHEMA)),
-            &[],
-        )
+        .execute(&format!("create schema {}", quote_identifier(TEST_DATABASE_SCHEMA)), &[])
         .await
         .expect("Failed to create test schema");
 
     // We now connect via sqlx just to run the migrations, but we still use the original tokio postgres
     // connection for the db object returned.
-    let pool = connect_to_source_database(&config, 1, 1, None)
-        .await
-        .expect("Failed to connect with sqlx");
+    let pool =
+        connect_to_source_database(&config, 1, 1, None).await.expect("Failed to connect with sqlx");
 
     // Create the `etl` schema first.
     sqlx::query("create schema if not exists etl")
@@ -123,10 +111,7 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
         .expect("Failed to set search path to 'etl'");
 
     // Run migrations to create the state store tables.
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
+    sqlx::migrate!("./migrations").run(&pool).await.expect("Failed to run migrations");
 
     database
 }

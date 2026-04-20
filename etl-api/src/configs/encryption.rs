@@ -95,10 +95,7 @@ pub fn decrypt_text(
     encryption_key: &EncryptionKey,
 ) -> Result<String, DecryptionError> {
     if encrypted_value.id != encryption_key.id {
-        return Err(DecryptionError::MismatchedKeyId(
-            encrypted_value.id,
-            encryption_key.id,
-        ));
+        return Err(DecryptionError::MismatchedKeyId(encrypted_value.id, encryption_key.id));
     }
 
     let encrypted_value_bytes = BASE64_STANDARD.decode(encrypted_value.value)?;

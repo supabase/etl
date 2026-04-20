@@ -1,33 +1,38 @@
-use etl::error::{ErrorKind, EtlError, EtlResult};
-use etl::etl_error;
-use etl::types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type};
-use gcp_bigquery_client::client_builder::ClientBuilder;
-use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
-use gcp_bigquery_client::google::cloud::bigquery::storage::v1::StorageError;
-use gcp_bigquery_client::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode;
-use gcp_bigquery_client::google::rpc::Status as GoogleRpcStatus;
-use gcp_bigquery_client::storage::{
-    BatchAppendRequest, BatchAppendResult, ColumnMode, StorageApiConfig,
+use std::fmt;
+
+use etl::{
+    error::{ErrorKind, EtlError, EtlResult},
+    etl_error,
+    types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type},
 };
-use gcp_bigquery_client::yup_oauth2::parse_service_account_key;
 use gcp_bigquery_client::{
     Client,
+    client_builder::ClientBuilder,
     error::BQError,
+    google::{
+        cloud::bigquery::storage::v1::{RowError, StorageError, storage_error::StorageErrorCode},
+        rpc::Status as GoogleRpcStatus,
+    },
     model::{query_request::QueryRequest, query_response::ResultSet},
-    storage::{ColumnType, FieldDescriptor, StreamName, TableBatch, TableDescriptor},
+    storage::{
+        BatchAppendRequest, BatchAppendResult, ColumnMode, ColumnType, FieldDescriptor,
+        StorageApiConfig, StreamName, TableBatch, TableDescriptor,
+    },
+    yup_oauth2::parse_service_account_key,
 };
+use metrics::counter;
 use prost::Message;
 use rand::random;
-use std::fmt;
 use tokio::time::{Duration, Instant, sleep};
 use tonic::Code;
 use tracing::{debug, error, info, warn};
 
-use crate::bigquery::encoding::BigQueryTableRow;
-use crate::bigquery::metrics::{
-    ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
+use crate::bigquery::{
+    encoding::BigQueryTableRow,
+    metrics::{
+        ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
+    },
 };
-use metrics::counter;
 
 /// Multiplier for calculating max inflight requests from pool size.
 ///
@@ -90,10 +95,7 @@ impl fmt::Display for BigQueryOperationType {
 #[derive(Debug)]
 enum BatchProcessResult {
     /// Batch succeeded with byte metrics.
-    Success {
-        bytes_sent: usize,
-        bytes_received: usize,
-    },
+    Success { bytes_sent: usize, bytes_received: usize },
     /// Batch hit schema propagation after DDL and should be retried.
     RetryableSchemaPropagation { detail: String },
     /// Batch had row-level errors.
@@ -130,10 +132,8 @@ fn format_retryable_append_requests(requests: &[RetryableAppendRequest]) -> Stri
         None => "schema propagation error".to_string(),
         Some((first, [])) => first.detail.clone(),
         Some((first, rest)) => {
-            let distinct_other_details = rest
-                .iter()
-                .filter(|request| request.detail != first.detail)
-                .count();
+            let distinct_other_details =
+                rest.iter().filter(|request| request.detail != first.detail).count();
 
             if distinct_other_details == 0 {
                 format!("{} ({} batches)", first.detail, requests.len())
@@ -151,10 +151,7 @@ fn format_retryable_append_requests(requests: &[RetryableAppendRequest]) -> Stri
 
 /// Creates a per-batch BigQuery trace identifier for Storage Write requests.
 fn create_append_trace_id(pipeline_id: PipelineId, table_id: &str, batch_index: usize) -> String {
-    format!(
-        "supabase_etl_{pipeline_id}_{table_id}_{batch_index}_{}",
-        random::<u32>()
-    )
+    format!("supabase_etl_{pipeline_id}_{table_id}_{batch_index}_{}", random::<u32>())
 }
 
 /// Computes the maximum number of inflight requests for the BigQuery Storage Write API.
@@ -199,10 +196,7 @@ fn process_single_batch_append_result(
     if !row_errors.is_empty() {
         BatchProcessResult::RowErrors { errors: row_errors }
     } else {
-        BatchProcessResult::Success {
-            bytes_sent,
-            bytes_received: total_bytes_received,
-        }
+        BatchProcessResult::Success { bytes_sent, bytes_received: total_bytes_received }
     }
 }
 
@@ -238,17 +232,12 @@ fn append_processing_result_from_request_error(
     append_requests: Vec<BatchAppendRequest<BigQueryTableRow>>,
 ) -> AppendProcessingResult {
     if is_retryable_schema_propagation_error(&error) {
-        let detail = bq_error_to_etl_error(error)
-            .detail()
-            .unwrap_or("schema propagation error")
-            .to_string();
+        let detail =
+            bq_error_to_etl_error(error).detail().unwrap_or("schema propagation error").to_string();
         AppendProcessingResult::Retry {
             pending_requests: append_requests
                 .into_iter()
-                .map(|request| RetryableAppendRequest {
-                    request,
-                    detail: detail.clone(),
-                })
+                .map(|request| RetryableAppendRequest { request, detail: detail.clone() })
                 .collect(),
             bytes_sent: 0,
             bytes_received: 0,
@@ -277,19 +266,13 @@ fn schema_propagation_timeout_error(detail: &str) -> EtlError {
 
 /// Converts BigQuery row errors to ETL destination errors.
 fn row_error_to_etl_error(err: RowError) -> EtlError {
-    etl_error!(
-        ErrorKind::DestinationError,
-        "BigQuery row error",
-        format!("{err:?}")
-    )
+    etl_error!(ErrorKind::DestinationError, "BigQuery row error", format!("{err:?}"))
 }
 
 /// Converts a request-level append error into a [`BatchProcessResult`].
 fn batch_process_result_from_request_error(error: BQError) -> BatchProcessResult {
     if is_retryable_schema_propagation_error(&error) {
-        BatchProcessResult::RetryableSchemaPropagation {
-            detail: error.to_string(),
-        }
+        BatchProcessResult::RetryableSchemaPropagation { detail: error.to_string() }
     } else {
         BatchProcessResult::RequestError { error }
     }
@@ -301,10 +284,9 @@ fn batch_process_result_from_request_error(error: BQError) -> BatchProcessResult
 fn bq_error_to_etl_error(err: BQError) -> EtlError {
     let (kind, description) = match &err {
         // Authentication related errors
-        BQError::InvalidServiceAccountKey(_) => (
-            ErrorKind::DestinationAuthenticationError,
-            "Invalid BigQuery service account key",
-        ),
+        BQError::InvalidServiceAccountKey(_) => {
+            (ErrorKind::DestinationAuthenticationError, "Invalid BigQuery service account key")
+        }
         BQError::InvalidServiceAccountAuthenticator(_) => (
             ErrorKind::DestinationAuthenticationError,
             "Invalid BigQuery service account authenticator",
@@ -321,18 +303,15 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
             ErrorKind::DestinationAuthenticationError,
             "Invalid BigQuery authorized user authenticator",
         ),
-        BQError::AuthError(_) => (
-            ErrorKind::DestinationAuthenticationError,
-            "BigQuery authentication error",
-        ),
-        BQError::YupAuthError(_) => (
-            ErrorKind::DestinationAuthenticationError,
-            "BigQuery OAuth authentication error",
-        ),
-        BQError::NoToken => (
-            ErrorKind::DestinationAuthenticationError,
-            "BigQuery authentication token missing",
-        ),
+        BQError::AuthError(_) => {
+            (ErrorKind::DestinationAuthenticationError, "BigQuery authentication error")
+        }
+        BQError::YupAuthError(_) => {
+            (ErrorKind::DestinationAuthenticationError, "BigQuery OAuth authentication error")
+        }
+        BQError::NoToken => {
+            (ErrorKind::DestinationAuthenticationError, "BigQuery authentication token missing")
+        }
 
         // Network and transport errors
         BQError::RequestError(_) => (ErrorKind::DestinationIoError, "BigQuery request failed"),
@@ -344,10 +323,9 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
         BQError::ResponseError { .. } => {
             (ErrorKind::DestinationQueryFailed, "BigQuery response error")
         }
-        BQError::NoDataAvailable => (
-            ErrorKind::InvalidState,
-            "BigQuery result set positioning error",
-        ),
+        BQError::NoDataAvailable => {
+            (ErrorKind::InvalidState, "BigQuery result set positioning error")
+        }
         BQError::InvalidColumnIndex { .. } => {
             (ErrorKind::InvalidData, "BigQuery invalid column index")
         }
@@ -359,10 +337,9 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
         }
 
         // Serialization errors
-        BQError::SerializationError(_) => (
-            ErrorKind::SerializationError,
-            "BigQuery JSON serialization error",
-        ),
+        BQError::SerializationError(_) => {
+            (ErrorKind::SerializationError, "BigQuery JSON serialization error")
+        }
 
         // gRPC errors
         BQError::TonicInvalidMetadataValueError(_) => {
@@ -419,10 +396,9 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
 
             // Code::Unauthenticated (16) - Authentication failure.
             // Requires credential refresh or configuration fix. Never retry.
-            Code::Unauthenticated => (
-                ErrorKind::DestinationError,
-                "BigQuery authentication failed",
-            ),
+            Code::Unauthenticated => {
+                (ErrorKind::DestinationError, "BigQuery authentication failed")
+            }
 
             // Code::InvalidArgument (3) - Malformed request or invalid data.
             // Client bug that requires code changes. Never retry.
@@ -430,17 +406,13 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
 
             // Code::NotFound (5) - Resource doesn't exist.
             // Requires creating the resource (table, dataset, stream) first. Never retry.
-            Code::NotFound => (
-                ErrorKind::DestinationTableMissing,
-                "BigQuery entity not found",
-            ),
+            Code::NotFound => (ErrorKind::DestinationTableMissing, "BigQuery entity not found"),
 
             // Code::AlreadyExists (6) - Entity conflict during creation.
             // For streaming with offsets, may indicate row was already written. Never retry.
-            Code::AlreadyExists => (
-                ErrorKind::DestinationTableAlreadyExists,
-                "BigQuery entity already exists",
-            ),
+            Code::AlreadyExists => {
+                (ErrorKind::DestinationTableAlreadyExists, "BigQuery entity already exists")
+            }
 
             // Code::OutOfRange (11) - Invalid offset for streaming.
             // Offset beyond current stream end. Requires application-level recovery. Never retry.
@@ -448,10 +420,9 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
 
             // Code::Unimplemented (12) - Operation not available.
             // Feature not supported by BigQuery. Never retry.
-            Code::Unimplemented => (
-                ErrorKind::DestinationError,
-                "BigQuery operation not supported",
-            ),
+            Code::Unimplemented => {
+                (ErrorKind::DestinationError, "BigQuery operation not supported")
+            }
 
             // Code::DataLoss (15) - Unrecoverable data corruption.
             // Severe error requiring manual intervention. Never retry.
@@ -462,27 +433,22 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
         },
 
         // Concurrency and task errors
-        BQError::SemaphorePermitError(_) => (
-            ErrorKind::DestinationError,
-            "BigQuery semaphore permit error",
-        ),
+        BQError::SemaphorePermitError(_) => {
+            (ErrorKind::DestinationError, "BigQuery semaphore permit error")
+        }
         BQError::TokioTaskError(_) => {
             (ErrorKind::DestinationError, "BigQuery task execution error")
         }
-        BQError::ConnectionPoolError(_) => (
-            ErrorKind::DestinationError,
-            "BigQuery connection pool error",
-        ),
+        BQError::ConnectionPoolError(_) => {
+            (ErrorKind::DestinationError, "BigQuery connection pool error")
+        }
     };
 
     let mut detail = err.to_string();
     if let BQError::TonicStatusError(status) = &err {
         let storage_error_codes = decode_storage_error_codes(status);
         if !storage_error_codes.is_empty() {
-            detail.push_str(&format!(
-                " [storage_error_codes={}]",
-                storage_error_codes.join(",")
-            ));
+            detail.push_str(&format!(" [storage_error_codes={}]", storage_error_codes.join(",")));
         }
     }
 
@@ -556,10 +522,7 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        let storage_config = StorageApiConfig {
-            connection_pool_size,
-            max_inflight_requests,
-        };
+        let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
@@ -580,10 +543,7 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        let storage_config = StorageApiConfig {
-            connection_pool_size,
-            max_inflight_requests,
-        };
+        let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
 
         let sa_key = parse_service_account_key(sa_key)
             .map_err(BQError::from)
@@ -607,10 +567,7 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        let storage_config = StorageApiConfig {
-            connection_pool_size,
-            max_inflight_requests,
-        };
+        let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
@@ -632,10 +589,7 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        let storage_config = StorageApiConfig {
-            connection_pool_size,
-            max_inflight_requests,
-        };
+        let storage_config = StorageApiConfig { connection_pool_size, max_inflight_requests };
 
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
@@ -716,13 +670,8 @@ impl BigQueryClient {
             return Ok(false);
         }
 
-        self.create_table(
-            dataset_id,
-            table_id,
-            replicated_table_schema,
-            max_staleness_mins,
-        )
-        .await?;
+        self.create_table(dataset_id, table_id, replicated_table_schema, max_staleness_mins)
+            .await?;
 
         Ok(true)
     }
@@ -901,11 +850,7 @@ impl BigQueryClient {
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
     ) -> EtlResult<bool> {
-        let table = self
-            .client
-            .table()
-            .get(&self.project_id, dataset_id, table_id, None)
-            .await;
+        let table = self.client.table().get(&self.project_id, dataset_id, table_id, None).await;
 
         let exists =
             !matches!(table, Err(BQError::ResponseError { error }) if error.error.code == 404);
@@ -918,11 +863,7 @@ impl BigQueryClient {
     /// Returns `true` if the dataset exists and the client has access, `false` if the
     /// dataset does not exist. Returns an error for authentication or connectivity failures.
     pub async fn dataset_exists(&self, dataset_id: &BigQueryDatasetId) -> EtlResult<bool> {
-        let result = self
-            .client
-            .dataset()
-            .get(&self.project_id, dataset_id)
-            .await;
+        let result = self.client.dataset().get(&self.project_id, dataset_id).await;
 
         match result {
             Ok(_) => Ok(true),
@@ -957,10 +898,7 @@ impl BigQueryClient {
 
         loop {
             match self.append_table_batches_once(pending_requests).await? {
-                AppendProcessingResult::Success {
-                    bytes_sent,
-                    bytes_received,
-                } => {
+                AppendProcessingResult::Success { bytes_sent, bytes_received } => {
                     total_bytes_sent += bytes_sent;
                     total_bytes_received += bytes_received;
 
@@ -975,10 +913,8 @@ impl BigQueryClient {
                     total_bytes_received += bytes_received;
 
                     let retry_summary = format_retryable_append_requests(&next_pending_requests);
-                    pending_requests = next_pending_requests
-                        .into_iter()
-                        .map(|request| request.request)
-                        .collect();
+                    pending_requests =
+                        next_pending_requests.into_iter().map(|request| request.request).collect();
 
                     let pending_batch_count = pending_requests.len();
                     if pending_batch_count == 0 {
@@ -1023,39 +959,28 @@ impl BigQueryClient {
         append_requests: Vec<BatchAppendRequest<BigQueryTableRow>>,
     ) -> EtlResult<AppendProcessingResult> {
         if append_requests.is_empty() {
-            return Ok(AppendProcessingResult::Success {
-                bytes_sent: 0,
-                bytes_received: 0,
-            });
+            return Ok(AppendProcessingResult::Success { bytes_sent: 0, bytes_received: 0 });
         }
 
-        debug!(
-            batch_count = append_requests.len(),
-            "streaming table batches concurrently"
-        );
+        debug!(batch_count = append_requests.len(), "streaming table batches concurrently");
 
-        let batch_append_results = self
-            .client
-            .storage()
-            .append_table_batches(append_requests.clone())
-            .await
-            .inspect_err(|err| {
-                let error_code = error_code_label(err);
+        let batch_append_results =
+            self.client.storage().append_table_batches(append_requests.clone()).await.inspect_err(
+                |err| {
+                    let error_code = error_code_label(err);
 
-                counter!(
-                    ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
-                    "error_code" => error_code
-                )
-                .increment(1);
-            });
+                    counter!(
+                        ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
+                        "error_code" => error_code
+                    )
+                    .increment(1);
+                },
+            );
 
         let batch_append_results = match batch_append_results {
             Ok(results) => results,
             Err(error) => {
-                return Ok(append_processing_result_from_request_error(
-                    error,
-                    append_requests,
-                ));
+                return Ok(append_processing_result_from_request_error(error, append_requests));
             }
         };
 
@@ -1068,14 +993,8 @@ impl BigQueryClient {
             let batch_index = batch_append_result.batch_index;
 
             match process_single_batch_append_result(batch_append_result) {
-                BatchProcessResult::Success {
-                    bytes_sent,
-                    bytes_received,
-                } => {
-                    debug!(
-                        batch_index,
-                        bytes_sent, bytes_received, "batch processed successfully"
-                    );
+                BatchProcessResult::Success { bytes_sent, bytes_received } => {
+                    debug!(batch_index, bytes_sent, bytes_received, "batch processed successfully");
 
                     total_bytes_sent += bytes_sent;
                     total_bytes_received += bytes_received;
@@ -1099,9 +1018,7 @@ impl BigQueryClient {
                         errors.push(row_error_to_etl_error(row_error));
                     }
                 }
-                BatchProcessResult::RequestError {
-                    error: request_error,
-                } => {
+                BatchProcessResult::RequestError { error: request_error } => {
                     let error_code = error_code_label(&request_error);
                     warn!(
                         batch_index,
@@ -1232,11 +1149,8 @@ impl BigQueryClient {
     fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
         let column_name = Self::sanitize_identifier(&column_schema.name, "BigQuery column name")?;
 
-        let mut column_spec = format!(
-            "`{}` {}",
-            column_name,
-            Self::postgres_to_bigquery_type(&column_schema.typ)
-        );
+        let mut column_spec =
+            format!("`{}` {}", column_name, Self::postgres_to_bigquery_type(&column_schema.typ));
 
         if !column_schema.nullable && !is_array_type(&column_schema.typ) {
             column_spec.push_str(" not null");
@@ -1252,10 +1166,8 @@ impl BigQueryClient {
     fn add_primary_key_clause(
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<Option<String>> {
-        let mut primary_key_columns: Vec<_> = replicated_table_schema
-            .column_schemas()
-            .filter(|s| s.primary_key())
-            .collect();
+        let mut primary_key_columns: Vec<_> =
+            replicated_table_schema.column_schemas().filter(|s| s.primary_key()).collect();
 
         // If no primary key columns are marked, return early.
         if primary_key_columns.is_empty() {
@@ -1273,10 +1185,8 @@ impl BigQueryClient {
             })
             .collect::<EtlResult<Vec<_>>>()?;
 
-        let primary_key_clause = format!(
-            ", primary key ({}) not enforced",
-            primary_key_columns.join(",")
-        );
+        let primary_key_clause =
+            format!(", primary key ({}) not enforced", primary_key_columns.join(","));
 
         Ok(Some(primary_key_clause))
     }
@@ -1442,22 +1352,20 @@ impl BigQueryClient {
 impl fmt::Debug for BigQueryClient {
     /// Formats the client for debugging, excluding sensitive client details.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BigQueryClient")
-            .field("project_id", &self.project_id)
-            .finish()
+        f.debug_struct("BigQueryClient").field("project_id", &self.project_id).finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{collections::HashSet, sync::Arc};
+
+    use etl::types::{ReplicationMask, TableId, TableName, TableSchema};
     use gcp_bigquery_client::google::cloud::bigquery::storage::v1::{
         AppendRowsResponse, append_rows_response,
     };
-    use std::sync::Arc;
 
-    use etl::types::{ReplicationMask, TableId, TableName, TableSchema};
-    use std::collections::HashSet;
+    use super::*;
 
     fn successful_append_response() -> AppendRowsResponse {
         AppendRowsResponse {
@@ -1506,50 +1414,20 @@ mod tests {
 
     #[test]
     fn test_postgres_to_bigquery_type_basic_types() {
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::BOOL),
-            "bool"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::TEXT),
-            "string"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::INT4),
-            "int64"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8),
-            "float64"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP),
-            "timestamp"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::JSON),
-            "json"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::BYTEA),
-            "bytes"
-        );
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL), "bool");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TEXT), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4), "int64");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8), "float64");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP), "timestamp");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::JSON), "json");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BYTEA), "bytes");
     }
 
     #[test]
     fn test_postgres_to_bigquery_type_array_types() {
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::BOOL_ARRAY),
-            "array<bool>"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::TEXT_ARRAY),
-            "array<string>"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::INT4_ARRAY),
-            "array<int64>"
-        );
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL_ARRAY), "array<bool>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TEXT_ARRAY), "array<string>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4_ARRAY), "array<int64>");
         assert_eq!(
             BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8_ARRAY),
             "array<float64>"
@@ -1602,9 +1480,8 @@ mod tests {
             test_column("name", Type::TEXT, 2, true, None),
         ];
         let schema_with_pk = test_replicated_schema(columns_with_pk);
-        let pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_pk)
-            .expect("pk clause")
-            .unwrap();
+        let pk_clause =
+            BigQueryClient::add_primary_key_clause(&schema_with_pk).expect("pk clause").unwrap();
         assert_eq!(pk_clause, ", primary key (`id`) not enforced");
 
         // Composite primary key with correct ordinal positions.
@@ -1617,10 +1494,7 @@ mod tests {
         let composite_pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_composite_pk)
             .unwrap()
             .expect("composite pk clause");
-        assert_eq!(
-            composite_pk_clause,
-            ", primary key (`tenant_id`,`id`) not enforced"
-        );
+        assert_eq!(composite_pk_clause, ", primary key (`tenant_id`,`id`) not enforced");
 
         // Composite primary key with reversed column order but correct ordinal positions.
         // The primary key clause should still be ordered by ordinal position.
@@ -1633,10 +1507,7 @@ mod tests {
         let reversed_pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_reversed_pk)
             .unwrap()
             .expect("reversed pk clause");
-        assert_eq!(
-            reversed_pk_clause,
-            ", primary key (`tenant_id`,`id`) not enforced"
-        );
+        assert_eq!(reversed_pk_clause, ", primary key (`tenant_id`,`id`) not enforced");
 
         let columns_no_pk = vec![
             test_column("name", Type::TEXT, 1, true, None),
@@ -1685,72 +1556,30 @@ mod tests {
 
         // Check regular columns
         assert_eq!(descriptor.field_descriptors[0].name, "id");
-        assert!(matches!(
-            descriptor.field_descriptors[0].typ,
-            ColumnType::Int32
-        ));
-        assert!(matches!(
-            descriptor.field_descriptors[0].mode,
-            ColumnMode::Required
-        ));
+        assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::Int32));
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Required));
 
         assert_eq!(descriptor.field_descriptors[1].name, "name");
-        assert!(matches!(
-            descriptor.field_descriptors[1].typ,
-            ColumnType::String
-        ));
-        assert!(matches!(
-            descriptor.field_descriptors[1].mode,
-            ColumnMode::Nullable
-        ));
+        assert!(matches!(descriptor.field_descriptors[1].typ, ColumnType::String));
+        assert!(matches!(descriptor.field_descriptors[1].mode, ColumnMode::Nullable));
 
         assert_eq!(descriptor.field_descriptors[2].name, "active");
-        assert!(matches!(
-            descriptor.field_descriptors[2].typ,
-            ColumnType::Bool
-        ));
-        assert!(matches!(
-            descriptor.field_descriptors[2].mode,
-            ColumnMode::Required
-        ));
+        assert!(matches!(descriptor.field_descriptors[2].typ, ColumnType::Bool));
+        assert!(matches!(descriptor.field_descriptors[2].mode, ColumnMode::Required));
 
         // Check array column
         assert_eq!(descriptor.field_descriptors[3].name, "tags");
-        assert!(matches!(
-            descriptor.field_descriptors[3].typ,
-            ColumnType::String
-        ));
-        assert!(matches!(
-            descriptor.field_descriptors[3].mode,
-            ColumnMode::Repeated
-        ));
+        assert!(matches!(descriptor.field_descriptors[3].typ, ColumnType::String));
+        assert!(matches!(descriptor.field_descriptors[3].mode, ColumnMode::Repeated));
 
         // Check CDC columns
-        assert_eq!(
-            descriptor.field_descriptors[4].name,
-            BIGQUERY_CDC_SPECIAL_COLUMN
-        );
-        assert!(matches!(
-            descriptor.field_descriptors[4].typ,
-            ColumnType::String
-        ));
-        assert!(matches!(
-            descriptor.field_descriptors[4].mode,
-            ColumnMode::Required
-        ));
+        assert_eq!(descriptor.field_descriptors[4].name, BIGQUERY_CDC_SPECIAL_COLUMN);
+        assert!(matches!(descriptor.field_descriptors[4].typ, ColumnType::String));
+        assert!(matches!(descriptor.field_descriptors[4].mode, ColumnMode::Required));
 
-        assert_eq!(
-            descriptor.field_descriptors[5].name,
-            BIGQUERY_CDC_SEQUENCE_COLUMN
-        );
-        assert!(matches!(
-            descriptor.field_descriptors[5].typ,
-            ColumnType::String
-        ));
-        assert!(matches!(
-            descriptor.field_descriptors[5].mode,
-            ColumnMode::Required
-        ));
+        assert_eq!(descriptor.field_descriptors[5].name, BIGQUERY_CDC_SEQUENCE_COLUMN);
+        assert!(matches!(descriptor.field_descriptors[5].typ, ColumnType::String));
+        assert!(matches!(descriptor.field_descriptors[5].mode, ColumnMode::Required));
     }
 
     #[test]
@@ -1770,30 +1599,12 @@ mod tests {
         assert_eq!(descriptor.field_descriptors.len(), 8); // 6 columns + CDC columns
 
         // Check that UUID, JSON, DATE, TIME are all mapped to String in storage
-        assert!(matches!(
-            descriptor.field_descriptors[0].typ,
-            ColumnType::String
-        )); // UUID
-        assert!(matches!(
-            descriptor.field_descriptors[1].typ,
-            ColumnType::String
-        )); // JSON
-        assert!(matches!(
-            descriptor.field_descriptors[2].typ,
-            ColumnType::Bytes
-        )); // BYTEA
-        assert!(matches!(
-            descriptor.field_descriptors[3].typ,
-            ColumnType::String
-        )); // NUMERIC
-        assert!(matches!(
-            descriptor.field_descriptors[4].typ,
-            ColumnType::String
-        )); // DATE
-        assert!(matches!(
-            descriptor.field_descriptors[5].typ,
-            ColumnType::String
-        )); // TIME
+        assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::String)); // UUID
+        assert!(matches!(descriptor.field_descriptors[1].typ, ColumnType::String)); // JSON
+        assert!(matches!(descriptor.field_descriptors[2].typ, ColumnType::Bytes)); // BYTEA
+        assert!(matches!(descriptor.field_descriptors[3].typ, ColumnType::String)); // NUMERIC
+        assert!(matches!(descriptor.field_descriptors[4].typ, ColumnType::String)); // DATE
+        assert!(matches!(descriptor.field_descriptors[5].typ, ColumnType::String)); // TIME
     }
 
     #[test]
@@ -1869,16 +1680,11 @@ mod tests {
     fn test_process_single_batch_append_result_retries_pure_schema_propagation_errors() {
         let result = process_single_batch_append_result(BatchAppendResult {
             batch_index: 0,
-            responses: vec![Err(tonic::Status::invalid_argument(
-                "schema_mismatch_extra_fields",
-            ))],
+            responses: vec![Err(tonic::Status::invalid_argument("schema_mismatch_extra_fields"))],
             bytes_sent: 128,
         });
 
-        assert!(matches!(
-            result,
-            BatchProcessResult::RetryableSchemaPropagation { .. }
-        ));
+        assert!(matches!(result, BatchProcessResult::RetryableSchemaPropagation { .. }));
     }
 
     #[test]
@@ -1887,17 +1693,12 @@ mod tests {
             batch_index: 0,
             responses: vec![
                 Ok(successful_append_response()),
-                Err(tonic::Status::invalid_argument(
-                    "schema_mismatch_extra_fields",
-                )),
+                Err(tonic::Status::invalid_argument("schema_mismatch_extra_fields")),
             ],
             bytes_sent: 128,
         });
 
-        assert!(matches!(
-            result,
-            BatchProcessResult::RetryableSchemaPropagation { .. }
-        ));
+        assert!(matches!(result, BatchProcessResult::RetryableSchemaPropagation { .. }));
     }
 
     #[test]
@@ -1905,9 +1706,6 @@ mod tests {
         let error = schema_propagation_timeout_error("schema lag");
 
         assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
-        assert_eq!(
-            error.description(),
-            Some("BigQuery schema propagation timed out")
-        );
+        assert_eq!(error.description(), Some("BigQuery schema propagation timed out"));
     }
 }

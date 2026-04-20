@@ -15,11 +15,7 @@ pub async fn auth_validator(
     req: ServiceRequest,
     credentials: BearerAuth,
 ) -> Result<ServiceRequest, (Error, ServiceRequest)> {
-    let config = req
-        .app_data::<Config>()
-        .cloned()
-        .unwrap_or_default()
-        .scope("v1");
+    let config = req.app_data::<Config>().cloned().unwrap_or_default().scope("v1");
 
     let api_config = req
         .app_data::<Data<ApiConfig>>()

@@ -1,17 +1,24 @@
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
+
 use tokio::sync::Mutex;
 
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
-use crate::state::destination_metadata::{
-    AppliedDestinationTableMetadata, DestinationTableMetadata,
+use crate::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    state::{
+        destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+        table::TableReplicationPhase,
+    },
+    store::{
+        cleanup::CleanupStore,
+        schema::SchemaStore,
+        state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
+    },
+    types::{SnapshotId, TableId, TableSchema},
 };
-use crate::state::table::TableReplicationPhase;
-use crate::store::cleanup::CleanupStore;
-use crate::store::schema::SchemaStore;
-use crate::store::state::{DestinationTablesMetadata, StateStore, TableReplicationStates};
-use crate::types::{SnapshotId, TableId, TableSchema};
 
 /// Inner state of [`MemoryStore`]
 #[derive(Debug)]
@@ -56,9 +63,7 @@ impl MemoryStore {
             destination_tables_metadata: Arc::new(HashMap::new()),
         };
 
-        Self {
-            inner: Arc::new(Mutex::new(inner)),
-        }
+        Self { inner: Arc::new(Mutex::new(inner)) }
     }
 }
 

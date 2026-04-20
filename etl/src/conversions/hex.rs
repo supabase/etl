@@ -1,5 +1,7 @@
-use crate::bail;
-use crate::error::{ErrorKind, EtlResult};
+use crate::{
+    bail,
+    error::{ErrorKind, EtlResult},
+};
 
 /// Converts a Postgres bytea hex string to a byte array.
 ///

@@ -1,11 +1,14 @@
-use crate::bigquery::validation::validate_cell_for_bigquery;
-use etl::error::EtlError;
-use etl::etl_error;
-use etl::types::{
-    ArrayCellNonOptional, CellNonOptional, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT,
-    TIMESTAMPTZ_FORMAT_HH_MM, TableRow,
+use etl::{
+    error::EtlError,
+    etl_error,
+    types::{
+        ArrayCellNonOptional, CellNonOptional, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT,
+        TIMESTAMPTZ_FORMAT_HH_MM, TableRow,
+    },
 };
 use prost::bytes;
+
+use crate::bigquery::validation::validate_cell_for_bigquery;
 
 /// Protocol buffer wrapper for a BigQuery table row containing non-optional cells.
 ///
@@ -280,31 +283,23 @@ fn array_cell_encode_prost(
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Date(vec) => {
-            let values: Vec<String> = vec
-                .iter()
-                .map(|v| v.format(DATE_FORMAT).to_string())
-                .collect();
+            let values: Vec<String> =
+                vec.iter().map(|v| v.format(DATE_FORMAT).to_string()).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Time(vec) => {
-            let values: Vec<String> = vec
-                .iter()
-                .map(|v| v.format(TIME_FORMAT).to_string())
-                .collect();
+            let values: Vec<String> =
+                vec.iter().map(|v| v.format(TIME_FORMAT).to_string()).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Timestamp(vec) => {
-            let values: Vec<String> = vec
-                .iter()
-                .map(|v| v.format(TIMESTAMP_FORMAT).to_string())
-                .collect();
+            let values: Vec<String> =
+                vec.iter().map(|v| v.format(TIMESTAMP_FORMAT).to_string()).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::TimestampTz(vec) => {
-            let values: Vec<String> = vec
-                .iter()
-                .map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string())
-                .collect();
+            let values: Vec<String> =
+                vec.iter().map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string()).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Uuid(vec) => {
@@ -346,31 +341,23 @@ fn array_cell_non_optional_encoded_len_prost(array_cell: &ArrayCellNonOptional, 
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Date(vec) => {
-            let values: Vec<String> = vec
-                .iter()
-                .map(|v| v.format(DATE_FORMAT).to_string())
-                .collect();
+            let values: Vec<String> =
+                vec.iter().map(|v| v.format(DATE_FORMAT).to_string()).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Time(vec) => {
-            let values: Vec<String> = vec
-                .iter()
-                .map(|v| v.format(TIME_FORMAT).to_string())
-                .collect();
+            let values: Vec<String> =
+                vec.iter().map(|v| v.format(TIME_FORMAT).to_string()).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Timestamp(vec) => {
-            let values: Vec<String> = vec
-                .iter()
-                .map(|v| v.format(TIMESTAMP_FORMAT).to_string())
-                .collect();
+            let values: Vec<String> =
+                vec.iter().map(|v| v.format(TIMESTAMP_FORMAT).to_string()).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::TimestampTz(vec) => {
-            let values: Vec<String> = vec
-                .iter()
-                .map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string())
-                .collect();
+            let values: Vec<String> =
+                vec.iter().map(|v| v.format(TIMESTAMPTZ_FORMAT_HH_MM).to_string()).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Uuid(vec) => {
@@ -387,11 +374,15 @@ fn array_cell_non_optional_encoded_len_prost(array_cell: &ArrayCellNonOptional, 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-    use etl::error::ErrorKind;
-    use etl::types::{Cell, PgNumeric};
     use std::str::FromStr;
+
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+    use etl::{
+        error::ErrorKind,
+        types::{Cell, PgNumeric},
+    };
+
+    use super::*;
 
     #[test]
     fn test_bigquery_table_row_try_from_valid() {
@@ -415,11 +406,7 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(err.detail().unwrap().contains("Cell at index 1"));
-        assert!(
-            err.detail()
-                .unwrap()
-                .contains("NaN cannot be stored in BigQuery")
-        );
+        assert!(err.detail().unwrap().contains("NaN cannot be stored in BigQuery"));
     }
 
     #[test]
@@ -434,19 +421,12 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
         assert!(err.detail().unwrap().contains("Cell at index 1"));
-        assert!(
-            err.detail()
-                .unwrap()
-                .contains("Infinity cannot be stored in BigQuery")
-        );
+        assert!(err.detail().unwrap().contains("Infinity cannot be stored in BigQuery"));
     }
 
     #[test]
     fn test_bigquery_table_row_try_from_invalid_date() {
-        let invalid_date = NaiveDate::from_ymd_opt(1, 1, 1)
-            .unwrap()
-            .pred_opt()
-            .unwrap(); // Date before year 1
+        let invalid_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap(); // Date before year 1
 
         let table_row = TableRow::new(vec![Cell::Date(invalid_date)]);
 
@@ -466,15 +446,8 @@ mod tests {
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(
-            err.kind(),
-            ErrorKind::NullValuesNotSupportedInArrayInDestination
-        );
-        assert!(
-            err.detail()
-                .unwrap()
-                .contains("Failed to convert cell at index 0")
-        );
+        assert_eq!(err.kind(), ErrorKind::NullValuesNotSupportedInArrayInDestination);
+        assert!(err.detail().unwrap().contains("Failed to convert cell at index 0"));
     }
 
     #[test]
@@ -552,10 +525,6 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::UnsupportedValueInDestination);
-        assert!(
-            err.detail()
-                .unwrap()
-                .contains("exceeds BigQuery's BIGNUMERIC limits")
-        );
+        assert!(err.detail().unwrap().contains("exceeds BigQuery's BIGNUMERIC limits"));
     }
 }

@@ -1,11 +1,14 @@
 #![allow(dead_code)]
 
-use etl_api::configs::source::FullApiSourceConfig;
-use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
-use etl_config::SerializableSecretString;
-use etl_config::shared::{IntoConnectOptions, PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
-use etl_postgres::replication::connect_to_source_database;
-use etl_postgres::sqlx::test_utils::create_pg_database;
+use etl_api::{
+    configs::source::FullApiSourceConfig,
+    routes::sources::{CreateSourceRequest, CreateSourceResponse},
+};
+use etl_config::{
+    SerializableSecretString,
+    shared::{IntoConnectOptions, PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
+};
+use etl_postgres::{replication::connect_to_source_database, sqlx::test_utils::create_pg_database};
 use pg_escape::{quote_identifier, quote_literal};
 use secrecy::ExposeSecret;
 use sqlx::{Connection, Executor, PgConnection, PgPool};
@@ -27,9 +30,7 @@ pub fn get_test_db_config() -> PgConnectionConfig {
         name: format!("test_db_{}", Uuid::new_v4()),
         username: std::env::var("TESTS_DATABASE_USERNAME")
             .expect("TESTS_DATABASE_USERNAME must be set"),
-        password: std::env::var("TESTS_DATABASE_PASSWORD")
-            .ok()
-            .map(Into::into),
+        password: std::env::var("TESTS_DATABASE_PASSWORD").ok().map(Into::into),
         tls: TlsConfig::disabled(),
         keepalive: TcpKeepaliveConfig::default(),
     }
@@ -72,16 +73,11 @@ pub async fn create_test_source_database(
             .map(|p| SerializableSecretString::from(p.expose_secret().to_string())),
     };
 
-    let source = CreateSourceRequest {
-        name: "Test Source".to_string(),
-        config: source_config,
-    };
+    let source = CreateSourceRequest { name: "Test Source".to_string(), config: source_config };
 
     let response = app.create_source(tenant_id, &source).await;
-    let response: CreateSourceResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateSourceResponse =
+        response.json().await.expect("failed to deserialize response");
 
     (source_pool, response.id, source_db_config)
 }
@@ -98,10 +94,8 @@ pub async fn create_trusted_source_database() -> TrustedSourceDatabase {
     admin_config.name = format!("test_trusted_source_db_{}", Uuid::new_v4());
 
     let admin_pool = create_pg_database(&admin_config).await;
-    let trusted_username = format!(
-        "supabase_etl_admin_{}",
-        &Uuid::new_v4().simple().to_string()[..12]
-    );
+    let trusted_username =
+        format!("supabase_etl_admin_{}", &Uuid::new_v4().simple().to_string()[..12]);
     let trusted_password = format!("trusted-{}", Uuid::new_v4().simple());
 
     let mut connection = PgConnection::connect_with(&admin_config.without_db(None))
@@ -130,21 +124,12 @@ pub async fn create_trusted_source_database() -> TrustedSourceDatabase {
     trusted_config.username = trusted_username.clone();
     trusted_config.password = Some(trusted_password.into());
 
-    TrustedSourceDatabase {
-        admin_pool,
-        admin_config,
-        trusted_config,
-        trusted_username,
-    }
+    TrustedSourceDatabase { admin_pool, admin_config, trusted_config, trusted_username }
 }
 
 pub async fn drop_trusted_source_database(database: TrustedSourceDatabase) {
-    let TrustedSourceDatabase {
-        admin_pool,
-        admin_config,
-        trusted_config,
-        trusted_username,
-    } = database;
+    let TrustedSourceDatabase { admin_pool, admin_config, trusted_config, trusted_username } =
+        database;
 
     drop(admin_pool);
 
@@ -155,10 +140,7 @@ pub async fn drop_trusted_source_database(database: TrustedSourceDatabase) {
         .expect("Failed to connect to Postgres");
 
     connection
-        .execute(&*format!(
-            "drop role if exists {}",
-            quote_identifier(&trusted_username),
-        ))
+        .execute(&*format!("drop role if exists {}", quote_identifier(&trusted_username),))
         .await
         .expect("Failed to drop trusted ETL role");
 

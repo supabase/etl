@@ -1,15 +1,15 @@
 mod install;
 mod scenario;
 
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::Result;
 use clap::Args;
 use k8s_openapi::api::core::v1::Service;
-use kube::CustomResource;
-use kube::api::{DeleteParams, PostParams};
-use kube::{Api, Client, Discovery};
+use kube::{
+    Api, Client, CustomResource, Discovery,
+    api::{DeleteParams, PostParams},
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -50,11 +50,7 @@ impl ChaosArgs {
 
         let labels = parse_selector(&self.selector)?;
         let client = ChaosClient::new(&self.namespace).await?;
-        let client = if self.print {
-            client.with_dry_run()
-        } else {
-            client
-        };
+        let client = if self.print { client.with_dry_run() } else { client };
         if self.delete {
             self.scenario.delete(&client, &labels).await?;
             println!("Chaos deleted.");
@@ -185,17 +181,11 @@ impl ChaosClient {
     pub(crate) async fn resolve_svc_clusterip(&self, svc_name: &str) -> Result<String> {
         let svc_api: Api<Service> = Api::namespaced(self.client.clone(), &self.namespace);
         let svc = svc_api.get(svc_name).await.map_err(|e| {
-            anyhow::anyhow!(
-                "service '{svc_name}' not found in namespace '{}': {e}",
-                self.namespace
-            )
+            anyhow::anyhow!("service '{svc_name}' not found in namespace '{}': {e}", self.namespace)
         })?;
-        svc.spec
-            .and_then(|s| s.cluster_ip)
-            .filter(|ip| ip != "None" && !ip.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!("service '{svc_name}' has no ClusterIP (headless service?)")
-            })
+        svc.spec.and_then(|s| s.cluster_ip).filter(|ip| ip != "None" && !ip.is_empty()).ok_or_else(
+            || anyhow::anyhow!("service '{svc_name}' has no ClusterIP (headless service?)"),
+        )
     }
 
     pub(crate) async fn delete(&self, name: &str) -> Result<()> {
@@ -274,10 +264,7 @@ impl ChaosClient {
             Target::Port(port) => (
                 Some(direction.to_string()),
                 None,
-                Some(vec![
-                    format!("0.0.0.0/1:{port}"),
-                    format!("128.0.0.0/1:{port}"),
-                ]),
+                Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]),
             ),
         };
         NetworkChaos::new(
@@ -286,10 +273,7 @@ impl ChaosClient {
                 action: "loss".into(),
                 mode: "all".into(),
                 selector: sel(&self.namespace, source),
-                loss: Some(LossSpec {
-                    loss: loss_pct.to_string(),
-                    correlation: "25".into(),
-                }),
+                loss: Some(LossSpec { loss: loss_pct.to_string(), correlation: "25".into() }),
                 direction: direction_val,
                 target: pod_target,
                 external_targets,
@@ -327,10 +311,7 @@ impl ChaosClient {
             Target::Port(port) => (
                 Some(direction.to_string()),
                 None,
-                Some(vec![
-                    format!("0.0.0.0/1:{port}"),
-                    format!("128.0.0.0/1:{port}"),
-                ]),
+                Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]),
             ),
         };
         NetworkChaos::new(
@@ -380,10 +361,7 @@ impl ChaosClient {
             Target::Port(port) => (
                 Some(direction.to_string()),
                 None,
-                Some(vec![
-                    format!("0.0.0.0/1:{port}"),
-                    format!("128.0.0.0/1:{port}"),
-                ]),
+                Some(vec![format!("0.0.0.0/1:{port}"), format!("128.0.0.0/1:{port}")]),
             ),
         };
         NetworkChaos::new(
@@ -392,11 +370,7 @@ impl ChaosClient {
                 action: "bandwidth".into(),
                 mode: "all".into(),
                 selector: sel(&self.namespace, selector),
-                bandwidth: Some(BandwidthSpec {
-                    rate: rate.into(),
-                    limit: 10000,
-                    buffer: 10000,
-                }),
+                bandwidth: Some(BandwidthSpec { rate: rate.into(), limit: 10000, buffer: 10000 }),
                 loss: None,
                 delay: None,
                 corrupt: None,

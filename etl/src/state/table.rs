@@ -1,13 +1,17 @@
+use std::fmt;
+
 use chrono::{DateTime, Duration, Utc};
 use etl_postgres::replication::state;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
-use crate::config::PipelineConfig;
-use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::types::{PgLsn, TableId};
-use crate::workers::ErrorHandlingPolicy;
-use crate::{bail, etl_error};
+use crate::{
+    bail,
+    config::PipelineConfig,
+    error::{ErrorKind, EtlError, EtlResult},
+    etl_error,
+    types::{PgLsn, TableId},
+    workers::ErrorHandlingPolicy,
+};
 
 /// Represents an error that occurred during table replication.
 ///
@@ -230,9 +234,7 @@ pub enum RetryPolicy {
 
 impl RetryPolicy {
     pub fn retry_in(duration: Duration) -> Self {
-        Self::TimedRetry {
-            next_retry: Utc::now() + duration,
-        }
+        Self::TimedRetry { next_retry: Utc::now() + duration }
     }
 }
 
@@ -311,10 +313,7 @@ pub enum TableReplicationPhase {
 }
 
 fn default_source_err() -> EtlError {
-    etl_error!(
-        ErrorKind::Unknown,
-        "table replication error restored from state store"
-    )
+    etl_error!(ErrorKind::Unknown, "table replication error restored from state store")
 }
 
 impl TableReplicationPhase {
@@ -520,16 +519,16 @@ mod lsn_serde {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        s.parse()
-            .map_err(|e| serde::de::Error::custom(format!("{e:?}")))
+        s.parse().map_err(|e| serde::de::Error::custom(format!("{e:?}")))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::Utc;
     use tokio_postgres::types::PgLsn;
+
+    use super::*;
 
     #[test]
     fn retry_policy_serialization() {
@@ -546,14 +545,9 @@ mod tests {
         assert!(matches!(deserialized, RetryPolicy::ManualRetry));
 
         let timestamp = Utc::now();
-        let timed_retry = RetryPolicy::TimedRetry {
-            next_retry: timestamp,
-        };
+        let timed_retry = RetryPolicy::TimedRetry { next_retry: timestamp };
         let json = serde_json::to_value(&timed_retry).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({"type": "timed_retry", "next_retry": timestamp})
-        );
+        assert_eq!(json, serde_json::json!({"type": "timed_retry", "next_retry": timestamp}));
         let deserialized: RetryPolicy = serde_json::from_value(json).unwrap();
         if let RetryPolicy::TimedRetry { next_retry } = deserialized {
             assert_eq!(next_retry, timestamp);
@@ -575,10 +569,7 @@ mod tests {
         let lsn = "0/1000000".parse::<PgLsn>().unwrap();
         let sync_done = TableReplicationPhase::SyncDone { lsn };
         let json = serde_json::to_value(&sync_done).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({"type": "sync_done", "lsn": "0/1000000"})
-        );
+        assert_eq!(json, serde_json::json!({"type": "sync_done", "lsn": "0/1000000"}));
         let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
         if let TableReplicationPhase::SyncDone { lsn: got } = deserialized {
             assert_eq!(got, lsn);
@@ -607,12 +598,7 @@ mod tests {
         assert!(!json.to_string().contains("source_err"));
 
         let deserialized: TableReplicationPhase = serde_json::from_value(json).unwrap();
-        if let TableReplicationPhase::Errored {
-            reason,
-            solution,
-            retry_policy,
-            ..
-        } = deserialized
+        if let TableReplicationPhase::Errored { reason, solution, retry_policy, .. } = deserialized
         {
             assert_eq!(reason, "Test error");
             assert_eq!(solution, Some("Test solution".to_string()));
@@ -624,14 +610,10 @@ mod tests {
 
     #[test]
     fn to_storage_format_rejects_memory_only_phases() {
-        let sync_wait = TableReplicationPhase::SyncWait {
-            lsn: "0/1000".parse::<PgLsn>().unwrap(),
-        };
+        let sync_wait = TableReplicationPhase::SyncWait { lsn: "0/1000".parse::<PgLsn>().unwrap() };
         assert!(sync_wait.to_storage_format().is_err());
 
-        let catchup = TableReplicationPhase::Catchup {
-            lsn: "0/2000".parse::<PgLsn>().unwrap(),
-        };
+        let catchup = TableReplicationPhase::Catchup { lsn: "0/2000".parse::<PgLsn>().unwrap() };
         assert!(catchup.to_storage_format().is_err());
     }
 
@@ -669,9 +651,7 @@ mod tests {
             TableReplicationPhase::Init,
             TableReplicationPhase::DataSync,
             TableReplicationPhase::FinishedCopy,
-            TableReplicationPhase::SyncDone {
-                lsn: "0/1000000".parse::<PgLsn>().unwrap(),
-            },
+            TableReplicationPhase::SyncDone { lsn: "0/1000000".parse::<PgLsn>().unwrap() },
             TableReplicationPhase::Ready,
             TableReplicationPhase::Errored {
                 reason: "broken".to_string(),

@@ -1,31 +1,32 @@
-use etl_config::Environment;
-use serde::ser::{SerializeMap, Serializer as _};
-use std::io;
-use std::io::Error;
-use std::sync::OnceLock;
 use std::{
     backtrace::{Backtrace, BacktraceStatus},
     fmt as stdfmt,
+    io::{self, Error},
     panic::PanicHookInfo,
-    sync::Once,
+    sync::{Once, OnceLock},
 };
+
+use etl_config::Environment;
+use serde::ser::{SerializeMap, Serializer as _};
 use thiserror::Error;
-use tracing::Event;
-use tracing::subscriber::{SetGlobalDefaultError, set_global_default};
+use tracing::{
+    Event,
+    subscriber::{SetGlobalDefaultError, set_global_default},
+};
 use tracing_appender::{
     non_blocking::WorkerGuard,
     rolling::{self, InitError},
 };
-use tracing_log::NormalizeEvent;
-use tracing_log::{LogTracer, log_tracer::SetLoggerError};
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt as tracing_fmt;
-use tracing_subscriber::fmt::{
-    FmtContext, FormattedFields, MakeWriter, fmt,
-    format::{self, FormatEvent, FormatFields, Writer},
-    time::FormatTime,
+use tracing_log::{LogTracer, NormalizeEvent, log_tracer::SetLoggerError};
+use tracing_subscriber::{
+    EnvFilter,
+    fmt::{
+        self as tracing_fmt, FmtContext, FormattedFields, MakeWriter, fmt,
+        format::{self, FormatEvent, FormatFields, Writer},
+        time::FormatTime,
+    },
+    registry::{LookupSpan, SpanRef},
 };
-use tracing_subscriber::registry::{LookupSpan, SpanRef};
 
 /// JSON field name for project identification in logs.
 const PROJECT_KEY_IN_LOG: &str = "project";
@@ -146,42 +147,32 @@ where
         let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());
 
         let spans = ctx.event_scope().map(|scope| {
-            scope
-                .from_root()
-                .map(|span| span_to_json_value::<S, N>(&span))
-                .collect::<Vec<_>>()
+            scope.from_root().map(|span| span_to_json_value::<S, N>(&span)).collect::<Vec<_>>()
         });
 
         let mut output = Vec::new();
         let mut serializer = serde_json::Serializer::new(&mut output);
         let mut map = serializer.serialize_map(None).map_err(|_| stdfmt::Error)?;
 
-        map.serialize_entry("timestamp", &timestamp)
-            .map_err(|_| stdfmt::Error)?;
-        map.serialize_entry("level", &meta.level().as_str())
-            .map_err(|_| stdfmt::Error)?;
+        map.serialize_entry("timestamp", &timestamp).map_err(|_| stdfmt::Error)?;
+        map.serialize_entry("level", &meta.level().as_str()).map_err(|_| stdfmt::Error)?;
 
         if let Some(project_ref) = get_global_project_ref() {
-            map.serialize_entry(PROJECT_KEY_IN_LOG, project_ref)
-                .map_err(|_| stdfmt::Error)?;
+            map.serialize_entry(PROJECT_KEY_IN_LOG, project_ref).map_err(|_| stdfmt::Error)?;
         }
 
         if let Some(pipeline_id) = get_global_pipeline_id() {
-            map.serialize_entry(PIPELINE_KEY_IN_LOG, &pipeline_id)
-                .map_err(|_| stdfmt::Error)?;
+            map.serialize_entry(PIPELINE_KEY_IN_LOG, &pipeline_id).map_err(|_| stdfmt::Error)?;
         }
 
-        map.serialize_entry("fields", &SerializableEvent(event))
-            .map_err(|_| stdfmt::Error)?;
+        map.serialize_entry("fields", &SerializableEvent(event)).map_err(|_| stdfmt::Error)?;
 
         if let Some(span) = spans.as_ref().and_then(|spans| spans.last()) {
-            map.serialize_entry("span", span)
-                .map_err(|_| stdfmt::Error)?;
+            map.serialize_entry("span", span).map_err(|_| stdfmt::Error)?;
         }
 
         if let Some(spans) = spans.as_ref() {
-            map.serialize_entry("spans", spans)
-                .map_err(|_| stdfmt::Error)?;
+            map.serialize_entry("spans", spans).map_err(|_| stdfmt::Error)?;
         }
 
         map.end().map_err(|_| stdfmt::Error)?;
@@ -214,18 +205,13 @@ where
     let mut map = serde_json::Map::new();
 
     let ext = span.extensions();
-    let data = ext
-        .get::<FormattedFields<N>>()
-        .expect("formatted span fields must exist");
+    let data = ext.get::<FormattedFields<N>>().expect("formatted span fields must exist");
 
     if let Ok(serde_json::Value::Object(fields)) = serde_json::from_str::<serde_json::Value>(data) {
         map.extend(fields);
     }
 
-    map.insert(
-        "name".to_string(),
-        serde_json::Value::String(span.metadata().name().to_string()),
-    );
+    map.insert("name".to_string(), serde_json::Value::String(span.metadata().name().to_string()));
 
     serde_json::Value::Object(map)
 }
@@ -238,30 +224,23 @@ struct JsonFieldVisitor {
 
 impl tracing::field::Visit for JsonFieldVisitor {
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
-        self.values
-            .insert(field.name().to_string(), serde_json::Value::from(value));
+        self.values.insert(field.name().to_string(), serde_json::Value::from(value));
     }
 
     fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
-        self.values
-            .insert(field.name().to_string(), serde_json::Value::from(value));
+        self.values.insert(field.name().to_string(), serde_json::Value::from(value));
     }
 
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        self.values
-            .insert(field.name().to_string(), serde_json::Value::from(value));
+        self.values.insert(field.name().to_string(), serde_json::Value::from(value));
     }
 
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-        self.values
-            .insert(field.name().to_string(), serde_json::Value::from(value));
+        self.values.insert(field.name().to_string(), serde_json::Value::from(value));
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.values.insert(
-            normalize_field_name(field.name()),
-            serde_json::Value::from(value),
-        );
+        self.values.insert(normalize_field_name(field.name()), serde_json::Value::from(value));
     }
 
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn stdfmt::Debug) {
@@ -280,10 +259,7 @@ impl tracing::field::Visit for JsonFieldVisitor {
 
 /// Normalizes raw tracing field names to their emitted representation.
 fn normalize_field_name(field_name: &str) -> String {
-    field_name
-        .strip_prefix("r#")
-        .unwrap_or(field_name)
-        .to_string()
+    field_name.strip_prefix("r#").unwrap_or(field_name).to_string()
 }
 
 /// Initializes tracing for the application.
@@ -378,11 +354,8 @@ fn configure_dev_tracing(filter: EnvFilter) -> Result<LogFlusher, TracingError> 
         .with_file(false)
         .with_target(true);
 
-    let subscriber = fmt()
-        .with_env_filter(filter)
-        .event_format(format)
-        .with_writer(io::stdout)
-        .finish();
+    let subscriber =
+        fmt().with_env_filter(filter).event_format(format).with_writer(io::stdout).finish();
 
     set_global_default(subscriber)?;
 
@@ -409,10 +382,9 @@ fn panic_hook(panic_info: &PanicHookInfo) {
     let backtrace = Backtrace::capture();
     let (backtrace, note) = match backtrace.status() {
         BacktraceStatus::Captured => (Some(backtrace), None),
-        BacktraceStatus::Disabled => (
-            None,
-            Some("run with RUST_BACKTRACE=1 to display backtraces"),
-        ),
+        BacktraceStatus::Disabled => {
+            (None, Some("run with RUST_BACKTRACE=1 to display backtraces"))
+        }
         BacktraceStatus::Unsupported => {
             (None, Some("backtraces are not supported on this platform"))
         }

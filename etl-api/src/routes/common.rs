@@ -1,7 +1,9 @@
-use crate::config::ApiConfig;
-use crate::configs::source::StoredSourceConfig;
-use crate::k8s::TrustedRootCertsCache;
-use crate::validation::{self, ValidationContext, ValidationError, ValidationFailure};
+use crate::{
+    config::ApiConfig,
+    configs::source::StoredSourceConfig,
+    k8s::TrustedRootCertsCache,
+    validation::{self, ValidationContext, ValidationError, ValidationFailure},
+};
 
 /// Validates a source config against the trusted source profile, when enabled.
 pub async fn validate_source_config(

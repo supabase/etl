@@ -1,11 +1,14 @@
 use core::str;
+
 use etl_postgres::types::ColumnSchema;
 use tracing::error;
 
-use crate::bail;
-use crate::conversions::text::parse_cell_from_postgres_text;
-use crate::error::{ErrorKind, EtlResult};
-use crate::types::{Cell, TableRow};
+use crate::{
+    bail,
+    conversions::text::parse_cell_from_postgres_text,
+    error::{ErrorKind, EtlResult},
+    types::{Cell, TableRow},
+};
 
 /// Converts raw Postgres COPY format data into a typed table row.
 ///
@@ -86,10 +89,7 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
                 None => {
                     // Validate that row was properly terminated with newline
                     if !row_terminated {
-                        bail!(
-                            ErrorKind::ConversionError,
-                            "Row data not properly terminated"
-                        );
+                        bail!(ErrorKind::ConversionError, "Row data not properly terminated");
                     }
                     done = true;
 
@@ -162,10 +162,11 @@ pub(crate) fn parse_table_row_from_postgres_copy_bytes<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::error::ErrorKind;
     use etl_postgres::types::ColumnSchema;
     use tokio_postgres::types::Type;
+
+    use super::*;
+    use crate::error::ErrorKind;
 
     /// Creates a test column schema with sensible defaults.
     fn test_column(
@@ -294,10 +295,7 @@ mod tests {
             parse_table_row_from_postgres_copy_bytes(row_data, column_schemas.iter());
         assert!(result_empty.is_err());
         let err = result_empty.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Expected 3 columns but row contains 2 columns")
-        );
+        assert!(err.to_string().contains("Expected 3 columns but row contains 2 columns"));
     }
 
     #[test]
@@ -309,10 +307,7 @@ mod tests {
 
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Expected 3 columns but row contains at least 4 columns")
-        );
+        assert!(err.to_string().contains("Expected 3 columns but row contains at least 4 columns"));
     }
 
     #[test]
@@ -387,13 +382,7 @@ mod tests {
         let mut expected_row = String::new();
 
         for i in 0i32..50 {
-            column_schemas.push(test_column(
-                &format!("col{i}"),
-                Type::INT4,
-                i + 1,
-                false,
-                false,
-            ));
+            column_schemas.push(test_column(&format!("col{i}"), Type::INT4, i + 1, false, false));
             if i > 0 {
                 expected_row.push('\t');
             }
@@ -435,14 +424,8 @@ mod tests {
         let result =
             parse_table_row_from_postgres_copy_bytes(row_data, column_schemas.iter()).unwrap();
 
-        assert_eq!(
-            result.values()[0],
-            Cell::String("value\twith\ttabs".to_string())
-        );
-        assert_eq!(
-            result.values()[1],
-            Cell::String("normal\tvalue".to_string())
-        );
+        assert_eq!(result.values()[0], Cell::String("value\twith\ttabs".to_string()));
+        assert_eq!(result.values()[1], Cell::String("normal\tvalue".to_string()));
     }
 
     #[test]
@@ -459,10 +442,7 @@ mod tests {
             parse_table_row_from_postgres_copy_bytes(row_data, column_schemas.iter()).unwrap();
 
         assert_eq!(result.values()[0], Cell::String("\tstart".to_string()));
-        assert_eq!(
-            result.values()[1],
-            Cell::String("middle\nvalue".to_string())
-        );
+        assert_eq!(result.values()[1], Cell::String("middle\nvalue".to_string()));
         assert_eq!(result.values()[2], Cell::String("end\r".to_string()));
     }
 
@@ -479,10 +459,7 @@ mod tests {
             parse_table_row_from_postgres_copy_bytes(&row_with_newline, column_schemas.iter())
                 .unwrap();
 
-        assert_eq!(
-            result.values()[0],
-            Cell::String("Hello\t🌍\nWorld\r测试".to_string())
-        );
+        assert_eq!(result.values()[0], Cell::String("Hello\t🌍\nWorld\r测试".to_string()));
     }
 
     #[test]
@@ -506,25 +483,13 @@ mod tests {
             (b"\\@\n", "@"),   // symbol
             (b"\\\"\n", "\""), // quote
             // Complex patterns
-            (
-                "Text\\bwith\\bbackspaces\n".as_bytes(),
-                "Text\u{0008}with\u{0008}backspaces",
-            ),
-            (
-                "Form\\ffeed\\ftest\n".as_bytes(),
-                "Form\u{000C}feed\u{000C}test",
-            ),
-            (
-                "Vertical\\vtab\\vtest\n".as_bytes(),
-                "Vertical\u{000B}tab\u{000B}test",
-            ),
+            ("Text\\bwith\\bbackspaces\n".as_bytes(), "Text\u{0008}with\u{0008}backspaces"),
+            ("Form\\ffeed\\ftest\n".as_bytes(), "Form\u{000C}feed\u{000C}test"),
+            ("Vertical\\vtab\\vtest\n".as_bytes(), "Vertical\u{000B}tab\u{000B}test"),
             ("Path\\\\to\\\\file.txt\n".as_bytes(), "Path\\to\\file.txt"),
             ("\\n\\n\\t\\t\\r\\r\n".as_bytes(), "\n\n\t\t\r\r"), // consecutive escapes
             // Mixed escape combinations
-            (
-                "Line1\\nTab:\\tBackslash:\\\\End\n".as_bytes(),
-                "Line1\nTab:\tBackslash:\\End",
-            ),
+            ("Line1\\nTab:\\tBackslash:\\\\End\n".as_bytes(), "Line1\nTab:\tBackslash:\\End"),
         ];
 
         for (input, expected) in test_cases {

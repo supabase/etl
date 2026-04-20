@@ -5,8 +5,7 @@ use etl_api::routes::tenants::{
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
-use crate::support::mocks::tenants::create_tenant_with_id_and_name;
-use crate::support::test_app::spawn_test_app;
+use crate::support::{mocks::tenants::create_tenant_with_id_and_name, test_app::spawn_test_app};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_can_be_created() {
@@ -23,18 +22,14 @@ async fn tenant_can_be_created() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: CreateTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateTenantResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, "abcdefghijklmnopqrst");
 
     let tenant_id = &response.id;
     let response = app.read_tenant(tenant_id).await;
-    let response: ReadTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadTenantResponse =
+        response.json().await.expect("failed to deserialize response");
 
     assert_eq!(&response.id, tenant_id);
     assert_eq!(response.name, tenant.name);
@@ -70,25 +65,19 @@ async fn create_or_update_tenant_creates_a_new_tenant() {
 
     // Act
     let tenant_id = "abcdefghijklmnopqrst";
-    let tenant = CreateOrUpdateTenantRequest {
-        name: "NewTenant".to_string(),
-    };
+    let tenant = CreateOrUpdateTenantRequest { name: "NewTenant".to_string() };
     let response = app.create_or_update_tenant(tenant_id, &tenant).await;
 
     // Assert
     assert!(response.status().is_success());
-    let response: CreateTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateTenantResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, tenant_id);
 
     let tenant_id = &response.id;
     let response = app.read_tenant(tenant_id).await;
-    let response: ReadTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadTenantResponse =
+        response.json().await.expect("failed to deserialize response");
 
     assert_eq!(&response.id, tenant_id);
     assert_eq!(response.name, tenant.name);
@@ -102,30 +91,22 @@ async fn create_or_update_tenant_updates_an_existing_tenant() {
 
     // Act
     let tenant_id = "abcdefghijklmnopqrst";
-    let tenant = CreateOrUpdateTenantRequest {
-        name: "NewTenant".to_string(),
-    };
+    let tenant = CreateOrUpdateTenantRequest { name: "NewTenant".to_string() };
     let response = app.create_or_update_tenant(tenant_id, &tenant).await;
     assert!(response.status().is_success());
-    let tenant = CreateOrUpdateTenantRequest {
-        name: "UpdatedTenant".to_string(),
-    };
+    let tenant = CreateOrUpdateTenantRequest { name: "UpdatedTenant".to_string() };
     let response = app.create_or_update_tenant(tenant_id, &tenant).await;
 
     // Assert
     assert!(response.status().is_success());
-    let response: CreateTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateTenantResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, tenant_id);
 
     let tenant_id = &response.id;
     let response = app.read_tenant(tenant_id).await;
-    let response: ReadTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadTenantResponse =
+        response.json().await.expect("failed to deserialize response");
 
     assert_eq!(&response.id, tenant_id);
     assert_eq!(response.name, tenant.name);
@@ -141,10 +122,8 @@ async fn an_existing_tenant_can_be_read() {
         name: "NewTenant".to_string(),
     };
     let response = app.create_tenant(&tenant).await;
-    let response: CreateTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateTenantResponse =
+        response.json().await.expect("failed to deserialize response");
     let tenant_id = &response.id;
 
     // Act
@@ -152,10 +131,8 @@ async fn an_existing_tenant_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: ReadTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadTenantResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(&response.id, tenant_id);
     assert_eq!(response.name, tenant.name);
 }
@@ -183,25 +160,19 @@ async fn an_existing_tenant_can_be_updated() {
         name: "NewTenant".to_string(),
     };
     let response = app.create_tenant(&tenant).await;
-    let response: CreateTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateTenantResponse =
+        response.json().await.expect("failed to deserialize response");
     let tenant_id = &response.id;
 
     // Act
-    let updated_tenant = UpdateTenantRequest {
-        name: "UpdatedTenant".to_string(),
-    };
+    let updated_tenant = UpdateTenantRequest { name: "UpdatedTenant".to_string() };
     let response = app.update_tenant(tenant_id, &updated_tenant).await;
 
     // Assert
     assert!(response.status().is_success());
     let response = app.read_tenant(tenant_id).await;
-    let response: ReadTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadTenantResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(&response.id, tenant_id);
     assert_eq!(response.name, updated_tenant.name);
 }
@@ -213,9 +184,7 @@ async fn non_existing_tenant_cannot_be_updated() {
     let app = spawn_test_app().await;
 
     // Act
-    let updated_tenant = UpdateTenantRequest {
-        name: "UpdatedTenant".to_string(),
-    };
+    let updated_tenant = UpdateTenantRequest { name: "UpdatedTenant".to_string() };
     let response = app.update_tenant("42", &updated_tenant).await;
 
     // Assert
@@ -232,10 +201,8 @@ async fn an_existing_tenant_can_be_deleted() {
         name: "NewTenant".to_string(),
     };
     let response = app.create_tenant(&tenant).await;
-    let response: CreateTenantResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateTenantResponse =
+        response.json().await.expect("failed to deserialize response");
     let tenant_id = &response.id;
 
     // Act
@@ -283,10 +250,8 @@ async fn all_tenants_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: ReadTenantsResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadTenantsResponse =
+        response.json().await.expect("failed to deserialize response");
     for tenant in response.tenants {
         if tenant.id == tenant1_id {
             assert_eq!(tenant.name, "Tenant1");

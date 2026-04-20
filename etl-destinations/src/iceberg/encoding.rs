@@ -889,9 +889,9 @@ fn append_array_cell_as_strings(
         ArrayCell::Date(vec) => {
             for item in vec {
                 match item {
-                    Some(d) => list_builder
-                        .values()
-                        .append_value(d.format(DATE_FORMAT).to_string()),
+                    Some(d) => {
+                        list_builder.values().append_value(d.format(DATE_FORMAT).to_string())
+                    }
                     None => list_builder.values().append_null(),
                 }
             }
@@ -899,9 +899,9 @@ fn append_array_cell_as_strings(
         ArrayCell::Time(vec) => {
             for item in vec {
                 match item {
-                    Some(t) => list_builder
-                        .values()
-                        .append_value(t.format(TIME_FORMAT).to_string()),
+                    Some(t) => {
+                        list_builder.values().append_value(t.format(TIME_FORMAT).to_string())
+                    }
                     None => list_builder.values().append_null(),
                 }
             }
@@ -909,9 +909,9 @@ fn append_array_cell_as_strings(
         ArrayCell::Timestamp(vec) => {
             for item in vec {
                 match item {
-                    Some(ts) => list_builder
-                        .values()
-                        .append_value(ts.format(TIMESTAMP_FORMAT).to_string()),
+                    Some(ts) => {
+                        list_builder.values().append_value(ts.format(TIMESTAMP_FORMAT).to_string())
+                    }
                     None => list_builder.values().append_null(),
                 }
             }
@@ -950,9 +950,10 @@ fn append_array_cell_as_strings(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use arrow::array::Array;
     use etl::types::ArrayCell;
+
+    use super::*;
 
     #[test]
     fn test_cell_to_bool() {
@@ -1004,10 +1005,7 @@ mod tests {
     #[test]
     fn test_cell_to_bytes() {
         let test_bytes = vec![1, 2, 3, 4];
-        assert_eq!(
-            cell_to_bytes(&Cell::Bytes(test_bytes.clone())),
-            Some(test_bytes)
-        );
+        assert_eq!(cell_to_bytes(&Cell::Bytes(test_bytes.clone())), Some(test_bytes));
         assert_eq!(cell_to_bytes(&Cell::Bytes(vec![])), Some(vec![]));
         assert_eq!(cell_to_bytes(&Cell::Null), None);
         assert_eq!(cell_to_bytes(&Cell::String("hello".to_string())), None);
@@ -1022,10 +1020,7 @@ mod tests {
         assert_eq!(cell_to_date32(&Cell::Date(test_date)), Some(expected_days));
         assert_eq!(cell_to_date32(&Cell::Date(UNIX_EPOCH)), Some(0));
         assert_eq!(cell_to_date32(&Cell::Null), None);
-        assert_eq!(
-            cell_to_date32(&Cell::String("2023-05-15".to_string())),
-            None
-        );
+        assert_eq!(cell_to_date32(&Cell::String("2023-05-15".to_string())), None);
     }
 
     #[test]
@@ -1046,15 +1041,9 @@ mod tests {
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap().naive_utc();
         let expected_micros = test_ts.and_utc().timestamp_micros();
 
-        assert_eq!(
-            cell_to_timestamp(&Cell::Timestamp(test_ts)),
-            Some(expected_micros)
-        );
+        assert_eq!(cell_to_timestamp(&Cell::Timestamp(test_ts)), Some(expected_micros));
         assert_eq!(cell_to_timestamp(&Cell::Null), None);
-        assert_eq!(
-            cell_to_timestamp(&Cell::String("2001-09-09 01:46:40".to_string())),
-            None
-        );
+        assert_eq!(cell_to_timestamp(&Cell::String("2001-09-09 01:46:40".to_string())), None);
     }
 
     #[test]
@@ -1063,15 +1052,9 @@ mod tests {
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap();
         let expected_micros = test_ts.timestamp_micros();
 
-        assert_eq!(
-            cell_to_timestamptz(&Cell::TimestampTz(test_ts)),
-            Some(expected_micros)
-        );
+        assert_eq!(cell_to_timestamptz(&Cell::TimestampTz(test_ts)), Some(expected_micros));
         assert_eq!(cell_to_timestamptz(&Cell::Null), None);
-        assert_eq!(
-            cell_to_timestamptz(&Cell::String("2001-09-09T01:46:40Z".to_string())),
-            None
-        );
+        assert_eq!(cell_to_timestamptz(&Cell::String("2001-09-09T01:46:40Z".to_string())), None);
     }
 
     #[test]
@@ -1094,10 +1077,7 @@ mod tests {
         assert_eq!(cell_to_string(&Cell::Null), None);
         assert_eq!(cell_to_string(&Cell::Bool(true)), None);
         assert_eq!(cell_to_string(&Cell::Bool(false)), None);
-        assert_eq!(
-            cell_to_string(&Cell::String("hello".to_string())),
-            Some("hello".to_string())
-        );
+        assert_eq!(cell_to_string(&Cell::String("hello".to_string())), Some("hello".to_string()));
         assert_eq!(cell_to_string(&Cell::I16(42)), None);
         assert_eq!(cell_to_string(&Cell::I32(-42)), None);
         assert_eq!(cell_to_string(&Cell::U32(42)), None);
@@ -1118,10 +1098,7 @@ mod tests {
 
         // Test JSON
         let json_val = serde_json::json!({"key": "value"});
-        assert_eq!(
-            cell_to_string(&Cell::Json(json_val.clone())),
-            Some(json_val.to_string())
-        );
+        assert_eq!(cell_to_string(&Cell::Json(json_val.clone())), Some(json_val.to_string()));
 
         // Test bytes (Base64 encoded)
         let test_bytes = vec![72, 101, 108, 108, 111];
@@ -1142,10 +1119,7 @@ mod tests {
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Boolean);
-        let bool_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::BooleanArray>()
-            .unwrap();
+        let bool_array = array_ref.as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
 
         assert_eq!(bool_array.len(), 4);
         assert!(bool_array.value(0));
@@ -1164,10 +1138,7 @@ mod tests {
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Int32);
-        let int_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
-            .unwrap();
+        let int_array = array_ref.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
 
         assert_eq!(int_array.len(), 4);
         assert_eq!(int_array.value(0), 42);
@@ -1187,10 +1158,7 @@ mod tests {
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Int64);
-        let int_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap();
+        let int_array = array_ref.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
 
         assert_eq!(int_array.len(), 5);
         assert_eq!(int_array.value(0), 123456789);
@@ -1210,10 +1178,7 @@ mod tests {
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Float32);
-        let float_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::Float32Array>()
-            .unwrap();
+        let float_array = array_ref.as_any().downcast_ref::<arrow::array::Float32Array>().unwrap();
 
         assert_eq!(float_array.len(), 4);
         assert_eq!(float_array.value(0), 2.5);
@@ -1232,10 +1197,7 @@ mod tests {
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Float64);
-        let float_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::Float64Array>()
-            .unwrap();
+        let float_array = array_ref.as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
 
         assert_eq!(float_array.len(), 4);
         assert_eq!(float_array.value(0), 1.23456789);
@@ -1254,10 +1216,7 @@ mod tests {
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Utf8);
-        let string_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = array_ref.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
 
         assert_eq!(string_array.len(), 4);
         assert_eq!(string_array.value(0), "hello");
@@ -1277,10 +1236,8 @@ mod tests {
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::LargeBinary);
-        let binary_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::LargeBinaryArray>()
-            .unwrap();
+        let binary_array =
+            array_ref.as_any().downcast_ref::<arrow::array::LargeBinaryArray>().unwrap();
 
         assert_eq!(binary_array.len(), 4);
         assert_eq!(binary_array.value(0), test_bytes);
@@ -1303,10 +1260,7 @@ mod tests {
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Date32);
-        let date_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::Date32Array>()
-            .unwrap();
+        let date_array = array_ref.as_any().downcast_ref::<arrow::array::Date32Array>().unwrap();
 
         assert_eq!(date_array.len(), 4);
         assert_eq!(date_array.value(0), expected_days);
@@ -1319,10 +1273,7 @@ mod tests {
     fn test_build_time64_array() {
         use chrono::NaiveTime;
         let test_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
-        let expected_micros = test_time
-            .signed_duration_since(MIDNIGHT)
-            .num_microseconds()
-            .unwrap();
+        let expected_micros = test_time.signed_duration_since(MIDNIGHT).num_microseconds().unwrap();
 
         let rows = vec![
             TableRow::new(vec![Cell::Time(test_time)]),
@@ -1332,10 +1283,8 @@ mod tests {
         ];
 
         let array_ref = build_array_for_field(&rows, 0, &DataType::Time64(TimeUnit::Microsecond));
-        let time_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::Time64MicrosecondArray>()
-            .unwrap();
+        let time_array =
+            array_ref.as_any().downcast_ref::<arrow::array::Time64MicrosecondArray>().unwrap();
 
         assert_eq!(time_array.len(), 4);
         assert_eq!(time_array.value(0), expected_micros);
@@ -1358,10 +1307,8 @@ mod tests {
 
         let array_ref =
             build_array_for_field(&rows, 0, &DataType::Timestamp(TimeUnit::Microsecond, None));
-        let ts_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
-            .unwrap();
+        let ts_array =
+            array_ref.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
 
         assert_eq!(ts_array.len(), 3);
         assert_eq!(ts_array.value(0), expected_micros);
@@ -1386,10 +1333,8 @@ mod tests {
             0,
             &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
         );
-        let ts_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
-            .unwrap();
+        let ts_array =
+            array_ref.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
 
         assert_eq!(ts_array.len(), 3);
         assert_eq!(ts_array.value(0), expected_micros);
@@ -1412,10 +1357,8 @@ mod tests {
 
         let array_ref =
             build_array_for_field(&rows, 0, &DataType::FixedSizeBinary(UUID_BYTE_WIDTH));
-        let uuid_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-            .unwrap();
+        let uuid_array =
+            array_ref.as_any().downcast_ref::<arrow::array::FixedSizeBinaryArray>().unwrap();
 
         assert_eq!(uuid_array.len(), 3);
         assert_eq!(uuid_array.value(0), expected_bytes);
@@ -1428,11 +1371,7 @@ mod tests {
         use arrow::datatypes::{Field, Schema};
 
         let rows = vec![
-            TableRow::new(vec![
-                Cell::I32(42),
-                Cell::String("hello".to_string()),
-                Cell::Bool(true),
-            ]),
+            TableRow::new(vec![Cell::I32(42), Cell::String("hello".to_string()), Cell::Bool(true)]),
             TableRow::new(vec![
                 Cell::I32(100),
                 Cell::String("world".to_string()),
@@ -1452,27 +1391,17 @@ mod tests {
         assert_eq!(batch.num_columns(), 3);
 
         // Verify column values
-        let id_array = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
-            .unwrap();
+        let id_array = batch.column(0).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
         assert_eq!(id_array.value(0), 42);
         assert_eq!(id_array.value(1), 100);
 
-        let name_array = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let name_array =
+            batch.column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(name_array.value(0), "hello");
         assert_eq!(name_array.value(1), "world");
 
-        let active_array = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<arrow::array::BooleanArray>()
-            .unwrap();
+        let active_array =
+            batch.column(2).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
         assert!(active_array.value(0));
         assert!(!active_array.value(1));
     }
@@ -1496,19 +1425,12 @@ mod tests {
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 2);
 
-        let id_array = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
-            .unwrap();
+        let id_array = batch.column(0).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
         assert_eq!(id_array.value(0), 42);
         assert!(id_array.is_null(1));
 
-        let name_array = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let name_array =
+            batch.column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert!(name_array.is_null(0));
         assert_eq!(name_array.value(1), "test");
     }
@@ -1533,11 +1455,7 @@ mod tests {
         let schema = Schema::new(vec![
             Field::new("date_col", DataType::Date32, false),
             Field::new("time_col", DataType::Time64(TimeUnit::Microsecond), false),
-            Field::new(
-                "ts_col",
-                DataType::Timestamp(TimeUnit::Microsecond, None),
-                false,
-            ),
+            Field::new("ts_col", DataType::Timestamp(TimeUnit::Microsecond, None), false),
             Field::new(
                 "ts_tz_col",
                 DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
@@ -1550,11 +1468,8 @@ mod tests {
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 4);
 
-        let date_array = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Date32Array>()
-            .unwrap();
+        let date_array =
+            batch.column(0).as_any().downcast_ref::<arrow::array::Date32Array>().unwrap();
         assert_eq!(
             date_array.value(0),
             test_date.signed_duration_since(UNIX_EPOCH).num_days() as i32
@@ -1567,10 +1482,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             time_array.value(0),
-            test_time
-                .signed_duration_since(MIDNIGHT)
-                .num_microseconds()
-                .unwrap()
+            test_time.signed_duration_since(MIDNIGHT).num_microseconds().unwrap()
         );
 
         let ts_array = batch
@@ -1596,10 +1508,8 @@ mod tests {
         let test_bytes = vec![1, 2, 3, 4, 5];
         let test_uuid = Uuid::new_v4();
 
-        let rows = vec![TableRow::new(vec![
-            Cell::Bytes(test_bytes.clone()),
-            Cell::Uuid(test_uuid),
-        ])];
+        let rows =
+            vec![TableRow::new(vec![Cell::Bytes(test_bytes.clone()), Cell::Uuid(test_uuid)])];
 
         let schema = Schema::new(vec![
             Field::new("data", DataType::LargeBinary, false),
@@ -1611,18 +1521,12 @@ mod tests {
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 2);
 
-        let bytes_array = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::LargeBinaryArray>()
-            .unwrap();
+        let bytes_array =
+            batch.column(0).as_any().downcast_ref::<arrow::array::LargeBinaryArray>().unwrap();
         assert_eq!(bytes_array.value(0), test_bytes);
 
-        let uuid_array = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-            .unwrap();
+        let uuid_array =
+            batch.column(1).as_any().downcast_ref::<arrow::array::FixedSizeBinaryArray>().unwrap();
         assert_eq!(uuid_array.value(0), test_uuid.as_bytes());
     }
 
@@ -1668,19 +1572,12 @@ mod tests {
         assert_eq!(batch.num_rows(), 2);
         assert_eq!(batch.num_columns(), 2);
 
-        let id_array = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
-            .unwrap();
+        let id_array = batch.column(0).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
         assert_eq!(id_array.value(0), 42);
         assert_eq!(id_array.value(1), 100);
 
-        let metadata_array = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let metadata_array =
+            batch.column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         // JSON should be converted to string representation
         assert_eq!(metadata_array.value(0), r#"{"key":"value","number":123}"#);
         assert!(metadata_array.is_null(1));
@@ -1749,19 +1646,14 @@ mod tests {
 
     #[test]
     fn test_build_boolean_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Boolean, true);
         let field_ref = Arc::new(field);
 
         // Test with boolean array cells
         let rows = vec![
-            TableRow::new(vec![Cell::Array(ArrayCell::Bool(vec![
-                Some(true),
-                Some(false),
-                None,
-            ]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), None]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Bool(vec![Some(true)]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Bool(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                           // Null cell,
@@ -1776,10 +1668,7 @@ mod tests {
         // First row: [true, false, null]
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let bool_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::BooleanArray>()
-            .unwrap();
+        let bool_array = first_list.as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
         assert_eq!(bool_array.len(), 3);
         assert!(bool_array.value(0));
         assert!(!bool_array.value(1));
@@ -1788,10 +1677,7 @@ mod tests {
         // Second row: [true]
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let bool_array = second_list
-            .as_any()
-            .downcast_ref::<arrow::array::BooleanArray>()
-            .unwrap();
+        let bool_array = second_list.as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
         assert_eq!(bool_array.len(), 1);
         assert!(bool_array.value(0));
 
@@ -1809,18 +1695,14 @@ mod tests {
 
     #[test]
     fn test_build_boolean_list_array_fallback() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Boolean, true);
         let field_ref = Arc::new(field);
 
         // Test with non-boolean array type - should fall back to string conversion
-        let rows = vec![TableRow::new(vec![Cell::Array(ArrayCell::I32(vec![
-            Some(1),
-            Some(0),
-            None,
-        ]))])];
+        let rows =
+            vec![TableRow::new(vec![Cell::Array(ArrayCell::I32(vec![Some(1), Some(0), None]))])];
 
         // This should trigger the fallback case
         let array_ref = build_boolean_list_array(&rows, 0, field_ref);
@@ -1833,22 +1715,14 @@ mod tests {
 
     #[test]
     fn test_build_int32_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Int32, true);
         let field_ref = Arc::new(field);
 
         let rows = vec![
-            TableRow::new(vec![Cell::Array(ArrayCell::I16(vec![
-                Some(10),
-                Some(20),
-                None,
-            ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::I32(vec![
-                Some(100),
-                Some(-200),
-            ]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::I16(vec![Some(10), Some(20), None]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::I32(vec![Some(100), Some(-200)]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::I32(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                          // Null cell,
         ];
@@ -1861,10 +1735,7 @@ mod tests {
         // First row: I16 values converted to i32
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let int_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
-            .unwrap();
+        let int_array = first_list.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
         assert_eq!(int_array.len(), 3);
         assert_eq!(int_array.value(0), 10);
         assert_eq!(int_array.value(1), 20);
@@ -1873,10 +1744,7 @@ mod tests {
         // Second row: I32 values
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let int_array = second_list
-            .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
-            .unwrap();
+        let int_array = second_list.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
         assert_eq!(int_array.len(), 2);
         assert_eq!(int_array.value(0), 100);
         assert_eq!(int_array.value(1), -200);
@@ -1892,8 +1760,7 @@ mod tests {
 
     #[test]
     fn test_build_int64_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Int64, true);
         let field_ref = Arc::new(field);
@@ -1904,10 +1771,7 @@ mod tests {
                 Some(-987654321),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::U32(vec![
-                Some(456),
-                Some(789),
-            ]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::U32(vec![Some(456), Some(789)]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::I64(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                          // Null cell,
         ];
@@ -1920,10 +1784,7 @@ mod tests {
         // First row: I64 values
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let int_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap();
+        let int_array = first_list.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
         assert_eq!(int_array.len(), 3);
         assert_eq!(int_array.value(0), 123456789);
         assert_eq!(int_array.value(1), -987654321);
@@ -1932,10 +1793,7 @@ mod tests {
         // Second row: U32 values converted to i64
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let int_array = second_list
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .unwrap();
+        let int_array = second_list.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
         assert_eq!(int_array.len(), 2);
         assert_eq!(int_array.value(0), 456);
         assert_eq!(int_array.value(1), 789);
@@ -1951,21 +1809,14 @@ mod tests {
 
     #[test]
     fn test_build_float32_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Float32, true);
         let field_ref = Arc::new(field);
 
         let rows = vec![
-            TableRow::new(vec![Cell::Array(ArrayCell::F32(vec![
-                Some(1.5),
-                Some(-2.75),
-                None,
-            ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::F32(vec![Some(
-                std::f32::consts::PI,
-            )]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::F32(vec![Some(1.5), Some(-2.75), None]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::F32(vec![Some(std::f32::consts::PI)]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::F32(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                          // Null cell,
         ];
@@ -1978,10 +1829,7 @@ mod tests {
         // First row: F32 values
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let float_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::Float32Array>()
-            .unwrap();
+        let float_array = first_list.as_any().downcast_ref::<arrow::array::Float32Array>().unwrap();
         assert_eq!(float_array.len(), 3);
         assert_eq!(float_array.value(0), 1.5);
         assert_eq!(float_array.value(1), -2.75);
@@ -1990,10 +1838,8 @@ mod tests {
         // Second row: F32 values
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let float_array = second_list
-            .as_any()
-            .downcast_ref::<arrow::array::Float32Array>()
-            .unwrap();
+        let float_array =
+            second_list.as_any().downcast_ref::<arrow::array::Float32Array>().unwrap();
         assert_eq!(float_array.len(), 1);
         assert!((float_array.value(0) - std::f32::consts::PI).abs() < f32::EPSILON);
 
@@ -2008,8 +1854,7 @@ mod tests {
 
     #[test]
     fn test_build_float64_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Float64, true);
         let field_ref = Arc::new(field);
@@ -2020,9 +1865,7 @@ mod tests {
                 Some(-9.87654321),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::F64(vec![Some(
-                std::f64::consts::PI,
-            )]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::F64(vec![Some(std::f64::consts::PI)]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::F64(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                          // Null cell,
         ];
@@ -2035,10 +1878,7 @@ mod tests {
         // First row: F64 values
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let float_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::Float64Array>()
-            .unwrap();
+        let float_array = first_list.as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
         assert_eq!(float_array.len(), 3);
         assert_eq!(float_array.value(0), 1.23456789);
         assert_eq!(float_array.value(1), -9.87654321);
@@ -2047,10 +1887,8 @@ mod tests {
         // Second row: F64 values
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let float_array = second_list
-            .as_any()
-            .downcast_ref::<arrow::array::Float64Array>()
-            .unwrap();
+        let float_array =
+            second_list.as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
         assert_eq!(float_array.len(), 1);
         assert!((float_array.value(0) - std::f64::consts::PI).abs() < f64::EPSILON);
 
@@ -2065,8 +1903,7 @@ mod tests {
 
     #[test]
     fn test_build_string_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use etl::types::PgNumeric;
 
         let field = Field::new("items", DataType::Utf8, true);
@@ -2100,10 +1937,7 @@ mod tests {
         // First row: String values
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let string_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = first_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 3);
         assert_eq!(string_array.value(0), "hello");
         assert_eq!(string_array.value(1), "world");
@@ -2112,10 +1946,8 @@ mod tests {
         // Second row: Numeric values converted to strings
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let string_array = second_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array =
+            second_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 3);
         assert_eq!(string_array.value(0), "12345");
         assert_eq!(string_array.value(1), "-6789");
@@ -2124,10 +1956,7 @@ mod tests {
         // Third row: JSON values converted to strings
         assert!(!list_array.is_null(2));
         let third_list = list_array.value(2);
-        let string_array = third_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = third_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 3);
         assert_eq!(string_array.value(0), r#"{"key":"value"}"#);
         assert_eq!(string_array.value(1), "[1,2,3]");
@@ -2144,8 +1973,7 @@ mod tests {
 
     #[test]
     fn test_build_binary_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::LargeBinary, true);
         let field_ref = Arc::new(field);
@@ -2160,9 +1988,7 @@ mod tests {
                 Some(test_bytes_2.clone()),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Bytes(vec![Some(
-                empty_bytes.clone(),
-            )]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Bytes(vec![Some(empty_bytes.clone())]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Bytes(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                            // Null cell,
         ];
@@ -2175,10 +2001,8 @@ mod tests {
         // First row: Bytes values
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let binary_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::LargeBinaryArray>()
-            .unwrap();
+        let binary_array =
+            first_list.as_any().downcast_ref::<arrow::array::LargeBinaryArray>().unwrap();
         assert_eq!(binary_array.len(), 3);
         assert_eq!(binary_array.value(0), test_bytes_1);
         assert_eq!(binary_array.value(1), test_bytes_2);
@@ -2187,10 +2011,8 @@ mod tests {
         // Second row: Empty bytes
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let binary_array = second_list
-            .as_any()
-            .downcast_ref::<arrow::array::LargeBinaryArray>()
-            .unwrap();
+        let binary_array =
+            second_list.as_any().downcast_ref::<arrow::array::LargeBinaryArray>().unwrap();
         assert_eq!(binary_array.len(), 1);
         assert_eq!(binary_array.value(0), empty_bytes);
 
@@ -2205,8 +2027,7 @@ mod tests {
 
     #[test]
     fn test_build_date32_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use chrono::NaiveDate;
 
         let field = Field::new("items", DataType::Date32, true);
@@ -2235,10 +2056,7 @@ mod tests {
         // First row: Date values
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let date_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::Date32Array>()
-            .unwrap();
+        let date_array = first_list.as_any().downcast_ref::<arrow::array::Date32Array>().unwrap();
         assert_eq!(date_array.len(), 3);
         assert_eq!(
             date_array.value(0),
@@ -2253,10 +2071,7 @@ mod tests {
         // Second row: Single date
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let date_array = second_list
-            .as_any()
-            .downcast_ref::<arrow::array::Date32Array>()
-            .unwrap();
+        let date_array = second_list.as_any().downcast_ref::<arrow::array::Date32Array>().unwrap();
         assert_eq!(date_array.len(), 1);
         assert_eq!(
             date_array.value(0),
@@ -2274,8 +2089,7 @@ mod tests {
 
     #[test]
     fn test_build_time64_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use chrono::NaiveTime;
 
         let field = Field::new("items", DataType::Time64(TimeUnit::Microsecond), true);
@@ -2304,41 +2118,28 @@ mod tests {
         // First row: Time values
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let time_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::Time64MicrosecondArray>()
-            .unwrap();
+        let time_array =
+            first_list.as_any().downcast_ref::<arrow::array::Time64MicrosecondArray>().unwrap();
         assert_eq!(time_array.len(), 3);
         assert_eq!(
             time_array.value(0),
-            test_time_1
-                .signed_duration_since(MIDNIGHT)
-                .num_microseconds()
-                .unwrap()
+            test_time_1.signed_duration_since(MIDNIGHT).num_microseconds().unwrap()
         );
         assert_eq!(
             time_array.value(1),
-            test_time_2
-                .signed_duration_since(MIDNIGHT)
-                .num_microseconds()
-                .unwrap()
+            test_time_2.signed_duration_since(MIDNIGHT).num_microseconds().unwrap()
         );
         assert!(time_array.is_null(2));
 
         // Second row: Single time
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let time_array = second_list
-            .as_any()
-            .downcast_ref::<arrow::array::Time64MicrosecondArray>()
-            .unwrap();
+        let time_array =
+            second_list.as_any().downcast_ref::<arrow::array::Time64MicrosecondArray>().unwrap();
         assert_eq!(time_array.len(), 1);
         assert_eq!(
             time_array.value(0),
-            test_time_3
-                .signed_duration_since(MIDNIGHT)
-                .num_microseconds()
-                .unwrap()
+            test_time_3.signed_duration_since(MIDNIGHT).num_microseconds().unwrap()
         );
 
         // Third row: empty array
@@ -2352,15 +2153,10 @@ mod tests {
 
     #[test]
     fn test_build_timestamp_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use chrono::DateTime;
 
-        let field = Field::new(
-            "items",
-            DataType::Timestamp(TimeUnit::Microsecond, None),
-            true,
-        );
+        let field = Field::new("items", DataType::Timestamp(TimeUnit::Microsecond, None), true);
         let field_ref = Arc::new(field);
 
         let test_ts_1 = DateTime::from_timestamp(1000000000, 0).unwrap().naive_utc();
@@ -2373,9 +2169,7 @@ mod tests {
                 Some(test_ts_2),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![Some(
-                test_ts_3,
-            )]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![Some(test_ts_3)]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                                // Null cell,
         ];
@@ -2388,10 +2182,8 @@ mod tests {
         // First row: Timestamp values
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let ts_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
-            .unwrap();
+        let ts_array =
+            first_list.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
         assert_eq!(ts_array.len(), 3);
         assert_eq!(ts_array.value(0), test_ts_1.and_utc().timestamp_micros());
         assert_eq!(ts_array.value(1), test_ts_2.and_utc().timestamp_micros());
@@ -2400,10 +2192,8 @@ mod tests {
         // Second row: Single timestamp
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let ts_array = second_list
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
-            .unwrap();
+        let ts_array =
+            second_list.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
         assert_eq!(ts_array.len(), 1);
         assert_eq!(ts_array.value(0), test_ts_3.and_utc().timestamp_micros());
 
@@ -2418,8 +2208,7 @@ mod tests {
 
     #[test]
     fn test_build_timestamptz_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use chrono::DateTime;
 
         let field = Field::new(
@@ -2439,9 +2228,7 @@ mod tests {
                 Some(test_ts_2),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![Some(
-                test_ts_3,
-            )]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![Some(test_ts_3)]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                                  // Null cell,
         ];
@@ -2454,10 +2241,8 @@ mod tests {
         // First row: TimestampTz values
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let ts_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
-            .unwrap();
+        let ts_array =
+            first_list.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
         assert_eq!(ts_array.len(), 3);
         assert_eq!(ts_array.value(0), test_ts_1.timestamp_micros());
         assert_eq!(ts_array.value(1), test_ts_2.timestamp_micros());
@@ -2469,10 +2254,8 @@ mod tests {
         // Second row: Single timestamptz
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let ts_array = second_list
-            .as_any()
-            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
-            .unwrap();
+        let ts_array =
+            second_list.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
         assert_eq!(ts_array.len(), 1);
         assert_eq!(ts_array.value(0), test_ts_3.timestamp_micros());
 
@@ -2487,8 +2270,7 @@ mod tests {
 
     #[test]
     fn test_build_uuid_list_array() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use uuid::Uuid;
 
         let field = Field::new("items", DataType::FixedSizeBinary(UUID_BYTE_WIDTH), true);
@@ -2517,10 +2299,8 @@ mod tests {
         // First row: UUID values
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let uuid_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-            .unwrap();
+        let uuid_array =
+            first_list.as_any().downcast_ref::<arrow::array::FixedSizeBinaryArray>().unwrap();
         assert_eq!(uuid_array.len(), 3);
         assert_eq!(uuid_array.value(0), test_uuid_1.as_bytes());
         assert_eq!(uuid_array.value(1), test_uuid_2.as_bytes());
@@ -2529,10 +2309,8 @@ mod tests {
         // Second row: Single UUID (nil)
         assert!(!list_array.is_null(1));
         let second_list = list_array.value(1);
-        let uuid_array = second_list
-            .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-            .unwrap();
+        let uuid_array =
+            second_list.as_any().downcast_ref::<arrow::array::FixedSizeBinaryArray>().unwrap();
         assert_eq!(uuid_array.len(), 1);
         assert_eq!(uuid_array.value(0), test_uuid_3.as_bytes());
 
@@ -2547,8 +2325,7 @@ mod tests {
 
     #[test]
     fn test_build_list_array_for_strings() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use chrono::{DateTime, NaiveDate, NaiveTime};
         use etl::types::PgNumeric;
         use uuid::Uuid;
@@ -2567,36 +2344,17 @@ mod tests {
                 Some("hello".to_string()),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Bool(vec![
-                Some(true),
-                Some(false),
-                None,
-            ]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), None]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::I32(vec![Some(42), None]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::F64(vec![
                 Some(std::f64::consts::PI),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Uuid(vec![
-                Some(test_uuid),
-                None,
-            ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![
-                Some(test_date),
-                None,
-            ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![
-                Some(test_time),
-                None,
-            ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![
-                Some(test_ts),
-                None,
-            ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![
-                Some(test_ts_tz),
-                None,
-            ]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Uuid(vec![Some(test_uuid), None]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![Some(test_date), None]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![Some(test_time), None]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![Some(test_ts), None]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![Some(test_ts_tz), None]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Numeric(vec![
                 Some("123.45".parse::<PgNumeric>().unwrap()),
                 None,
@@ -2605,10 +2363,7 @@ mod tests {
                 Some(serde_json::json!({"key": "value"})),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Bytes(vec![
-                Some(vec![1, 2, 3]),
-                None,
-            ]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Bytes(vec![Some(vec![1, 2, 3]), None]))]),
             TableRow::new(vec![Cell::Null]), // Null cell,
         ];
 
@@ -2620,10 +2375,7 @@ mod tests {
         // Row 0: String array (direct)
         assert!(!list_array.is_null(0));
         let first_list = list_array.value(0);
-        let string_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = first_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "hello");
         assert!(string_array.is_null(1));
@@ -2631,10 +2383,7 @@ mod tests {
         // Row 1: Bool array (converted to strings)
         assert!(!list_array.is_null(1));
         let bool_list = list_array.value(1);
-        let string_array = bool_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = bool_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 3);
         assert_eq!(string_array.value(0), "true");
         assert_eq!(string_array.value(1), "false");
@@ -2643,10 +2392,7 @@ mod tests {
         // Row 2: I32 array (converted to strings)
         assert!(!list_array.is_null(2));
         let int_list = list_array.value(2);
-        let string_array = int_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = int_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "42");
         assert!(string_array.is_null(1));
@@ -2654,10 +2400,7 @@ mod tests {
         // Row 3: F64 array (converted to strings)
         assert!(!list_array.is_null(3));
         let float_list = list_array.value(3);
-        let string_array = float_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = float_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), std::f64::consts::PI.to_string());
         assert!(string_array.is_null(1));
@@ -2665,10 +2408,7 @@ mod tests {
         // Row 4: UUID array (converted to strings)
         assert!(!list_array.is_null(4));
         let uuid_list = list_array.value(4);
-        let string_array = uuid_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = uuid_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), test_uuid.to_string());
         assert!(string_array.is_null(1));
@@ -2676,52 +2416,31 @@ mod tests {
         // Row 5: Date array (converted to strings with DATE_FORMAT)
         assert!(!list_array.is_null(5));
         let date_list = list_array.value(5);
-        let string_array = date_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = date_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
-        assert_eq!(
-            string_array.value(0),
-            test_date.format(DATE_FORMAT).to_string()
-        );
+        assert_eq!(string_array.value(0), test_date.format(DATE_FORMAT).to_string());
         assert!(string_array.is_null(1));
 
         // Row 6: Time array (converted to strings with TIME_FORMAT)
         assert!(!list_array.is_null(6));
         let time_list = list_array.value(6);
-        let string_array = time_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = time_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
-        assert_eq!(
-            string_array.value(0),
-            test_time.format(TIME_FORMAT).to_string()
-        );
+        assert_eq!(string_array.value(0), test_time.format(TIME_FORMAT).to_string());
         assert!(string_array.is_null(1));
 
         // Row 7: Timestamp array (converted to strings with TIMESTAMP_FORMAT)
         assert!(!list_array.is_null(7));
         let ts_list = list_array.value(7);
-        let string_array = ts_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = ts_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
-        assert_eq!(
-            string_array.value(0),
-            test_ts.format(TIMESTAMP_FORMAT).to_string()
-        );
+        assert_eq!(string_array.value(0), test_ts.format(TIMESTAMP_FORMAT).to_string());
         assert!(string_array.is_null(1));
 
         // Row 8: TimestampTz array (converted to strings with RFC3339)
         assert!(!list_array.is_null(8));
         let ts_tz_list = list_array.value(8);
-        let string_array = ts_tz_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = ts_tz_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), test_ts_tz.to_rfc3339());
         assert!(string_array.is_null(1));
@@ -2729,10 +2448,8 @@ mod tests {
         // Row 9: Numeric array (converted to strings)
         assert!(!list_array.is_null(9));
         let numeric_list = list_array.value(9);
-        let string_array = numeric_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array =
+            numeric_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "123.45");
         assert!(string_array.is_null(1));
@@ -2740,10 +2457,7 @@ mod tests {
         // Row 10: JSON array (converted to strings)
         assert!(!list_array.is_null(10));
         let json_list = list_array.value(10);
-        let string_array = json_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = json_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), r#"{"key":"value"}"#);
         assert!(string_array.is_null(1));
@@ -2751,10 +2465,7 @@ mod tests {
         // Row 11: Bytes array (becomes null elements)
         assert!(!list_array.is_null(11));
         let bytes_list = list_array.value(11);
-        let string_array = bytes_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = bytes_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
         assert!(string_array.is_null(0)); // Bytes become null in string conversion
         assert!(string_array.is_null(1));
@@ -2878,10 +2589,8 @@ mod tests {
             list_builder.append(true);
             let list_array = list_builder.finish();
             let first_list = list_array.value(0);
-            let string_array = first_list
-                .as_any()
-                .downcast_ref::<arrow::array::StringArray>()
-                .unwrap();
+            let string_array =
+                first_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
 
             let total_len = string_array.len();
             let expected_non_nulls = expected_values.len();
@@ -2917,14 +2626,8 @@ mod tests {
             (DataType::LargeBinary, "binary list"),
             (DataType::Date32, "date32 list"),
             (DataType::Time64(TimeUnit::Microsecond), "time64 list"),
-            (
-                DataType::Timestamp(TimeUnit::Microsecond, None),
-                "timestamp list",
-            ),
-            (
-                DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
-                "timestamptz list",
-            ),
+            (DataType::Timestamp(TimeUnit::Microsecond, None), "timestamp list"),
+            (DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())), "timestamptz list"),
             (DataType::FixedSizeBinary(UUID_BYTE_WIDTH), "uuid list"),
         ];
 
@@ -2939,10 +2642,7 @@ mod tests {
 
             // Should not panic and should create an array
             let array_ref = build_list_array(&rows, 0, field_ref);
-            let list_array = array_ref
-                .as_any()
-                .downcast_ref::<arrow::array::ListArray>()
-                .unwrap();
+            let list_array = array_ref.as_any().downcast_ref::<arrow::array::ListArray>().unwrap();
 
             assert_eq!(list_array.len(), 2, "Failed for {test_name}");
             assert!(list_array.is_null(1),);
@@ -2957,26 +2657,18 @@ mod tests {
         let field = Field::new("item", DataType::Decimal128(10, 2), true); // Unsupported type
         let field_ref = Arc::new(field);
 
-        let rows = vec![TableRow::new(vec![Cell::Array(ArrayCell::I32(vec![
-            Some(123),
-            Some(456),
-        ]))])];
+        let rows =
+            vec![TableRow::new(vec![Cell::Array(ArrayCell::I32(vec![Some(123), Some(456)]))])];
 
         let array_ref = build_list_array(&rows, 0, field_ref);
-        let list_array = array_ref
-            .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
-            .unwrap();
+        let list_array = array_ref.as_any().downcast_ref::<arrow::array::ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 1);
         assert!(!list_array.is_null(0));
 
         // Should have created a string list as fallback
         let first_list = list_array.value(0);
-        let string_array = first_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array = first_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "123");
         assert_eq!(string_array.value(1), "456");
@@ -3048,29 +2740,20 @@ mod tests {
         assert_eq!(batch.num_columns(), 6);
 
         // Check ID column
-        let id_array = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
-            .unwrap();
+        let id_array = batch.column(0).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
         assert_eq!(id_array.value(0), 1);
         assert_eq!(id_array.value(1), 2);
 
         // Check bool list column
-        let bool_list_array = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
-            .unwrap();
+        let bool_list_array =
+            batch.column(1).as_any().downcast_ref::<arrow::array::ListArray>().unwrap();
         assert_eq!(bool_list_array.len(), 2);
         assert!(!bool_list_array.is_null(0));
         assert!(!bool_list_array.is_null(1));
 
         let first_bool_list = bool_list_array.value(0);
-        let bool_array = first_bool_list
-            .as_any()
-            .downcast_ref::<arrow::array::BooleanArray>()
-            .unwrap();
+        let bool_array =
+            first_bool_list.as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
         assert_eq!(bool_array.len(), 2);
         assert!(bool_array.value(0));
         assert!(!bool_array.value(1));
@@ -3079,93 +2762,68 @@ mod tests {
         assert_eq!(second_bool_list.len(), 0);
 
         // Check int list column
-        let int_list_array = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
-            .unwrap();
+        let int_list_array =
+            batch.column(2).as_any().downcast_ref::<arrow::array::ListArray>().unwrap();
         assert_eq!(int_list_array.len(), 2);
         assert!(!int_list_array.is_null(0));
         assert!(!int_list_array.is_null(1));
 
         let first_int_list = int_list_array.value(0);
-        let int_array = first_int_list
-            .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
-            .unwrap();
+        let int_array = first_int_list.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
         assert_eq!(int_array.len(), 3);
         assert_eq!(int_array.value(0), 10);
         assert_eq!(int_array.value(1), 20);
         assert!(int_array.is_null(2));
 
         let second_int_list = int_list_array.value(1);
-        let int_array = second_int_list
-            .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
-            .unwrap();
+        let int_array =
+            second_int_list.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
         assert_eq!(int_array.len(), 1);
         assert_eq!(int_array.value(0), 100);
 
         // Check string list column
-        let string_list_array = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
-            .unwrap();
+        let string_list_array =
+            batch.column(3).as_any().downcast_ref::<arrow::array::ListArray>().unwrap();
         assert_eq!(string_list_array.len(), 2);
         assert!(!string_list_array.is_null(0));
         assert!(string_list_array.is_null(1)); // Null array
 
         let first_string_list = string_list_array.value(0);
-        let string_array = first_string_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array =
+            first_string_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "hello");
         assert!(string_array.is_null(1));
 
         // Check UUID list column
-        let uuid_list_array = batch
-            .column(4)
-            .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
-            .unwrap();
+        let uuid_list_array =
+            batch.column(4).as_any().downcast_ref::<arrow::array::ListArray>().unwrap();
         assert_eq!(uuid_list_array.len(), 2);
         assert!(!uuid_list_array.is_null(0));
         assert!(!uuid_list_array.is_null(1));
 
         let first_uuid_list = uuid_list_array.value(0);
-        let uuid_array = first_uuid_list
-            .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-            .unwrap();
+        let uuid_array =
+            first_uuid_list.as_any().downcast_ref::<arrow::array::FixedSizeBinaryArray>().unwrap();
         assert_eq!(uuid_array.len(), 1);
         assert_eq!(uuid_array.value(0), test_uuid.as_bytes());
 
         let second_uuid_list = uuid_list_array.value(1);
-        let uuid_array = second_uuid_list
-            .as_any()
-            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
-            .unwrap();
+        let uuid_array =
+            second_uuid_list.as_any().downcast_ref::<arrow::array::FixedSizeBinaryArray>().unwrap();
         assert_eq!(uuid_array.len(), 1);
         assert!(uuid_array.is_null(0)); // Null UUID
 
         // Check date list column
-        let date_list_array = batch
-            .column(5)
-            .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
-            .unwrap();
+        let date_list_array =
+            batch.column(5).as_any().downcast_ref::<arrow::array::ListArray>().unwrap();
         assert_eq!(date_list_array.len(), 2);
         assert!(!date_list_array.is_null(0));
         assert!(!date_list_array.is_null(1));
 
         let first_date_list = date_list_array.value(0);
-        let date_array = first_date_list
-            .as_any()
-            .downcast_ref::<arrow::array::Date32Array>()
-            .unwrap();
+        let date_array =
+            first_date_list.as_any().downcast_ref::<arrow::array::Date32Array>().unwrap();
         assert_eq!(date_array.len(), 2);
         assert_eq!(
             date_array.value(0),
@@ -3188,10 +2846,7 @@ mod tests {
                 Cell::I32(42),
                 Cell::Array(ArrayCell::F32(vec![Some(1.1), Some(2.2)])),
                 Cell::Bool(true),
-                Cell::Array(ArrayCell::String(vec![
-                    Some("a".to_string()),
-                    Some("b".to_string()),
-                ])),
+                Cell::Array(ArrayCell::String(vec![Some("a".to_string()), Some("b".to_string())])),
             ]),
             TableRow::new(vec![
                 Cell::String("record2".to_string()),
@@ -3224,36 +2879,25 @@ mod tests {
         assert_eq!(batch.num_columns(), 5);
 
         // Verify all scalar columns work correctly
-        let name_array = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let name_array =
+            batch.column(0).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(name_array.value(0), "record1");
         assert_eq!(name_array.value(1), "record2");
 
-        let value_array = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<arrow::array::Int32Array>()
-            .unwrap();
+        let value_array =
+            batch.column(1).as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
         assert_eq!(value_array.value(0), 42);
         assert_eq!(value_array.value(1), 84);
 
         // Verify array columns work correctly
-        let float_list_array = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
-            .unwrap();
+        let float_list_array =
+            batch.column(2).as_any().downcast_ref::<arrow::array::ListArray>().unwrap();
         assert!(!float_list_array.is_null(0));
         assert!(!float_list_array.is_null(1));
 
         let first_float_list = float_list_array.value(0);
-        let float_array = first_float_list
-            .as_any()
-            .downcast_ref::<arrow::array::Float32Array>()
-            .unwrap();
+        let float_array =
+            first_float_list.as_any().downcast_ref::<arrow::array::Float32Array>().unwrap();
         assert_eq!(float_array.len(), 2);
         assert_eq!(float_array.value(0), 1.1);
         assert_eq!(float_array.value(1), 2.2);
@@ -3262,28 +2906,20 @@ mod tests {
         assert_eq!(second_float_list.len(), 0);
 
         // Verify remaining scalar column
-        let flag_array = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<arrow::array::BooleanArray>()
-            .unwrap();
+        let flag_array =
+            batch.column(3).as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
         assert!(flag_array.value(0));
         assert!(!flag_array.value(1));
 
         // Verify final array column
-        let string_list_array = batch
-            .column(4)
-            .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
-            .unwrap();
+        let string_list_array =
+            batch.column(4).as_any().downcast_ref::<arrow::array::ListArray>().unwrap();
         assert!(!string_list_array.is_null(0));
         assert!(string_list_array.is_null(1)); // Null array
 
         let first_string_list = string_list_array.value(0);
-        let string_array = first_string_list
-            .as_any()
-            .downcast_ref::<arrow::array::StringArray>()
-            .unwrap();
+        let string_array =
+            first_string_list.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "a");
         assert_eq!(string_array.value(1), "b");

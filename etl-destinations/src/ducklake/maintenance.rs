@@ -1,28 +1,33 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use etl::error::{ErrorKind, EtlError, EtlResult};
-use etl::etl_error;
+use etl::{
+    error::{ErrorKind, EtlError, EtlResult},
+    etl_error,
+};
 use metrics::{counter, histogram};
 use parking_lot::Mutex;
 use pg_escape::quote_literal;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
-use tokio::task::JoinHandle;
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
+    task::JoinHandle,
+    time::{Instant, MissedTickBehavior},
+};
 use tracing::{info, warn};
 
-use crate::ducklake::client::{
-    DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
-    format_query_error_detail, run_duckdb_blocking,
+use crate::ducklake::{
+    DuckLakeTableName, LAKE_CATALOG,
+    client::{
+        DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
+        format_query_error_detail, run_duckdb_blocking,
+    },
+    core::{DuckLakeInlineFlushKind, flush_table_inlined_data},
+    metrics::{
+        DuckLakeTableStorageMetrics, ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
+        ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL, MAINTENANCE_OPERATION_LABEL,
+        MAINTENANCE_OUTCOME_LABEL, MAINTENANCE_REASON_LABEL, MAINTENANCE_TASK_LABEL,
+        SMALL_FILE_SIZE_BYTES,
+    },
 };
-use crate::ducklake::core::{DuckLakeInlineFlushKind, flush_table_inlined_data};
-use crate::ducklake::metrics::{
-    DuckLakeTableStorageMetrics, ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
-    ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL, MAINTENANCE_OPERATION_LABEL, MAINTENANCE_OUTCOME_LABEL,
-    MAINTENANCE_REASON_LABEL, MAINTENANCE_TASK_LABEL, SMALL_FILE_SIZE_BYTES,
-};
-use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG};
 
 /// Dedicated pool size for background DuckLake maintenance work.
 const MAINTENANCE_POOL_SIZE: u32 = 1;
@@ -222,9 +227,8 @@ impl TableMaintenanceState {
     /// Aggregates one write notification into the existing table state.
     fn record_write_activity(&mut self, notification: &TableWriteActivity, now: Instant) {
         self.pending_bytes = self.pending_bytes.saturating_add(notification.approx_bytes);
-        self.pending_inserted_rows = self
-            .pending_inserted_rows
-            .saturating_add(notification.inserted_rows);
+        self.pending_inserted_rows =
+            self.pending_inserted_rows.saturating_add(notification.inserted_rows);
         self.dirty_since_compaction = true;
         self.last_write_at = Some(now);
     }
@@ -302,10 +306,7 @@ impl TableMaintenanceState {
         };
 
         if enough_idle && enough_gap {
-            Some(targeted_maintenance_plan(
-                metrics,
-                TargetedMaintenanceScope::Idle,
-            ))
+            Some(targeted_maintenance_plan(metrics, TargetedMaintenanceScope::Idle))
         } else {
             None
         }
@@ -448,12 +449,12 @@ fn known_ducklake_compaction_error_context(
     }
 
     match error.description() {
-        Some("DuckLake rewrite data files failed") => plan
-            .rewrite_reason
-            .map(|reason| (MaintenanceOperation::RewriteDataFiles, reason)),
-        Some("DuckLake merge adjacent files failed") => plan
-            .merge_reason
-            .map(|reason| (MaintenanceOperation::MergeAdjacentFiles, reason)),
+        Some("DuckLake rewrite data files failed") => {
+            plan.rewrite_reason.map(|reason| (MaintenanceOperation::RewriteDataFiles, reason))
+        }
+        Some("DuckLake merge adjacent files failed") => {
+            plan.merge_reason.map(|reason| (MaintenanceOperation::MergeAdjacentFiles, reason))
+        }
         _ => None,
     }
 }
@@ -539,9 +540,7 @@ pub(super) async fn send_maintenance_notification(
     notification_tx: &mpsc::Sender<TableMaintenanceNotification>,
     notification: TableMaintenanceNotification,
 ) {
-    if let Err(error) = notification_tx
-        .send_timeout(notification, NOTIFICATION_SEND_TIMEOUT)
-        .await
+    if let Err(error) = notification_tx.send_timeout(notification, NOTIFICATION_SEND_TIMEOUT).await
     {
         match error {
             mpsc::error::SendTimeoutError::Timeout(notification) => {
@@ -769,10 +768,7 @@ pub(super) fn table_write_slot(
     table_name: &str,
 ) -> Arc<Semaphore> {
     let mut slots = table_write_slots.lock();
-    slots
-        .entry(table_name.to_string())
-        .or_insert_with(|| Arc::new(Semaphore::new(1)))
-        .clone()
+    slots.entry(table_name.to_string()).or_insert_with(|| Arc::new(Semaphore::new(1))).clone()
 }
 
 /// Tries to acquire the table-local semaphore without blocking the maintenance worker.
@@ -780,9 +776,7 @@ fn try_acquire_table_write_slot(
     table_write_slots: &Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     table_name: &str,
 ) -> Option<OwnedSemaphorePermit> {
-    table_write_slot(table_write_slots, table_name)
-        .try_acquire_owned()
-        .ok()
+    table_write_slot(table_write_slots, table_name).try_acquire_owned().ok()
 }
 
 /// Materializes one table's pending inlined rows on the maintenance pool.
@@ -977,10 +971,7 @@ fn run_background_checkpoint_blocking(
             MaintenanceOutcome::Failed,
             checkpoint_started.elapsed().as_secs_f64(),
         );
-        return Err(etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake checkpoint failed"
-        ));
+        return Err(etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake checkpoint failed"));
     }
 
     conn.execute_batch("CHECKPOINT").map_err(|error| {
@@ -1032,16 +1023,14 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
         ));
     }
 
-    let files_created: i64 = conn
-        .query_row(&sql, [], |row| row.get(0))
-        .map_err(|error| {
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake rewrite data files failed",
-                format_query_error_detail(&sql, &error),
-                source: error
-            )
-        })?;
+    let files_created: i64 = conn.query_row(&sql, [], |row| row.get(0)).map_err(|error| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake rewrite data files failed",
+            format_query_error_detail(&sql, &error),
+            source: error
+        )
+    })?;
 
     Ok(files_created.max(0) as u64)
 }
@@ -1055,34 +1044,32 @@ fn merge_adjacent_table_files(conn: &duckdb::Connection, table_name: &str) -> Et
         quote_literal(table_name),
         SMALL_FILE_SIZE_BYTES,
     );
-    let files_created: i64 = conn
-        .query_row(&sql, [], |row| row.get(0))
-        .map_err(|error| {
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake merge adjacent files failed",
-                format_query_error_detail(&sql, &error),
-                source: error
-            )
-        })?;
+    let files_created: i64 = conn.query_row(&sql, [], |row| row.get(0)).map_err(|error| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake merge adjacent files failed",
+            format_query_error_detail(&sql, &error),
+            source: error
+        )
+    })?;
 
     Ok(files_created.max(0) as u64)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    use std::sync::atomic::Ordering as AtomicOrdering;
-    use std::sync::{Arc, LazyLock};
+    use std::sync::{Arc, LazyLock, atomic::Ordering as AtomicOrdering};
 
     use etl_telemetry::metrics::init_metrics_handle;
 
-    use crate::ducklake::client::{
-        DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
-        run_duckdb_blocking,
+    use super::*;
+    use crate::ducklake::{
+        client::{
+            DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
+            run_duckdb_blocking,
+        },
+        metrics::register_metrics,
     };
-    use crate::ducklake::metrics::register_metrics;
 
     static CHECKPOINT_TEST_GUARD: LazyLock<Arc<Semaphore>> =
         LazyLock::new(|| Arc::new(Semaphore::new(1)));
@@ -1109,9 +1096,8 @@ mod tests {
         rendered
             .lines()
             .find_map(|line| {
-                if line.starts_with(&format!(
-                    "{ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS}_count"
-                )) && line.contains(&task_label)
+                if line.starts_with(&format!("{ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS}_count"))
+                    && line.contains(&task_label)
                     && line.contains(&operation_label)
                     && line.contains(&reason_label)
                     && line.contains(&outcome_label)
@@ -1151,22 +1137,14 @@ mod tests {
     }
 
     fn write_activity(approx_bytes: u64, inserted_rows: u64) -> TableWriteActivity {
-        TableWriteActivity {
-            table_name: "public_users".to_string(),
-            approx_bytes,
-            inserted_rows,
-        }
+        TableWriteActivity { table_name: "public_users".to_string(), approx_bytes, inserted_rows }
     }
 
     fn table_metrics_sample(
         sampled_at: Instant,
         metrics: DuckLakeTableStorageMetrics,
     ) -> TableMetricsSample {
-        TableMetricsSample {
-            table_name: "public_users".to_string(),
-            sampled_at,
-            metrics,
-        }
+        TableMetricsSample { table_name: "public_users".to_string(), sampled_at, metrics }
     }
 
     fn storage_metrics(
@@ -1308,18 +1286,12 @@ mod tests {
             flush_applied_after > flush_applied_before,
             "flush applied duration count did not increase"
         );
-        assert!(
-            flush_noop_after > flush_noop_before,
-            "flush noop duration count did not increase"
-        );
+        assert!(flush_noop_after > flush_noop_before, "flush noop duration count did not increase");
         assert!(
             rewrite_applied_after > rewrite_applied_before,
             "rewrite applied duration count did not increase"
         );
-        assert!(
-            merge_noop_after > merge_noop_before,
-            "merge noop duration count did not increase"
-        );
+        assert!(merge_noop_after > merge_noop_before, "merge noop duration count did not increase");
         assert!(
             checkpoint_failed_after > checkpoint_failed_before,
             "checkpoint failed duration count did not increase"
@@ -1393,10 +1365,7 @@ mod tests {
             MaintenanceOutcome::SkippedBusy,
         );
 
-        assert!(
-            rewrite_after > rewrite_before,
-            "rewrite skipped counter did not increase"
-        );
+        assert!(rewrite_after > rewrite_before, "rewrite skipped counter did not increase");
         assert!(
             (merge_after - merge_before).abs() < f64::EPSILON,
             "merge skipped counter should stay unchanged when merge was not selected"
@@ -1465,9 +1434,8 @@ mod tests {
         let metrics = storage_metrics(10, 20_000_000, 6, 1000, 4, 1024, 25);
         let mut state = TableMaintenanceState::default();
         state.record_metrics_sample(table_metrics_sample(now, metrics.clone()));
-        let (recorded_metrics, sampled_at) = state
-            .current_storage_metrics()
-            .expect("metrics sample should be visible");
+        let (recorded_metrics, sampled_at) =
+            state.current_storage_metrics().expect("metrics sample should be visible");
 
         assert_eq!(sampled_at, now);
         assert_eq!(recorded_metrics.small_data_files, metrics.small_data_files);
@@ -1717,10 +1685,7 @@ mod tests {
             MaintenanceOutcome::Failed,
         );
 
-        assert!(
-            failed_after > failed_before,
-            "flush failed duration count did not increase"
-        );
+        assert!(failed_after > failed_before, "flush failed duration count did not increase");
     }
 
     #[tokio::test]
@@ -1836,14 +1801,13 @@ mod tests {
             std::sync::Arc::clone(&blocking_slots),
             DuckDbBlockingOperationKind::Maintenance,
             |conn| {
-                conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
-                    .map_err(|source| {
-                        etl_error!(
-                            ErrorKind::DestinationQueryFailed,
-                            "DuckLake connection recycling verification query failed",
-                            source: source
-                        )
-                    })
+                conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0)).map_err(|source| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake connection recycling verification query failed",
+                        source: source
+                    )
+                })
             },
         )
         .await
@@ -1937,14 +1901,8 @@ mod tests {
             MaintenanceOutcome::Failed,
         );
 
-        assert!(
-            result.is_err(),
-            "checkpoint should fail when the test hook is armed"
-        );
-        assert!(
-            failed_after > failed_before,
-            "checkpoint failed duration count did not increase"
-        );
+        assert!(result.is_err(), "checkpoint should fail when the test hook is armed");
+        assert!(failed_after > failed_before, "checkpoint failed duration count did not increase");
 
         FAIL_CHECKPOINT_ONCE_FOR_TESTS.store(false, AtomicOrdering::Relaxed);
     }
@@ -1990,13 +1948,7 @@ mod tests {
             MaintenanceOutcome::SkippedBusy,
         );
 
-        assert!(
-            skipped_after > skipped_before,
-            "flush skipped counter did not increase"
-        );
-        assert_eq!(
-            duration_after, duration_before,
-            "flush skip should not emit a duration sample"
-        );
+        assert!(skipped_after > skipped_before, "flush skipped counter did not increase");
+        assert_eq!(duration_after, duration_before, "flush skip should not emit a duration sample");
     }
 }

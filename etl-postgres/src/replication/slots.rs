@@ -1,9 +1,11 @@
-use crate::types::TableId;
-use sqlx::PgPool;
 use std::time::Duration;
+
+use sqlx::PgPool;
 use thiserror::Error;
 use tokio_postgres::types::Oid;
 use tracing::{debug, warn};
+
+use crate::types::TableId;
 
 /// Maximum length for a Postgres replication slot name in bytes.
 const MAX_SLOT_NAME_LENGTH: usize = 63;
@@ -39,10 +41,7 @@ impl EtlReplicationSlot {
 
     /// Creates a new [`EtlReplicationSlot`] for the table sync worker.
     pub fn for_table_sync_worker(pipeline_id: u64, table_id: TableId) -> Self {
-        Self::TableSync {
-            pipeline_id,
-            table_id,
-        }
+        Self::TableSync { pipeline_id, table_id }
     }
 
     /// Returns the prefix of apply sync slot for a pipeline.
@@ -123,14 +122,8 @@ impl TryFrom<EtlReplicationSlot> for String {
             EtlReplicationSlot::Apply { pipeline_id } => {
                 format!("{APPLY_WORKER_PREFIX}_{pipeline_id}")
             }
-            EtlReplicationSlot::TableSync {
-                pipeline_id,
-                table_id,
-            } => {
-                format!(
-                    "{TABLE_SYNC_WORKER_PREFIX}_{pipeline_id}_{}",
-                    table_id.into_inner()
-                )
+            EtlReplicationSlot::TableSync { pipeline_id, table_id } => {
+                format!("{TABLE_SYNC_WORKER_PREFIX}_{pipeline_id}_{}", table_id.into_inner())
             }
         };
 
@@ -185,10 +178,7 @@ pub async fn delete_pipeline_replication_slots(
             where r.slot_name = any($1) and r.active = true and r.active_pid is not null;
             "#,
         );
-        let result = sqlx::query(&terminate_query)
-            .bind(&slot_names)
-            .execute(pool)
-            .await;
+        let result = sqlx::query(&terminate_query).bind(&slot_names).execute(pool).await;
         if let Err(err) = result {
             warn!(%pipeline_id, %err, "could not terminate backend(s) using replication slot(s) that have to be deleted");
         }
@@ -207,10 +197,7 @@ pub async fn delete_pipeline_replication_slots(
             where r.slot_name = any($1);
             "#,
         );
-        let result = sqlx::query(&drop_query)
-            .bind(&slot_names)
-            .execute(pool)
-            .await;
+        let result = sqlx::query(&drop_query).bind(&slot_names).execute(pool).await;
 
         match result {
             Ok(_) => return Ok(()),
@@ -241,9 +228,7 @@ mod tests {
     #[test]
     fn test_apply_worker_slot_name() {
         let pipeline_id = 1;
-        let result: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
-            .try_into()
-            .unwrap();
+        let result: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
 
         assert!(result.starts_with(APPLY_WORKER_PREFIX));
         assert!(result.len() <= MAX_SLOT_NAME_LENGTH);
@@ -278,10 +263,7 @@ mod tests {
         assert!(slot_name.len() <= MAX_SLOT_NAME_LENGTH);
 
         // The longest possible slot name with current prefixes should still be valid
-        assert_eq!(
-            slot_name,
-            "supabase_etl_table_sync_9223372036854775807_4294967295"
-        );
+        assert_eq!(slot_name, "supabase_etl_table_sync_9223372036854775807_4294967295");
         assert!(slot_name.len() <= MAX_SLOT_NAME_LENGTH);
     }
 
@@ -308,10 +290,7 @@ mod tests {
         let parsed = EtlReplicationSlot::try_from("supabase_etl_table_sync_7_12345").unwrap();
         assert_eq!(
             parsed,
-            EtlReplicationSlot::TableSync {
-                pipeline_id: 7,
-                table_id: TableId::new(12345_u32),
-            }
+            EtlReplicationSlot::TableSync { pipeline_id: 7, table_id: TableId::new(12345_u32) }
         );
     }
 

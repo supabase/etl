@@ -10,9 +10,7 @@ use thiserror::Error;
 use tracing_actix_web::RootSpan;
 use utoipa::ToSchema;
 
-use crate::db;
-use crate::db::tenants::TenantsDbError;
-use crate::routes::ErrorMessage;
+use crate::{db, db::tenants::TenantsDbError, routes::ErrorMessage};
 
 #[derive(Debug, Error)]
 pub enum TenantError {
@@ -46,14 +44,10 @@ impl ResponseError for TenantError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage {
-            error: self.to_message(),
-        };
+        let error_message = ErrorMessage { error: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::json())
-            .body(body)
+        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
     }
 }
 
@@ -191,10 +185,7 @@ pub async fn read_tenant(
 
     let response = db::tenants::read_tenant(&**pool, &tenant_id)
         .await?
-        .map(|t| ReadTenantResponse {
-            id: t.id,
-            name: t.name,
-        })
+        .map(|t| ReadTenantResponse { id: t.id, name: t.name })
         .ok_or(TenantError::TenantNotFound(tenant_id))?;
 
     Ok(Json(response))
@@ -275,10 +266,7 @@ pub async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, Tena
     let tenants: Vec<ReadTenantResponse> = db::tenants::read_all_tenants(&**pool)
         .await?
         .drain(..)
-        .map(|t| ReadTenantResponse {
-            id: t.id,
-            name: t.name,
-        })
+        .map(|t| ReadTenantResponse { id: t.id, name: t.name })
         .collect();
 
     let response = ReadTenantsResponse { tenants };

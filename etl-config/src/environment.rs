@@ -1,5 +1,4 @@
-use std::fmt;
-use std::io::Error;
+use std::{fmt, io::Error};
 
 /// Environment variable name containing the environment identifier.
 const APP_ENVIRONMENT_ENV_NAME: &str = "APP_ENVIRONMENT";
@@ -33,9 +32,7 @@ impl Environment {
     /// Defaults to [`Environment::Prod`] if the variable is not set.
     pub fn load() -> Result<Environment, Error> {
         // TODO: maybe we want to wrap this error with its own type to make the interface more usable.
-        std::env::var(APP_ENVIRONMENT_ENV_NAME)
-            .unwrap_or_else(|_| PROD_ENV_NAME.into())
-            .try_into()
+        std::env::var(APP_ENVIRONMENT_ENV_NAME).unwrap_or_else(|_| PROD_ENV_NAME.into()).try_into()
     }
 
     /// Sets the `APP_ENVIRONMENT` environment variable to this environment's value.

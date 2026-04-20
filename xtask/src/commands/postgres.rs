@@ -1,6 +1,8 @@
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Duration;
+use std::{
+    process::{Command, Stdio},
+    thread,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
@@ -92,11 +94,7 @@ impl StartArgs {
         for shard in 2..=self.shards {
             let port = self.base_port + shard - 1;
             let project = format!("etl-stack-pg-{}-shard-{shard}", self.pg_version);
-            self.docker_compose_up(
-                &self.pg_version,
-                Some((&project, port)),
-                &["source-postgres"],
-            )?;
+            self.docker_compose_up(&self.pg_version, Some((&project, port)), &["source-postgres"])?;
         }
 
         // Wait for all clusters to accept connections.
@@ -140,14 +138,7 @@ impl StartArgs {
     fn wait_for_pg(&self, port: u16) -> Result<()> {
         loop {
             let status = Command::new("pg_isready")
-                .args([
-                    "-h",
-                    "localhost",
-                    "-p",
-                    &port.to_string(),
-                    "-U",
-                    &self.pg_user,
-                ])
+                .args(["-h", "localhost", "-p", &port.to_string(), "-U", &self.pg_user])
                 .status()
                 .context("failed to run pg_isready")?;
 

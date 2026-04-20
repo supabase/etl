@@ -1,30 +1,38 @@
 use std::collections::HashMap;
 
-use crate::error::{ReplicatorError, ReplicatorResult};
-use crate::error_notification::ErrorNotificationClient;
-use crate::error_reporting::ErrorReportingStateStore;
-use crate::metrics;
-use crate::sentry::set_destination_tag;
-use etl::pipeline::Pipeline;
-use etl::store::both::postgres::PostgresStore;
-use etl::store::cleanup::CleanupStore;
-use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
-use etl::types::PipelineId;
-use etl::{config::IcebergConfig, destination::Destination};
-use etl_config::shared::{DestinationConfig, PgConnectionConfig, ReplicatorConfig};
-use etl_config::{Environment, parse_ducklake_url};
-use etl_destinations::iceberg::{
-    DestinationNamespace, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
+use etl::{
+    config::IcebergConfig,
+    destination::Destination,
+    pipeline::Pipeline,
+    store::{
+        both::postgres::PostgresStore, cleanup::CleanupStore, schema::SchemaStore,
+        state::StateStore,
+    },
+    types::PipelineId,
+};
+use etl_config::{
+    Environment, parse_ducklake_url,
+    shared::{DestinationConfig, PgConnectionConfig, ReplicatorConfig},
 };
 use etl_destinations::{
     bigquery::BigQueryDestination,
     ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
-    iceberg::{IcebergClient, IcebergDestination},
+    iceberg::{
+        DestinationNamespace, IcebergClient, IcebergDestination, S3_ACCESS_KEY_ID, S3_ENDPOINT,
+        S3_SECRET_ACCESS_KEY,
+    },
 };
 use secrecy::ExposeSecret;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
+
+use crate::{
+    error::{ReplicatorError, ReplicatorResult},
+    error_notification::ErrorNotificationClient,
+    error_reporting::ErrorReportingStateStore,
+    metrics,
+    sentry::set_destination_tag,
+};
 
 /// Starts the replicator service with the provided configuration.
 ///

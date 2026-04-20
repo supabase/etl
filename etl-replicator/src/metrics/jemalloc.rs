@@ -274,11 +274,8 @@ pub(super) fn spawn_jemalloc_metrics_task() {
 
             // Calculate fragmentation ratio: (resident - allocated) / resident.
             // A ratio of 0 means no fragmentation, >0.5 indicates significant fragmentation.
-            let fragmentation = if resident > 0.0 {
-                (resident - allocated) / resident
-            } else {
-                0.0
-            };
+            let fragmentation =
+                if resident > 0.0 { (resident - allocated) / resident } else { 0.0 };
             gauge!(JEMALLOC_FRAGMENTATION_RATIO, APP_TYPE_LABEL => APP_TYPE_VALUE)
                 .set(fragmentation);
 

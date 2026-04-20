@@ -17,9 +17,9 @@
 //! this cache only tracks the latest per-table decoding state needed by active
 //! workers.
 
+use std::{collections::HashMap, sync::Arc};
+
 use etl_postgres::types::{ReplicationMask, SnapshotId, TableId};
-use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::warn;
 
@@ -42,9 +42,7 @@ pub(crate) struct SharedTableCache {
 impl SharedTableCache {
     /// Creates a new empty [`SharedTableCache`] container.
     pub(crate) fn new() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self { inner: Arc::new(RwLock::new(HashMap::new())) }
     }
 
     /// Returns the shared state for a table, if present.
@@ -85,13 +83,7 @@ impl SharedTableCache {
                 state.replication_mask = replication_mask;
             }
             None => {
-                guard.insert(
-                    table_id,
-                    SharedTableState {
-                        snapshot_id,
-                        replication_mask,
-                    },
-                );
+                guard.insert(table_id, SharedTableState { snapshot_id, replication_mask });
             }
         }
     }
@@ -99,10 +91,12 @@ impl SharedTableCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use etl_postgres::types::{ColumnSchema, TableName, TableSchema};
     use std::collections::HashSet;
+
+    use etl_postgres::types::{ColumnSchema, TableName, TableSchema};
     use tokio_postgres::types::Type;
+
+    use super::*;
 
     fn create_test_mask() -> ReplicationMask {
         let schema = TableSchema::new(
@@ -127,20 +121,12 @@ mod tests {
         let snapshot_id = SnapshotId::new(10.into());
         let replication_mask = create_test_mask();
 
-        cache
-            .upsert(table_id, snapshot_id, Some(replication_mask.clone()))
-            .await;
+        cache.upsert(table_id, snapshot_id, Some(replication_mask.clone())).await;
 
-        let state = cache
-            .get(&table_id)
-            .await
-            .expect("table state should exist");
+        let state = cache.get(&table_id).await.expect("table state should exist");
         assert_eq!(state.snapshot_id, snapshot_id);
         assert_eq!(
-            state
-                .replication_mask
-                .expect("replication mask should exist")
-                .as_slice(),
+            state.replication_mask.expect("replication mask should exist").as_slice(),
             replication_mask.as_slice()
         );
     }
@@ -151,17 +137,10 @@ mod tests {
         let table_id = TableId::new(123);
         let replication_mask = create_test_mask();
 
-        cache
-            .upsert(table_id, SnapshotId::new(10.into()), Some(replication_mask))
-            .await;
-        cache
-            .upsert(table_id, SnapshotId::new(11.into()), None)
-            .await;
+        cache.upsert(table_id, SnapshotId::new(10.into()), Some(replication_mask)).await;
+        cache.upsert(table_id, SnapshotId::new(11.into()), None).await;
 
-        let state = cache
-            .get(&table_id)
-            .await
-            .expect("table state should exist");
+        let state = cache.get(&table_id).await.expect("table state should exist");
         assert_eq!(state.snapshot_id, SnapshotId::new(11.into()));
         assert!(state.replication_mask.is_none());
     }
@@ -173,16 +152,8 @@ mod tests {
         let table_id = TableId::new(123);
         let replication_mask = create_test_mask();
 
-        cache
-            .upsert(
-                table_id,
-                SnapshotId::new(11.into()),
-                Some(replication_mask.clone()),
-            )
-            .await;
-        cache
-            .upsert(table_id, SnapshotId::new(10.into()), None)
-            .await;
+        cache.upsert(table_id, SnapshotId::new(11.into()), Some(replication_mask.clone())).await;
+        cache.upsert(table_id, SnapshotId::new(10.into()), None).await;
     }
 
     #[tokio::test]
@@ -193,20 +164,12 @@ mod tests {
         let snapshot_id = SnapshotId::new(10.into());
         let replication_mask = create_test_mask();
 
-        cache1
-            .upsert(table_id, snapshot_id, Some(replication_mask.clone()))
-            .await;
+        cache1.upsert(table_id, snapshot_id, Some(replication_mask.clone())).await;
 
-        let state = cache2
-            .get(&table_id)
-            .await
-            .expect("table state should exist");
+        let state = cache2.get(&table_id).await.expect("table state should exist");
         assert_eq!(state.snapshot_id, snapshot_id);
         assert_eq!(
-            state
-                .replication_mask
-                .expect("replication mask should exist")
-                .as_slice(),
+            state.replication_mask.expect("replication mask should exist").as_slice(),
             replication_mask.as_slice()
         );
     }

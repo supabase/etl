@@ -1,13 +1,21 @@
-use etl_postgres::tokio::test_utils::{PgDatabase, id_column_schema};
-use etl_postgres::types::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema};
-use std::ops::RangeInclusive;
-use std::sync::Arc;
-use tokio_postgres::types::{PgLsn, Type};
-use tokio_postgres::{Client, GenericClient};
+use std::{ops::RangeInclusive, sync::Arc};
 
-use crate::test_utils::database::{TEST_DATABASE_SCHEMA, test_table_name};
-use crate::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use crate::types::{Cell, Event, InsertEvent, TableRow};
+use etl_postgres::{
+    tokio::test_utils::{PgDatabase, id_column_schema},
+    types::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema},
+};
+use tokio_postgres::{
+    Client, GenericClient,
+    types::{PgLsn, Type},
+};
+
+use crate::{
+    test_utils::{
+        database::{TEST_DATABASE_SCHEMA, test_table_name},
+        test_destination_wrapper::TestDestinationWrapper,
+    },
+    types::{Cell, Event, InsertEvent, TableRow},
+};
 
 /// Creates a test column schema with sensible defaults.
 fn test_column(
@@ -47,15 +55,11 @@ impl TestDatabaseSchema {
     }
 
     pub fn users_schema(&self) -> TableSchema {
-        self.users_table_schema
-            .clone()
-            .expect("Users table schema not found")
+        self.users_table_schema.clone().expect("Users table schema not found")
     }
 
     pub fn orders_schema(&self) -> TableSchema {
-        self.orders_table_schema
-            .clone()
-            .expect("Orders table schema not found")
+        self.orders_table_schema.clone().expect("Orders table schema not found")
     }
 
     pub fn schema() -> &'static str {
@@ -98,11 +102,7 @@ pub async fn setup_test_database_schema<G: GenericClient>(
     if matches!(selection, TableSelection::Both | TableSelection::OrdersOnly) {
         let orders_table_name = test_table_name("orders");
         let orders_table_id = database
-            .create_table(
-                orders_table_name.clone(),
-                true,
-                &[("description", "text not null")],
-            )
+            .create_table(orders_table_name.clone(), true, &[("description", "text not null")])
             .await
             .expect("Failed to create orders table");
 
@@ -111,10 +111,7 @@ pub async fn setup_test_database_schema<G: GenericClient>(
         orders_table_schema = Some(TableSchema::new(
             orders_table_id,
             orders_table_name,
-            vec![
-                id_column_schema(),
-                test_column("description", Type::TEXT, 2, false, false),
-            ],
+            vec![id_column_schema(), test_column("description", Type::TEXT, 2, false, false)],
         ));
     }
 

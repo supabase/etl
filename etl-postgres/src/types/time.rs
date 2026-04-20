@@ -1,5 +1,7 @@
-use std::sync::LazyLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::LazyLock,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 /// Postgres date format string for parsing dates in YYYY-MM-DD format.
 pub const DATE_FORMAT: &str = "%Y-%m-%d";

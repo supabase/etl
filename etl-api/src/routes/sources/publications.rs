@@ -9,13 +9,16 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::config::ApiConfig;
-use crate::db::connect_to_source_database_from_api;
-use crate::db::publications::PublicationsDbError;
-use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
 use crate::{
+    config::ApiConfig,
     configs::encryption::EncryptionKey,
-    db::{self, publications::Publication, sources::SourcesDbError, tables::Table},
+    db::{
+        self, connect_to_source_database_from_api,
+        publications::{Publication, PublicationsDbError},
+        sources::SourcesDbError,
+        tables::Table,
+    },
+    k8s::{TrustedRootCertsCache, TrustedRootCertsError},
     routes::{ErrorMessage, TenantIdError, extract_tenant_id},
 };
 
@@ -72,14 +75,10 @@ impl ResponseError for PublicationError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage {
-            error: self.to_message(),
-        };
+        let error_message = ErrorMessage { error: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::json())
-            .body(body)
+        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
     }
 }
 
@@ -134,17 +133,12 @@ pub async fn create_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source.tls_enabled)
-        .await?;
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
     let publication = publication.0;
-    let publication = Publication {
-        name: publication.name,
-        tables: publication.tables,
-    };
+    let publication = Publication { name: publication.name, tables: publication.tables };
     db::publications::create_publication(&publication, &source_pool).await?;
 
     Ok(HttpResponse::Ok().finish())
@@ -181,9 +175,7 @@ pub async fn read_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source.tls_enabled)
-        .await?;
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
@@ -227,17 +219,12 @@ pub async fn update_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source.tls_enabled)
-        .await?;
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
     let publication = publication.0;
-    let publication = Publication {
-        name: publication_name,
-        tables: publication.tables,
-    };
+    let publication = Publication { name: publication_name, tables: publication.tables };
     db::publications::update_publication(&publication, &source_pool).await?;
 
     Ok(HttpResponse::Ok().finish())
@@ -274,9 +261,7 @@ pub async fn delete_publication(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source.tls_enabled)
-        .await?;
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;
@@ -314,9 +299,7 @@ pub async fn read_all_publications(
         .map(|s| s.config)
         .ok_or(PublicationError::SourceNotFound(source_id))?;
 
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source.tls_enabled)
-        .await?;
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;

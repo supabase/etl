@@ -8,11 +8,11 @@ use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 use sqlx::PgPool;
 
-use crate::support::database::create_test_source_database;
-use crate::support::mocks::create_default_image;
-use crate::support::mocks::destinations::create_destination;
-use crate::support::mocks::tenants::create_tenant;
-use crate::support::test_app::{TestApp, spawn_test_app};
+use crate::support::{
+    database::create_test_source_database,
+    mocks::{create_default_image, destinations::create_destination, tenants::create_tenant},
+    test_app::{TestApp, spawn_test_app},
+};
 
 async fn create_pipeline_with_unmigrated_source_db(
     app: &TestApp,
@@ -30,10 +30,8 @@ async fn create_pipeline_with_unmigrated_source_db(
     };
 
     let response = app.create_pipeline(tenant_id, &req).await;
-    let response: CreatePipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
 
     (response.id, source_pool, source_db_config)
 }
@@ -47,9 +45,7 @@ async fn replication_status_fails_when_etl_tables_missing() {
     let (pipeline_id, _source_pool, source_db_config) =
         create_pipeline_with_unmigrated_source_db(&app, &tenant_id).await;
 
-    let response = app
-        .get_pipeline_replication_status(&tenant_id, pipeline_id)
-        .await;
+    let response = app.get_pipeline_replication_status(&tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(
         response

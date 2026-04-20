@@ -1,23 +1,28 @@
-use crate::destination::Destination;
-use crate::pipeline::Pipeline;
-use crate::state::table::TableReplicationPhaseType;
-use crate::store::cleanup::CleanupStore;
-use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
-use crate::test_utils::database::{spawn_source_database, test_table_name};
-use crate::test_utils::memory_destination::MemoryDestination;
-use crate::test_utils::notifying_store::NotifyingStore;
-use crate::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use crate::types::PipelineId;
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
     PipelineConfig, TableSyncCopyConfig,
 };
-use etl_postgres::tokio::test_utils::PgDatabase;
-use etl_postgres::types::{TableId, TableName};
+use etl_postgres::{
+    tokio::test_utils::PgDatabase,
+    types::{TableId, TableName},
+};
 use rand::random;
 use tokio_postgres::Client;
 use uuid::Uuid;
+
+use crate::{
+    destination::Destination,
+    pipeline::Pipeline,
+    state::table::TableReplicationPhaseType,
+    store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
+    test_utils::{
+        database::{spawn_source_database, test_table_name},
+        memory_destination::MemoryDestination,
+        notifying_store::NotifyingStore,
+        test_destination_wrapper::TestDestinationWrapper,
+    },
+    types::PipelineId,
+};
 
 /// Generates a test-specific replication slot name with a random component.
 ///
@@ -108,10 +113,7 @@ where
             publication_name,
             store,
             destination,
-            batch: BatchConfig {
-                max_fill_ms: 1000,
-                memory_budget_ratio: 0.2,
-            },
+            batch: BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2 },
             table_error_retry_delay_ms: 1000,
             table_error_retry_max_attempts: 2,
             max_table_sync_workers: 1,
@@ -286,10 +288,7 @@ pub async fn create_database_and_ready_pipeline_with_table(
     let database = spawn_source_database().await;
 
     let table_name = test_table_name(table_suffix);
-    let table_id = database
-        .create_table(table_name.clone(), true, columns)
-        .await
-        .unwrap();
+    let table_id = database.create_table(table_name.clone(), true, columns).await.unwrap();
 
     let publication_name = format!("pub_{}", random::<u32>());
     database
@@ -316,22 +315,11 @@ pub async fn create_database_and_ready_pipeline_with_table(
     // ETL in a state before `Ready` since the system will advance on its own. To properly test all
     // the table sync worker states, we would need a way to programmatically drive execution, but we deemed
     // it too much work compared to the benefit it brings.
-    let ready = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let ready = store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     ready.notified().await;
 
-    (
-        database,
-        table_name,
-        table_id,
-        store,
-        destination,
-        pipeline,
-        pipeline_id,
-        publication_name,
-    )
+    (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication_name)
 }

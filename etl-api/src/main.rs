@@ -1,9 +1,9 @@
+use std::{env, sync::Once};
+
 use anyhow::{Context, anyhow};
 use etl_api::{config::ApiConfig, startup::Application};
 use etl_config::{load_config, shared::PgConnectionConfig};
 use etl_telemetry::tracing::init_tracing;
-use std::env;
-use std::sync::Once;
 use tracing::{error, info};
 
 /// Ensures crypto provider is only initialized once.

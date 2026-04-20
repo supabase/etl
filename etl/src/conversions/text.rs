@@ -1,16 +1,18 @@
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use core::str;
+
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl_postgres::types::{
     DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, TIMESTAMPTZ_FORMAT_HHMM,
 };
 use tokio_postgres::types::Type;
 use uuid::Uuid;
 
-use crate::bail;
-use crate::conversions::PgNumeric;
-use crate::conversions::{bool::parse_bool, hex};
-use crate::error::{ErrorKind, EtlResult};
-use crate::types::{ArrayCell, Cell};
+use crate::{
+    bail,
+    conversions::{PgNumeric, bool::parse_bool, hex},
+    error::{ErrorKind, EtlResult},
+    types::{ArrayCell, Cell},
+};
 
 /// Creates a default [`Cell`] value for the given Postgres type.
 ///
@@ -276,11 +278,8 @@ where
             }
         }
 
-        let val = if !val_quoted && val_str.to_lowercase() == "null" {
-            None
-        } else {
-            parse(&val_str)?
-        };
+        let val =
+            if !val_quoted && val_str.to_lowercase() == "null" { None } else { parse(&val_str)? };
 
         res.push(val);
         val_str.clear();
@@ -292,8 +291,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::{Datelike, Timelike};
+
+    use super::*;
 
     #[test]
     fn parse_text_array_quoted_null_as_string() {
@@ -589,10 +589,7 @@ mod tests {
                 // These should be literal strings since array parser doesn't decode escapes like table parser
                 assert_eq!(
                     v,
-                    vec![
-                        Some("line1\\nline2".to_string()),
-                        Some("tab\\there".to_string())
-                    ]
+                    vec![Some("line1\\nline2".to_string()), Some("tab\\there".to_string())]
                 );
             }
             _ => panic!("Expected TEXT array with escape sequences"),

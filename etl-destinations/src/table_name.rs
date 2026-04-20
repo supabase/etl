@@ -1,6 +1,9 @@
-use etl::error::{ErrorKind, EtlResult};
-use etl::types::TableName;
-use etl::{bail, etl_error};
+use etl::{
+    bail,
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    types::TableName,
+};
 
 /// Converts a [`TableName`] into a single underscore-escaped identifier.
 ///
@@ -103,9 +106,6 @@ mod tests {
     fn preserves_multiple_underscores() {
         let table_name = TableName::new("a__b".to_string(), "c__d".to_string());
 
-        assert_eq!(
-            try_stringify_table_name(&table_name).unwrap(),
-            "a____b_c____d"
-        );
+        assert_eq!(try_stringify_table_name(&table_name).unwrap(), "a____b_c____d");
     }
 }

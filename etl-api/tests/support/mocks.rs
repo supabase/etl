@@ -1,12 +1,17 @@
 #![allow(dead_code)]
 
-use etl_api::configs::destination::FullApiDestinationConfig;
-use etl_api::configs::pipeline::FullApiPipelineConfig;
-use etl_api::configs::source::FullApiSourceConfig;
-use etl_api::routes::destinations::{CreateDestinationRequest, CreateDestinationResponse};
-use etl_api::routes::images::{CreateImageRequest, CreateImageResponse};
-use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
-use etl_api::routes::sources::{CreateSourceRequest, CreateSourceResponse};
+use etl_api::{
+    configs::{
+        destination::FullApiDestinationConfig, pipeline::FullApiPipelineConfig,
+        source::FullApiSourceConfig,
+    },
+    routes::{
+        destinations::{CreateDestinationRequest, CreateDestinationResponse},
+        images::{CreateImageRequest, CreateImageResponse},
+        pipelines::{CreatePipelineRequest, CreatePipelineResponse},
+        sources::{CreateSourceRequest, CreateSourceResponse},
+    },
+};
 use etl_config::SerializableSecretString;
 
 use crate::support::test_app::TestApp;
@@ -20,10 +25,8 @@ pub async fn create_default_image(app: &TestApp) -> i64 {
 pub async fn create_image_with_name(app: &TestApp, name: String, is_default: bool) -> i64 {
     let image = CreateImageRequest { name, is_default };
     let response = app.create_image(&image).await;
-    let response: CreateImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateImageResponse =
+        response.json().await.expect("failed to deserialize response");
 
     response.id
 }
@@ -117,10 +120,8 @@ pub mod destinations {
     ) -> i64 {
         let destination = CreateDestinationRequest { name, config };
         let response = app.create_destination(tenant_id, &destination).await;
-        let response: CreateDestinationResponse = response
-            .json()
-            .await
-            .expect("failed to deserialize response");
+        let response: CreateDestinationResponse =
+            response.json().await.expect("failed to deserialize response");
         response.id
     }
 
@@ -186,18 +187,17 @@ pub mod sources {
     ) -> i64 {
         let source = CreateSourceRequest { name, config };
         let response = app.create_source(tenant_id, &source).await;
-        let response: CreateSourceResponse = response
-            .json()
-            .await
-            .expect("failed to deserialize response");
+        let response: CreateSourceResponse =
+            response.json().await.expect("failed to deserialize response");
         response.id
     }
 }
 
 /// Tenant helpers.
 pub mod tenants {
-    use super::*;
     use etl_api::routes::tenants::{CreateTenantRequest, CreateTenantResponse};
+
+    use super::*;
 
     /// Creates a default tenant and returns its id.
     pub async fn create_tenant(app: &TestApp) -> String {
@@ -213,28 +213,24 @@ pub mod tenants {
     pub async fn create_tenant_with_id_and_name(app: &TestApp, id: String, name: String) -> String {
         let tenant = CreateTenantRequest { id, name };
         let response = app.create_tenant(&tenant).await;
-        let response: CreateTenantResponse = response
-            .json()
-            .await
-            .expect("failed to deserialize response");
+        let response: CreateTenantResponse =
+            response.json().await.expect("failed to deserialize response");
         response.id
     }
 }
 
 /// Pipeline config helpers.
 pub mod pipelines {
-    use super::*;
     use etl_api::configs::log::LogLevel;
     use etl_config::shared::{BatchConfig, MemoryBackpressureConfig, TableSyncCopyConfig};
+
+    use super::*;
 
     /// Returns a default pipeline config.
     pub fn new_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "publication".to_owned(),
-            batch: Some(BatchConfig {
-                max_fill_ms: 5,
-                memory_budget_ratio: 0.2,
-            }),
+            batch: Some(BatchConfig { max_fill_ms: 5, memory_budget_ratio: 0.2 }),
             table_error_retry_delay_ms: Some(10000),
             table_error_retry_max_attempts: Some(5),
             max_table_sync_workers: Some(2),
@@ -251,10 +247,7 @@ pub mod pipelines {
     pub fn updated_pipeline_config() -> FullApiPipelineConfig {
         FullApiPipelineConfig {
             publication_name: "updated_publication".to_owned(),
-            batch: Some(BatchConfig {
-                max_fill_ms: 10,
-                memory_budget_ratio: 0.2,
-            }),
+            batch: Some(BatchConfig { max_fill_ms: 10, memory_budget_ratio: 0.2 }),
             table_error_retry_delay_ms: Some(20000),
             table_error_retry_max_attempts: Some(10),
             max_table_sync_workers: Some(4),
@@ -275,18 +268,12 @@ pub mod pipelines {
         destination_id: i64,
         config: FullApiPipelineConfig,
     ) -> i64 {
-        let pipeline = CreatePipelineRequest {
-            source_id,
-            destination_id,
-            config,
-        };
+        let pipeline = CreatePipelineRequest { source_id, destination_id, config };
         let response = app.create_pipeline(tenant_id, &pipeline).await;
         assert!(response.status().is_success(), "failed to created pipeline");
 
-        let response: CreatePipelineResponse = response
-            .json()
-            .await
-            .expect("failed to deserialize response");
+        let response: CreatePipelineResponse =
+            response.json().await.expect("failed to deserialize response");
 
         response.id
     }

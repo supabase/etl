@@ -1,4 +1,9 @@
 use core::str;
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
+
 use etl_postgres::types::{
     ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
     convert_type_oid_to_type,
@@ -6,17 +11,19 @@ use etl_postgres::types::{
 use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 use tokio_postgres::types::PgLsn;
 
-use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
-use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::metrics::{ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL};
-use crate::types::{
-    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow, TruncateEvent, UpdateEvent,
+use crate::{
+    bail,
+    conversions::text::{default_value_for_type, parse_cell_from_postgres_text},
+    error::{ErrorKind, EtlError, EtlResult},
+    etl_error,
+    metrics::{ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL},
+    types::{
+        BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow, TruncateEvent,
+        UpdateEvent,
+    },
 };
-use crate::{bail, etl_error};
 
 /// The prefix used for DDL schema change messages emitted by the `etl.emit_schema_change_messages`
 /// event trigger. Messages with this prefix contain JSON-encoded schema information.
@@ -250,13 +257,7 @@ pub(crate) fn parse_event_from_insert_message(
         false,
     )?;
 
-    Ok(InsertEvent {
-        start_lsn,
-        commit_lsn,
-        tx_ordinal,
-        replicated_table_schema,
-        table_row,
-    })
+    Ok(InsertEvent { start_lsn, commit_lsn, tx_ordinal, replicated_table_schema, table_row })
 }
 
 /// Converts a Postgres update message into an [`UpdateEvent`].
@@ -354,13 +355,7 @@ pub(crate) fn parse_event_from_delete_message(
     }
     .map(|row| (is_key, row));
 
-    Ok(DeleteEvent {
-        start_lsn,
-        commit_lsn,
-        tx_ordinal,
-        replicated_table_schema,
-        old_table_row,
-    })
+    Ok(DeleteEvent { start_lsn, commit_lsn, tx_ordinal, replicated_table_schema, old_table_row })
 }
 
 /// Creates a [`TruncateEvent`] from Postgres protocol data.
@@ -405,10 +400,7 @@ pub(crate) fn convert_tuple_to_row<'a>(
         // We are expecting that for each column, there is corresponding tuple data, even for null
         // values.
         let Some(tuple_data) = &tuple_data.get(i) else {
-            bail!(
-                ErrorKind::ConversionError,
-                "Tuple data missing value at index"
-            );
+            bail!(ErrorKind::ConversionError, "Tuple data missing value at index");
         };
 
         let cell = match tuple_data {
@@ -445,10 +437,7 @@ pub(crate) fn convert_tuple_to_row<'a>(
                 }
             }
             protocol::TupleData::Binary(_) => {
-                bail!(
-                    ErrorKind::ConversionError,
-                    "Binary format not supported in tuple data"
-                );
+                bail!(ErrorKind::ConversionError, "Binary format not supported in tuple data");
             }
             protocol::TupleData::Text(bytes) => {
                 let str = str::from_utf8(&bytes[..])?;

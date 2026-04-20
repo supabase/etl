@@ -14,13 +14,16 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::config::ApiConfig;
-use crate::configs::destination::FullApiDestinationConfig;
-use crate::configs::pipeline::FullApiPipelineConfig;
-use crate::configs::source::StoredSourceConfig;
-use crate::db::connect_to_source_database_from_api;
-use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
-use crate::validation::validators::{DestinationValidator, PipelineValidator, SourceValidator};
+use crate::{
+    config::ApiConfig,
+    configs::{
+        destination::FullApiDestinationConfig, pipeline::FullApiPipelineConfig,
+        source::StoredSourceConfig,
+    },
+    db::connect_to_source_database_from_api,
+    k8s::{TrustedRootCertsCache, TrustedRootCertsError},
+    validation::validators::{DestinationValidator, PipelineValidator, SourceValidator},
+};
 
 /// Shared context provided to validators during validation.
 pub struct ValidationContext {
@@ -36,11 +39,7 @@ pub struct ValidationContext {
 impl ValidationContext {
     /// Creates a new validation context builder.
     pub fn builder(environment: Environment) -> ValidationContextBuilder {
-        ValidationContextBuilder {
-            environment,
-            source_pool: None,
-            trusted_username: None,
-        }
+        ValidationContextBuilder { environment, source_pool: None, trusted_username: None }
     }
 
     /// Builds a [`ValidationContext`] by connecting to a source database.
@@ -49,9 +48,8 @@ impl ValidationContext {
         api_config: &ApiConfig,
         trusted_root_certs_cache: &TrustedRootCertsCache,
     ) -> Result<Self, ValidationError> {
-        let tls_config = trusted_root_certs_cache
-            .get_tls_config(api_config.source.tls_enabled)
-            .await?;
+        let tls_config =
+            trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
         let source_pool =
             connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
                 .await?;
@@ -118,20 +116,12 @@ pub struct ValidationFailure {
 impl ValidationFailure {
     /// Creates a new critical validation failure.
     pub fn critical(name: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            reason: reason.into(),
-            failure_type: FailureType::Critical,
-        }
+        Self { name: name.into(), reason: reason.into(), failure_type: FailureType::Critical }
     }
 
     /// Creates a new warning validation failure.
     pub fn warning(name: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            reason: reason.into(),
-            failure_type: FailureType::Warning,
-        }
+        Self { name: name.into(), reason: reason.into(), failure_type: FailureType::Warning }
     }
 }
 

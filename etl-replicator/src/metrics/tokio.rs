@@ -125,19 +125,13 @@ fn log_runtime_metrics(
 /// Emits a structured debug log for the current Tokio runtime metrics snapshot.
 #[cfg(all(not(tokio_unstable), target_has_atomic = "64"))]
 fn log_runtime_metrics(num_workers: usize, alive_tasks: f64, global_queue_depth: f64) {
-    debug!(
-        num_workers,
-        alive_tasks, global_queue_depth, "tokio runtime stats updated"
-    );
+    debug!(num_workers, alive_tasks, global_queue_depth, "tokio runtime stats updated");
 }
 
 /// Emits a structured debug log for the current Tokio runtime metrics snapshot.
 #[cfg(all(not(tokio_unstable), not(target_has_atomic = "64")))]
 fn log_runtime_metrics(num_workers: usize, alive_tasks: f64, global_queue_depth: f64) {
-    debug!(
-        num_workers,
-        alive_tasks, global_queue_depth, "tokio runtime stats updated"
-    );
+    debug!(num_workers, alive_tasks, global_queue_depth, "tokio runtime stats updated");
 }
 
 /// Registers Tokio runtime metric descriptions with the global metrics recorder.
@@ -277,9 +271,8 @@ pub(super) fn spawn_tokio_metrics_task() {
             #[cfg(target_has_atomic = "64")]
             for worker_id in 0..num_workers {
                 let worker_id_str = worker_id.to_string();
-                let worker_busy_duration = runtime_metrics
-                    .worker_total_busy_duration(worker_id)
-                    .as_secs_f64();
+                let worker_busy_duration =
+                    runtime_metrics.worker_total_busy_duration(worker_id).as_secs_f64();
                 let worker_park_count = runtime_metrics.worker_park_count(worker_id) as f64;
                 let worker_park_unpark_count =
                     runtime_metrics.worker_park_unpark_count(worker_id) as f64;

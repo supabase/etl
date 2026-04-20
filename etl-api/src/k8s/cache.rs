@@ -1,14 +1,17 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use etl_config::shared::TlsConfig;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::debug;
 
-use etl_config::shared::TlsConfig;
-
-use crate::k8s::http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME};
-use crate::k8s::{K8sClient, K8sError};
+use crate::k8s::{
+    K8sClient, K8sError,
+    http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME},
+};
 
 /// Errors that can occur when fetching trusted root certificates.
 #[derive(Debug, Error)]
@@ -48,10 +51,7 @@ impl TrustedRootCertsCache {
 
     /// Creates a new cache backed by the provided Kubernetes client.
     pub fn new(k8s_client: Arc<dyn K8sClient>) -> Self {
-        Self {
-            k8s_client,
-            cache: RwLock::new(None),
-        }
+        Self { k8s_client, cache: RwLock::new(None) }
     }
 
     /// Returns a [`TlsConfig`] based on whether TLS is enabled.
@@ -65,10 +65,7 @@ impl TrustedRootCertsCache {
     ) -> Result<TlsConfig, TrustedRootCertsError> {
         if tls_enabled {
             let trusted_root_certs = self.get().await?;
-            Ok(TlsConfig {
-                enabled: true,
-                trusted_root_certs,
-            })
+            Ok(TlsConfig { enabled: true, trusted_root_certs })
         } else {
             Ok(TlsConfig::disabled())
         }
@@ -98,24 +95,16 @@ impl TrustedRootCertsCache {
         let certs = self.fetch_from_k8s().await?;
 
         let mut cache = self.cache.write().await;
-        *cache = Some(CachedCerts {
-            certs: certs.clone(),
-            fetched_at: Instant::now(),
-        });
+        *cache = Some(CachedCerts { certs: certs.clone(), fetched_at: Instant::now() });
 
         Ok(certs)
     }
 
     /// Fetches the trusted root certificates from the Kubernetes ConfigMap.
     async fn fetch_from_k8s(&self) -> Result<String, TrustedRootCertsError> {
-        let config_map = self
-            .k8s_client
-            .get_config_map(TRUSTED_ROOT_CERT_CONFIG_MAP_NAME)
-            .await?;
+        let config_map = self.k8s_client.get_config_map(TRUSTED_ROOT_CERT_CONFIG_MAP_NAME).await?;
 
-        let data = config_map
-            .data
-            .ok_or(TrustedRootCertsError::ConfigMapDataMissing)?;
+        let data = config_map.data.ok_or(TrustedRootCertsError::ConfigMapDataMissing)?;
 
         let certs = data
             .get(TRUSTED_ROOT_CERT_KEY_NAME)
@@ -132,15 +121,17 @@ impl TrustedRootCertsCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::BTreeMap;
 
     use async_trait::async_trait;
     use etl_config::Environment;
     use k8s_openapi::api::core::v1::ConfigMap;
 
-    use crate::configs::log::LogLevel;
-    use crate::k8s::{DestinationType, PodStatus, ReplicatorConfigMapFile};
+    use super::*;
+    use crate::{
+        configs::log::LogLevel,
+        k8s::{DestinationType, PodStatus, ReplicatorConfigMapFile},
+    };
 
     struct MockK8sClient {
         certs: String,
@@ -203,10 +194,7 @@ mod tests {
             if config_map_name == TRUSTED_ROOT_CERT_CONFIG_MAP_NAME {
                 let mut map = BTreeMap::new();
                 map.insert(TRUSTED_ROOT_CERT_KEY_NAME.to_string(), self.certs.clone());
-                Ok(ConfigMap {
-                    data: Some(map),
-                    ..ConfigMap::default()
-                })
+                Ok(ConfigMap { data: Some(map), ..ConfigMap::default() })
             } else {
                 Ok(ConfigMap::default())
             }
@@ -247,9 +235,7 @@ mod tests {
     #[tokio::test]
     async fn test_cache_returns_certs() {
         let expected_certs = "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----";
-        let client = Arc::new(MockK8sClient {
-            certs: expected_certs.to_string(),
-        });
+        let client = Arc::new(MockK8sClient { certs: expected_certs.to_string() });
         let cache = TrustedRootCertsCache::new(client);
 
         let result = cache.get().await.unwrap();
@@ -259,9 +245,7 @@ mod tests {
     #[tokio::test]
     async fn test_cache_returns_cached_value() {
         let expected_certs = "cached-certs";
-        let client = Arc::new(MockK8sClient {
-            certs: expected_certs.to_string(),
-        });
+        let client = Arc::new(MockK8sClient { certs: expected_certs.to_string() });
         let cache = TrustedRootCertsCache::new(client);
 
         // First call fetches from K8s

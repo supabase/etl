@@ -1,7 +1,11 @@
-use crate::types::cell::{ArrayCell, Cell};
-use crate::types::{PgNumeric, SizeHint};
 use std::mem::size_of;
+
 use tracing::warn;
+
+use crate::types::{
+    PgNumeric, SizeHint,
+    cell::{ArrayCell, Cell},
+};
 
 /// Represents a complete row of data from a database table.
 ///
@@ -25,10 +29,7 @@ impl TableRow {
     pub fn new(values: Vec<Cell>) -> Self {
         let size_hint_bytes = estimate_table_row_allocated_bytes(&values, values.capacity());
 
-        Self {
-            size_hint_bytes,
-            values,
-        }
+        Self { size_hint_bytes, values }
     }
 
     /// Returns the row values in table column order.
@@ -276,10 +277,7 @@ fn checked_add_or_saturating(left: usize, right: usize, context: &'static str) -
     match left.checked_add(right) {
         Some(value) => value,
         None => {
-            warn!(
-                context,
-                left, right, "size hint addition overflowed, saturating to usize::MAX"
-            );
+            warn!(context, left, right, "size hint addition overflowed, saturating to usize::MAX");
 
             usize::MAX
         }

@@ -3,26 +3,25 @@
 //! Contains the main [`Pipeline`] struct that coordinates Postgres logical replication
 //! with destination systems. Manages worker lifecycles, shutdown coordination, and error handling.
 
-use crate::bail;
-use crate::concurrency::{MemoryMonitor, ShutdownTx, create_shutdown_channel};
-use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlResult};
-use crate::metrics::register_metrics;
-use crate::replication::SharedTableCache;
-use crate::replication::client::PgReplicationClient;
-use crate::state::table::TableReplicationPhase;
-use crate::store::cleanup::CleanupStore;
-use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
-use crate::types::{PipelineId, TableId};
-use crate::workers::{ApplyWorker, ApplyWorkerHandle, TableSyncWorkerPool};
+use std::{collections::HashSet, sync::Arc};
+
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use std::collections::HashSet;
-use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
-use crate::config::PipelineConfig;
+use crate::{
+    bail,
+    concurrency::{MemoryMonitor, ShutdownTx, create_shutdown_channel},
+    config::PipelineConfig,
+    destination::Destination,
+    error::{ErrorKind, EtlResult},
+    metrics::register_metrics,
+    replication::{SharedTableCache, client::PgReplicationClient},
+    state::table::TableReplicationPhase,
+    store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
+    types::{PipelineId, TableId},
+    workers::{ApplyWorker, ApplyWorkerHandle, TableSyncWorkerPool},
+};
 
 /// Internal state tracking for pipeline lifecycle.
 ///
@@ -33,10 +32,7 @@ enum PipelineState {
     /// Pipeline has been created but not yet started.
     NotStarted,
     /// Pipeline is running with active workers.
-    Started {
-        apply_worker: ApplyWorkerHandle,
-        pool: Arc<TableSyncWorkerPool>,
-    },
+    Started { apply_worker: ApplyWorkerHandle, pool: Arc<TableSyncWorkerPool> },
 }
 
 /// Core ETL pipeline that orchestrates Postgres logical replication.
@@ -223,10 +219,7 @@ where
         if let Err(err) = table_sync_workers_result {
             // We naively use the `kinds` as number of errors.
             let errors_number = err.kinds().len();
-            warn!(
-                error_count = errors_number,
-                "table sync workers failed, collecting errors"
-            );
+            warn!(error_count = errors_number, "table sync workers failed, collecting errors");
 
             errors.push(err);
         }
@@ -292,10 +285,7 @@ where
         replication_client: &PgReplicationClient,
     ) -> EtlResult<()> {
         // We need to make sure that the publication exists.
-        if !replication_client
-            .publication_exists(&self.config.publication_name)
-            .await?
-        {
+        if !replication_client.publication_exists(&self.config.publication_name).await? {
             bail!(
                 ErrorKind::ConfigError,
                 "Missing publication",
@@ -306,9 +296,8 @@ where
             );
         }
 
-        let publication_table_ids = replication_client
-            .get_publication_table_ids(&self.config.publication_name)
-            .await?;
+        let publication_table_ids =
+            replication_client.get_publication_table_ids(&self.config.publication_name).await?;
 
         info!(
             publication_name = %self.config.publication_name,
@@ -327,9 +316,8 @@ where
             .await?;
 
         if !publish_via_partition_root {
-            let has_partitioned_tables = replication_client
-                .has_partitioned_tables(&publication_table_ids)
-                .await?;
+            let has_partitioned_tables =
+                replication_client.has_partitioned_tables(&publication_table_ids).await?;
 
             if has_partitioned_tables {
                 bail!(

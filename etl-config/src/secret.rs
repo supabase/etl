@@ -1,6 +1,7 @@
+use std::ops::Deref;
+
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::ops::Deref;
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 

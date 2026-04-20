@@ -1,9 +1,12 @@
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    hash::{Hash, Hasher},
+    str::FromStr,
+    sync::Arc,
+};
+
 use pg_escape::quote_identifier;
-use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::str::FromStr;
-use std::sync::Arc;
 use thiserror::Error;
 use tokio_postgres::types::{FromSql, PgLsn, ToSql, Type};
 
@@ -67,9 +70,7 @@ impl SnapshotId {
     ///
     /// Returns [`SchemaError::InvalidSnapshotId`] if the string is not a valid `pg_lsn` format.
     pub fn from_pg_lsn_string(s: &str) -> Result<Self, SchemaError> {
-        s.parse::<PgLsn>()
-            .map(Self)
-            .map_err(|_| SchemaError::InvalidSnapshotId(s.to_string()))
+        s.parse::<PgLsn>().map(Self).map_err(|_| SchemaError::InvalidSnapshotId(s.to_string()))
     }
 }
 
@@ -181,14 +182,7 @@ impl ColumnSchema {
         primary_key_ordinal_position: Option<i32>,
         nullable: bool,
     ) -> ColumnSchema {
-        Self {
-            name,
-            typ,
-            modifier,
-            ordinal_position,
-            primary_key_ordinal_position,
-            nullable,
-        }
+        Self { name, typ, modifier, ordinal_position, primary_key_ordinal_position, nullable }
     }
 
     /// Returns whether this column is part of the table's primary key.
@@ -310,12 +304,7 @@ impl TableSchema {
         column_schemas: Vec<ColumnSchema>,
         snapshot_id: SnapshotId,
     ) -> Self {
-        Self {
-            id,
-            name,
-            column_schemas,
-            snapshot_id,
-        }
+        Self { id, name, column_schemas, snapshot_id }
     }
 
     /// Adds a new column schema to this [`TableSchema`].
@@ -540,19 +529,13 @@ impl ReplicatedTableSchema {
             "mask length must match column count"
         );
 
-        Self {
-            table_schema,
-            replication_mask,
-        }
+        Self { table_schema, replication_mask }
     }
 
     /// Creates a [`ReplicatedTableSchema`] where all columns are replicated.
     pub fn all(table_schema: Arc<TableSchema>) -> Self {
         let replication_mask = ReplicationMask::all(&table_schema);
-        Self {
-            table_schema,
-            replication_mask,
-        }
+        Self { table_schema, replication_mask }
     }
 
     /// Returns the table ID.
@@ -606,15 +589,11 @@ impl ReplicatedTableSchema {
     /// - Positions in new but not in old are columns to add.
     pub fn diff(&self, new_schema: &ReplicatedTableSchema) -> SchemaDiff {
         // Build maps: ordinal_position -> ColumnSchema for replicated columns only.
-        let old_columns: HashMap<i32, &ColumnSchema> = self
-            .column_schemas()
-            .map(|col| (col.ordinal_position, col))
-            .collect();
+        let old_columns: HashMap<i32, &ColumnSchema> =
+            self.column_schemas().map(|col| (col.ordinal_position, col)).collect();
 
-        let new_columns: HashMap<i32, &ColumnSchema> = new_schema
-            .column_schemas()
-            .map(|col| (col.ordinal_position, col))
-            .collect();
+        let new_columns: HashMap<i32, &ColumnSchema> =
+            new_schema.column_schemas().map(|col| (col.ordinal_position, col)).collect();
 
         // Same ordinal position means the same logical column, even if the name changed.
         let mut columns_to_rename = Vec::new();
@@ -643,11 +622,7 @@ impl ReplicatedTableSchema {
             .collect();
         columns_to_add.sort_by_key(|c| c.ordinal_position);
 
-        SchemaDiff {
-            columns_to_add,
-            columns_to_remove,
-            columns_to_rename,
-        }
+        SchemaDiff { columns_to_add, columns_to_remove, columns_to_rename }
     }
 }
 
@@ -704,10 +679,8 @@ mod tests {
     #[test]
     fn test_replication_mask_try_build_all_columns_replicated() {
         let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> = ["id", "name", "age"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let replicated_columns: HashSet<String> =
+            ["id", "name", "age"].into_iter().map(String::from).collect();
 
         let mask = ReplicationMask::try_build(&schema, &replicated_columns).unwrap();
 
@@ -738,10 +711,8 @@ mod tests {
     #[test]
     fn test_replication_mask_try_build_unknown_column_error() {
         let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> = ["id", "unknown_column"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let replicated_columns: HashSet<String> =
+            ["id", "unknown_column"].into_iter().map(String::from).collect();
 
         let result = ReplicationMask::try_build(&schema, &replicated_columns);
 
@@ -788,10 +759,8 @@ mod tests {
     #[test]
     fn test_replication_mask_build_or_all_falls_back_to_all() {
         let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> = ["id", "unknown_column"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let replicated_columns: HashSet<String> =
+            ["id", "unknown_column"].into_iter().map(String::from).collect();
 
         let mask = ReplicationMask::build_or_all(&schema, &replicated_columns);
 
@@ -956,11 +925,8 @@ mod tests {
         let diff = old_schema.diff(&new_schema);
 
         assert_eq!(diff.columns_to_add.len(), 2);
-        let added_names: HashSet<&str> = diff
-            .columns_to_add
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect();
+        let added_names: HashSet<&str> =
+            diff.columns_to_add.iter().map(|c| c.name.as_str()).collect();
         assert!(added_names.contains("name"));
         assert!(added_names.contains("email"));
         assert!(diff.columns_to_remove.is_empty());
@@ -987,11 +953,8 @@ mod tests {
 
         assert!(diff.columns_to_add.is_empty());
         assert_eq!(diff.columns_to_remove.len(), 2);
-        let removed_names: HashSet<&str> = diff
-            .columns_to_remove
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect();
+        let removed_names: HashSet<&str> =
+            diff.columns_to_remove.iter().map(|c| c.name.as_str()).collect();
         assert!(removed_names.contains("name"));
         assert!(removed_names.contains("email"));
         assert!(diff.columns_to_rename.is_empty());
@@ -1000,10 +963,8 @@ mod tests {
     #[test]
     fn test_replication_mask_display_all_replicated() {
         let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> = ["id", "name", "age"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let replicated_columns: HashSet<String> =
+            ["id", "name", "age"].into_iter().map(String::from).collect();
 
         let mask = ReplicationMask::build(&schema, &replicated_columns);
 

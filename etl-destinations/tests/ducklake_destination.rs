@@ -21,15 +21,25 @@
 //! "
 //! ```
 
+#[cfg(feature = "test-utils")]
+use std::sync::LazyLock;
+use std::{
+    f64::consts::PI,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
 use chrono::NaiveDate;
 use duckdb::Connection;
-use etl::destination::Destination;
-use etl::error::ErrorKind;
-use etl::store::both::memory::MemoryStore;
-use etl::store::schema::SchemaStore;
-use etl::types::{
-    Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow, TableSchema,
-    Type as PgType,
+use etl::{
+    destination::Destination,
+    error::ErrorKind,
+    store::{both::memory::MemoryStore, schema::SchemaStore},
+    types::{
+        Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow,
+        TableSchema, Type as PgType,
+    },
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
 #[cfg(feature = "test-utils")]
@@ -38,12 +48,6 @@ use etl_destinations::ducklake::{
     arm_fail_after_copy_batch_commit_once_for_tests, reset_ducklake_test_hooks,
 };
 use pg_escape::{quote_identifier, quote_literal};
-use std::f64::consts::PI;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-#[cfg(feature = "test-utils")]
-use std::sync::LazyLock;
-use std::time::Duration;
 #[cfg(feature = "test-utils")]
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::Url;
@@ -61,10 +65,7 @@ fn make_test_dir(test_name: &str) -> PathBuf {
         .expect("failed to create temp dir")
         .keep(); // `into_path` prevents auto-cleanup on drop
 
-    println!(
-        "[{test_name}] catalog : {}",
-        dir.join("catalog.ducklake").display()
-    );
+    println!("[{test_name}] catalog : {}", dir.join("catalog.ducklake").display());
     println!("[{test_name}] data    : {}", dir.join("data").display());
     dir
 }
@@ -149,10 +150,7 @@ async fn open_lake_conn_when_tables_visible(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let conn = open_lake_conn(catalog, data);
-        if table_names
-            .iter()
-            .all(|table_name| lake_table_exists(&conn, table_name))
-        {
+        if table_names.iter().all(|table_name| lake_table_exists(&conn, table_name)) {
             return conn;
         }
 
@@ -196,10 +194,9 @@ fn count_applied_batches(conn: &Connection, table_name: &str, batch_kind: &str) 
 fn count_table_files(data: &Path, table_name: &str) -> usize {
     let table_dir = data.join("main").join(table_name);
     match std::fs::read_dir(&table_dir) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path().is_file())
-            .count(),
+        Ok(entries) => {
+            entries.filter_map(Result::ok).filter(|entry| entry.path().is_file()).count()
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
         Err(error) => panic!("table file count query failed: {error}"),
     }
@@ -229,10 +226,7 @@ where
             return;
         }
 
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "condition not met within {timeout:?}"
-        );
+        assert!(tokio::time::Instant::now() < deadline, "condition not met within {timeout:?}");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -247,8 +241,7 @@ where
 /// Running `CHECKPOINT` makes the final durable state visible deterministically.
 fn checkpoint_lake(catalog: &Url, data: &Url) {
     let conn = open_lake_conn(catalog, data);
-    conn.execute_batch("CHECKPOINT")
-        .expect("failed to checkpoint DuckLake catalog");
+    conn.execute_batch("CHECKPOINT").expect("failed to checkpoint DuckLake catalog");
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -332,10 +325,7 @@ async fn test_write_table_rows_small_batch_stays_inlined_after_return() {
     destination
         .write_table_rows(
             &replicated_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("first".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())])],
         )
         .await
         .unwrap();
@@ -405,10 +395,7 @@ async fn test_write_table_rows_reuses_warm_pooled_connection() {
     destination
         .write_table_rows(
             &replicated_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("first".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())])],
         )
         .await
         .unwrap();
@@ -417,10 +404,7 @@ async fn test_write_table_rows_reuses_warm_pooled_connection() {
     destination
         .write_table_rows(
             &replicated_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(2),
-                Cell::String("second".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())])],
         )
         .await
         .unwrap();
@@ -463,10 +447,7 @@ async fn test_write_table_rows_replaces_broken_pooled_connection_after_retry() {
     destination
         .write_table_rows(
             &replicated_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("first".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())])],
         )
         .await
         .unwrap();
@@ -475,10 +456,7 @@ async fn test_write_table_rows_replaces_broken_pooled_connection_after_retry() {
     destination
         .write_table_rows(
             &replicated_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(2),
-                Cell::String("second".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())])],
         )
         .await
         .unwrap();
@@ -566,17 +544,11 @@ async fn test_concurrent_same_table_copy_batches_complete() {
     destination
         .write_table_rows(
             &replicated_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(-1),
-                Cell::String("seed".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(-1), Cell::String("seed".to_string())])],
         )
         .await
         .unwrap();
-    destination
-        .truncate_table(&replicated_schema)
-        .await
-        .unwrap();
+    destination.truncate_table(&replicated_schema).await.unwrap();
 
     let first_batch: Vec<TableRow> = (0..50)
         .map(|id| TableRow::new(vec![Cell::I32(id), Cell::String(format!("first-{id}"))]))
@@ -588,19 +560,15 @@ async fn test_concurrent_same_table_copy_batches_complete() {
     let task_a = {
         let destination = Arc::clone(&destination);
         let replicated_schema = replicated_schema.clone();
-        tokio::spawn(async move {
-            destination
-                .write_table_rows(&replicated_schema, first_batch)
-                .await
-        })
+        tokio::spawn(
+            async move { destination.write_table_rows(&replicated_schema, first_batch).await },
+        )
     };
     let task_b = {
         let destination = Arc::clone(&destination);
-        tokio::spawn(async move {
-            destination
-                .write_table_rows(&replicated_schema, second_batch)
-                .await
-        })
+        tokio::spawn(
+            async move { destination.write_table_rows(&replicated_schema, second_batch).await },
+        )
     };
 
     task_a.await.unwrap().unwrap();
@@ -637,17 +605,10 @@ async fn test_write_table_rows_empty_creates_table() {
         DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
             .await
             .unwrap();
-    destination
-        .write_table_rows(&replicated_schema, vec![])
-        .await
-        .expect("empty write failed");
+    destination.write_table_rows(&replicated_schema, vec![]).await.expect("empty write failed");
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(
-        count_rows(&conn, &table_name),
-        0,
-        "table should exist but be empty"
-    );
+    assert_eq!(count_rows(&conn, &table_name), 0, "table should exist but be empty");
 }
 
 /// `truncate_table` deletes all rows while leaving the table schema intact.
@@ -683,17 +644,10 @@ async fn test_truncate_clears_rows() {
         .await
         .unwrap();
 
-    destination
-        .truncate_table(&replicated_schema)
-        .await
-        .expect("truncate failed");
+    destination.truncate_table(&replicated_schema).await.expect("truncate failed");
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(
-        count_rows(&conn, &table_name),
-        0,
-        "table should be empty after truncate"
-    );
+    assert_eq!(count_rows(&conn, &table_name), 0, "table should be empty after truncate");
 
     // Confirm the schema is still intact.
     let col_count: i64 = conn
@@ -709,10 +663,7 @@ async fn test_truncate_clears_rows() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(
-        col_count, 2,
-        "table should still have 2 columns after truncate"
-    );
+    assert_eq!(col_count, 2, "table should still have 2 columns after truncate");
 }
 
 /// Truncation should clear copy markers so the same rows can be copied again.
@@ -743,18 +694,9 @@ async fn test_truncate_clears_copy_markers_for_recopy() {
         TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())]),
     ];
 
-    destination
-        .write_table_rows(&replicated_schema, rows.clone())
-        .await
-        .unwrap();
-    destination
-        .truncate_table(&replicated_schema)
-        .await
-        .unwrap();
-    destination
-        .write_table_rows(&replicated_schema, rows)
-        .await
-        .unwrap();
+    destination.write_table_rows(&replicated_schema, rows.clone()).await.unwrap();
+    destination.truncate_table(&replicated_schema).await.unwrap();
+    destination.write_table_rows(&replicated_schema, rows).await.unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);
@@ -1113,10 +1055,7 @@ async fn test_shutdown_flushes_inlined_copy_rows() {
     destination
         .write_table_rows(
             &replicated_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("pending copy row".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("pending copy row".to_string())])],
         )
         .await
         .unwrap();
@@ -1132,10 +1071,8 @@ async fn test_shutdown_flushes_inlined_copy_rows() {
 
     destination.shutdown().await.unwrap();
 
-    wait_for_condition(Duration::from_secs(10), || {
-        count_table_files(&data, &table_name) >= 1
-    })
-    .await;
+    wait_for_condition(Duration::from_secs(10), || count_table_files(&data, &table_name) >= 1)
+        .await;
 
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
@@ -1507,19 +1444,15 @@ async fn test_concurrent_writes_with_single_slot_complete() {
     let task_a = {
         let destination = Arc::clone(&destination);
         let replicated_schema_a = replicated_schema_a.clone();
-        tokio::spawn(async move {
-            destination
-                .write_table_rows(&replicated_schema_a, rows_a)
-                .await
-        })
+        tokio::spawn(
+            async move { destination.write_table_rows(&replicated_schema_a, rows_a).await },
+        )
     };
     let task_b = {
         let destination = Arc::clone(&destination);
-        tokio::spawn(async move {
-            destination
-                .write_table_rows(&replicated_schema_b, rows_b)
-                .await
-        })
+        tokio::spawn(
+            async move { destination.write_table_rows(&replicated_schema_b, rows_b).await },
+        )
     };
 
     task_a.await.unwrap().unwrap();

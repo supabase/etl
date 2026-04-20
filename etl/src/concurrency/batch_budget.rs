@@ -1,13 +1,18 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use metrics::gauge;
 use tracing::debug;
 
-use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::metrics::ETL_IDEAL_BATCH_SIZE_BYTES;
-use crate::types::PipelineId;
+use crate::{
+    concurrency::memory_monitor::MemoryMonitor, metrics::ETL_IDEAL_BATCH_SIZE_BYTES,
+    types::PipelineId,
+};
 
 /// Refresh interval for cached batch budget reads.
 const CACHED_BATCH_BUDGET_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
@@ -41,10 +46,7 @@ impl BatchBudgetController {
         let units = units.max(1);
         self.active_streams.fetch_add(units, Ordering::Relaxed);
 
-        ActiveStreamsGuard {
-            active_streams: self.active_streams.clone(),
-            units,
-        }
+        ActiveStreamsGuard { active_streams: self.active_streams.clone(), units }
     }
 
     /// Returns a cached budget reader that refreshes from the controller every 100ms.

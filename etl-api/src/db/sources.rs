@@ -1,14 +1,15 @@
-use sqlx::PgExecutor;
 use std::fmt::Debug;
+
+use sqlx::PgExecutor;
 use thiserror::Error;
 
-use crate::configs::encryption::EncryptionKey;
-use crate::configs::serde::{
-    DbDeserializationError, DbSerializationError, decrypt_and_deserialize_from_value,
-    encrypt_and_serialize,
-};
-use crate::configs::source::{
-    EncryptedStoredSourceConfig, FullApiSourceConfig, StoredSourceConfig,
+use crate::configs::{
+    encryption::EncryptionKey,
+    serde::{
+        DbDeserializationError, DbSerializationError, decrypt_and_deserialize_from_value,
+        encrypt_and_serialize,
+    },
+    source::{EncryptedStoredSourceConfig, FullApiSourceConfig, StoredSourceConfig},
 };
 
 #[derive(Debug)]
@@ -90,12 +91,7 @@ where
                 StoredSourceConfig,
             >(record.config, encryption_key)?;
 
-            Some(Source {
-                id: record.id,
-                tenant_id: record.tenant_id,
-                name: record.name,
-                config,
-            })
+            Some(Source { id: record.id, tenant_id: record.tenant_id, name: record.name, config })
         }
         None => None,
     };
@@ -185,12 +181,8 @@ where
             EncryptedStoredSourceConfig,
             StoredSourceConfig,
         >(record.config.clone(), encryption_key)?;
-        let source = Source {
-            id: record.id,
-            tenant_id: record.tenant_id,
-            name: record.name,
-            config,
-        };
+        let source =
+            Source { id: record.id, tenant_id: record.tenant_id, name: record.name, config };
         sources.push(source);
     }
 

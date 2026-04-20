@@ -1,5 +1,4 @@
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 
 /// Market trait that has to be implemented by configs that can be stored in the database.
 ///

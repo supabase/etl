@@ -31,16 +31,18 @@ The pipeline will automatically:
 
 */
 
+use std::{error::Error, sync::Once};
+
 use clap::{Args, Parser};
-use etl::config::{
-    BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+use etl::{
+    config::{
+        BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+    },
+    pipeline::Pipeline,
+    store::MemoryStore,
 };
-use etl::pipeline::Pipeline;
-use etl::store::MemoryStore;
 use etl_destinations::bigquery::BigQueryDestination;
-use std::error::Error;
-use std::sync::Once;
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -224,9 +226,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
 
     // Set up signal handler for graceful shutdown on Ctrl+C
     let shutdown_signal = async {
-        signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
+        signal::ctrl_c().await.expect("Failed to install Ctrl+C handler");
         info!("received ctrl+c signal, initiating graceful shutdown");
     };
 

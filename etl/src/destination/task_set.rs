@@ -1,12 +1,12 @@
-use std::future::Future;
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
-use tokio::sync::Mutex;
-use tokio::task::JoinSet;
+use tokio::{sync::Mutex, task::JoinSet};
 use tracing::{error, warn};
 
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
+use crate::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+};
 
 /// Reap completed destination tasks once the tracked set grows past this threshold.
 ///
@@ -38,11 +38,7 @@ pub struct DestinationTaskSet {
 impl DestinationTaskSet {
     /// Creates a new task set for a destination.
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(DestinationTaskSetInner {
-                join_set: JoinSet::new(),
-            })),
-        }
+        Self { inner: Arc::new(Mutex::new(DestinationTaskSetInner { join_set: JoinSet::new() })) }
     }
 
     /// Spawns a new tracked background task.

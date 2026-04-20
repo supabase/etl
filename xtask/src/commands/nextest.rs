@@ -1,6 +1,8 @@
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
-use std::thread;
+use std::{
+    io::{BufRead, BufReader},
+    process::{Command, Stdio},
+    thread,
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
@@ -244,13 +246,7 @@ fn run_lane(lane: &Lane, mode: Mode, extra: &[String], pg_env: &PgEnv) -> Result
 fn prebuild_test_binaries() -> Result<()> {
     eprintln!("prebuilding test binaries.");
     let status = Command::new("cargo")
-        .args([
-            "nextest",
-            "run",
-            "--workspace",
-            "--all-features",
-            "--no-run",
-        ])
+        .args(["nextest", "run", "--workspace", "--all-features", "--no-run"])
         .status()
         .context("failed to prebuild test binaries")?;
 

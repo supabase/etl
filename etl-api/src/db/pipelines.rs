@@ -1,21 +1,26 @@
-use super::connect_to_source_database_from_api;
-use crate::configs::encryption::EncryptionKey;
-use crate::configs::pipeline::{FullApiPipelineConfig, StoredPipelineConfig};
-use crate::configs::serde::{
-    DbDeserializationError, DbSerializationError, deserialize_from_value, serialize,
-};
-use crate::db;
-use crate::db::destinations::{Destination, DestinationsDbError};
-use crate::db::images::Image;
-use crate::db::replicators::{Replicator, ReplicatorsDbError, create_replicator};
-use crate::db::sources::Source;
-use crate::routes::pipelines::PipelineError;
+use std::ops::DerefMut;
 
 use etl_config::shared::TlsConfig;
 use etl_postgres::replication::{destination_metadata, health, schema, slots, state};
 use sqlx::{PgExecutor, PgTransaction};
-use std::ops::DerefMut;
 use thiserror::Error;
+
+use super::connect_to_source_database_from_api;
+use crate::{
+    configs::{
+        encryption::EncryptionKey,
+        pipeline::{FullApiPipelineConfig, StoredPipelineConfig},
+        serde::{DbDeserializationError, DbSerializationError, deserialize_from_value, serialize},
+    },
+    db::{
+        self,
+        destinations::{Destination, DestinationsDbError},
+        images::Image,
+        replicators::{Replicator, ReplicatorsDbError, create_replicator},
+        sources::Source,
+    },
+    routes::pipelines::PipelineError,
+};
 
 /// Maximum number of pipelines allowed per tenant.
 ///

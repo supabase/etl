@@ -10,12 +10,12 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::configs::destination::FullApiDestinationConfig;
-use crate::configs::encryption::EncryptionKey;
-use crate::db::destinations::DestinationsDbError;
-use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
-use crate::validation::{FailureType, ValidationContext, ValidationError, ValidationFailure};
-use crate::{db, validation};
+use crate::{
+    configs::{destination::FullApiDestinationConfig, encryption::EncryptionKey},
+    db::{self, destinations::DestinationsDbError},
+    routes::{ErrorMessage, TenantIdError, extract_tenant_id},
+    validation::{self, FailureType, ValidationContext, ValidationError, ValidationFailure},
+};
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
@@ -70,14 +70,10 @@ impl ResponseError for DestinationError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage {
-            error: self.to_message(),
-        };
+        let error_message = ErrorMessage { error: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::json())
-            .body(body)
+        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
     }
 }
 
@@ -139,11 +135,7 @@ pub struct ValidationFailureResponse {
 
 impl From<ValidationFailure> for ValidationFailureResponse {
     fn from(failure: ValidationFailure) -> Self {
-        Self {
-            name: failure.name,
-            reason: failure.reason,
-            failure_type: failure.failure_type,
-        }
+        Self { name: failure.name, reason: failure.reason, failure_type: failure.failure_type }
     }
 }
 

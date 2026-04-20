@@ -5,8 +5,10 @@ use actix_web_httpauth::middleware::HttpAuthentication;
 use actix_web_metrics::ActixWebMetricsBuilder;
 use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use base64::{Engine, prelude::BASE64_STANDARD};
-use etl_config::Environment;
-use etl_config::shared::{IntoConnectOptions, PgConnectionConfig};
+use etl_config::{
+    Environment,
+    shared::{IntoConnectOptions, PgConnectionConfig},
+};
 use etl_telemetry::metrics::init_metrics_handle;
 use kube::config::KubeConfigOptions;
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -15,14 +17,13 @@ use tracing_actix_web::TracingLogger;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::feature_flags::{FeatureFlagsClient, init_feature_flags};
-use crate::k8s::http::HttpK8sClient;
-use crate::k8s::{K8sClient, K8sError, TrustedRootCertsCache};
 use crate::{
     authentication::auth_validator,
     config::ApiConfig,
     configs::encryption,
     db::publications::Publication,
+    feature_flags::{FeatureFlagsClient, init_feature_flags},
+    k8s::{K8sClient, K8sError, TrustedRootCertsCache, http::HttpK8sClient},
     routes::{
         destinations::{
             CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
@@ -99,10 +100,7 @@ impl Application {
 
         let key_bytes = BASE64_STANDARD.decode(&config.encryption_key.key)?;
         let key = RandomizedNonceKey::new(&AES_256_GCM, &key_bytes)?;
-        let encryption_key = encryption::EncryptionKey {
-            id: config.encryption_key.id,
-            key,
-        };
+        let encryption_key = encryption::EncryptionKey { id: config.encryption_key.id, key };
 
         // Try to create Kubernetes client, but continue without it if unavailable
         let kube_client_result = match Environment::load() {
@@ -424,11 +422,8 @@ pub fn run(
             .app_data(connection_pool.clone())
             .app_data(encryption_key.clone());
 
-        let app = if let Some(k8s_client) = k8s_client.clone() {
-            app.app_data(k8s_client)
-        } else {
-            app
-        };
+        let app =
+            if let Some(k8s_client) = k8s_client.clone() { app.app_data(k8s_client) } else { app };
 
         let app = if let Some(trusted_root_certs_cache) = trusted_root_certs_cache.clone() {
             app.app_data(trusted_root_certs_cache)

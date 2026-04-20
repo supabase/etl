@@ -5,18 +5,19 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use etl::store::both::memory::MemoryStore;
 use etl_config::parse_ducklake_url;
-use etl_destinations::bigquery::BigQueryClient;
-use etl_destinations::ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config};
-use etl_destinations::iceberg::{
-    IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
+use etl_destinations::{
+    bigquery::BigQueryClient,
+    ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
+    iceberg::{IcebergClient, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY},
 };
 use secrecy::ExposeSecret;
 use sqlx::FromRow;
 
-use crate::configs::destination::{FullApiDestinationConfig, FullApiIcebergConfig};
-use crate::configs::pipeline::FullApiPipelineConfig;
-
 use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
+use crate::configs::{
+    destination::{FullApiDestinationConfig, FullApiIcebergConfig},
+    pipeline::FullApiPipelineConfig,
+};
 
 const ETL_SCHEMA_NAME: &str = "etl";
 
@@ -50,14 +51,11 @@ impl Validator for SourceValidator {
             return Ok(vec![]);
         };
 
-        let source_pool = ctx
-            .source_pool
-            .as_ref()
-            .expect("source pool required for source validation");
+        let source_pool =
+            ctx.source_pool.as_ref().expect("source pool required for source validation");
 
-        let current_user: String = sqlx::query_scalar("select current_user")
-            .fetch_one(source_pool)
-            .await?;
+        let current_user: String =
+            sqlx::query_scalar("select current_user").fetch_one(source_pool).await?;
 
         if current_user != *expected_username {
             return Ok(vec![ValidationFailure::critical(
@@ -208,10 +206,8 @@ impl Validator for PublicationExistsValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool = ctx
-            .source_pool
-            .as_ref()
-            .expect("source pool required for publication validation");
+        let source_pool =
+            ctx.source_pool.as_ref().expect("source pool required for publication validation");
 
         let exists: bool =
             sqlx::query_scalar("select exists(select 1 from pg_publication where pubname = $1)")
@@ -242,9 +238,7 @@ pub struct ReplicationSlotsValidator {
 
 impl ReplicationSlotsValidator {
     pub fn new(max_table_sync_workers: u16) -> Self {
-        Self {
-            max_table_sync_workers,
-        }
+        Self { max_table_sync_workers }
     }
 }
 
@@ -303,10 +297,8 @@ impl Validator for WalLevelValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool = ctx
-            .source_pool
-            .as_ref()
-            .expect("source pool required for WAL level validation");
+        let source_pool =
+            ctx.source_pool.as_ref().expect("source pool required for WAL level validation");
 
         let wal_level: String = sqlx::query_scalar("select current_setting('wal_level')")
             .fetch_one(source_pool)
@@ -434,10 +426,8 @@ impl Validator for PrimaryKeysValidator {
         &self,
         ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let source_pool = ctx
-            .source_pool
-            .as_ref()
-            .expect("source pool required for primary keys validation");
+        let source_pool =
+            ctx.source_pool.as_ref().expect("source pool required for primary keys validation");
 
         // Find tables without primary keys using pg_publication_rel for direct OID access
         let tables_without_pk: Vec<String> = sqlx::query_scalar(
@@ -593,11 +583,7 @@ struct BigQueryValidator {
 
 impl BigQueryValidator {
     fn new(project_id: String, dataset_id: String, service_account_key: String) -> Self {
-        Self {
-            project_id,
-            dataset_id,
-            service_account_key,
-        }
+        Self { project_id, dataset_id, service_account_key }
     }
 }
 
@@ -738,26 +724,17 @@ impl Validator for DucklakeValidator {
             }
         };
 
-        let s3_config = self
-            .s3_access_key_id
-            .clone()
-            .map(|access_key_id| DucklakeS3Config {
-                access_key_id,
-                secret_access_key: self
-                    .s3_secret_access_key
-                    .clone()
-                    .expect("ducklake s3 secret access key should be present"),
-                region: self
-                    .s3_region
-                    .clone()
-                    .unwrap_or_else(|| "us-east-1".to_string()),
-                endpoint: self.s3_endpoint.clone(),
-                url_style: self
-                    .s3_url_style
-                    .clone()
-                    .unwrap_or_else(|| "path".to_string()),
-                use_ssl: self.s3_use_ssl.unwrap_or(false),
-            });
+        let s3_config = self.s3_access_key_id.clone().map(|access_key_id| DucklakeS3Config {
+            access_key_id,
+            secret_access_key: self
+                .s3_secret_access_key
+                .clone()
+                .expect("ducklake s3 secret access key should be present"),
+            region: self.s3_region.clone().unwrap_or_else(|| "us-east-1".to_string()),
+            endpoint: self.s3_endpoint.clone(),
+            url_style: self.s3_url_style.clone().unwrap_or_else(|| "path".to_string()),
+            use_ssl: self.s3_use_ssl.unwrap_or(false),
+        });
 
         match DuckLakeDestination::new(
             catalog_url,
@@ -926,12 +903,8 @@ impl Validator for DestinationValidator {
                     pool_size.unwrap_or(
                         etl_config::shared::DestinationConfig::DEFAULT_DUCKLAKE_POOL_SIZE,
                     ),
-                    s3_access_key_id
-                        .as_ref()
-                        .map(|value| value.expose_secret().to_string()),
-                    s3_secret_access_key
-                        .as_ref()
-                        .map(|value| value.expose_secret().to_string()),
+                    s3_access_key_id.as_ref().map(|value| value.expose_secret().to_string()),
+                    s3_secret_access_key.as_ref().map(|value| value.expose_secret().to_string()),
                     s3_region.clone(),
                     s3_endpoint.clone(),
                     s3_url_style.clone(),

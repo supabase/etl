@@ -1,19 +1,26 @@
-use std::collections::{BTreeMap, HashMap};
-use std::{fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+    sync::Arc,
+};
 
 use etl_postgres::types::{SnapshotId, TableId, TableSchema};
 use tokio::sync::{Notify, RwLock};
 
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
-use crate::state::destination_metadata::{
-    AppliedDestinationTableMetadata, DestinationTableMetadata,
+use crate::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    state::{
+        destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+        table::{TableReplicationPhase, TableReplicationPhaseType},
+    },
+    store::{
+        cleanup::CleanupStore,
+        schema::SchemaStore,
+        state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
+    },
+    test_utils::notify::TimedNotify,
 };
-use crate::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use crate::store::cleanup::CleanupStore;
-use crate::store::schema::SchemaStore;
-use crate::store::state::{DestinationTablesMetadata, StateStore, TableReplicationStates};
-use crate::test_utils::notify::TimedNotify;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StateStoreMethod {
@@ -25,11 +32,8 @@ pub enum StateStoreMethod {
 }
 
 type TableStateTypeCondition = (TableId, TableReplicationPhaseType, Arc<Notify>);
-type TableStateCondition = (
-    TableId,
-    Arc<Notify>,
-    Box<dyn Fn(&TableReplicationPhase) -> bool + Send + Sync>,
-);
+type TableStateCondition =
+    (TableId, Arc<Notify>, Box<dyn Fn(&TableReplicationPhase) -> bool + Send + Sync>);
 type TableSchemaCountCondition = (TableId, usize, Arc<Notify>);
 
 struct Inner {
@@ -46,41 +50,38 @@ struct Inner {
 impl Inner {
     fn check_conditions(&mut self) {
         let table_states = Arc::clone(&self.table_replication_states);
-        self.table_state_type_conditions
-            .retain(|(tid, expected_state, notify)| {
-                if let Some(state) = table_states.get(tid) {
-                    let should_retain = *expected_state != state.as_type();
-                    if !should_retain {
-                        notify.notify_one();
-                    }
-                    should_retain
-                } else {
-                    true
-                }
-            });
-
-        self.table_state_conditions
-            .retain(|(tid, notify, condition)| {
-                if let Some(state) = table_states.get(tid) {
-                    let should_retain = !condition(state);
-                    if !should_retain {
-                        notify.notify_one();
-                    }
-                    should_retain
-                } else {
-                    true
-                }
-            });
-
-        self.table_schema_count_conditions
-            .retain(|(tid, expected_count, notify)| {
-                let schemas_count = self.table_schemas.get(tid).map_or(0, Vec::len);
-                let should_retain = schemas_count < *expected_count;
+        self.table_state_type_conditions.retain(|(tid, expected_state, notify)| {
+            if let Some(state) = table_states.get(tid) {
+                let should_retain = *expected_state != state.as_type();
                 if !should_retain {
                     notify.notify_one();
                 }
                 should_retain
-            });
+            } else {
+                true
+            }
+        });
+
+        self.table_state_conditions.retain(|(tid, notify, condition)| {
+            if let Some(state) = table_states.get(tid) {
+                let should_retain = !condition(state);
+                if !should_retain {
+                    notify.notify_one();
+                }
+                should_retain
+            } else {
+                true
+            }
+        });
+
+        self.table_schema_count_conditions.retain(|(tid, expected_count, notify)| {
+            let schemas_count = self.table_schemas.get(tid).map_or(0, Vec::len);
+            let should_retain = schemas_count < *expected_count;
+            if !should_retain {
+                notify.notify_one();
+            }
+            should_retain
+        });
     }
 
     fn dispatch_method_notification(&self, method: StateStoreMethod) {
@@ -111,9 +112,7 @@ impl NotifyingStore {
             method_call_notifiers: HashMap::new(),
         };
 
-        Self {
-            inner: Arc::new(RwLock::new(inner)),
-        }
+        Self { inner: Arc::new(RwLock::new(inner)) }
     }
 
     /// Returns all table replication states.
@@ -130,9 +129,7 @@ impl NotifyingStore {
             .table_schemas
             .iter()
             .filter_map(|(table_id, schemas)| {
-                schemas
-                    .last()
-                    .map(|schema| (*table_id, Arc::as_ref(schema).clone()))
+                schemas.last().map(|schema| (*table_id, Arc::as_ref(schema).clone()))
             })
             .collect()
     }
@@ -166,9 +163,7 @@ impl NotifyingStore {
     ) -> TimedNotify {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
-        inner
-            .table_state_type_conditions
-            .push((table_id, expected_state, notify.clone()));
+        inner.table_state_type_conditions.push((table_id, expected_state, notify.clone()));
 
         TimedNotify::new(notify)
     }
@@ -184,9 +179,7 @@ impl NotifyingStore {
     {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
-        inner
-            .table_state_conditions
-            .push((table_id, notify.clone(), Box::new(condition)));
+        inner.table_state_conditions.push((table_id, notify.clone(), Box::new(condition)));
 
         TimedNotify::new(notify)
     }
@@ -203,9 +196,7 @@ impl NotifyingStore {
     ) -> TimedNotify {
         let notify = Arc::new(Notify::new());
         let mut inner = self.inner.write().await;
-        inner
-            .table_schema_count_conditions
-            .push((table_id, expected_count, notify.clone()));
+        inner.table_schema_count_conditions.push((table_id, expected_count, notify.clone()));
 
         TimedNotify::new(notify)
     }
@@ -374,11 +365,7 @@ impl SchemaStore for NotifyingStore {
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         let inner = self.inner.read().await;
 
-        Ok(inner
-            .table_schemas
-            .values()
-            .flat_map(|schemas| schemas.iter().cloned())
-            .collect())
+        Ok(inner.table_schemas.values().flat_map(|schemas| schemas.iter().cloned()).collect())
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
@@ -395,9 +382,8 @@ impl SchemaStore for NotifyingStore {
         let table_schema = Arc::new(table_schema);
 
         let schemas = inner.table_schemas.entry(table_id).or_default();
-        if let Some(existing_schema) = schemas
-            .iter_mut()
-            .find(|schema| schema.snapshot_id == snapshot_id)
+        if let Some(existing_schema) =
+            schemas.iter_mut().find(|schema| schema.snapshot_id == snapshot_id)
         {
             *existing_schema = Arc::clone(&table_schema);
         } else {

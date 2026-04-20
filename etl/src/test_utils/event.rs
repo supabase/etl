@@ -1,6 +1,8 @@
-use crate::types::{Event, EventType, TableRow};
-use etl_postgres::types::TableId;
 use std::collections::HashMap;
+
+use etl_postgres::types::TableId;
+
+use crate::types::{Event, EventType, TableRow};
 
 /// Condition for waiting on events in tests.
 #[derive(Clone, Debug)]
@@ -15,10 +17,7 @@ pub fn group_events_by_type(events: &[Event]) -> HashMap<EventType, Vec<Event>> 
     let mut grouped = HashMap::new();
     for event in events {
         let event_type = EventType::from(event);
-        grouped
-            .entry(event_type)
-            .or_insert_with(Vec::new)
-            .push(event.clone());
+        grouped.entry(event_type).or_insert_with(Vec::new).push(event.clone());
     }
 
     grouped
@@ -36,11 +35,9 @@ pub fn group_events_by_type_and_table_id(
             Event::Insert(event) => vec![event.replicated_table_schema.id()],
             Event::Update(event) => vec![event.replicated_table_schema.id()],
             Event::Delete(event) => vec![event.replicated_table_schema.id()],
-            Event::Truncate(event) => event
-                .truncated_tables
-                .iter()
-                .map(|schema| schema.id())
-                .collect(),
+            Event::Truncate(event) => {
+                event.truncated_tables.iter().map(|schema| schema.id()).collect()
+            }
             _ => vec![],
         };
         for table_id in table_ids {
@@ -58,10 +55,7 @@ pub fn check_events_count(events: &[Event], conditions: Vec<(EventType, u64)>) -
     let grouped_events = group_events_by_type(events);
 
     conditions.into_iter().all(|(event_type, count)| {
-        grouped_events
-            .get(&event_type)
-            .map(|inner| inner.len() == count as usize)
-            .unwrap_or(false)
+        grouped_events.get(&event_type).map(|inner| inner.len() == count as usize).unwrap_or(false)
     })
 }
 
@@ -140,10 +134,7 @@ pub fn check_all_events_count(
                 .unwrap_or(0);
 
             let table_row_count = if *event_type == EventType::Insert {
-                table_rows
-                    .get(table_id)
-                    .map(|rows| rows.len() as u64)
-                    .unwrap_or(0)
+                table_rows.get(table_id).map(|rows| rows.len() as u64).unwrap_or(0)
             } else {
                 0
             };

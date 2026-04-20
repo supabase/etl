@@ -41,9 +41,6 @@ pub struct SupabaseConfigWithoutSecrets {
 
 impl From<SupabaseConfig> for SupabaseConfigWithoutSecrets {
     fn from(value: SupabaseConfig) -> Self {
-        SupabaseConfigWithoutSecrets {
-            project_ref: value.project_ref,
-            api_url: value.api_url,
-        }
+        SupabaseConfigWithoutSecrets { project_ref: value.project_ref, api_url: value.api_url }
     }
 }

@@ -1,8 +1,6 @@
-use std::time::Duration;
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 
-use tokio::sync::Notify;
-use tokio::time::timeout;
+use tokio::{sync::Notify, time::timeout};
 
 /// Default timeout duration for notifications.
 ///
@@ -28,10 +26,7 @@ impl TimedNotify {
 
     /// Creates a new [`TimedNotify`] with a custom timeout duration.
     pub fn with_timeout(notify: Arc<Notify>, timeout_duration: Duration) -> Self {
-        Self {
-            notify,
-            timeout_duration,
-        }
+        Self { notify, timeout_duration }
     }
 
     /// Waits for a notification with timeout.
@@ -62,8 +57,6 @@ impl TimedNotify {
 
 impl fmt::Debug for TimedNotify {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TimedNotify")
-            .field("timeout_duration", &self.timeout_duration)
-            .finish()
+        f.debug_struct("TimedNotify").field("timeout_duration", &self.timeout_duration).finish()
     }
 }

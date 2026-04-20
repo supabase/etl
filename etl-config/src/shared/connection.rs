@@ -1,8 +1,8 @@
+use std::{sync::LazyLock, time::Duration};
+
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions as SqlxConnectOptions, PgSslMode as SqlxSslMode};
-use std::sync::LazyLock;
-use std::time::Duration;
 use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPgSslMode};
 
 use crate::Config;
@@ -156,25 +156,16 @@ impl PgConnectionOptions {
         vec![
             ("datestyle".to_string(), self.datestyle.clone()),
             ("intervalstyle".to_string(), self.intervalstyle.clone()),
-            (
-                "extra_float_digits".to_string(),
-                self.extra_float_digits.to_string(),
-            ),
+            ("extra_float_digits".to_string(), self.extra_float_digits.to_string()),
             ("client_encoding".to_string(), self.client_encoding.clone()),
             ("timezone".to_string(), self.timezone.clone()),
-            (
-                "statement_timeout".to_string(),
-                self.statement_timeout.to_string(),
-            ),
+            ("statement_timeout".to_string(), self.statement_timeout.to_string()),
             ("lock_timeout".to_string(), self.lock_timeout.to_string()),
             (
                 "idle_in_transaction_session_timeout".to_string(),
                 self.idle_in_transaction_session_timeout.to_string(),
             ),
-            (
-                "application_name".to_string(),
-                self.application_name.clone(),
-            ),
+            ("application_name".to_string(), self.application_name.clone()),
         ]
     }
 }
@@ -254,10 +245,7 @@ pub struct TlsConfig {
 impl TlsConfig {
     /// Returns a TLS configuration that disables TLS.
     pub fn disabled() -> Self {
-        Self {
-            trusted_root_certs: "".to_string(),
-            enabled: false,
-        }
+        Self { trusted_root_certs: "".to_string(), enabled: false }
     }
 }
 
@@ -274,11 +262,7 @@ pub struct TcpKeepaliveConfig {
 
 impl Default for TcpKeepaliveConfig {
     fn default() -> Self {
-        Self {
-            idle_secs: 30,
-            interval_secs: 10,
-            retries: 3,
-        }
+        Self { idle_secs: 30, interval_secs: 10, retries: 3 }
     }
 }
 
@@ -309,11 +293,7 @@ pub trait IntoConnectOptions<Output> {
 impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
     /// Creates sqlx connection options without database name.
     fn without_db(&self, options: Option<&PgConnectionOptions>) -> SqlxConnectOptions {
-        let ssl_mode = if self.tls.enabled {
-            SqlxSslMode::VerifyFull
-        } else {
-            SqlxSslMode::Prefer
-        };
+        let ssl_mode = if self.tls.enabled { SqlxSslMode::VerifyFull } else { SqlxSslMode::Prefer };
         let mut connect_options = SqlxConnectOptions::new_without_pgpass()
             .host(&self.host)
             .username(&self.username)
@@ -351,11 +331,8 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
 impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
     /// Creates tokio-postgres connection options without database name.
     fn without_db(&self, options: Option<&PgConnectionOptions>) -> TokioPgConnectOptions {
-        let ssl_mode = if self.tls.enabled {
-            TokioPgSslMode::VerifyFull
-        } else {
-            TokioPgSslMode::Prefer
-        };
+        let ssl_mode =
+            if self.tls.enabled { TokioPgSslMode::VerifyFull } else { TokioPgSslMode::Prefer };
         let mut config = TokioPgConnectOptions::new();
         config
             .host(self.host.clone())
@@ -428,10 +405,12 @@ mod tests {
         assert!(pairs.contains(&("timezone".to_string(), "UTC".to_string())));
         assert!(pairs.contains(&("statement_timeout".to_string(), "30000".to_string())));
         assert!(pairs.contains(&("lock_timeout".to_string(), "10000".to_string())));
-        assert!(pairs.contains(&(
-            "idle_in_transaction_session_timeout".to_string(),
-            "60000".to_string()
-        )));
+        assert!(
+            pairs.contains(&(
+                "idle_in_transaction_session_timeout".to_string(),
+                "60000".to_string()
+            ))
+        );
         assert!(pairs.contains(&(
             "application_name".to_string(),
             "supabase_etl_replicator_state".to_string()

@@ -1,18 +1,23 @@
-use etl_config::Environment;
-use etl_config::shared::{ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets, TlsConfig};
+use etl_config::{
+    Environment,
+    shared::{ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets, TlsConfig},
+};
 use secrecy::ExposeSecret;
 
-use crate::configs::destination::{StoredDestinationConfig, StoredIcebergConfig};
-use crate::configs::log::LogLevel;
-use crate::configs::pipeline::StoredPipelineConfig;
-use crate::configs::source::StoredSourceConfig;
-use crate::db::destinations::Destination;
-use crate::db::images::Image;
-use crate::db::pipelines::Pipeline;
-use crate::db::replicators::Replicator;
-use crate::db::sources::Source;
-use crate::k8s::{DestinationType, K8sClient, PodStatus, ReplicatorConfigMapFile};
-use crate::routes::pipelines::PipelineError;
+use crate::{
+    configs::{
+        destination::{StoredDestinationConfig, StoredIcebergConfig},
+        log::LogLevel,
+        pipeline::StoredPipelineConfig,
+        source::StoredSourceConfig,
+    },
+    db::{
+        destinations::Destination, images::Image, pipelines::Pipeline, replicators::Replicator,
+        sources::Source,
+    },
+    k8s::{DestinationType, K8sClient, PodStatus, ReplicatorConfigMapFile},
+    routes::pipelines::PipelineError,
+};
 
 /// Secret types required by different destination configurations.
 ///
@@ -150,23 +155,17 @@ fn build_secrets_from_configs(
     source_config: &StoredSourceConfig,
     destination_config: &StoredDestinationConfig,
 ) -> Secrets {
-    let postgres_password = source_config
-        .password
-        .as_ref()
-        .map(|p| p.expose_secret().to_owned())
-        .unwrap_or_default();
+    let postgres_password =
+        source_config.password.as_ref().map(|p| p.expose_secret().to_owned()).unwrap_or_default();
 
     match destination_config {
-        StoredDestinationConfig::BigQuery {
-            service_account_key,
-            ..
-        } => Secrets::BigQuery {
+        StoredDestinationConfig::BigQuery { service_account_key, .. } => Secrets::BigQuery {
             postgres_password,
             big_query_service_account_key: service_account_key.expose_secret().to_string(),
         },
-        StoredDestinationConfig::Iceberg {
-            config: StoredIcebergConfig::Rest { .. },
-        } => Secrets::None,
+        StoredDestinationConfig::Iceberg { config: StoredIcebergConfig::Rest { .. } } => {
+            Secrets::None
+        }
         StoredDestinationConfig::Iceberg {
             config:
                 StoredIcebergConfig::Supabase {
@@ -181,19 +180,17 @@ fn build_secrets_from_configs(
             s3_access_key_id: s3_access_key_id.expose_secret().to_string(),
             s3_secret_access_key: s3_secret_access_key.expose_secret().to_string(),
         },
-        StoredDestinationConfig::Ducklake {
-            s3_access_key_id,
-            s3_secret_access_key,
-            ..
-        } => Secrets::Ducklake {
-            postgres_password,
-            s3_access_key_id: s3_access_key_id
-                .as_ref()
-                .map(|value| value.expose_secret().to_string()),
-            s3_secret_access_key: s3_secret_access_key
-                .as_ref()
-                .map(|value| value.expose_secret().to_string()),
-        },
+        StoredDestinationConfig::Ducklake { s3_access_key_id, s3_secret_access_key, .. } => {
+            Secrets::Ducklake {
+                postgres_password,
+                s3_access_key_id: s3_access_key_id
+                    .as_ref()
+                    .map(|value| value.expose_secret().to_string()),
+                s3_secret_access_key: s3_secret_access_key
+                    .as_ref()
+                    .map(|value| value.expose_secret().to_string()),
+            }
+        }
     }
 }
 
@@ -214,9 +211,7 @@ fn build_replicator_config_without_secrets(
 
     ReplicatorConfigWithoutSecrets {
         destination: destination_config.into_etl_config().into(),
-        pipeline: pipeline_config
-            .into_etl_config(pipeline_id, pg_connection_config)
-            .into(),
+        pipeline: pipeline_config.into_etl_config(pipeline_id, pg_connection_config).into(),
         supabase: Some(supabase_config),
     }
 }
@@ -242,13 +237,8 @@ async fn create_or_update_dynamic_replicator_secrets(
 ) -> Result<(), PipelineError> {
     match secrets {
         Secrets::None => {}
-        Secrets::BigQuery {
-            postgres_password,
-            big_query_service_account_key,
-        } => {
-            k8s_client
-                .create_or_update_postgres_secret(prefix, &postgres_password)
-                .await?;
+        Secrets::BigQuery { postgres_password, big_query_service_account_key } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
             k8s_client
                 .create_or_update_bigquery_secret(prefix, &big_query_service_account_key)
                 .await?;
@@ -259,9 +249,7 @@ async fn create_or_update_dynamic_replicator_secrets(
             s3_access_key_id,
             s3_secret_access_key,
         } => {
-            k8s_client
-                .create_or_update_postgres_secret(prefix, &postgres_password)
-                .await?;
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
             k8s_client
                 .create_or_update_iceberg_secret(
                     prefix,
@@ -271,14 +259,8 @@ async fn create_or_update_dynamic_replicator_secrets(
                 )
                 .await?;
         }
-        Secrets::Ducklake {
-            postgres_password,
-            s3_access_key_id,
-            s3_secret_access_key,
-        } => {
-            k8s_client
-                .create_or_update_postgres_secret(prefix, &postgres_password)
-                .await?;
+        Secrets::Ducklake { postgres_password, s3_access_key_id, s3_secret_access_key } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
             if let (Some(s3_access_key_id), Some(s3_secret_access_key)) =
                 (s3_access_key_id, s3_secret_access_key)
             {
@@ -318,15 +300,10 @@ async fn create_or_update_replicator_config(
             // is added directly in the environment-specific config file.
             content: "{}".to_owned(),
         },
-        ReplicatorConfigMapFile {
-            filename: format!("{environment}.json"),
-            content: env_config,
-        },
+        ReplicatorConfigMapFile { filename: format!("{environment}.json"), content: env_config },
     ];
 
-    k8s_client
-        .create_or_update_replicator_config_map(prefix, files)
-        .await?;
+    k8s_client.create_or_update_replicator_config_map(prefix, files).await?;
 
     Ok(())
 }
@@ -411,10 +388,12 @@ mod tests {
     use k8s_openapi::api::core::v1::ConfigMap;
 
     use super::*;
-    use crate::configs::destination::StoredDestinationConfig;
-    use crate::configs::log::LogLevel;
-    use crate::configs::source::StoredSourceConfig;
-    use crate::k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile};
+    use crate::{
+        configs::{
+            destination::StoredDestinationConfig, log::LogLevel, source::StoredSourceConfig,
+        },
+        k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile},
+    };
 
     #[derive(Debug, Default, Clone)]
     struct RecordingK8sClient {
@@ -434,10 +413,7 @@ mod tests {
             prefix: &str,
             postgres_password: &str,
         ) -> Result<(), K8sError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("postgres:{prefix}:{postgres_password}"));
+            self.calls.lock().unwrap().push(format!("postgres:{prefix}:{postgres_password}"));
             Ok(())
         }
 
@@ -465,9 +441,10 @@ mod tests {
             s3_access_key_id: &str,
             s3_secret_access_key: &str,
         ) -> Result<(), K8sError> {
-            self.calls.lock().unwrap().push(format!(
-                "ducklake:{prefix}:{s3_access_key_id}:{s3_secret_access_key}"
-            ));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("ducklake:{prefix}:{s3_access_key_id}:{s3_secret_access_key}"));
             Ok(())
         }
 
@@ -484,10 +461,7 @@ mod tests {
         }
 
         async fn delete_ducklake_secret(&self, prefix: &str) -> Result<(), K8sError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("delete-ducklake:{prefix}"));
+            self.calls.lock().unwrap().push(format!("delete-ducklake:{prefix}"));
             Ok(())
         }
 
@@ -552,9 +526,7 @@ mod tests {
         let secrets = build_secrets_from_configs(&source_config, &destination_config);
         let client = RecordingK8sClient::default();
 
-        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets)
-            .await
-            .unwrap();
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
 
         assert_eq!(
             client.calls(),
@@ -590,9 +562,7 @@ mod tests {
         let secrets = build_secrets_from_configs(&source_config, &destination_config);
         let client = RecordingK8sClient::default();
 
-        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets)
-            .await
-            .unwrap();
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
 
         assert_eq!(
             client.calls(),

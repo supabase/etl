@@ -1,9 +1,11 @@
-use etl::error::EtlError;
-use etl::types::TableId;
-use sentry::protocol::{Event, Exception, Stacktrace, Value};
-use sentry::types::Uuid;
-use serde_json::json;
 use std::backtrace::BacktraceStatus;
+
+use etl::{error::EtlError, types::TableId};
+use sentry::{
+    protocol::{Event, Exception, Stacktrace, Value},
+    types::Uuid,
+};
+use serde_json::json;
 
 use crate::error::ReplicatorError;
 
@@ -39,10 +41,7 @@ fn event_from_replicator_error(err: &ReplicatorError) -> Event<'static> {
         return event_from_etl_error(etl_err);
     }
 
-    let mut event = Event {
-        level: sentry::Level::Error,
-        ..Default::default()
-    };
+    let mut event = Event { level: sentry::Level::Error, ..Default::default() };
     let mut exceptions = Vec::new();
 
     collect_standard_exception_chain(err, &mut exceptions);
@@ -59,10 +58,7 @@ fn event_from_replicator_error(err: &ReplicatorError) -> Event<'static> {
 
 /// Converts an [`EtlError`] into a Sentry [`Event`].
 fn event_from_etl_error(err: &EtlError) -> Event<'static> {
-    let mut event = Event {
-        level: sentry::Level::Error,
-        ..Default::default()
-    };
+    let mut event = Event { level: sentry::Level::Error, ..Default::default() };
     let mut exceptions = Vec::new();
 
     if err.errors().is_some() {
@@ -72,10 +68,7 @@ fn event_from_etl_error(err: &EtlError) -> Event<'static> {
             value: Some(format!("{leaf_count} errors occurred")),
             ..Default::default()
         });
-        event.extra.insert(
-            "etl_error_tree".to_string(),
-            etl_error_tree_to_serde_value(err),
-        );
+        event.extra.insert("etl_error_tree".to_string(), etl_error_tree_to_serde_value(err));
     } else {
         collect_single_etl_exception_chain(err, &mut exceptions);
     }
@@ -137,10 +130,7 @@ fn format_etl_sentry_value(error: &EtlError) -> String {
     let description = error.description().unwrap_or("etl error");
     match error.detail() {
         Some(detail) if !detail.trim().is_empty() => {
-            format!(
-                "{description}: {}",
-                detail.lines().collect::<Vec<_>>().join(" ")
-            )
+            format!("{description}: {}", detail.lines().collect::<Vec<_>>().join(" "))
         }
         _ => description.to_string(),
     }
@@ -184,10 +174,5 @@ fn find_and_parse_backtrace(backtrace: Option<&std::backtrace::Backtrace>) -> Op
 /// Extracts a type name from an error's debug representation.
 fn type_name_from_debug(err: &dyn std::error::Error) -> String {
     let debug = format!("{err:?}");
-    debug
-        .split(['{', '(', ' '])
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("Error")
-        .to_string()
+    debug.split(['{', '(', ' ']).next().filter(|s| !s.is_empty()).unwrap_or("Error").to_string()
 }

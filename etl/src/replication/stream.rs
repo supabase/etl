@@ -1,30 +1,35 @@
-use etl_postgres::types::ColumnSchema;
-use etl_postgres::types::POSTGRES_EPOCH;
+use std::{
+    fmt::{Display, Formatter},
+    pin::Pin,
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
+
+use etl_postgres::types::{ColumnSchema, POSTGRES_EPOCH};
 use futures::{Stream, ready};
+use metrics::{counter, histogram};
 use pin_project_lite::pin_project;
-use postgres_replication::LogicalReplicationStream;
-use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
-use std::fmt::{Display, Formatter};
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
-use tokio_postgres::CopyOutStream;
-use tokio_postgres::types::PgLsn;
+use postgres_replication::{
+    LogicalReplicationStream,
+    protocol::{LogicalReplicationMessage, ReplicationMessage},
+};
+use tokio_postgres::{CopyOutStream, types::PgLsn};
 use tracing::debug;
 #[cfg(feature = "failpoints")]
 use tracing::warn;
 
-use crate::conversions::parse_table_row_from_postgres_copy_bytes;
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
-use crate::metrics::{
-    ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, ETL_STATUS_UPDATES_SKIPPED_TOTAL,
-    ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, STATUS_UPDATE_TYPE_LABEL,
+use crate::{
+    conversions::parse_table_row_from_postgres_copy_bytes,
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    metrics::{
+        ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, ETL_STATUS_UPDATES_SKIPPED_TOTAL,
+        ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, STATUS_UPDATE_TYPE_LABEL,
+    },
+    types::TableRow,
 };
-use crate::types::TableRow;
-use metrics::{counter, histogram};
 
 /// The amount of milliseconds between two consecutive status updates in case no forced update
 /// is requested.
@@ -49,10 +54,7 @@ impl<I> TableCopyStream<I> {
     ///
     /// The column schemas are used to convert the raw Postgres data into [`TableRow`]s.
     pub(crate) fn wrap(stream: CopyOutStream, column_schemas: I) -> Self {
-        Self {
-            stream,
-            column_schemas,
-        }
+        Self { stream, column_schemas }
     }
 }
 
@@ -142,12 +144,7 @@ pub(crate) struct EventsStream {
 impl EventsStream {
     /// Creates a new [`EventsStream`] from a [`LogicalReplicationStream`].
     pub(crate) fn wrap(stream: LogicalReplicationStream) -> Self {
-        Self {
-            stream,
-            last_update: None,
-            last_write_lsn: None,
-            last_flush_lsn: None,
-        }
+        Self { stream, last_update: None, last_write_lsn: None, last_flush_lsn: None }
     }
 
     /// Sends a status update to the Postgres server.
@@ -230,11 +227,7 @@ impl EventsStream {
         let ts = POSTGRES_EPOCH
             .elapsed()
             .map_err(|err| {
-                etl_error!(
-                    ErrorKind::InvalidState,
-                    "Invalid PostgreSQL epoch",
-                    err.to_string()
-                )
+                etl_error!(ErrorKind::InvalidState, "Invalid PostgreSQL epoch", err.to_string())
             })?
             .as_micros() as i64;
 

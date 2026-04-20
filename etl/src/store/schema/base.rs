@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use crate::error::EtlResult;
-use crate::types::{SnapshotId, TableId, TableSchema};
+use crate::{
+    error::EtlResult,
+    types::{SnapshotId, TableId, TableSchema},
+};
 
 /// Trait for storing and retrieving database table schema information.
 ///

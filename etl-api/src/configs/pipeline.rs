@@ -53,10 +53,7 @@ pub struct FullApiPipelineConfig {
     #[schema(example = 100)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_refresh_interval_ms: Option<u64>,
-    #[serde(
-        default = "default_memory_backpressure",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default = "default_memory_backpressure", skip_serializing_if = "Option::is_none")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_sync_copy: Option<TableSyncCopyConfig>,
@@ -164,17 +161,15 @@ impl From<FullApiPipelineConfig> for StoredPipelineConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use etl_config::shared::BatchConfig;
+
+    use super::*;
 
     #[test]
     fn test_stored_pipeline_config_serialization() {
         let config = StoredPipelineConfig {
             publication_name: "test_publication".to_string(),
-            batch: BatchConfig {
-                max_fill_ms: 5000,
-                memory_budget_ratio: 0.2,
-            },
+            batch: BatchConfig { max_fill_ms: 5000, memory_budget_ratio: 0.2 },
             table_error_retry_delay_ms: 2000,
             table_error_retry_max_attempts: 7,
             max_table_sync_workers: 4,
@@ -193,18 +188,12 @@ mod tests {
         let deserialized: StoredPipelineConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(config.publication_name, deserialized.publication_name);
-        assert_eq!(
-            config.table_error_retry_delay_ms,
-            deserialized.table_error_retry_delay_ms
-        );
+        assert_eq!(config.table_error_retry_delay_ms, deserialized.table_error_retry_delay_ms);
         assert_eq!(
             config.table_error_retry_max_attempts,
             deserialized.table_error_retry_max_attempts
         );
-        assert_eq!(
-            config.max_table_sync_workers,
-            deserialized.max_table_sync_workers
-        );
+        assert_eq!(config.max_table_sync_workers, deserialized.max_table_sync_workers);
         assert_eq!(
             config.max_copy_connections_per_table,
             deserialized.max_copy_connections_per_table
@@ -260,10 +249,7 @@ mod tests {
             stored.table_error_retry_max_attempts,
             PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS
         );
-        assert_eq!(
-            stored.max_table_sync_workers,
-            PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS
-        );
+        assert_eq!(stored.max_table_sync_workers, PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS);
         assert_eq!(
             stored.max_copy_connections_per_table,
             PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE
@@ -273,9 +259,6 @@ mod tests {
             PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS
         );
         assert_eq!(stored.memory_backpressure, None);
-        assert_eq!(
-            stored.invalidated_slot_behavior,
-            InvalidatedSlotBehavior::Error
-        );
+        assert_eq!(stored.invalidated_slot_behavior, InvalidatedSlotBehavior::Error);
     }
 }

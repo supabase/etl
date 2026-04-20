@@ -9,7 +9,9 @@ mod pipeline;
 mod sized;
 mod table_row;
 
+// Re-exports.
 pub use cell::{ArrayCell, ArrayCellNonOptional, Cell, CellNonOptional};
+pub use etl_postgres::types::*;
 pub use event::{
     BeginEvent, CommitEvent, DeleteEvent, Event, EventSequenceKey, EventType, InsertEvent,
     RelationEvent, TruncateEvent, UpdateEvent,
@@ -17,9 +19,6 @@ pub use event::{
 pub use pipeline::PipelineId;
 pub use sized::SizeHint;
 pub use table_row::TableRow;
+pub use tokio_postgres::types::*;
 
 pub use crate::conversions::{InvalidSign, ParseNumericError, PgNumeric, Sign};
-
-// Re-exports.
-pub use etl_postgres::types::*;
-pub use tokio_postgres::types::*;

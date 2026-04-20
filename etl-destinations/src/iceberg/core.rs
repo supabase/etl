@@ -4,27 +4,30 @@ use std::{
     sync::Arc,
 };
 
+use etl::{
+    destination::{
+        Destination,
+        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+        task_set::DestinationTaskSet,
+    },
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    state::destination_metadata::DestinationTableMetadata,
+    store::state::StateStore,
+    types::{
+        Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow, Type,
+        generate_sequence_number,
+    },
+};
+use tokio::{sync::Mutex, task::JoinSet};
+use tracing::{debug, warn};
+
 #[cfg(feature = "egress")]
 use crate::egress::{PROCESSING_TYPE_STREAMING, PROCESSING_TYPE_TABLE_COPY, log_processed_bytes};
-use crate::iceberg::IcebergClient;
-use crate::iceberg::error::iceberg_error_to_etl_error;
-use crate::table_name::try_stringify_table_name;
-use etl::destination::Destination;
-use etl::destination::async_result::{
-    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+use crate::{
+    iceberg::{IcebergClient, error::iceberg_error_to_etl_error},
+    table_name::try_stringify_table_name,
 };
-use etl::destination::task_set::DestinationTaskSet;
-use etl::error::{ErrorKind, EtlResult};
-use etl::etl_error;
-use etl::state::destination_metadata::DestinationTableMetadata;
-use etl::store::state::StateStore;
-use etl::types::{
-    Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow, Type,
-    generate_sequence_number,
-};
-use tokio::sync::Mutex;
-use tokio::task::JoinSet;
-use tracing::{debug, warn};
 
 /// Type alias for Iceberg table names.
 type IcebergTableName = String;
@@ -52,10 +55,7 @@ pub fn table_name_to_iceberg_table_name(
         ));
     }
 
-    Ok(format!(
-        "{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}",
-        table_name.name
-    ))
+    Ok(format!("{}_{ICEBERG_CHANGELOG_TABLE_SUFFIX}", table_name.name))
 }
 
 /// CDC operation types for Iceberg changelog tables.
@@ -201,10 +201,7 @@ where
         //
         // If no metadata exists, it means the table was never created in Iceberg (e.g., due to
         // errors during copy). In this case, we skip the truncate since there's nothing to truncate.
-        let Some(metadata) = self
-            .store
-            .get_applied_destination_table_metadata(table_id)
-            .await?
+        let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await?
         else {
             warn!(
                 %table_id,
@@ -224,8 +221,7 @@ where
         inner.created_tables.remove(&iceberg_table_name);
 
         // We recreate the table with the same schema.
-        self.prepare_table_for_streaming(&mut inner, replicated_table_schema)
-            .await?;
+        self.prepare_table_for_streaming(&mut inner, replicated_table_schema).await?;
 
         Ok(())
     }
@@ -244,24 +240,19 @@ where
             // We hold the lock for the entire preparation to avoid race conditions since the consistency
             // of this code path is critical.
             let mut inner = self.inner.lock().await;
-            self.prepare_table_for_streaming(&mut inner, replicated_table_schema)
-                .await?
+            self.prepare_table_for_streaming(&mut inner, replicated_table_schema).await?
         };
 
         for table_row in &mut table_rows {
             let sequence_number = generate_sequence_number(0.into(), 0.into());
-            table_row
-                .values_mut()
-                .push(IcebergOperationType::Insert.into());
+            table_row.values_mut().push(IcebergOperationType::Insert.into());
             table_row.values_mut().push(Cell::String(sequence_number));
         }
 
         if !table_rows.is_empty() {
             #[allow(unused_variables)]
-            let bytes_sent = self
-                .client
-                .insert_rows(namespace, iceberg_table_name, table_rows)
-                .await?;
+            let bytes_sent =
+                self.client.insert_rows(namespace, iceberg_table_name, table_rows).await?;
 
             #[cfg(feature = "egress")]
             log_processed_bytes(Self::name(), PROCESSING_TYPE_TABLE_COPY, bytes_sent, 0);
@@ -295,14 +286,8 @@ where
                 match event {
                     Event::Insert(mut insert) => {
                         let sequence_key = insert.event_sequence_key().to_string();
-                        insert
-                            .table_row
-                            .values_mut()
-                            .push(IcebergOperationType::Insert.into());
-                        insert
-                            .table_row
-                            .values_mut()
-                            .push(Cell::String(sequence_key));
+                        insert.table_row.values_mut().push(IcebergOperationType::Insert.into());
+                        insert.table_row.values_mut().push(Cell::String(sequence_key));
 
                         let table_id = insert.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -312,14 +297,8 @@ where
                     }
                     Event::Update(mut update) => {
                         let sequence_key = update.event_sequence_key().to_string();
-                        update
-                            .table_row
-                            .values_mut()
-                            .push(IcebergOperationType::Update.into());
-                        update
-                            .table_row
-                            .values_mut()
-                            .push(Cell::String(sequence_key));
+                        update.table_row.values_mut().push(IcebergOperationType::Update.into());
+                        update.table_row.values_mut().push(Cell::String(sequence_key));
 
                         let table_id = update.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -333,9 +312,7 @@ where
                             debug!("delete event has no row, skipping");
                             continue;
                         };
-                        old_table_row
-                            .values_mut()
-                            .push(IcebergOperationType::Delete.into());
+                        old_table_row.values_mut().push(IcebergOperationType::Delete.into());
                         old_table_row.values_mut().push(Cell::String(sequence_key));
 
                         let table_id = delete.replicated_table_schema.id();
@@ -352,10 +329,8 @@ where
                         let new_replication_mask =
                             relation.replicated_table_schema.replication_mask();
 
-                        if let Some(metadata) = self
-                            .store
-                            .get_applied_destination_table_metadata(table_id)
-                            .await?
+                        if let Some(metadata) =
+                            self.store.get_applied_destination_table_metadata(table_id).await?
                             && (metadata.snapshot_id != new_snapshot_id
                                 || &metadata.replication_mask != new_replication_mask)
                         {
@@ -393,9 +368,7 @@ where
                     let client = self.client.clone();
 
                     join_set.spawn(async move {
-                        client
-                            .insert_rows(namespace, iceberg_table_name, table_rows)
-                            .await
+                        client.insert_rows(namespace, iceberg_table_name, table_rows).await
                     });
                 }
 
@@ -457,10 +430,8 @@ where
 
         let iceberg_table_name =
             table_name_to_iceberg_table_name(table_name, inner.namespace.is_single())?;
-        let iceberg_table_name = if let Some(metadata) = self
-            .store
-            .get_applied_destination_table_metadata(table_id)
-            .await?
+        let iceberg_table_name = if let Some(metadata) =
+            self.store.get_applied_destination_table_metadata(table_id).await?
         {
             metadata.destination_table_id
         } else {
@@ -488,9 +459,7 @@ where
             snapshot_id,
             replication_mask,
         );
-        self.store
-            .store_destination_table_metadata(table_id, metadata.clone())
-            .await?;
+        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
         self.client
             .create_table_if_missing(&namespace, iceberg_table_name.clone(), &column_schemas)
@@ -498,9 +467,7 @@ where
             .map_err(iceberg_error_to_etl_error)?;
 
         // Mark as applied after successful table creation.
-        self.store
-            .store_destination_table_metadata(table_id, metadata.to_applied())
-            .await?;
+        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
 
         // We add the table to the cache.
         inner.created_tables.insert(iceberg_table_name.clone());
@@ -552,22 +519,8 @@ where
         let sequence_number_col =
             find_unique_column_name(&column_schemas, SEQUENCE_NUMBER_COLUMN_NAME);
 
-        column_schemas.push(ColumnSchema::new(
-            cdc_operation_col,
-            Type::TEXT,
-            -1,
-            0,
-            None,
-            false,
-        ));
-        column_schemas.push(ColumnSchema::new(
-            sequence_number_col,
-            Type::TEXT,
-            -1,
-            0,
-            None,
-            false,
-        ));
+        column_schemas.push(ColumnSchema::new(cdc_operation_col, Type::TEXT, -1, 0, None, false));
+        column_schemas.push(ColumnSchema::new(sequence_number_col, Type::TEXT, -1, 0, None, false));
 
         column_schemas
     }
@@ -675,13 +628,7 @@ fn schema_to_namespace(schema: &str) -> String {
     let mut namespace: String = schema
         .to_lowercase()
         .chars()
-        .map(|c| {
-            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' { c } else { '_' })
         .collect();
 
     // S3 Tables namespaces must not start with 'aws'.
@@ -757,13 +704,7 @@ mod tests {
         let column_schemas = vec![
             test_column("id", Type::BOOL, 1, false, Some(1)),
             test_column(CDC_OPERATION_COLUMN_NAME, Type::BOOL, 2, false, Some(2)),
-            test_column(
-                &format!("{CDC_OPERATION_COLUMN_NAME}_1"),
-                Type::BOOL,
-                3,
-                false,
-                Some(3),
-            ),
+            test_column(&format!("{CDC_OPERATION_COLUMN_NAME}_1"), Type::BOOL, 3, false, Some(3)),
         ];
         let col_name = find_unique_column_name(&column_schemas, CDC_OPERATION_COLUMN_NAME);
         assert_eq!(col_name, format!("{CDC_OPERATION_COLUMN_NAME}_2"));
@@ -797,10 +738,7 @@ mod tests {
         assert_eq!(schema_to_namespace("schema.name"), "schema_name");
         assert_eq!(schema_to_namespace("test@schema"), "test_schema");
         assert_eq!(schema_to_namespace("schema#1"), "schema_1");
-        assert_eq!(
-            schema_to_namespace("my-complex.schema$name"),
-            "my_complex_schema_name"
-        );
+        assert_eq!(schema_to_namespace("my-complex.schema$name"), "my_complex_schema_name");
     }
 
     #[test]
@@ -913,9 +851,6 @@ mod tests {
         assert_eq!(schema_to_namespace("realtime"), "realtime");
         assert_eq!(schema_to_namespace("storage"), "storage");
         assert_eq!(schema_to_namespace("pg_catalog"), "pg_catalog");
-        assert_eq!(
-            schema_to_namespace("information_schema"),
-            "information_schema"
-        );
+        assert_eq!(schema_to_namespace("information_schema"), "information_schema");
     }
 }

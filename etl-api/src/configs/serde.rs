@@ -1,10 +1,10 @@
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::configs::encryption::{
-    Decrypt, DecryptionError, Encrypt, EncryptionError, EncryptionKey,
+use crate::configs::{
+    encryption::{Decrypt, DecryptionError, Encrypt, EncryptionError, EncryptionKey},
+    store::Store,
 };
-use crate::configs::store::Store;
 
 /// Errors that can occur during serialization or encryption for database storage.
 #[derive(Debug, Error)]

@@ -1,9 +1,10 @@
-use byteorder::{BigEndian, ReadBytesExt};
 use std::{
     io::Cursor,
     iter::Peekable,
     str::{Chars, FromStr},
 };
+
+use byteorder::{BigEndian, ReadBytesExt};
 use tokio_postgres::types::{FromSql, IsNull, ToSql, Type};
 
 const POSITIVE_SIGN: u16 = 0x0000;
@@ -81,12 +82,8 @@ pub enum PgNumeric {
     },
 }
 
-const ZERO: PgNumeric = PgNumeric::Value {
-    sign: Sign::Positive,
-    weight: 0,
-    scale: 0,
-    digits: vec![],
-};
+const ZERO: PgNumeric =
+    PgNumeric::Value { sign: Sign::Positive, weight: 0, scale: 0, digits: vec![] };
 
 impl Default for PgNumeric {
     fn default() -> Self {
@@ -163,12 +160,7 @@ impl<'a> FromSql<'a> for PgNumeric {
             digits.push(rdr.read_i16::<BigEndian>()?);
         }
 
-        Ok(PgNumeric::Value {
-            sign,
-            weight,
-            scale,
-            digits,
-        })
+        Ok(PgNumeric::Value { sign, weight, scale, digits })
     }
 
     fn accepts(ty: &Type) -> bool {
@@ -186,18 +178,12 @@ impl ToSql for PgNumeric {
             PgNumeric::NaN => (NAN_SIGN, &0i16, &0u16, &vec![]),
             PgNumeric::PositiveInfinity => (POSITIVE_INFINITY_SIGN, &0i16, &0u16, &vec![]),
             PgNumeric::NegativeInfinity => (NEGATIVE_INFINITY_SIGN, &0i16, &0u16, &vec![]),
-            PgNumeric::Value {
-                sign: Sign::Positive,
-                weight,
-                scale,
-                digits,
-            } => (POSITIVE_SIGN, weight, scale, digits),
-            PgNumeric::Value {
-                sign: Sign::Negative,
-                weight,
-                scale,
-                digits,
-            } => (NEGATIVE_SIGN, weight, scale, digits),
+            PgNumeric::Value { sign: Sign::Positive, weight, scale, digits } => {
+                (POSITIVE_SIGN, weight, scale, digits)
+            }
+            PgNumeric::Value { sign: Sign::Negative, weight, scale, digits } => {
+                (NEGATIVE_SIGN, weight, scale, digits)
+            }
         };
 
         let num_digits: u16 = digits.len().try_into()?;
@@ -391,11 +377,7 @@ fn parse_numeric_value(
         }
 
         dweight += exponent as i32;
-        dscale = if (dscale as i64 - exponent) < 0 {
-            0
-        } else {
-            (dscale as i64 - exponent) as u32
-        };
+        dscale = if (dscale as i64 - exponent) < 0 { 0 } else { (dscale as i64 - exponent) as u32 };
     }
 
     // Check for trailing whitespace/junk
@@ -431,11 +413,7 @@ fn convert_to_base_10000(
 
     // Calculate weight in base-10000 terms
     // Each base-10000 digit represents 4 decimal digits
-    let weight = if dweight >= 0 {
-        (dweight + 4) / 4 - 1
-    } else {
-        -((-dweight - 1) / 4 + 1)
-    };
+    let weight = if dweight >= 0 { (dweight + 4) / 4 - 1 } else { -((-dweight - 1) / 4 + 1) };
 
     // Calculate offset for proper alignment
     let offset = (weight + 1) * 4 - (dweight + 1);
@@ -527,12 +505,9 @@ impl std::fmt::Display for PgNumeric {
             PgNumeric::NaN => write!(f, "NaN"),
             PgNumeric::PositiveInfinity => write!(f, "Infinity"),
             PgNumeric::NegativeInfinity => write!(f, "-Infinity"),
-            PgNumeric::Value {
-                sign,
-                weight,
-                scale,
-                digits,
-            } => format_numeric_value(f, sign, *weight, *scale, digits),
+            PgNumeric::Value { sign, weight, scale, digits } => {
+                format_numeric_value(f, sign, *weight, *scale, digits)
+            }
         }
     }
 }
@@ -565,11 +540,7 @@ fn format_numeric_value(
     } else {
         // Output digits before the decimal point
         for d in 0..=weight {
-            let base_10000_digit = if (d as usize) < digits.len() {
-                digits[d as usize]
-            } else {
-                0
-            };
+            let base_10000_digit = if (d as usize) < digits.len() { digits[d as usize] } else { 0 };
 
             // Convert base-10000 digit to 4 decimal digits
             let decimal_digits = format!("{base_10000_digit:04}");
@@ -597,11 +568,8 @@ fn format_numeric_value(
         let mut d = weight + 1;
 
         while remaining_scale > 0 {
-            let base_10000_digit = if d >= 0 && (d as usize) < digits.len() {
-                digits[d as usize]
-            } else {
-                0
-            };
+            let base_10000_digit =
+                if d >= 0 && (d as usize) < digits.len() { digits[d as usize] } else { 0 };
 
             // Convert base-10000 digit to 4 decimal digits
             let decimal_digits = format!("{base_10000_digit:04}");
@@ -624,19 +592,14 @@ fn format_numeric_value(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::BytesMut;
+
+    use super::*;
 
     #[test]
     fn parse_simple_integer() {
         let result = PgNumeric::from_str("123").unwrap();
-        if let PgNumeric::Value {
-            sign,
-            weight: _,
-            scale,
-            digits,
-        } = result
-        {
+        if let PgNumeric::Value { sign, weight: _, scale, digits } = result {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(scale, 0);
             assert_eq!(digits, vec![123]);
@@ -648,13 +611,7 @@ mod tests {
     #[test]
     fn parse_negative() {
         let result = PgNumeric::from_str("-456").unwrap();
-        if let PgNumeric::Value {
-            sign,
-            weight: _,
-            scale,
-            digits,
-        } = result
-        {
+        if let PgNumeric::Value { sign, weight: _, scale, digits } = result {
             assert_eq!(sign, Sign::Negative);
             assert_eq!(scale, 0);
             assert_eq!(digits, vec![456]);
@@ -666,13 +623,7 @@ mod tests {
     #[test]
     fn parse_decimal() {
         let result = PgNumeric::from_str("123.45").unwrap();
-        if let PgNumeric::Value {
-            sign,
-            weight: _,
-            scale,
-            digits,
-        } = result
-        {
+        if let PgNumeric::Value { sign, weight: _, scale, digits } = result {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(scale, 2);
             assert_eq!(digits, vec![123, 4500]);
@@ -684,34 +635,16 @@ mod tests {
     #[test]
     fn parse_special_values() {
         assert_eq!(PgNumeric::from_str("NaN").unwrap(), PgNumeric::NaN);
-        assert_eq!(
-            PgNumeric::from_str("Infinity").unwrap(),
-            PgNumeric::PositiveInfinity
-        );
-        assert_eq!(
-            PgNumeric::from_str("-Infinity").unwrap(),
-            PgNumeric::NegativeInfinity
-        );
-        assert_eq!(
-            PgNumeric::from_str("inf").unwrap(),
-            PgNumeric::PositiveInfinity
-        );
-        assert_eq!(
-            PgNumeric::from_str("-inf").unwrap(),
-            PgNumeric::NegativeInfinity
-        );
+        assert_eq!(PgNumeric::from_str("Infinity").unwrap(), PgNumeric::PositiveInfinity);
+        assert_eq!(PgNumeric::from_str("-Infinity").unwrap(), PgNumeric::NegativeInfinity);
+        assert_eq!(PgNumeric::from_str("inf").unwrap(), PgNumeric::PositiveInfinity);
+        assert_eq!(PgNumeric::from_str("-inf").unwrap(), PgNumeric::NegativeInfinity);
     }
 
     #[test]
     fn parse_scientific_notation() {
         let result = PgNumeric::from_str("1.23e2").unwrap();
-        if let PgNumeric::Value {
-            sign,
-            weight,
-            scale,
-            digits,
-        } = result
-        {
+        if let PgNumeric::Value { sign, weight, scale, digits } = result {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 0);
             assert_eq!(scale, 0);
@@ -738,20 +671,10 @@ mod tests {
 
     #[test]
     fn display_simple_integers() {
-        let num = PgNumeric::Value {
-            sign: Sign::Positive,
-            weight: 0,
-            scale: 0,
-            digits: vec![123],
-        };
+        let num = PgNumeric::Value { sign: Sign::Positive, weight: 0, scale: 0, digits: vec![123] };
         assert_eq!(format!("{num}"), "123");
 
-        let num = PgNumeric::Value {
-            sign: Sign::Negative,
-            weight: 0,
-            scale: 0,
-            digits: vec![456],
-        };
+        let num = PgNumeric::Value { sign: Sign::Negative, weight: 0, scale: 0, digits: vec![456] };
         assert_eq!(format!("{num}"), "-456");
     }
 
@@ -768,12 +691,7 @@ mod tests {
 
     #[test]
     fn display_zero() {
-        let num = PgNumeric::Value {
-            sign: Sign::Positive,
-            weight: 0,
-            scale: 0,
-            digits: vec![],
-        };
+        let num = PgNumeric::Value { sign: Sign::Positive, weight: 0, scale: 0, digits: vec![] };
         assert_eq!(format!("{num}"), "0");
     }
 
@@ -783,13 +701,7 @@ mod tests {
             let num = PgNumeric::from_str(s).unwrap();
             assert_eq!(num.to_string(), "0");
 
-            if let PgNumeric::Value {
-                sign,
-                weight,
-                scale: _,
-                digits,
-            } = num
-            {
+            if let PgNumeric::Value { sign, weight, scale: _, digits } = num {
                 assert_eq!(sign, Sign::Positive);
                 assert_eq!(weight, 0);
                 assert!(digits.is_empty());
@@ -805,13 +717,7 @@ mod tests {
             let num = PgNumeric::from_str(s).unwrap();
             assert_eq!(num.to_string(), "0");
 
-            if let PgNumeric::Value {
-                sign,
-                weight,
-                scale: _,
-                digits,
-            } = num
-            {
+            if let PgNumeric::Value { sign, weight, scale: _, digits } = num {
                 // Normalize to positive zero
                 assert_eq!(sign, Sign::Positive);
                 assert_eq!(weight, 0);
@@ -831,13 +737,7 @@ mod tests {
             let round = PgNumeric::from_sql(&Type::NUMERIC, &buf).unwrap();
             // Internal representation should be canonical-zero with same scale
             assert_eq!(num, round);
-            if let PgNumeric::Value {
-                sign,
-                weight,
-                digits,
-                ..
-            } = round
-            {
+            if let PgNumeric::Value { sign, weight, digits, .. } = round {
                 assert_eq!(sign, Sign::Positive);
                 assert_eq!(weight, 0);
                 assert!(digits.is_empty());
@@ -860,12 +760,8 @@ mod tests {
 
     #[test]
     fn display_small_decimals() {
-        let num = PgNumeric::Value {
-            sign: Sign::Positive,
-            weight: -1,
-            scale: 4,
-            digits: vec![1234],
-        };
+        let num =
+            PgNumeric::Value { sign: Sign::Positive, weight: -1, scale: 4, digits: vec![1234] };
         assert_eq!(format!("{num}"), "0.1234");
     }
 
@@ -899,21 +795,11 @@ mod tests {
         let num = PgNumeric::from_str("0.0012000").unwrap();
         assert_eq!(num.to_string(), "0.0012000");
 
-        if let PgNumeric::Value {
-            sign,
-            weight,
-            scale,
-            ref digits,
-        } = num
-        {
+        if let PgNumeric::Value { sign, weight, scale, ref digits } = num {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, -1, "weight should remain -1");
             assert_eq!(scale, 7, "scale preserved for display");
-            assert_eq!(
-                digits.as_slice(),
-                &[12],
-                "trailing base-10000 zero group stripped"
-            );
+            assert_eq!(digits.as_slice(), &[12], "trailing base-10000 zero group stripped");
         } else {
             panic!("Expected Value variant");
         }
@@ -925,13 +811,7 @@ mod tests {
         let num_1 = PgNumeric::from_str("9999.9999").unwrap();
         assert_eq!(num_1.to_string(), "9999.9999");
 
-        if let PgNumeric::Value {
-            sign,
-            weight,
-            scale,
-            ref digits,
-        } = num_1
-        {
+        if let PgNumeric::Value { sign, weight, scale, ref digits } = num_1 {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 0);
             assert_eq!(scale, 4);
@@ -944,13 +824,7 @@ mod tests {
         let num_2 = PgNumeric::from_str("10000.0001").unwrap();
         assert_eq!(num_2.to_string(), "10000.0001");
 
-        if let PgNumeric::Value {
-            sign,
-            weight,
-            scale,
-            ref digits,
-        } = num_2
-        {
+        if let PgNumeric::Value { sign, weight, scale, ref digits } = num_2 {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 1);
             assert_eq!(scale, 4);
@@ -966,13 +840,7 @@ mod tests {
         let num = PgNumeric::from_str("0000120.00").unwrap();
         assert_eq!(num.to_string(), "120.00");
 
-        if let PgNumeric::Value {
-            sign,
-            weight,
-            scale,
-            ref digits,
-        } = num
-        {
+        if let PgNumeric::Value { sign, weight, scale, ref digits } = num {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 0);
             assert_eq!(scale, 2);
@@ -984,15 +852,7 @@ mod tests {
 
     #[test]
     fn roundtrip_stability() {
-        let cases = [
-            "120.00",
-            "1.2000",
-            "0.0120",
-            "9999.9999",
-            "10000.0001",
-            "-120.00",
-            "1200000",
-        ];
+        let cases = ["120.00", "1.2000", "0.0120", "9999.9999", "10000.0001", "-120.00", "1200000"];
 
         for case in &cases {
             let parsed = PgNumeric::from_str(case).unwrap();
@@ -1014,13 +874,7 @@ mod tests {
         let num = PgNumeric::from_str("1200000").unwrap();
         assert_eq!(num.to_string(), "1200000");
 
-        if let PgNumeric::Value {
-            sign,
-            weight,
-            scale,
-            ref digits,
-        } = num
-        {
+        if let PgNumeric::Value { sign, weight, scale, ref digits } = num {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, 1);
             assert_eq!(scale, 0);
@@ -1032,11 +886,7 @@ mod tests {
 
     #[test]
     fn tosql_fromsql_special_values() {
-        let cases = [
-            PgNumeric::NaN,
-            PgNumeric::PositiveInfinity,
-            PgNumeric::NegativeInfinity,
-        ];
+        let cases = [PgNumeric::NaN, PgNumeric::PositiveInfinity, PgNumeric::NegativeInfinity];
 
         for case in cases {
             let mut buf = BytesMut::new();

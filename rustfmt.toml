@@ -1,0 +1,24 @@
+# Allow nightly-only rustfmt options used by this workspace.
+unstable_features = true
+# Format according to the Rust 2024 style edition.
+style_edition = "2024"
+# Wrap code at 100 columns for readable diffs without over-wrapping.
+max_width = 100
+# Always write files with Unix newlines for cross-platform consistency.
+newline_style = "Unix"
+# Prefer wider single-line layouts before falling back to vertical wrapping.
+use_small_heuristics = "Max"
+# Use the standard mixed import layout instead of wrapping everything in one outer `use { ... }`.
+imports_layout = "Mixed"
+# Normalize imports at the crate level to keep grouped paths readable.
+imports_granularity = "Crate"
+# Group imports into std / external crates / local crate sections.
+group_imports = "StdExternalCrate"
+# Reorder imports deterministically within each import group.
+reorder_imports = true
+# Prefer trailing commas in vertical layouts for cleaner diffs.
+trailing_comma = "Vertical"
+# Use field init shorthand like `foo` instead of `foo: foo` when possible.
+use_field_init_shorthand = true
+# Keep separate derive attributes instead of merging them together.
+merge_derives = false

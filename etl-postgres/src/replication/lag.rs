@@ -1,8 +1,8 @@
-use sqlx::{FromRow, PgExecutor};
 use std::collections::BTreeMap;
 
-use crate::replication::slots::EtlReplicationSlot;
-use crate::types::TableId;
+use sqlx::{FromRow, PgExecutor};
+
+use crate::{replication::slots::EtlReplicationSlot, types::TableId};
 
 /// Lag metrics associated with a logical replication slot.
 #[derive(Debug)]
@@ -90,15 +90,14 @@ where
         };
 
         match EtlReplicationSlot::try_from(row.slot_name.as_str()) {
-            Ok(EtlReplicationSlot::Apply {
-                pipeline_id: slot_pipeline_id,
-            }) if slot_pipeline_id == pipeline_id => {
+            Ok(EtlReplicationSlot::Apply { pipeline_id: slot_pipeline_id })
+                if slot_pipeline_id == pipeline_id =>
+            {
                 metrics.apply = Some(slot_lag_metrics);
             }
-            Ok(EtlReplicationSlot::TableSync {
-                pipeline_id: slot_pipeline_id,
-                table_id,
-            }) if slot_pipeline_id == pipeline_id => {
+            Ok(EtlReplicationSlot::TableSync { pipeline_id: slot_pipeline_id, table_id })
+                if slot_pipeline_id == pipeline_id =>
+            {
                 metrics.table_sync.insert(table_id, slot_lag_metrics);
             }
             _ => {}

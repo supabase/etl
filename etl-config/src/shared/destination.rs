@@ -264,9 +264,9 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 max_staleness_mins,
                 connection_pool_size,
             },
-            DestinationConfig::Iceberg { config } => DestinationConfigWithoutSecrets::Iceberg {
-                config: config.into(),
-            },
+            DestinationConfig::Iceberg { config } => {
+                DestinationConfigWithoutSecrets::Iceberg { config: config.into() }
+            }
             DestinationConfig::Ducklake {
                 catalog_url,
                 data_path,

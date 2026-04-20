@@ -1,7 +1,6 @@
 use std::future::Future;
 
-use crate::error::EtlResult;
-use crate::types::TableId;
+use crate::{error::EtlResult, types::TableId};
 
 /// Combined maintenance operations across state and schema stores.
 ///

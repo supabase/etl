@@ -1,5 +1,6 @@
-use crate::types::Type;
 use etl_postgres::types::{ColumnSchema, ReplicatedTableSchema, SnapshotId, TableSchema};
+
+use crate::types::Type;
 
 /// Asserts that two column schemas are equal.
 pub fn assert_column_schema_eq(actual: &ColumnSchema, expected: &ColumnSchema) {
@@ -201,10 +202,7 @@ pub fn assert_schema_snapshots_ordering(
     snapshots: &[(SnapshotId, TableSchema)],
     first_is_zero: bool,
 ) {
-    assert!(
-        !snapshots.is_empty(),
-        "expected at least one schema snapshot"
-    );
+    assert!(!snapshots.is_empty(), "expected at least one schema snapshot");
 
     let (first_snapshot_id, _) = &snapshots[0];
     if first_is_zero {

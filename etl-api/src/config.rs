@@ -1,9 +1,14 @@
-use base64::{Engine, prelude::BASE64_STANDARD};
-use etl_config::Config;
-use etl_config::shared::{PgConnectionConfig, SentryConfig};
-use serde::de::{MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, de};
 use std::fmt;
+
+use base64::{Engine, prelude::BASE64_STANDARD};
+use etl_config::{
+    Config,
+    shared::{PgConnectionConfig, SentryConfig},
+};
+use serde::{
+    Deserialize, Deserializer,
+    de::{self, MapAccess, Visitor},
+};
 use thiserror::Error;
 
 /// Required length in bytes for a valid API key.
@@ -91,10 +96,7 @@ pub struct SourceConfig {
 
 impl Default for SourceConfig {
     fn default() -> Self {
-        Self {
-            tls_enabled: default_source_tls_enabled(),
-            trusted_username: None,
-        }
+        Self { tls_enabled: default_source_tls_enabled(), trusted_username: None }
     }
 }
 
@@ -163,19 +165,14 @@ impl TryFrom<&str> for ApiKey {
     /// # Panics
     /// Panics if the decoded key cannot be converted to a 32-byte array.
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let key = BASE64_STANDARD
-            .decode(value)
-            .map_err(|_| ApiKeyConversionError::NotBase64Encoded)?;
+        let key =
+            BASE64_STANDARD.decode(value).map_err(|_| ApiKeyConversionError::NotBase64Encoded)?;
 
         if key.len() != API_KEY_LENGTH_IN_BYTES {
             return Err(ApiKeyConversionError::LengthNot32Bytes(key.len()));
         }
 
-        Ok(ApiKey {
-            key: key
-                .try_into()
-                .expect("failed to convert api key into array"),
-        })
+        Ok(ApiKey { key: key.try_into().expect("failed to convert api key into array") })
     }
 }
 

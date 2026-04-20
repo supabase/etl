@@ -34,13 +34,17 @@ static malloc_conf: &[u8] =
 static malloc_conf: &[u8] =
     b"narenas:8,background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
 
-use crate::core::start_replicator_with_config;
-use crate::error::{ReplicatorError, ReplicatorResult};
-use crate::error_notification::ErrorNotificationClient;
+use std::process::ExitCode;
+
 use ::tracing::{debug, error};
 use etl_config::shared::ReplicatorConfig;
-use std::process::ExitCode;
 use tracing::info;
+
+use crate::{
+    core::start_replicator_with_config,
+    error::{ReplicatorError, ReplicatorResult},
+    error_notification::ErrorNotificationClient,
+};
 
 mod core;
 mod error;
@@ -140,9 +144,7 @@ async fn async_main(
                     client.notify_error(error_message.clone(), etl_err).await;
                 }
                 _ => {
-                    client
-                        .notify_error(error_message.clone(), error_message)
-                        .await;
+                    client.notify_error(error_message.clone(), error_message).await;
                 }
             }
         }

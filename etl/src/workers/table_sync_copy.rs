@@ -1,39 +1,41 @@
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{pin::Pin, sync::Arc, time::Instant};
 
 use etl_config::shared::BatchConfig;
 use etl_postgres::types::TableId;
 use futures::{Stream, StreamExt};
 use metrics::{counter, histogram};
-use tokio::pin;
-use tokio::sync::Semaphore;
-use tokio::sync::watch;
-use tokio::task::JoinSet;
+use tokio::{
+    pin,
+    sync::{Semaphore, watch},
+    task::JoinSet,
+};
 use tracing::info;
 
-use crate::concurrency::{
-    BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx, TryBatchBackpressureStream,
-    table_sync_worker_copy_stream_id,
-};
-use crate::destination::Destination;
-use crate::destination::async_result::WriteTableRowsResult;
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
-use crate::metrics::{
-    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-    ETL_EVENTS_PROCESSED_TOTAL, ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
-    ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE, ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL,
-    WORKER_TYPE_LABEL,
+use crate::{
+    concurrency::{
+        BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx,
+        TryBatchBackpressureStream, table_sync_worker_copy_stream_id,
+    },
+    destination::{Destination, async_result::WriteTableRowsResult},
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    metrics::{
+        ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+        ETL_EVENTS_PROCESSED_TOTAL, ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
+        ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE, ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL,
+        WORKER_TYPE_LABEL,
+    },
+    replication::{
+        TableCopyStream,
+        client::{
+            CtidPartition, PgReplicationChildTransaction, PgReplicationTransaction,
+            PostgresConnectionUpdate,
+        },
+    },
+    types::{ReplicatedTableSchema, TableRow},
 };
-use crate::replication::TableCopyStream;
-use crate::replication::client::{
-    CtidPartition, PgReplicationChildTransaction, PgReplicationTransaction,
-    PostgresConnectionUpdate,
-};
-use crate::types::{ReplicatedTableSchema, TableRow};
 
 /// Calculates Load Imbalance Factor (LIF) for a set of values.
 ///
@@ -69,10 +71,7 @@ fn calculate_skew_metrics(values: &[f64]) -> f64 {
 #[derive(Debug)]
 pub(crate) enum TableCopyResult {
     /// All rows copied successfully.
-    Completed {
-        total_rows: u64,
-        total_duration_secs: f64,
-    },
+    Completed { total_rows: u64, total_duration_secs: f64 },
     /// Copy was interrupted by a shutdown signal.
     Shutdown,
 }
@@ -251,10 +250,8 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
-    let replicated_column_schemas = replicated_table_schema
-        .column_schemas()
-        .cloned()
-        .collect::<Vec<_>>();
+    let replicated_column_schemas =
+        replicated_table_schema.column_schemas().cloned().collect::<Vec<_>>();
     let table_copy_stream = transaction
         .get_table_copy_stream(table_id, &replicated_column_schemas, publication_name)
         .await?;
@@ -287,10 +284,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     {
         ShutdownResult::Ok(total_rows) => total_rows,
         ShutdownResult::Shutdown(total_rows) => {
-            info!(
-                table_id = table_id.0,
-                total_rows, "shutting down serial table copy"
-            );
+            info!(table_id = table_id.0, total_rows, "shutting down serial table copy");
 
             return Ok(TableCopyResult::Shutdown);
         }
@@ -305,15 +299,9 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
 
-    info!(
-        table_id = table_id.0,
-        total_rows, total_duration_secs, "completed serial table copy"
-    );
+    info!(table_id = table_id.0, total_rows, total_duration_secs, "completed serial table copy");
 
-    Ok(TableCopyResult::Completed {
-        total_rows,
-        total_duration_secs,
-    })
+    Ok(TableCopyResult::Completed { total_rows, total_duration_secs })
 }
 
 /// Copies a table in parallel across multiple child connections.
@@ -336,10 +324,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
-    info!(
-        table_id = table_id.0,
-        max_copy_connections, "starting parallel table copy"
-    );
+    info!(table_id = table_id.0, max_copy_connections, "starting parallel table copy");
 
     // Determine copy partitions: ctid ranges for regular tables, leaf partitions for
     // partitioned tables. Ctid-based partitioning cannot be used with partitioned tables
@@ -359,9 +344,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             .map(|leaf_table_id| CopyPartition::LeafPartition { leaf_table_id })
             .collect()
     } else {
-        let ctid_partitions = transaction
-            .plan_ctid_partitions(table_id, max_copy_connections)
-            .await?;
+        let ctid_partitions =
+            transaction.plan_ctid_partitions(table_id, max_copy_connections).await?;
 
         info!(
             table_id = table_id.0,
@@ -369,22 +353,13 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             "using ctid-based parallelism"
         );
 
-        ctid_partitions
-            .into_iter()
-            .map(CopyPartition::CtidRange)
-            .collect()
+        ctid_partitions.into_iter().map(CopyPartition::CtidRange).collect()
     };
 
     if copy_partitions.is_empty() {
-        info!(
-            table_id = table_id.0,
-            "table is empty, skipping parallel copy"
-        );
+        info!(table_id = table_id.0, "table is empty, skipping parallel copy");
 
-        return Ok(TableCopyResult::Completed {
-            total_rows: 0,
-            total_duration_secs: 0.0,
-        });
+        return Ok(TableCopyResult::Completed { total_rows: 0, total_duration_secs: 0.0 });
     }
 
     // Export the snapshot from the main connection's transaction so child connections can
@@ -488,12 +463,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 
     // Calculate partition skew metrics
     let time_lif = calculate_skew_metrics(&partition_durations);
-    let rows_lif = calculate_skew_metrics(
-        &partition_row_counts
-            .iter()
-            .map(|&r| r as f64)
-            .collect::<Vec<_>>(),
-    );
+    let rows_lif =
+        calculate_skew_metrics(&partition_row_counts.iter().map(|&r| r as f64).collect::<Vec<_>>());
 
     // Record imbalance metrics.
     histogram!(
@@ -517,10 +488,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         "completed parallel table copy"
     );
 
-    Ok(TableCopyResult::Completed {
-        total_rows,
-        total_duration_secs,
-    })
+    Ok(TableCopyResult::Completed { total_rows, total_duration_secs })
 }
 
 /// Copies a single partition from the source table to the destination.
@@ -545,10 +513,8 @@ where
     D: Destination + Clone + Send + 'static,
 {
     let start_time = Instant::now();
-    let replicated_column_schemas = replicated_table_schema
-        .column_schemas()
-        .cloned()
-        .collect::<Vec<_>>();
+    let replicated_column_schemas =
+        replicated_table_schema.column_schemas().cloned().collect::<Vec<_>>();
 
     match &partition {
         CopyPartition::CtidRange(ctid) => match ctid {
@@ -607,9 +573,7 @@ where
     };
 
     let table_copy_stream = TableCopyStream::wrap(copy_stream, replicated_column_schemas.iter());
-    let connection_updates_rx = child_transaction
-        .get_cloned_client()
-        .connection_updates_rx();
+    let connection_updates_rx = child_transaction.get_cloned_client().connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
     let stream_id = table_sync_worker_copy_stream_id(table_id);
@@ -698,8 +662,5 @@ where
         }
     }
 
-    Ok(TableCopyResult::Completed {
-        total_rows,
-        total_duration_secs,
-    })
+    Ok(TableCopyResult::Completed { total_rows, total_duration_secs })
 }

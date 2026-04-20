@@ -160,13 +160,7 @@ impl Scenario {
     ) -> Result<()> {
         let chaos_name = self.name(&labels);
         match self {
-            Self::PacketLoss {
-                loss,
-                target_url,
-                target_port,
-                target_pod,
-                target_svc,
-            } => {
+            Self::PacketLoss { loss, target_url, target_port, target_pod, target_svc } => {
                 let loss = loss
                     .ok_or_else(|| anyhow::anyhow!("<loss> is required when not using --delete"))?;
                 let effective_url = match target_svc {
@@ -179,13 +173,7 @@ impl Scenario {
             Scenario::Partition => {
                 partition(client, labels, &chaos_name).await?;
             }
-            Scenario::Latency {
-                latency_ms,
-                target_url,
-                target_port,
-                target_pod,
-                target_svc,
-            } => {
+            Scenario::Latency { latency_ms, target_url, target_port, target_pod, target_svc } => {
                 let latency_ms = latency_ms.ok_or_else(|| {
                     anyhow::anyhow!("<latency_ms> is required when not using --delete")
                 })?;
@@ -202,11 +190,7 @@ impl Scenario {
                 })?;
                 packet_corruption(client, labels, &chaos_name, percentage, direction).await?;
             }
-            Scenario::ConnectionFlapping {
-                flaps,
-                chaos_secs,
-                recovery_secs,
-            } => {
+            Scenario::ConnectionFlapping { flaps, chaos_secs, recovery_secs } => {
                 connection_flapping(
                     client,
                     labels,
@@ -217,13 +201,7 @@ impl Scenario {
                 )
                 .await?;
             }
-            Scenario::Bandwidth {
-                rate,
-                target_url,
-                target_port,
-                target_pod,
-                target_svc,
-            } => {
+            Scenario::Bandwidth { rate, target_url, target_port, target_pod, target_svc } => {
                 let rate = rate.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("<rate> is required when not using --delete (e.g. \"1mbps\")")
                 })?;

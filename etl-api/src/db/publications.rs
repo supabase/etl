@@ -1,7 +1,8 @@
+use std::collections::HashMap;
+
 use pg_escape::{quote_identifier, quote_literal};
 use serde::Serialize;
 use sqlx::{Executor, PgPool, Row};
-use std::collections::HashMap;
 use thiserror::Error;
 use utoipa::ToSchema;
 
@@ -121,10 +122,7 @@ pub async fn read_publication(
         let schema: Option<String> = row.get("schemaname?");
         let table_name: Option<String> = row.get("tablename?");
         if let (Some(schema), Some(table_name)) = (schema, table_name) {
-            tables.push(Table {
-                schema,
-                name: table_name,
-            });
+            tables.push(Table { schema, name: table_name });
         }
     }
 
@@ -150,17 +148,12 @@ pub async fn read_all_publications(pool: &PgPool) -> Result<Vec<Publication>, Pu
         let tables = pub_name_to_tables.entry(pub_name).or_default();
 
         if let (Some(schema), Some(table_name)) = (schema, table_name) {
-            tables.push(Table {
-                schema,
-                name: table_name,
-            });
+            tables.push(Table { schema, name: table_name });
         }
     }
 
-    let publications = pub_name_to_tables
-        .into_iter()
-        .map(|(name, tables)| Publication { name, tables })
-        .collect();
+    let publications =
+        pub_name_to_tables.into_iter().map(|(name, tables)| Publication { name, tables }).collect();
 
     Ok(publications)
 }

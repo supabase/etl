@@ -1,9 +1,12 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use etl::test_utils::test_schema::assert_table_rows_equal_ignoring_size;
-use etl::types::{ArrayCell, Cell, ColumnSchema, TableRow, Type};
-use etl_destinations::iceberg::IcebergClient;
-use etl_destinations::iceberg::test_utils::LakekeeperClient;
-use etl_destinations::iceberg::test_utils::{LAKEKEEPER_URL, create_minio_props, get_catalog_url};
+use etl::{
+    test_utils::test_schema::assert_table_rows_equal_ignoring_size,
+    types::{ArrayCell, Cell, ColumnSchema, TableRow, Type},
+};
+use etl_destinations::iceberg::{
+    IcebergClient,
+    test_utils::{LAKEKEEPER_URL, LakekeeperClient, create_minio_props, get_catalog_url},
+};
 use etl_telemetry::tracing::init_test_tracing;
 use uuid::Uuid;
 
@@ -63,10 +66,7 @@ async fn create_namespace() {
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
     client.drop_namespace(namespace).await.unwrap();
-    lakekeeper_client
-        .drop_warehouse(warehouse_id)
-        .await
-        .unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -86,19 +86,13 @@ async fn create_hierarchical_namespace() {
     let root_namespace = "root_namespace";
 
     // create namespace for the first time
-    client
-        .create_namespace_if_missing(root_namespace)
-        .await
-        .unwrap();
+    client.create_namespace_if_missing(root_namespace).await.unwrap();
     // root namespace should exist now
     assert!(client.namespace_exists(root_namespace).await.unwrap());
 
     let child_namespace = &format!("{root_namespace}.child_namespace");
 
-    client
-        .create_namespace_if_missing(child_namespace)
-        .await
-        .unwrap();
+    client.create_namespace_if_missing(child_namespace).await.unwrap();
     // child namespace should exist now
     assert!(client.namespace_exists(child_namespace).await.unwrap());
 
@@ -108,10 +102,7 @@ async fn create_hierarchical_namespace() {
     // that test.
     client.drop_namespace(child_namespace).await.unwrap();
     client.drop_namespace(root_namespace).await.unwrap();
-    lakekeeper_client
-        .drop_warehouse(warehouse_id)
-        .await
-        .unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -184,13 +175,7 @@ async fn create_table_if_missing() {
         test_column("date_array_col", Type::DATE_ARRAY, 35, true, None),
         test_column("time_array_col", Type::TIME_ARRAY, 36, true, None),
         test_column("timestamp_array_col", Type::TIMESTAMP_ARRAY, 37, true, None),
-        test_column(
-            "timestamptz_array_col",
-            Type::TIMESTAMPTZ_ARRAY,
-            38,
-            true,
-            None,
-        ),
+        test_column("timestamptz_array_col", Type::TIMESTAMPTZ_ARRAY, 38, true, None),
         test_column("uuid_array_col", Type::UUID_ARRAY, 39, true, None),
         test_column("json_array_col", Type::JSON_ARRAY, 40, true, None),
         test_column("jsonb_array_col", Type::JSONB_ARRAY, 41, true, None),
@@ -199,67 +184,34 @@ async fn create_table_if_missing() {
     ];
 
     // table doesn't exist yet
-    assert!(
-        !client
-            .table_exists(namespace, table_name.to_string())
-            .await
-            .unwrap()
-    );
+    assert!(!client.table_exists(namespace, table_name.to_string()).await.unwrap());
 
     // Create table for the first time
-    client
-        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
-        .await
-        .unwrap();
+    client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     // table should exist now
-    assert!(
-        client
-            .table_exists(namespace, table_name.to_string())
-            .await
-            .unwrap()
-    );
+    assert!(client.table_exists(namespace, table_name.to_string()).await.unwrap());
 
     // Verify identifier fields are set correctly.
-    let table = client
-        .load_table(namespace.to_string(), table_name.clone())
-        .await
-        .unwrap();
-    let identifier_field_ids: Vec<i32> = table
-        .metadata()
-        .current_schema()
-        .identifier_field_ids()
-        .collect();
+    let table = client.load_table(namespace.to_string(), table_name.clone()).await.unwrap();
+    let identifier_field_ids: Vec<i32> =
+        table.metadata().current_schema().identifier_field_ids().collect();
     // The "id" column is the primary key and should be the only identifier field (field_id = 1).
     assert_eq!(identifier_field_ids, vec![1]);
 
     // Creating the same table again should be a no-op (no error)
-    client
-        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
-        .await
-        .unwrap();
+    client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     // table should still exist
-    assert!(
-        client
-            .table_exists(namespace, table_name.to_string())
-            .await
-            .unwrap()
-    );
+    assert!(client.table_exists(namespace, table_name.to_string()).await.unwrap());
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
-    client
-        .drop_table_if_exists(namespace, table_name)
-        .await
-        .unwrap();
+    client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
-    lakekeeper_client
-        .drop_warehouse(warehouse_id)
-        .await
-        .unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -285,54 +237,30 @@ async fn drop_table_if_exists_is_idempotent() {
     let column_schemas = vec![test_column("id", Type::INT4, 1, false, Some(1))];
 
     // Create table
-    client
-        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
-        .await
-        .unwrap();
+    client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     // Table should exist
-    assert!(
-        client
-            .table_exists(namespace, table_name.clone())
-            .await
-            .unwrap()
-    );
+    assert!(client.table_exists(namespace, table_name.clone()).await.unwrap());
 
     // First drop should succeed and return true (table was dropped)
-    let dropped = client
-        .drop_table_if_exists(namespace, table_name.clone())
-        .await
-        .unwrap();
+    let dropped = client.drop_table_if_exists(namespace, table_name.clone()).await.unwrap();
     assert!(dropped);
 
     // Table should no longer exist
-    assert!(
-        !client
-            .table_exists(namespace, table_name.clone())
-            .await
-            .unwrap()
-    );
+    assert!(!client.table_exists(namespace, table_name.clone()).await.unwrap());
 
     // Second drop should succeed and return false (table didn't exist)
-    let dropped = client
-        .drop_table_if_exists(namespace, table_name.clone())
-        .await
-        .unwrap();
+    let dropped = client.drop_table_if_exists(namespace, table_name.clone()).await.unwrap();
     assert!(!dropped);
 
     // Dropping a table that never existed should also succeed and return false
-    let dropped = client
-        .drop_table_if_exists(namespace, "nonexistent_table".to_string())
-        .await
-        .unwrap();
+    let dropped =
+        client.drop_table_if_exists(namespace, "nonexistent_table".to_string()).await.unwrap();
     assert!(!dropped);
 
     // Manual cleanup
     client.drop_namespace(namespace).await.unwrap();
-    lakekeeper_client
-        .drop_warehouse(warehouse_id)
-        .await
-        .unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -391,10 +319,7 @@ async fn insert_nullable_scalars() {
         test_column("bytea_col", Type::BYTEA, 22, true, None),
     ];
 
-    client
-        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
-        .await
-        .unwrap();
+    client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     let mut table_rows = vec![
         TableRow::new(vec![
@@ -456,11 +381,7 @@ async fn insert_nullable_scalars() {
         ]),
     ];
     client
-        .insert_rows(
-            namespace.to_string(),
-            table_name.clone(),
-            table_rows.clone(),
-        )
+        .insert_rows(namespace.to_string(), table_name.clone(), table_rows.clone())
         .await
         .unwrap();
 
@@ -480,15 +401,9 @@ async fn insert_nullable_scalars() {
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
-    client
-        .drop_table_if_exists(namespace, table_name)
-        .await
-        .unwrap();
+    client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
-    lakekeeper_client
-        .drop_warehouse(warehouse_id)
-        .await
-        .unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -547,10 +462,7 @@ async fn insert_non_nullable_scalars() {
         test_column("bytea_col", Type::BYTEA, 22, false, None),
     ];
 
-    client
-        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
-        .await
-        .unwrap();
+    client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     let mut table_rows = vec![TableRow::new(vec![
         Cell::I32(42),                                              // id
@@ -586,11 +498,7 @@ async fn insert_non_nullable_scalars() {
         Cell::Bytes(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]), // bytea_col (Hello in bytes)
     ])];
     client
-        .insert_rows(
-            namespace.to_string(),
-            table_name.clone(),
-            table_rows.clone(),
-        )
+        .insert_rows(namespace.to_string(), table_name.clone(), table_rows.clone())
         .await
         .unwrap();
 
@@ -612,15 +520,9 @@ async fn insert_non_nullable_scalars() {
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
-    client
-        .drop_table_if_exists(namespace, table_name)
-        .await
-        .unwrap();
+    client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
-    lakekeeper_client
-        .drop_warehouse(warehouse_id)
-        .await
-        .unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -667,13 +569,7 @@ async fn insert_nullable_array() {
         test_column("date_array_col", Type::DATE_ARRAY, 14, true, None),
         test_column("time_array_col", Type::TIME_ARRAY, 15, true, None),
         test_column("timestamp_array_col", Type::TIMESTAMP_ARRAY, 16, true, None),
-        test_column(
-            "timestamptz_array_col",
-            Type::TIMESTAMPTZ_ARRAY,
-            17,
-            true,
-            None,
-        ),
+        test_column("timestamptz_array_col", Type::TIMESTAMPTZ_ARRAY, 17, true, None),
         // UUID array type
         test_column("uuid_array_col", Type::UUID_ARRAY, 18, true, None),
         // JSON array types
@@ -685,19 +581,13 @@ async fn insert_nullable_array() {
         test_column("bytea_array_col", Type::BYTEA_ARRAY, 22, true, None),
     ];
 
-    client
-        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
-        .await
-        .unwrap();
+    client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     let table_rows = vec![
         TableRow::new(vec![
-            Cell::I32(1),                                                            // id
+            Cell::I32(1),                                                                       // id
             Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), Some(true)])), // bool_array_col
-            Cell::Array(ArrayCell::String(vec![
-                Some("A".to_string()),
-                Some("B".to_string()),
-            ])), // char_array_col
+            Cell::Array(ArrayCell::String(vec![Some("A".to_string()), Some("B".to_string())])), // char_array_col
             Cell::Array(ArrayCell::String(vec![
                 Some("fix1".to_string()),
                 Some("fix2".to_string()),
@@ -757,10 +647,7 @@ async fn insert_nullable_array() {
                     Utc,
                 )),
             ])), // timestamptz_array_col
-            Cell::Array(ArrayCell::Uuid(vec![
-                Some(Uuid::new_v4()),
-                Some(Uuid::new_v4()),
-            ])), // uuid_array_col
+            Cell::Array(ArrayCell::Uuid(vec![Some(Uuid::new_v4()), Some(Uuid::new_v4())])), // uuid_array_col
             Cell::Array(ArrayCell::Json(vec![
                 Some(serde_json::json!({"key1": "value1"})),
                 Some(serde_json::json!({"key2": "value2"})),
@@ -769,7 +656,7 @@ async fn insert_nullable_array() {
                 Some(serde_json::json!({"keyb1": "valueb1"})),
                 Some(serde_json::json!({"keyb2": "valueb2"})),
             ])), // jsonb_array_col
-            Cell::Array(ArrayCell::U32(vec![Some(1001), Some(1002)])),             // oid_array_col
+            Cell::Array(ArrayCell::U32(vec![Some(1001), Some(1002)])), // oid_array_col
             Cell::Array(ArrayCell::Bytes(vec![
                 Some(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]),
                 Some(vec![0x57, 0x6f, 0x72, 0x6c, 0x64]),
@@ -802,11 +689,7 @@ async fn insert_nullable_array() {
     ];
 
     client
-        .insert_rows(
-            namespace.to_string(),
-            table_name.clone(),
-            table_rows.clone(),
-        )
+        .insert_rows(namespace.to_string(), table_name.clone(), table_rows.clone())
         .await
         .unwrap();
 
@@ -824,26 +707,20 @@ async fn insert_nullable_array() {
 
     // numeric_array_col (index 12): NUMERIC_ARRAY maps to String in Iceberg
     if let Cell::Array(ArrayCell::Numeric(vec)) = &values[12] {
-        let converted: Vec<Option<String>> = vec
-            .iter()
-            .map(|opt| opt.as_ref().map(|n| n.to_string()))
-            .collect();
+        let converted: Vec<Option<String>> =
+            vec.iter().map(|opt| opt.as_ref().map(|n| n.to_string())).collect();
         values[12] = Cell::Array(ArrayCell::String(converted));
     }
 
     // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to String in Iceberg
     if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
-        let converted: Vec<Option<String>> = vec
-            .iter()
-            .map(|opt| opt.as_ref().map(|j| j.to_string()))
-            .collect();
+        let converted: Vec<Option<String>> =
+            vec.iter().map(|opt| opt.as_ref().map(|j| j.to_string())).collect();
         values[18] = Cell::Array(ArrayCell::String(converted));
     }
     if let Cell::Array(ArrayCell::Json(vec)) = &values[19] {
-        let converted: Vec<Option<String>> = vec
-            .iter()
-            .map(|opt| opt.as_ref().map(|j| j.to_string()))
-            .collect();
+        let converted: Vec<Option<String>> =
+            vec.iter().map(|opt| opt.as_ref().map(|j| j.to_string())).collect();
         values[19] = Cell::Array(ArrayCell::String(converted));
     }
 
@@ -862,15 +739,9 @@ async fn insert_nullable_array() {
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
-    client
-        .drop_table_if_exists(namespace, table_name)
-        .await
-        .unwrap();
+    client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
-    lakekeeper_client
-        .drop_warehouse(warehouse_id)
-        .await
-        .unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -916,20 +787,8 @@ async fn insert_non_nullable_array() {
         // Date/Time array types
         test_column("date_array_col", Type::DATE_ARRAY, 14, false, None),
         test_column("time_array_col", Type::TIME_ARRAY, 15, false, None),
-        test_column(
-            "timestamp_array_col",
-            Type::TIMESTAMP_ARRAY,
-            16,
-            false,
-            None,
-        ),
-        test_column(
-            "timestamptz_array_col",
-            Type::TIMESTAMPTZ_ARRAY,
-            17,
-            false,
-            None,
-        ),
+        test_column("timestamp_array_col", Type::TIMESTAMP_ARRAY, 16, false, None),
+        test_column("timestamptz_array_col", Type::TIMESTAMPTZ_ARRAY, 17, false, None),
         // UUID array type
         test_column("uuid_array_col", Type::UUID_ARRAY, 18, false, None),
         // JSON array types
@@ -941,39 +800,21 @@ async fn insert_non_nullable_array() {
         test_column("bytea_array_col", Type::BYTEA_ARRAY, 22, false, None),
     ];
 
-    client
-        .create_table_if_missing(namespace, table_name.clone(), &column_schemas)
-        .await
-        .unwrap();
+    client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     let table_rows = vec![TableRow::new(vec![
-        Cell::I32(1),                                                            // id
+        Cell::I32(1),                                                                       // id
         Cell::Array(ArrayCell::Bool(vec![Some(true), Some(false), Some(true)])), // bool_array_col
-        Cell::Array(ArrayCell::String(vec![
-            Some("A".to_string()),
-            Some("B".to_string()),
-        ])), // char_array_col
-        Cell::Array(ArrayCell::String(vec![
-            Some("fix1".to_string()),
-            Some("fix2".to_string()),
-        ])), // bpchar_array_col
-        Cell::Array(ArrayCell::String(vec![
-            Some("var1".to_string()),
-            Some("var2".to_string()),
-        ])), // varchar_array_col
-        Cell::Array(ArrayCell::String(vec![
-            Some("name1".to_string()),
-            Some("name2".to_string()),
-        ])), // name_array_col
-        Cell::Array(ArrayCell::String(vec![
-            Some("text1".to_string()),
-            Some("text2".to_string()),
-        ])), // text_array_col
-        Cell::Array(ArrayCell::I16(vec![Some(1), Some(2), Some(3)])),            // int2_array_col
-        Cell::Array(ArrayCell::I32(vec![Some(10), Some(20), Some(30)])),         // int4_array_col
-        Cell::Array(ArrayCell::I64(vec![Some(100), Some(200), Some(300)])),      // int8_array_col
-        Cell::Array(ArrayCell::F32(vec![Some(1.5), Some(2.5), Some(3.5)])),      // float4_array_col
-        Cell::Array(ArrayCell::F64(vec![Some(10.5), Some(20.5), Some(30.5)])),   // float8_array_col
+        Cell::Array(ArrayCell::String(vec![Some("A".to_string()), Some("B".to_string())])), // char_array_col
+        Cell::Array(ArrayCell::String(vec![Some("fix1".to_string()), Some("fix2".to_string())])), // bpchar_array_col
+        Cell::Array(ArrayCell::String(vec![Some("var1".to_string()), Some("var2".to_string())])), // varchar_array_col
+        Cell::Array(ArrayCell::String(vec![Some("name1".to_string()), Some("name2".to_string())])), // name_array_col
+        Cell::Array(ArrayCell::String(vec![Some("text1".to_string()), Some("text2".to_string())])), // text_array_col
+        Cell::Array(ArrayCell::I16(vec![Some(1), Some(2), Some(3)])), // int2_array_col
+        Cell::Array(ArrayCell::I32(vec![Some(10), Some(20), Some(30)])), // int4_array_col
+        Cell::Array(ArrayCell::I64(vec![Some(100), Some(200), Some(300)])), // int8_array_col
+        Cell::Array(ArrayCell::F32(vec![Some(1.5), Some(2.5), Some(3.5)])), // float4_array_col
+        Cell::Array(ArrayCell::F64(vec![Some(10.5), Some(20.5), Some(30.5)])), // float8_array_col
         Cell::Array(ArrayCell::Numeric(vec![
             Some("123.45".parse().unwrap()),
             Some("678.90".parse().unwrap()),
@@ -1012,10 +853,7 @@ async fn insert_non_nullable_array() {
                 Utc,
             )),
         ])), // timestamptz_array_col
-        Cell::Array(ArrayCell::Uuid(vec![
-            Some(Uuid::new_v4()),
-            Some(Uuid::new_v4()),
-        ])), // uuid_array_col
+        Cell::Array(ArrayCell::Uuid(vec![Some(Uuid::new_v4()), Some(Uuid::new_v4())])), // uuid_array_col
         Cell::Array(ArrayCell::Json(vec![
             Some(serde_json::json!({"key1": "value1"})),
             Some(serde_json::json!({"key2": "value2"})),
@@ -1024,7 +862,7 @@ async fn insert_non_nullable_array() {
             Some(serde_json::json!({"keyb1": "valueb1"})),
             Some(serde_json::json!({"keyb2": "valueb2"})),
         ])), // jsonb_array_col
-        Cell::Array(ArrayCell::U32(vec![Some(1001), Some(1002)])),               // oid_array_col
+        Cell::Array(ArrayCell::U32(vec![Some(1001), Some(1002)])), // oid_array_col
         Cell::Array(ArrayCell::Bytes(vec![
             Some(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]),
             Some(vec![0x57, 0x6f, 0x72, 0x6c, 0x64]),
@@ -1032,11 +870,7 @@ async fn insert_non_nullable_array() {
     ])];
 
     client
-        .insert_rows(
-            namespace.to_string(),
-            table_name.clone(),
-            table_rows.clone(),
-        )
+        .insert_rows(namespace.to_string(), table_name.clone(), table_rows.clone())
         .await
         .unwrap();
 
@@ -1054,26 +888,20 @@ async fn insert_non_nullable_array() {
 
     // numeric_array_col (index 12): NUMERIC_ARRAY maps to String in Iceberg
     if let Cell::Array(ArrayCell::Numeric(vec)) = &values[12] {
-        let converted: Vec<Option<String>> = vec
-            .iter()
-            .map(|opt| opt.as_ref().map(|n| n.to_string()))
-            .collect();
+        let converted: Vec<Option<String>> =
+            vec.iter().map(|opt| opt.as_ref().map(|n| n.to_string())).collect();
         values[12] = Cell::Array(ArrayCell::String(converted));
     }
 
     // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to String in Iceberg
     if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
-        let converted: Vec<Option<String>> = vec
-            .iter()
-            .map(|opt| opt.as_ref().map(|j| j.to_string()))
-            .collect();
+        let converted: Vec<Option<String>> =
+            vec.iter().map(|opt| opt.as_ref().map(|j| j.to_string())).collect();
         values[18] = Cell::Array(ArrayCell::String(converted));
     }
     if let Cell::Array(ArrayCell::Json(vec)) = &values[19] {
-        let converted: Vec<Option<String>> = vec
-            .iter()
-            .map(|opt| opt.as_ref().map(|j| j.to_string()))
-            .collect();
+        let converted: Vec<Option<String>> =
+            vec.iter().map(|opt| opt.as_ref().map(|j| j.to_string())).collect();
         values[19] = Cell::Array(ArrayCell::String(converted));
     }
 
@@ -1094,13 +922,7 @@ async fn insert_non_nullable_array() {
     // This feature is planned for future releases. We'll start to use it when it becomes available.
     // The cleanup is not in a Drop impl because each test has different number of object specitic to
     // that test.
-    client
-        .drop_table_if_exists(namespace, table_name)
-        .await
-        .unwrap();
+    client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
-    lakekeeper_client
-        .drop_warehouse(warehouse_id)
-        .await
-        .unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }

@@ -1,15 +1,20 @@
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
 use etl_postgres::types::TableId;
-use std::collections::HashMap;
-use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, RwLock};
-use tokio::task::JoinSet;
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::JoinSet,
+};
 use tracing::{debug, warn};
 
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
-use crate::workers::table_sync::{
-    TableSyncWorkerHandle, TableSyncWorkerResult, TableSyncWorkerState,
+use crate::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    workers::table_sync::{TableSyncWorkerHandle, TableSyncWorkerResult, TableSyncWorkerState},
 };
 
 /// Unique identifier for a table sync worker run.
@@ -126,10 +131,7 @@ impl TableSyncWorkerPool {
             return None;
         }
 
-        debug!(
-            table_id = table_id.0,
-            "retrieved active table sync worker state"
-        );
+        debug!(table_id = table_id.0, "retrieved active table sync worker state");
 
         Some(handle.state())
     }
@@ -201,11 +203,7 @@ impl TableSyncWorkerPool {
             }
         }
 
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.into())
-        }
+        if errors.is_empty() { Ok(()) } else { Err(errors.into()) }
     }
 }
 

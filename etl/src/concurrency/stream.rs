@@ -1,15 +1,19 @@
-use core::pin::Pin;
-use core::task::{Context, Poll};
+use core::{
+    pin::Pin,
+    task::{Context, Poll},
+};
+use std::time::Duration;
+
 use etl_config::shared::BatchConfig;
 use etl_postgres::types::TableId;
 use futures::{Stream, ready};
 use pin_project_lite::pin_project;
-use std::time::Duration;
 use tracing::info;
 
-use crate::concurrency::batch_budget::CachedBatchBudget;
-use crate::concurrency::memory_monitor::MemoryMonitorSubscription;
-use crate::types::SizeHint;
+use crate::{
+    concurrency::{batch_budget::CachedBatchBudget, memory_monitor::MemoryMonitorSubscription},
+    types::SizeHint,
+};
 
 /// Builds the stream id for a table sync worker's initial table-copy stream.
 pub(crate) fn table_sync_worker_copy_stream_id(table_id: TableId) -> String {
@@ -46,12 +50,7 @@ impl<S: Stream> BackpressureStream<S> {
         stream_id: impl Into<String>,
         memory_subscription: Option<MemoryMonitorSubscription>,
     ) -> Self {
-        Self {
-            stream,
-            stream_id: stream_id.into(),
-            memory_subscription,
-            paused_for_memory: false,
-        }
+        Self { stream, stream_id: stream_id.into(), memory_subscription, paused_for_memory: false }
     }
 
     /// Returns a pinned mutable reference to the wrapped stream.
@@ -251,10 +250,9 @@ where
             // PRIORITY 2: Timer management.
             // Reset the timeout timer when starting a new batch or after emitting a batch.
             if *this.reset_timer {
-                this.deadline
-                    .set(Some(tokio::time::sleep(Duration::from_millis(
-                        this.batch_config.max_fill_ms,
-                    ))));
+                this.deadline.set(Some(tokio::time::sleep(Duration::from_millis(
+                    this.batch_config.max_fill_ms,
+                ))));
                 *this.reset_timer = false;
             }
 
@@ -319,15 +317,17 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::concurrency::batch_budget::BatchBudgetController;
-    use crate::concurrency::memory_monitor::MemoryMonitor;
-    use crate::types::SizeHint;
     use core::task::Poll;
+
     use etl_postgres::types::TableId;
-    use futures::StreamExt;
-    use futures::future::poll_fn;
+    use futures::{StreamExt, future::poll_fn};
     use pin_project_lite::pin_project;
+
+    use super::*;
+    use crate::{
+        concurrency::{batch_budget::BatchBudgetController, memory_monitor::MemoryMonitor},
+        types::SizeHint,
+    };
 
     pin_project! {
         struct TwoThenPending {
@@ -504,10 +504,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig {
-            max_fill_ms: 10_000,
-            memory_budget_ratio: 0.2,
-        };
+        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             TwoThenPending::new(),
             "test_stream",
@@ -537,10 +534,7 @@ mod tests {
         memory.set_backpressure_active_for_test(true);
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig {
-            max_fill_ms: 10_000,
-            memory_budget_ratio: 0.2,
-        };
+        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             futures::stream::iter(vec![Ok::<i32, &'static str>(1)]),
             "test_stream",
@@ -568,10 +562,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig {
-            max_fill_ms: 10_000,
-            memory_budget_ratio: 0.2,
-        };
+        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
         let stream = TryBatchBackpressureStream::wrap(
             futures::stream::iter(vec![Ok::<i32, &'static str>(2)]),
             "test_stream",
@@ -614,10 +605,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig {
-            max_fill_ms: 100,
-            memory_budget_ratio: 0.2,
-        };
+        let batch_config = BatchConfig { max_fill_ms: 100, memory_budget_ratio: 0.2 };
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             TwoThenPending::new(),
             "test_stream",
@@ -643,33 +631,16 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig {
-            max_fill_ms: 10_000,
-            memory_budget_ratio: 0.2,
-        };
+        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
         let (cached_budget, byte_limit) = test_cached_budget_with_limit(&memory);
         let byte_size = (byte_limit / 2).max(1);
         let items = vec![
-            SizedToken {
-                value: 1,
-                bytes: byte_size,
-            },
-            SizedToken {
-                value: 2,
-                bytes: byte_size,
-            },
-            SizedToken {
-                value: 3,
-                bytes: byte_size,
-            },
+            SizedToken { value: 1, bytes: byte_size },
+            SizedToken { value: 2, bytes: byte_size },
+            SizedToken { value: 3, bytes: byte_size },
         ];
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
-            futures::stream::iter(
-                items
-                    .clone()
-                    .into_iter()
-                    .map(Ok::<SizedToken, &'static str>),
-            ),
+            futures::stream::iter(items.clone().into_iter().map(Ok::<SizedToken, &'static str>)),
             "test_stream",
             batch_config,
             memory_sub,
@@ -688,37 +659,18 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig {
-            max_fill_ms: 10_000,
-            memory_budget_ratio: 0.2,
-        };
+        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
         let (cached_budget, byte_limit) = test_cached_budget_with_limit(&memory);
         let first = (byte_limit / 4).max(1);
         let second = (byte_limit / 4).max(1);
-        let third = byte_limit
-            .saturating_sub(first.saturating_add(second))
-            .max(1);
+        let third = byte_limit.saturating_sub(first.saturating_add(second)).max(1);
         let items = vec![
-            SizedToken {
-                value: 1,
-                bytes: first,
-            },
-            SizedToken {
-                value: 2,
-                bytes: second,
-            },
-            SizedToken {
-                value: 3,
-                bytes: third,
-            },
+            SizedToken { value: 1, bytes: first },
+            SizedToken { value: 2, bytes: second },
+            SizedToken { value: 3, bytes: third },
         ];
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
-            futures::stream::iter(
-                items
-                    .clone()
-                    .into_iter()
-                    .map(Ok::<SizedToken, &'static str>),
-            ),
+            futures::stream::iter(items.clone().into_iter().map(Ok::<SizedToken, &'static str>)),
             "test_stream",
             batch_config,
             memory_sub,
@@ -734,10 +686,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig {
-            max_fill_ms: 100,
-            memory_budget_ratio: 0.2,
-        };
+        let batch_config = BatchConfig { max_fill_ms: 100, memory_budget_ratio: 0.2 };
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             TwoThenPending::new(),
             "test_stream",
@@ -765,10 +714,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig {
-            max_fill_ms: 10_000,
-            memory_budget_ratio: 0.2,
-        };
+        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             futures::stream::iter(vec![Ok::<i32, &'static str>(7), Ok(8)]),
             "test_stream",
@@ -791,10 +737,7 @@ mod tests {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
-        let batch_config = BatchConfig {
-            max_fill_ms: 10_000,
-            memory_budget_ratio: 0.2,
-        };
+        let batch_config = BatchConfig { max_fill_ms: 10_000, memory_budget_ratio: 0.2 };
         let mut stream = Box::pin(TryBatchBackpressureStream::wrap(
             futures::stream::empty::<Result<i32, &'static str>>(),
             "test_stream",

@@ -1,52 +1,59 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
-
-use etl::destination::Destination;
-use etl::destination::async_result::{
-    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, atomic::AtomicBool},
 };
-use etl::error::{ErrorKind, EtlResult};
-use etl::etl_error;
-use etl::state::destination_metadata::DestinationTableMetadata;
-use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
-use etl::types::{Event, ReplicatedTableSchema, SizeHint, TableId, TableName, TableRow};
+
+use etl::{
+    destination::{
+        Destination,
+        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+    },
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    state::destination_metadata::DestinationTableMetadata,
+    store::{schema::SchemaStore, state::StateStore},
+    types::{Event, ReplicatedTableSchema, SizeHint, TableId, TableName, TableRow},
+};
 use metrics::{gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::task::JoinSet;
-use tokio::time::Instant;
-
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task::JoinSet,
+    time::Instant,
+};
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::ducklake::batches::{
-    DuckLakeTableBatchKind, TableMutation, TrackedTableMutation, TrackedTruncateEvent,
-    apply_table_batch_with_retry, apply_table_batches_with_retry,
-    clear_applied_batch_markers_for_kind, ensure_applied_batches_table_exists,
-    prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
+use crate::{
+    ducklake::{
+        DuckLakeTableName, LAKE_CATALOG, S3Config,
+        batches::{
+            DuckLakeTableBatchKind, TableMutation, TrackedTableMutation, TrackedTruncateEvent,
+            apply_table_batch_with_retry, apply_table_batches_with_retry,
+            clear_applied_batch_markers_for_kind, ensure_applied_batches_table_exists,
+            prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
+        },
+        client::{
+            DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
+            format_query_error_detail, run_duckdb_blocking,
+        },
+        config::{build_setup_sql, current_duckdb_extension_strategy},
+        maintenance::{
+            DuckLakeMaintenanceWorker, TableMaintenanceNotification, TableWriteActivity,
+            send_maintenance_notification, spawn_ducklake_maintenance_worker, table_write_slot,
+        },
+        metrics::{
+            BATCH_KIND_LABEL, DuckLakeMetricsSampler, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
+            ETL_DUCKLAKE_INLINE_FLUSH_ROWS, ETL_DUCKLAKE_POOL_SIZE, RESULT_LABEL, register_metrics,
+            spawn_ducklake_metrics_sampler,
+        },
+        schema::build_create_table_sql_ducklake,
+    },
+    table_name::try_stringify_table_name,
 };
-use crate::ducklake::client::{
-    DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
-    format_query_error_detail, run_duckdb_blocking,
-};
-use crate::ducklake::config::{build_setup_sql, current_duckdb_extension_strategy};
-use crate::ducklake::maintenance::{
-    DuckLakeMaintenanceWorker, TableMaintenanceNotification, TableWriteActivity,
-    send_maintenance_notification, spawn_ducklake_maintenance_worker, table_write_slot,
-};
-use crate::ducklake::metrics::{
-    BATCH_KIND_LABEL, DuckLakeMetricsSampler, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
-    ETL_DUCKLAKE_INLINE_FLUSH_ROWS, ETL_DUCKLAKE_POOL_SIZE, RESULT_LABEL, register_metrics,
-    spawn_ducklake_metrics_sampler,
-};
-use crate::ducklake::schema::build_create_table_sql_ducklake;
-use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG, S3Config};
-use crate::table_name::try_stringify_table_name;
 
 /// Label values used only for inline-flush metrics and logs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,9 +142,7 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        let result = self
-            .write_table_rows_inner(replicated_table_schema, table_rows)
-            .await;
+        let result = self.write_table_rows_inner(replicated_table_schema, table_rows).await;
         async_result.send(result);
 
         Ok(())
@@ -179,8 +184,7 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.write_table_rows_inner(replicated_table_schema, table_rows)
-            .await
+        self.write_table_rows_inner(replicated_table_schema, table_rows).await
     }
 
     /// Writes one streaming CDC batch directly to the destination.
@@ -388,10 +392,7 @@ where
             return Ok(());
         }
 
-        let approx_bytes = table_rows
-            .iter()
-            .map(|row| row.size_hint() as u64)
-            .sum::<u64>();
+        let approx_bytes = table_rows.iter().map(|row| row.size_hint() as u64).sum::<u64>();
         let inserted_rows = table_rows.len() as u64;
 
         // Here we can have concurrent table writers because it's INSERTs only and CDC (write_events) won't start before the copy phase is complete
@@ -407,11 +408,7 @@ where
         .await?;
 
         self.notify_background_maintenance(TableMaintenanceNotification::WriteActivity(
-            TableWriteActivity {
-                table_name,
-                approx_bytes,
-                inserted_rows,
-            },
+            TableWriteActivity { table_name, approx_bytes, inserted_rows },
         ))
         .await;
 
@@ -447,9 +444,7 @@ where
                     Event::Insert(insert) => {
                         let approx_bytes = insert.table_row.size_hint() as u64;
                         let table_id = insert.replicated_table_schema.id();
-                        table_schemas
-                            .entry(table_id)
-                            .or_insert(insert.replicated_table_schema);
+                        table_schemas.entry(table_id).or_insert(insert.replicated_table_schema);
                         table_id_to_mutations.entry(table_id).or_default().push(
                             TrackedTableMutation::new(
                                 insert.start_lsn,
@@ -466,9 +461,7 @@ where
                         let table_row = update.table_row;
                         let old_table_row = update.old_table_row;
                         let upsert_bytes = table_row.size_hint() as u64;
-                        table_schemas
-                            .entry(table_id)
-                            .or_insert(update.replicated_table_schema);
+                        table_schemas.entry(table_id).or_insert(update.replicated_table_schema);
                         let mutations = table_id_to_mutations.entry(table_id).or_default();
                         if let Some((_, old_row)) = old_table_row {
                             mutations.push(TrackedTableMutation::new(
@@ -499,9 +492,7 @@ where
                             continue;
                         };
                         let table_id = delete.replicated_table_schema.id();
-                        table_schemas
-                            .entry(table_id)
-                            .or_insert(delete.replicated_table_schema);
+                        table_schemas.entry(table_id).or_insert(delete.replicated_table_schema);
                         table_id_to_mutations.entry(table_id).or_default().push(
                             TrackedTableMutation::new(
                                 delete.start_lsn,
@@ -596,10 +587,7 @@ where
 
                 while let Some(result) = join_set.join_next().await {
                     result.map_err(|_| {
-                        etl_error!(
-                            ErrorKind::ApplyWorkerPanic,
-                            "DuckLake truncate task panicked"
-                        )
+                        etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake truncate task panicked")
                     })??;
                 }
             }
@@ -615,9 +603,7 @@ where
     ) -> EtlResult<DuckLakeTableName> {
         let table_id = replicated_table_schema.id();
 
-        let table_name = self
-            .get_or_create_applied_table_mapping(replicated_table_schema)
-            .await?;
+        let table_name = self.get_or_create_applied_table_mapping(replicated_table_schema).await?;
 
         // Fast path: already created.
         {
@@ -627,16 +613,9 @@ where
             }
         }
 
-        let _table_creation_permit = self
-            .table_creation_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| {
-                etl_error!(
-                    ErrorKind::InvalidState,
-                    "DuckLake table creation semaphore closed"
-                )
+        let _table_creation_permit =
+            self.table_creation_slots.clone().acquire_owned().await.map_err(|_| {
+                etl_error!(ErrorKind::InvalidState, "DuckLake table creation semaphore closed")
             })?;
 
         {
@@ -649,16 +628,12 @@ where
         // `build_create_table_sql_ducklake` generates `CREATE TABLE IF NOT EXISTS "name" (...)`.
         // Prefix the table name with the catalog alias so DuckLake knows which
         // catalog to create the table in.
-        let replicated_column_schemas = replicated_table_schema
-            .column_schemas()
-            .cloned()
-            .collect::<Vec<_>>();
+        let replicated_column_schemas =
+            replicated_table_schema.column_schemas().cloned().collect::<Vec<_>>();
         let ddl = build_create_table_sql_ducklake(&table_name, &replicated_column_schemas);
         let quoted_table_name = quote_identifier(&table_name).into_owned();
-        let qualified_ddl = ddl.replace(
-            &quoted_table_name,
-            &format!("{LAKE_CATALOG}.{quoted_table_name}"),
-        );
+        let qualified_ddl =
+            ddl.replace(&quoted_table_name, &format!("{LAKE_CATALOG}.{quoted_table_name}"));
 
         let created_tables = Arc::clone(&self.created_tables);
         let table_name_clone = table_name.clone();
@@ -693,9 +668,7 @@ where
         if let Some(metadata) = self.store.get_destination_table_metadata(table_id).await?
             && metadata.is_applying()
         {
-            self.store
-                .store_destination_table_metadata(table_id, metadata.to_applied())
-                .await?;
+            self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
         }
 
         Ok(table_name)
@@ -725,21 +698,14 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<DuckLakeTableName> {
         let table_id = replicated_table_schema.id();
-        if let Some(existing) = self
-            .store
-            .get_applied_destination_table_metadata(table_id)
-            .await?
-        {
-            return existing
-                .destination_table_id
-                .parse::<DuckLakeTableName>()
-                .map_err(|e| {
-                    etl_error!(
-                        ErrorKind::InvalidState,
-                        "Invalid DuckLake table name in metadata",
-                        e.to_string()
-                    )
-                });
+        if let Some(existing) = self.store.get_applied_destination_table_metadata(table_id).await? {
+            return existing.destination_table_id.parse::<DuckLakeTableName>().map_err(|e| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "Invalid DuckLake table name in metadata",
+                    e.to_string()
+                )
+            });
         }
 
         let ducklake_table_name =
@@ -749,9 +715,7 @@ where
             replicated_table_schema.inner().snapshot_id,
             replicated_table_schema.replication_mask().clone(),
         );
-        self.store
-            .store_destination_table_metadata(table_id, metadata)
-            .await?;
+        self.store.store_destination_table_metadata(table_id, metadata).await?;
 
         Ok(ducklake_table_name)
     }
@@ -761,10 +725,7 @@ where
         let table_slot = table_write_slot(&self.table_write_slots, table_name);
 
         table_slot.acquire_owned().await.map_err(|_| {
-            etl_error!(
-                ErrorKind::InvalidState,
-                "DuckLake table write semaphore closed"
-            )
+            etl_error!(ErrorKind::InvalidState, "DuckLake table write semaphore closed")
         })
     }
 
@@ -1001,22 +962,24 @@ pub(super) fn flush_table_inlined_data(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    use std::time::Duration;
+    use std::{
+        path::{Path, PathBuf},
+        time::Duration,
+    };
 
     use duckdb::{Config, Connection};
-    use etl::store::both::memory::MemoryStore;
-    use etl::store::schema::SchemaStore;
-    use etl::types::{
-        Cell, ColumnSchema, ReplicatedTableSchema, ReplicationMask, TableId, TableName, TableRow,
-        TableSchema, Type as PgType,
+    use etl::{
+        store::{both::memory::MemoryStore, schema::SchemaStore},
+        types::{
+            Cell, ColumnSchema, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
+            TableRow, TableSchema, Type as PgType,
+        },
     };
     use pg_escape::{quote_identifier, quote_literal};
-    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use url::Url;
 
+    use super::*;
     use crate::ducklake::metrics::{
         query_catalog_maintenance_metrics_blocking, query_table_storage_metrics_blocking,
     };
@@ -1149,16 +1112,12 @@ mod tests {
                 quote_literal(table_name),
             ))
             .expect("failed to prepare DuckLake column query");
-        let mut rows = statement
-            .query([])
-            .expect("failed to query DuckLake table columns");
+        let mut rows = statement.query([]).expect("failed to query DuckLake table columns");
         let mut column_names = Vec::new();
 
         while let Some(row) = rows.next().expect("failed to read DuckLake column row") {
-            column_names.push(
-                row.get::<_, String>(0)
-                    .expect("failed to read DuckLake column name"),
-            );
+            column_names
+                .push(row.get::<_, String>(0).expect("failed to read DuckLake column name"));
         }
 
         column_names
@@ -1228,10 +1187,7 @@ mod tests {
         let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
         let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
-        store
-            .store_table_schema(schema.clone())
-            .await
-            .expect("failed to seed schema");
+        store.store_table_schema(schema.clone()).await.expect("failed to seed schema");
 
         let destination =
             DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, store)
@@ -1294,10 +1250,7 @@ mod tests {
         );
         let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
-        store
-            .store_table_schema(schema)
-            .await
-            .expect("failed to seed schema");
+        store.store_table_schema(schema).await.expect("failed to seed schema");
 
         let destination =
             DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, store.clone())
@@ -1307,10 +1260,7 @@ mod tests {
         destination
             .write_table_rows(
                 &replicated_schema,
-                vec![TableRow::new(vec![
-                    Cell::I32(1),
-                    Cell::String("alice".to_string()),
-                ])],
+                vec![TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())])],
             )
             .await
             .expect("failed to write filtered rows");
@@ -1339,10 +1289,7 @@ mod tests {
         let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
         let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
-        store
-            .store_table_schema(schema.clone())
-            .await
-            .expect("failed to seed schema");
+        store.store_table_schema(schema.clone()).await.expect("failed to seed schema");
 
         let destination =
             DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, store)
@@ -1391,10 +1338,7 @@ mod tests {
         let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
         let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
-        store
-            .store_table_schema(schema.clone())
-            .await
-            .expect("failed to seed schema");
+        store.store_table_schema(schema.clone()).await.expect("failed to seed schema");
 
         let destination =
             DuckLakeDestination::new(catalog.clone(), data.clone(), 1, None, None, store)
@@ -1404,22 +1348,13 @@ mod tests {
         destination
             .write_table_rows(
                 &replicated_schema,
-                vec![TableRow::new(vec![
-                    Cell::I32(1),
-                    Cell::String("alice".to_string()),
-                ])],
+                vec![TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())])],
             )
             .await
             .expect("failed to write rows");
-        destination
-            .truncate_table(&replicated_schema)
-            .await
-            .expect("failed to truncate table");
+        destination.truncate_table(&replicated_schema).await.expect("failed to truncate table");
 
-        destination
-            .shutdown()
-            .await
-            .expect("failed to shutdown destination");
+        destination.shutdown().await.expect("failed to shutdown destination");
         drop(destination);
 
         let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;

@@ -38,9 +38,7 @@ pub fn generate_random_alpha_str(len: usize) -> String {
         's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
     ];
     let mut rng = rand::rng();
-    (0..len)
-        .map(|_| chars[rng.random_range(0..chars.len())])
-        .collect()
+    (0..len).map(|_| chars[rng.random_range(0..chars.len())]).collect()
 }
 
 /// Parses a Docker image reference to extract the tag to be used as a version name.
@@ -95,14 +93,8 @@ mod tests {
     #[test]
     fn parse_with_tag() {
         assert_eq!(parse_docker_image_tag("supabase/replicator:1.2.3"), "1.2.3");
-        assert_eq!(
-            parse_docker_image_tag("example.com:5000/team/my-app:2.0"),
-            "2.0"
-        );
-        assert_eq!(
-            parse_docker_image_tag("ghcr.io/dockersamples/example-app:pr-311"),
-            "pr-311"
-        );
+        assert_eq!(parse_docker_image_tag("example.com:5000/team/my-app:2.0"), "2.0");
+        assert_eq!(parse_docker_image_tag("ghcr.io/dockersamples/example-app:pr-311"), "pr-311");
     }
 
     #[test]
@@ -122,10 +114,7 @@ mod tests {
 
     #[test]
     fn parse_with_only_digest_unavailable() {
-        assert_eq!(
-            parse_docker_image_tag("repo/name@sha256:abcdef0123456789"),
-            "unavailable"
-        );
+        assert_eq!(parse_docker_image_tag("repo/name@sha256:abcdef0123456789"), "unavailable");
     }
 
     #[test]
