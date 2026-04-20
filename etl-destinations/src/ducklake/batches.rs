@@ -1026,7 +1026,7 @@ fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> E
 
 /// Formats an optional LSN for marker-table inserts.
 fn optional_lsn_to_sql_literal(lsn: Option<PgLsn>) -> String {
-    lsn.map(|value| u64::from(value).to_string()).unwrap_or_else(|| "NULL".to_string())
+    lsn.map_or_else(|| "NULL".to_string(), |value| u64::from(value).to_string())
 }
 
 /// Applies one prepared table mutation inside an open transaction.

@@ -609,7 +609,8 @@ pub(super) fn query_catalog_maintenance_metrics_blocking(
 }
 
 fn epoch_age_seconds(now_epoch_ms: i64, oldest_epoch_ms: Option<i64>) -> i64 {
-    oldest_epoch_ms.map(|epoch_ms| now_epoch_ms.saturating_sub(epoch_ms) / 1_000).unwrap_or(0)
+    oldest_epoch_ms
+        .map_or(0, |epoch_ms| now_epoch_ms.saturating_sub(epoch_ms) / 1_000)
 }
 
 /// Returns the fully-qualified hidden DuckLake metadata namespace.

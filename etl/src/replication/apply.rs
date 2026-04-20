@@ -1752,9 +1752,7 @@ where
         // the schema.
         let shared_table_state = self.shared_table_cache.get(&table_id).await;
         let used_bootstrap_snapshot = shared_table_state.is_none();
-        let table_snapshot_id = shared_table_state
-            .map(|state| state.snapshot_id)
-            .unwrap_or_else(|| self.state.bootstrap_snapshot_id());
+        let table_snapshot_id = shared_table_state.map_or_else(|| self.state.bootstrap_snapshot_id(), |state| state.snapshot_id);
         let table_schema = get_table_schema(
             &self.schema_store,
             &table_id,

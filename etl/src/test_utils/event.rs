@@ -55,7 +55,9 @@ pub fn check_events_count(events: &[Event], conditions: Vec<(EventType, u64)>) -
     let grouped_events = group_events_by_type(events);
 
     conditions.into_iter().all(|(event_type, count)| {
-        grouped_events.get(&event_type).map(|inner| inner.len() == count as usize).unwrap_or(false)
+        grouped_events
+            .get(&event_type)
+            .is_some_and(|inner| inner.len() == count as usize)
     })
 }
 
@@ -117,8 +119,7 @@ pub fn check_all_events_count(
         EventCondition::Any(event_type, expected_count) => {
             let event_count = grouped_events_by_type
                 .get(event_type)
-                .map(|events| events.len() as u64)
-                .unwrap_or(0);
+                .map_or(0, |events| events.len() as u64);
 
             let table_row_count = if *event_type == EventType::Insert {
                 table_rows.values().map(|rows| rows.len() as u64).sum()
@@ -131,11 +132,12 @@ pub fn check_all_events_count(
         EventCondition::Table(event_type, table_id, expected_count) => {
             let event_count = grouped_events_by_type_and_table
                 .get(&(event_type.clone(), *table_id))
-                .map(|events| events.len() as u64)
-                .unwrap_or(0);
+                .map_or(0, |events| events.len() as u64);
 
             let table_row_count = if *event_type == EventType::Insert {
-                table_rows.get(table_id).map(|rows| rows.len() as u64).unwrap_or(0)
+                table_rows
+                    .get(table_id)
+                    .map_or(0, |rows| rows.len() as u64)
             } else {
                 0
             };

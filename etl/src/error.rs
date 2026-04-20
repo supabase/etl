@@ -167,9 +167,9 @@ impl EtlError {
     pub fn kind(&self) -> ErrorKind {
         match self.repr {
             ErrorRepr::Single(ref payload) => payload.kind,
-            ErrorRepr::Many { ref errors, .. } => {
-                errors.first().map(|err| err.kind()).unwrap_or(ErrorKind::Unknown)
-            }
+            ErrorRepr::Many { ref errors, .. } => errors
+                .first()
+                .map_or(ErrorKind::Unknown, |err| err.kind()),
         }
     }
 

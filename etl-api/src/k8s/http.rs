@@ -577,17 +577,15 @@ impl K8sClient for HttpK8sClient {
 
         let phase = pod
             .status
-            .map(|status| {
+            .map_or(PodPhase::Unknown, |status| {
                 let phase: PodPhase = status
                     .phase
-                    .map(|phase| {
+                    .map_or(PodPhase::Unknown, |phase| {
                         let phase: PodPhase = phase.as_str().into();
                         phase
-                    })
-                    .unwrap_or(PodPhase::Unknown);
+                    });
                 phase
-            })
-            .unwrap_or(PodPhase::Unknown);
+            });
 
         Ok(match phase {
             PodPhase::Pending => PodStatus::Starting,

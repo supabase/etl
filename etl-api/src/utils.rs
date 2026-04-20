@@ -52,7 +52,7 @@ pub fn generate_random_alpha_str(len: usize) -> String {
 /// - If parsing fails or only a digest is present, returns `unavailable`.
 pub fn parse_docker_image_tag(image: &str) -> String {
     // Work on the last path segment only
-    let last_slash = image.rfind('/').map(|i| i + 1).unwrap_or(0);
+    let last_slash = image.rfind('/').map_or(0, |i| i + 1);
     let segment = &image[last_slash..];
 
     // Identify optional digest marker within the segment
