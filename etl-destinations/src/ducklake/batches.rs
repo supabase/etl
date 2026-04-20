@@ -1243,8 +1243,8 @@ fn batch_log_kind(batch: &PreparedDuckLakeTableBatch) -> &'static str {
         PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => {
             match prepared_mutations.as_slice() {
                 [PreparedTableMutation::Upsert(_)] => "insert",
-                [PreparedTableMutation::Delete { origin, .. }] => origin,
-                [
+                [PreparedTableMutation::Delete { origin, .. }]
+                | [
                     PreparedTableMutation::Delete { origin, .. },
                     PreparedTableMutation::Upsert(_),
                 ] => origin,

@@ -78,11 +78,11 @@ impl SourceError {
 impl ResponseError for SourceError {
     fn status_code(&self) -> StatusCode {
         match self {
-            SourceError::SourcesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            SourceError::PipelinesDb(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SourceError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             SourceError::TenantId(_) => StatusCode::BAD_REQUEST,
-            SourceError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SourceError::SourcesDb(_) | SourceError::Database(_) | SourceError::Validation(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
             SourceError::ValidationFailed(_) => StatusCode::FORBIDDEN,
             SourceError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SourceError::ActivePipeline(_) | SourceError::SourceInUse(_) => StatusCode::CONFLICT,

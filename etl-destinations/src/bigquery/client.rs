@@ -1,9 +1,15 @@
-use std::fmt;
+#![allow(clippy::match_same_arms)]
 
-use etl::{
-    error::{ErrorKind, EtlError, EtlResult},
-    etl_error,
-    types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type},
+use etl::error::{ErrorKind, EtlError, EtlResult};
+use etl::etl_error;
+use etl::types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type};
+use gcp_bigquery_client::client_builder::ClientBuilder;
+use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
+use gcp_bigquery_client::google::cloud::bigquery::storage::v1::StorageError;
+use gcp_bigquery_client::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode;
+use gcp_bigquery_client::google::rpc::Status as GoogleRpcStatus;
+use gcp_bigquery_client::storage::{
+    BatchAppendRequest, BatchAppendResult, ColumnMode, StorageApiConfig,
 };
 use gcp_bigquery_client::{
     Client,

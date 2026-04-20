@@ -58,9 +58,9 @@ impl ReplicatorError {
     pub(crate) fn backtrace(&self) -> Option<&Backtrace> {
         match self {
             ReplicatorError::Etl(err) => err.backtrace(),
-            ReplicatorError::Config(_, cb) => Some(&cb.0),
-            ReplicatorError::Migration(_, cb) => Some(&cb.0),
-            ReplicatorError::Io(_, cb) => Some(&cb.0),
+            ReplicatorError::Config(_, cb)
+            | ReplicatorError::Migration(_, cb)
+            | ReplicatorError::Io(_, cb) => Some(&cb.0),
         }
     }
 

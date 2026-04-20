@@ -625,7 +625,7 @@ impl PgReplicationClient {
 
                 return match wal_status.as_deref() {
                     Some("lost") => Ok(SlotState::Invalidated),
-                    Some(_) => Ok(SlotState::Valid),
+                    Some(_) |
                     // If wal_status is NULL, assume the slot is valid
                     // (this can happen on very old PostgreSQL versions)
                     None => Ok(SlotState::Valid),

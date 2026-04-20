@@ -252,6 +252,7 @@ impl HttpK8sClient {
         if let Some(waiting) = &state.waiting
             && let Some(reason) = &waiting.reason
         {
+            #[allow(clippy::match_same_arms)]
             match reason.as_str() {
                 // Crash/restart errors
                 "CrashLoopBackOff" => return true,
@@ -575,17 +576,13 @@ impl K8sClient for HttpK8sClient {
             return Ok(PodStatus::Stopping);
         }
 
-        let phase = pod
-            .status
-            .map_or(PodPhase::Unknown, |status| {
-                let phase: PodPhase = status
-                    .phase
-                    .map_or(PodPhase::Unknown, |phase| {
-                        let phase: PodPhase = phase.as_str().into();
-                        phase
-                    });
+        let phase = pod.status.map_or(PodPhase::Unknown, |status| {
+            let phase: PodPhase = status.phase.map_or(PodPhase::Unknown, |phase| {
+                let phase: PodPhase = phase.as_str().into();
                 phase
             });
+            phase
+        });
 
         Ok(match phase {
             PodPhase::Pending => PodStatus::Starting,

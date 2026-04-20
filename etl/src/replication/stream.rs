@@ -119,6 +119,7 @@ impl StatusUpdateType {
     /// Returns `true` whether this status update type requires a reply from
     /// Postgres, `false` otherwise.
     fn request_reply(&self) -> bool {
+        #[allow(clippy::match_same_arms)]
         match self {
             Self::KeepAlive => false,
             Self::PeriodicKeepAlive => true,

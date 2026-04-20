@@ -456,12 +456,12 @@ impl From<serde_json::Error> for EtlError {
     fn from(err: serde_json::Error) -> EtlError {
         let (kind, description) = match err.classify() {
             serde_json::error::Category::Io => (ErrorKind::IoError, "JSON I/O operation failed"),
-            serde_json::error::Category::Syntax | serde_json::error::Category::Data => {
-                (ErrorKind::DeserializationError, "JSON deserialization failed")
-            }
-            serde_json::error::Category::Eof => {
-                (ErrorKind::DeserializationError, "JSON deserialization failed")
-            }
+            serde_json::error::Category::Syntax
+            | serde_json::error::Category::Data
+            | serde_json::error::Category::Eof => (
+                ErrorKind::DeserializationError,
+                "JSON deserialization failed",
+            ),
         };
 
         let detail = err.to_string();
@@ -910,6 +910,7 @@ impl From<ParseNumericError> for EtlError {
 /// [`ErrorKind::SourceConnectionFailed`].
 impl From<sqlx::Error> for EtlError {
     fn from(err: sqlx::Error) -> EtlError {
+        #[allow(clippy::match_same_arms)]
         let kind = match &err {
             sqlx::Error::Database(_) => ErrorKind::SourceQueryFailed,
             sqlx::Error::Io(_) => ErrorKind::IoError,
