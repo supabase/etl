@@ -250,27 +250,6 @@ pub async fn delete_pipeline_source_state(
     Ok(())
 }
 
-pub async fn delete_pipelines_api_and_source_state(
-    api_connection: &mut PgConnection,
-    source_connection: &mut PgConnection,
-    tenant_id: &str,
-    pipelines: &[PipelineDeletion],
-) -> Result<Vec<i64>, PipelinesDbError> {
-    let mut deleted_pipeline_ids = Vec::with_capacity(pipelines.len());
-    for pipeline in pipelines {
-        delete_pipeline_api_and_source_state(
-            api_connection,
-            source_connection,
-            tenant_id,
-            pipeline,
-        )
-        .await?;
-        deleted_pipeline_ids.push(pipeline.id);
-    }
-
-    Ok(deleted_pipeline_ids)
-}
-
 pub async fn delete_pipelines_source_state(
     source_connection: &mut PgConnection,
     pipelines: &[PipelineDeletion],
