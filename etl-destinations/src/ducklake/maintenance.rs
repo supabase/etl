@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 use etl::error::{ErrorKind, EtlError, EtlResult};
@@ -65,9 +63,11 @@ const MAINTENANCE_TASK_TARGETED_MAINTENANCE: &str = "targeted_maintenance";
 const MAINTENANCE_TASK_CHECKPOINT: &str = "checkpoint";
 
 #[cfg(test)]
-static FAIL_CHECKPOINT_ONCE_FOR_TESTS: AtomicBool = AtomicBool::new(false);
+static FAIL_CHECKPOINT_ONCE_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 #[cfg(test)]
-static FAIL_REWRITE_SINGLE_OUTPUT_FILE_ONCE_FOR_TESTS: AtomicBool = AtomicBool::new(false);
+static FAIL_REWRITE_SINGLE_OUTPUT_FILE_ONCE_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Concrete DuckLake maintenance operations emitted in metrics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -969,7 +969,7 @@ fn run_background_checkpoint_blocking(
 ) -> EtlResult<()> {
     let checkpoint_started = Instant::now();
     #[cfg(test)]
-    if FAIL_CHECKPOINT_ONCE_FOR_TESTS.swap(false, AtomicOrdering::Relaxed) {
+    if FAIL_CHECKPOINT_ONCE_FOR_TESTS.swap(false, std::sync::atomic::Ordering::Relaxed) {
         record_ducklake_maintenance_duration(
             MAINTENANCE_TASK_CHECKPOINT,
             MaintenanceOperation::Checkpoint,
@@ -1017,7 +1017,9 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
         quote_literal(table_name),
     );
     #[cfg(test)]
-    if FAIL_REWRITE_SINGLE_OUTPUT_FILE_ONCE_FOR_TESTS.swap(false, AtomicOrdering::Relaxed) {
+    if FAIL_REWRITE_SINGLE_OUTPUT_FILE_ONCE_FOR_TESTS
+        .swap(false, std::sync::atomic::Ordering::Relaxed)
+    {
         let source = duckdb::Error::DuckDBFailure(
             duckdb::ffi::Error::new(1),
             Some("INTERNAL Error: DuckLakeCompaction - expected a single output file".to_string()),
@@ -1071,6 +1073,7 @@ fn merge_adjacent_table_files(conn: &duckdb::Connection, table_name: &str) -> Et
 mod tests {
     use super::*;
 
+    use std::sync::atomic::Ordering as AtomicOrdering;
     use std::sync::{Arc, LazyLock};
 
     use etl_telemetry::metrics::init_metrics_handle;

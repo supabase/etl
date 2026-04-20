@@ -195,6 +195,16 @@ pub struct UpdateDestinationPipelineRequest {
     pub pipeline_config: FullApiPipelineConfig,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DeleteDestinationPipelineResponse {
+    #[schema(example = 1)]
+    pub destination_id: i64,
+    #[schema(example = 2)]
+    pub pipeline_id: i64,
+    #[schema(example = true)]
+    pub destination_deleted: bool,
+}
+
 #[utoipa::path(
     summary = "Create destination and pipeline",
     description = "Creates a destination and a pipeline linked to the specified source.",
@@ -369,7 +379,7 @@ pub async fn update_destination_and_pipeline(
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Destination and pipeline deleted successfully"),
+        (status = 200, description = "Pipeline deleted successfully, with destination deletion status included in the response body", body = DeleteDestinationPipelineResponse),
         (status = 409, description = "Pipeline is active", body = ErrorMessage),
         (status = 404, description = "Pipeline or destination not found", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
@@ -421,7 +431,7 @@ pub async fn delete_destination_and_pipeline(
             .await?;
     let mut api_txn = pool.begin().await?;
     let mut source_txn = source_pool.begin().await?;
-    let table_ids = delete_pipeline_api_and_source_state(
+    delete_pipeline_api_and_source_state(
         api_txn.deref_mut(),
         source_txn.deref_mut(),
         tenant_id,
@@ -431,19 +441,26 @@ pub async fn delete_destination_and_pipeline(
     let remaining_pipelines =
         read_pipelines_for_destination_for_deletion(api_txn.deref_mut(), tenant_id, destination_id)
             .await?;
-    if remaining_pipelines.is_empty() {
+    let destination_deleted = if remaining_pipelines.is_empty() {
         db::destinations::delete_destination(api_txn.deref_mut(), tenant_id, destination_id)
             .await?
             .ok_or(DestinationPipelineError::DestinationNotFound(
                 destination_id,
             ))?;
-    }
+        true
+    } else {
+        false
+    };
     // Commit the API transaction first. If the source transaction committed first and the API
     // commit failed afterwards, the API database could still reference pipeline state that no
     // longer exists in the source database.
     api_txn.commit().await?;
     source_txn.commit().await?;
-    delete_pipeline_replication_slots(&source_pool, pipeline.id, table_ids).await?;
+    delete_pipeline_replication_slots(&source_pool, pipeline.id).await?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(Json(DeleteDestinationPipelineResponse {
+        destination_id,
+        pipeline_id: pipeline.id,
+        destination_deleted,
+    }))
 }

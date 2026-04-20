@@ -2,7 +2,7 @@ use etl_api::k8s::PodStatus;
 use etl_api::routes::destinations::ReadDestinationResponse;
 use etl_api::routes::destinations_pipelines::{
     CreateDestinationPipelineRequest, CreateDestinationPipelineResponse,
-    UpdateDestinationPipelineRequest,
+    DeleteDestinationPipelineResponse, UpdateDestinationPipelineRequest,
 };
 use etl_api::routes::pipelines::ReadPipelineResponse;
 use etl_config::shared::PgConnectionConfig;
@@ -650,6 +650,13 @@ async fn destination_and_pipeline_can_be_deleted() {
     // Assert
     let status = response.status();
     assert!(status.is_success());
+    let response: DeleteDestinationPipelineResponse = response
+        .json()
+        .await
+        .expect("failed to deserialize response");
+    assert_eq!(response.destination_id, fixture.destination_id);
+    assert_eq!(response.pipeline_id, fixture.pipeline_id);
+    assert!(response.destination_deleted);
 
     // Verify they no longer exist
     let destination_response = app

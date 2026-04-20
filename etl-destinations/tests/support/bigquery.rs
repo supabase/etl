@@ -5,21 +5,12 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::types::PgNumeric;
+use etl_destinations::bigquery::test_utils::parse_table_cell;
 use gcp_bigquery_client::model::table_cell::TableCell;
 use gcp_bigquery_client::model::table_row::TableRow;
 use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
-
-pub fn parse_table_cell<O>(table_cell: TableCell) -> Option<O>
-where
-    O: FromStr,
-    <O as FromStr>::Err: fmt::Debug,
-{
-    table_cell
-        .value
-        .map(|value| value.as_str().unwrap().parse().unwrap())
-}
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct BigQueryUser {

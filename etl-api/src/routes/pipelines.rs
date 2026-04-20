@@ -748,7 +748,7 @@ pub async fn delete_pipeline(
             .await?;
     let mut api_txn = pool.begin().await?;
     let mut source_txn = source_pool.begin().await?;
-    let table_ids = delete_pipeline_api_and_source_state(
+    delete_pipeline_api_and_source_state(
         api_txn.deref_mut(),
         source_txn.deref_mut(),
         tenant_id,
@@ -760,7 +760,7 @@ pub async fn delete_pipeline(
     // already been removed from the source database.
     api_txn.commit().await?;
     source_txn.commit().await?;
-    delete_pipeline_replication_slots(&source_pool, pipeline.id, table_ids).await?;
+    delete_pipeline_replication_slots(&source_pool, pipeline.id).await?;
 
     Ok(HttpResponse::Ok().finish())
 }
@@ -1101,7 +1101,7 @@ pub async fn get_pipeline_replication_status(
     let table_names = get_table_names_from_table_ids(source_txn.deref_mut(), &table_ids).await?;
 
     // Convert database states to UI-friendly format
-    let mut tables: Vec<TableReplicationStatus> = Vec::new();
+    let mut tables: Vec<TableReplicationStatus> = Vec::with_capacity(state_rows.len());
     for row in state_rows {
         let table_id = TableId::new(row.table_id.0);
         let table_name = table_names
@@ -1247,7 +1247,7 @@ pub async fn rollback_tables(
         }
     };
 
-    let mut rolled_back_tables = Vec::new();
+    let mut rolled_back_tables = Vec::with_capacity(target_table_ids.len());
     for table_id in target_table_ids {
         let new_state_row = match rollback_type {
             RollbackType::Individual => {

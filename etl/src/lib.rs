@@ -30,10 +30,10 @@
 //!
 //! ## Store
 //! The [`store::schema::SchemaStore`] and [`store::state::StateStore`] traits define where the
-//! table schemas, replication state, and table mappings are stored. These stores are critical to a pipeline's
+//! table schemas, replication state, and destination table metadata are stored. These stores are critical to a pipeline's
 //! operation, as they allow it to be safely paused and resumed.
 //!
-//! The [`store::state::StateStore`] trait handles both table replication states and table mappings,
+//! The [`store::state::StateStore`] trait handles both table replication states and destination table metadata,
 //! providing a single interface for all state-related storage operations.
 //!
 //! **Note:** To pause and resume a pipeline after the process is stopped, it must be able to
@@ -50,24 +50,24 @@
 //! ```rust,no_run
 //! use etl::{
 //!     config::{BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, TcpKeepaliveConfig, TlsConfig, TableSyncCopyConfig},
-//!     destination::{Destination, async_result::{WriteEventsResult, WriteTableRowsResult}},
+//!     destination::{Destination, async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult}},
 //!     error::EtlResult,
 //!     pipeline::Pipeline,
 //!     store::both::memory::MemoryStore,
 //!     types::{Event, TableRow},
 //! };
-//! use etl_postgres::types::TableId;
+//! use etl_postgres::types::ReplicatedTableSchema;
 //!
 //! #[derive(Clone)]
 //! struct NoopDestination;
 //!
 //! impl Destination for NoopDestination {
 //!     fn name() -> &'static str { "noop" }
-//!     async fn truncate_table(&self, _table_id: TableId, async_result: etl::destination::async_result::TruncateTableResult<()>) -> EtlResult<()> {
+//!     async fn truncate_table(&self, _replicated_table_schema: &ReplicatedTableSchema, async_result: TruncateTableResult<()>) -> EtlResult<()> {
 //!         async_result.send(Ok(()));
 //!         Ok(())
 //!     }
-//!     async fn write_table_rows(&self, _table_id: TableId, _table_rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> EtlResult<()> {
+//!     async fn write_table_rows(&self, _replicated_table_schema: &ReplicatedTableSchema, _table_rows: Vec<TableRow>, async_result: WriteTableRowsResult<()>) -> EtlResult<()> {
 //!         async_result.send(Ok(()));
 //!         Ok(())
 //!     }

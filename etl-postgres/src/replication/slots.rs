@@ -145,7 +145,7 @@ impl TryFrom<EtlReplicationSlot> for String {
 /// Deletes all replication slots for a given pipeline.
 ///
 /// This function deletes both the apply worker slot and all table sync worker slots
-/// for the tables associated with the pipeline.
+/// associated with the pipeline.
 ///
 /// This function forcefully terminates active walsender processes and drops slots even if they
 /// are active. It retries up to 3 times with exponential backoff to handle transient failures.
@@ -154,31 +154,18 @@ impl TryFrom<EtlReplicationSlot> for String {
 pub async fn delete_pipeline_replication_slots(
     pool: &PgPool,
     pipeline_id: u64,
-    table_ids: &[TableId],
 ) -> sqlx::Result<()> {
-    // Collect all slot names that need to be deleted
-    let mut slot_names: Vec<String> = Vec::with_capacity(table_ids.len() + 1);
-
-    // Add apply worker slot
-    let slot_name = EtlReplicationSlot::for_apply_worker(pipeline_id);
-    if let Ok(apply_slot_name) = slot_name.try_into() {
-        slot_names.push(apply_slot_name);
+    let Ok(apply_slot_name) = String::try_from(EtlReplicationSlot::for_apply_worker(pipeline_id))
+    else {
+        return Ok(());
     };
-
-    // Add table sync worker slots
-    for table_id in table_ids {
-        let slot_name = EtlReplicationSlot::for_table_sync_worker(pipeline_id, *table_id);
-        if let Ok(table_sync_slot_name) = slot_name.try_into() {
-            slot_names.push(table_sync_slot_name);
-        };
-    }
+    let Ok(table_sync_prefix) = EtlReplicationSlot::table_sync_prefix(pipeline_id) else {
+        return Ok(());
+    };
+    let table_sync_pattern = format!("{table_sync_prefix}%");
 
     const MAX_RETRIES: u32 = 3;
     const INITIAL_BACKOFF_MS: u64 = 100;
-
-    if slot_names.is_empty() {
-        return Ok(());
-    }
 
     for attempt in 0..MAX_RETRIES {
         // Phase 1: Terminate active walsender processes for these slots
@@ -186,11 +173,14 @@ pub async fn delete_pipeline_replication_slots(
             r#"
             select pg_terminate_backend(r.active_pid)
             from pg_replication_slots r
-            where r.slot_name = any($1) and r.active = true and r.active_pid is not null;
+            where (r.slot_name = $1 or r.slot_name like $2)
+              and r.active = true
+              and r.active_pid is not null;
             "#,
         );
         let result = sqlx::query(&terminate_query)
-            .bind(&slot_names)
+            .bind(&apply_slot_name)
+            .bind(&table_sync_pattern)
             .execute(pool)
             .await;
         if let Err(err) = result {
@@ -208,11 +198,12 @@ pub async fn delete_pipeline_replication_slots(
             r#"
             select pg_drop_replication_slot(r.slot_name)
             from pg_replication_slots r
-            where r.slot_name = any($1);
+            where r.slot_name = $1 or r.slot_name like $2;
             "#,
         );
         let result = sqlx::query(&drop_query)
-            .bind(&slot_names)
+            .bind(&apply_slot_name)
+            .bind(&table_sync_pattern)
             .execute(pool)
             .await;
 

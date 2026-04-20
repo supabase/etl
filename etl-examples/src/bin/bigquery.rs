@@ -115,8 +115,8 @@ struct BqArgs {
 // Entry point - handles error reporting and process exit
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    if let Err(e) = main_impl().await {
-        error!("{e}");
+    if let Err(err) = main_impl().await {
+        error!(error = %err, "fatal error");
         std::process::exit(1);
     }
 

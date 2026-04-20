@@ -10,6 +10,7 @@ use crate::destination::Destination;
 use crate::error::{ErrorKind, EtlResult};
 use crate::metrics::register_metrics;
 use crate::replication::client::PgReplicationClient;
+use crate::replication::table_cache::SharedTableCache;
 use crate::state::table::TableReplicationPhase;
 use crate::store::cleanup::CleanupStore;
 use crate::store::schema::SchemaStore;
@@ -70,7 +71,8 @@ where
     ///
     /// The pipeline is initially in the not-started state and must be
     /// explicitly started using [`Pipeline::start`]. The state store is used for tracking
-    /// replication progress, table schemas, and table mappings, while the destination receives replicated data.
+    /// replication progress, table schemas, and destination table metadata, while the
+    /// destination receives replicated data.
     /// The pipeline ID is extracted from the configuration, ensuring consistency between
     /// pipeline identity and configuration settings.
     pub fn new(config: PipelineConfig, state_store: S, destination: D) -> Self {
@@ -111,16 +113,16 @@ where
 
     /// Starts the pipeline and begins replication processing.
     ///
-    /// This method initializes the connection to Postgres, sets up table mappings
-    /// and schemas, creates the worker pool for table synchronization, and starts
-    /// the apply worker for processing replication stream events.
+    /// This method initializes the connection to Postgres, loads destination
+    /// table metadata and schemas, creates the worker pool for table
+    /// synchronization, and starts the apply worker for processing replication
+    /// stream events.
     pub async fn start(&mut self) -> EtlResult<()> {
         info!(
             publication_name = %self.config.publication_name,
             pipeline_id = %self.config.id,
             "starting pipeline"
         );
-
         // We always start memory monitoring to keep total memory snapshots available.
         let memory_monitor = MemoryMonitor::new(
             self.config.id,
@@ -133,13 +135,12 @@ where
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
-        // We load the table mappings and schemas from the store to have them cached for quick
-        // access.
+        // We load the destination table metadata and schemas from the store to have them cached
+        // for quick access.
         //
-        // It's really important to load the mappings and schemas before starting the apply worker
-        // since downstream code relies on the assumption that the mappings and schemas are loaded
-        // in the cache.
-        self.store.load_table_mappings().await?;
+        // It's really important to load the metadata and schemas before starting the apply worker
+        // since downstream code relies on the assumption that they are loaded in the cache.
+        self.store.load_destination_tables_metadata().await?;
         self.store.load_table_schemas().await?;
 
         // We load the table states by checking the table ids of a publication and loading/creating
@@ -154,12 +155,18 @@ where
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
+        // We create the shared per-table protocol cache used by both the apply worker and table
+        // sync workers. It tracks the latest schema snapshot and replication mask for each table.
+        let shared_table_cache = SharedTableCache::new();
+
+        // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
             self.config.id,
             self.config.clone(),
             pool.clone(),
             self.store.clone(),
             self.destination.clone(),
+            shared_table_cache,
             self.shutdown_tx.subscribe(),
             table_sync_worker_permits,
             memory_monitor,
@@ -281,7 +288,7 @@ where
     /// Also detects tables for which we have stored state but are no longer
     /// part of the publication, performs a best-effort cleanup of their table
     /// sync replication slots, and deletes their stored state (replication
-    /// state, table mappings, and table schemas) without touching the actual
+    /// state, destination table metadata, and table schemas) without touching the actual
     /// destination tables.
     async fn initialize_table_states(
         &self,
@@ -311,12 +318,6 @@ where
             table_count = publication_table_ids.len(),
             "publication tables loaded"
         );
-
-        // We notify the user that if there are no tables in the publication, the system will start but
-        // the pipeline will be hanging idle forever.
-        if publication_table_ids.is_empty() {
-            warn!(publication_name = %self.config.publication_name, "the publication has no tables, the pipeline will not receive any data");
-        }
 
         // Validate that the publication is configured correctly for partitioned tables.
         //

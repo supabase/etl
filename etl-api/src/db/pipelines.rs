@@ -9,9 +9,8 @@ use crate::db::images::Image;
 use crate::db::replicators::{Replicator, ReplicatorsDbError, create_replicator};
 use crate::db::sources::Source;
 use crate::routes::pipelines::PipelineError;
-use etl_postgres::replication::{health, schema, slots, state, table_mappings};
-use etl_postgres::types::TableId;
-use sqlx::{PgConnection, PgExecutor, PgPool, PgTransaction};
+use etl_postgres::replication::{destination_metadata, health, schema, slots, state};
+use sqlx::{FromRow, PgConnection, PgExecutor, PgPool, PgTransaction};
 use std::ops::DerefMut;
 use thiserror::Error;
 
@@ -33,7 +32,7 @@ pub struct Pipeline {
     pub config: StoredPipelineConfig,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, FromRow)]
 pub struct PipelineDeletion {
     pub id: i64,
     pub source_id: i64,
@@ -221,7 +220,7 @@ pub async fn delete_pipeline_api_and_source_state(
     source_connection: &mut PgConnection,
     tenant_id: &str,
     pipeline: &PipelineDeletion,
-) -> Result<Option<Vec<TableId>>, PipelinesDbError> {
+) -> Result<(), PipelinesDbError> {
     // Delete the pipeline from the main database (this does NOT cascade delete the replicator due to missing constraint).
     delete_pipeline(&mut *api_connection, tenant_id, pipeline.id).await?;
 
@@ -235,30 +234,20 @@ pub async fn delete_pipeline_api_and_source_state(
 pub async fn delete_pipeline_source_state(
     source_connection: &mut PgConnection,
     pipeline_id: i64,
-) -> Result<Option<Vec<TableId>>, PipelinesDbError> {
-    // Get all table IDs for this pipeline before deleting state (only if all ETL tables exist).
-    let etl_present = health::etl_tables_present(&mut *source_connection).await?;
-    let table_ids = if etl_present {
-        Some(state::get_pipeline_table_ids(&mut *source_connection, pipeline_id).await?)
-    } else {
-        None
-    };
-
-    // Delete state, schema, and table mappings from the source database, only if ETL tables exist.
-    if etl_present {
-        let _ =
-            state::delete_replication_state_for_all_tables(&mut *source_connection, pipeline_id)
-                .await?;
-        let _ = schema::delete_table_schemas_for_all_tables(&mut *source_connection, pipeline_id)
+) -> Result<(), PipelinesDbError> {
+    // Delete state, schema, and destination metadata from the source database, only if ETL tables exist.
+    if health::etl_tables_present(&mut *source_connection).await? {
+        state::delete_replication_state_for_all_tables(&mut *source_connection, pipeline_id)
             .await?;
-        let _ = table_mappings::delete_table_mappings_for_all_tables(
+        schema::delete_table_schemas_for_all_tables(&mut *source_connection, pipeline_id).await?;
+        destination_metadata::delete_destination_tables_metadata_for_all_tables(
             &mut *source_connection,
             pipeline_id,
         )
         .await?;
     }
 
-    Ok(table_ids)
+    Ok(())
 }
 
 pub async fn delete_pipelines_api_and_source_state(
@@ -266,42 +255,40 @@ pub async fn delete_pipelines_api_and_source_state(
     source_connection: &mut PgConnection,
     tenant_id: &str,
     pipelines: &[PipelineDeletion],
-) -> Result<Vec<(i64, Option<Vec<TableId>>)>, PipelinesDbError> {
-    let mut pipeline_slot_state = Vec::with_capacity(pipelines.len());
+) -> Result<Vec<i64>, PipelinesDbError> {
+    let mut deleted_pipeline_ids = Vec::with_capacity(pipelines.len());
     for pipeline in pipelines {
-        let table_ids = delete_pipeline_api_and_source_state(
+        delete_pipeline_api_and_source_state(
             api_connection,
             source_connection,
             tenant_id,
             pipeline,
         )
         .await?;
-        pipeline_slot_state.push((pipeline.id, table_ids));
+        deleted_pipeline_ids.push(pipeline.id);
     }
 
-    Ok(pipeline_slot_state)
+    Ok(deleted_pipeline_ids)
 }
 
 pub async fn delete_pipelines_source_state(
     source_connection: &mut PgConnection,
     pipelines: &[PipelineDeletion],
-) -> Result<Vec<(i64, Option<Vec<TableId>>)>, PipelinesDbError> {
-    let mut pipeline_slot_state = Vec::with_capacity(pipelines.len());
+) -> Result<Vec<i64>, PipelinesDbError> {
+    let mut deleted_pipeline_ids = Vec::with_capacity(pipelines.len());
     for pipeline in pipelines {
-        let table_ids = delete_pipeline_source_state(source_connection, pipeline.id).await?;
-        pipeline_slot_state.push((pipeline.id, table_ids));
+        delete_pipeline_source_state(source_connection, pipeline.id).await?;
+        deleted_pipeline_ids.push(pipeline.id);
     }
 
-    Ok(pipeline_slot_state)
+    Ok(deleted_pipeline_ids)
 }
 
 pub async fn delete_pipeline_replication_slots(
     source_pool: &PgPool,
     pipeline_id: i64,
-    table_ids: Option<Vec<TableId>>,
 ) -> Result<(), PipelinesDbError> {
-    let table_ids = table_ids.as_deref().unwrap_or(&[]);
-    slots::delete_pipeline_replication_slots(source_pool, pipeline_id as u64, table_ids).await?;
+    slots::delete_pipeline_replication_slots(source_pool, pipeline_id as u64).await?;
 
     Ok(())
 }
@@ -360,24 +347,19 @@ pub async fn read_pipeline_for_deletion<'c, E>(
 where
     E: PgExecutor<'c>,
 {
-    let record = sqlx::query!(
+    let record = sqlx::query_as::<_, PipelineDeletion>(
         r#"
         select id, source_id, destination_id, replicator_id
         from app.pipelines
         where tenant_id = $1 and id = $2
         "#,
-        tenant_id,
-        pipeline_id,
     )
+    .bind(tenant_id)
+    .bind(pipeline_id)
     .fetch_optional(executor)
     .await?;
 
-    Ok(record.map(|record| PipelineDeletion {
-        id: record.id,
-        source_id: record.source_id,
-        destination_id: record.destination_id,
-        replicator_id: record.replicator_id,
-    }))
+    Ok(record)
 }
 
 pub async fn read_all_pipelines_for_deletion<'c, E>(
@@ -387,26 +369,18 @@ pub async fn read_all_pipelines_for_deletion<'c, E>(
 where
     E: PgExecutor<'c>,
 {
-    let records = sqlx::query!(
+    let records = sqlx::query_as::<_, PipelineDeletion>(
         r#"
         select id, source_id, destination_id, replicator_id
         from app.pipelines
         where tenant_id = $1
         "#,
-        tenant_id,
     )
+    .bind(tenant_id)
     .fetch_all(executor)
     .await?;
 
-    Ok(records
-        .into_iter()
-        .map(|record| PipelineDeletion {
-            id: record.id,
-            source_id: record.source_id,
-            destination_id: record.destination_id,
-            replicator_id: record.replicator_id,
-        })
-        .collect())
+    Ok(records)
 }
 
 pub async fn read_pipelines_for_source_for_deletion<'c, E>(
@@ -417,27 +391,19 @@ pub async fn read_pipelines_for_source_for_deletion<'c, E>(
 where
     E: PgExecutor<'c>,
 {
-    let records = sqlx::query!(
+    let records = sqlx::query_as::<_, PipelineDeletion>(
         r#"
         select id, source_id, destination_id, replicator_id
         from app.pipelines
         where tenant_id = $1 and source_id = $2
         "#,
-        tenant_id,
-        source_id,
     )
+    .bind(tenant_id)
+    .bind(source_id)
     .fetch_all(executor)
     .await?;
 
-    Ok(records
-        .into_iter()
-        .map(|record| PipelineDeletion {
-            id: record.id,
-            source_id: record.source_id,
-            destination_id: record.destination_id,
-            replicator_id: record.replicator_id,
-        })
-        .collect())
+    Ok(records)
 }
 
 pub async fn read_pipelines_for_destination_for_deletion<'c, E>(
@@ -448,27 +414,19 @@ pub async fn read_pipelines_for_destination_for_deletion<'c, E>(
 where
     E: PgExecutor<'c>,
 {
-    let records = sqlx::query!(
+    let records = sqlx::query_as::<_, PipelineDeletion>(
         r#"
         select id, source_id, destination_id, replicator_id
         from app.pipelines
         where tenant_id = $1 and destination_id = $2
         "#,
-        tenant_id,
-        destination_id,
     )
+    .bind(tenant_id)
+    .bind(destination_id)
     .fetch_all(executor)
     .await?;
 
-    Ok(records
-        .into_iter()
-        .map(|record| PipelineDeletion {
-            id: record.id,
-            source_id: record.source_id,
-            destination_id: record.destination_id,
-            replicator_id: record.replicator_id,
-        })
-        .collect())
+    Ok(records)
 }
 
 pub async fn read_pipeline_components(

@@ -319,8 +319,9 @@ pub async fn delete_tenant(
             .push(pipeline);
     }
 
-    // We assume each stored source points at a different physical database, so tenant teardown
-    // can process them independently without deduplicating connection configs.
+    // We intentionally visit every stored source connection. If multiple source records happen to
+    // target the same physical database, the source-side cleanup stays idempotent, so repeated
+    // passes are still safe without deduplicating connection configs.
     for source in sources {
         let source_pipelines = pipelines_by_source.remove(&source.id).unwrap_or_default();
         // If the source database is already unreachable during tenant teardown, we treat it as
@@ -343,12 +344,12 @@ pub async fn delete_tenant(
             }
         };
         let mut source_txn = source_pool.begin().await?;
-        let source_pipeline_slot_state =
+        let deleted_pipeline_ids =
             delete_pipelines_source_state(source_txn.deref_mut(), &source_pipelines).await?;
         db::sources::uninstall_source_installation(source_txn.deref_mut()).await?;
         source_txn.commit().await?;
-        for (pipeline_id, table_ids) in source_pipeline_slot_state {
-            delete_pipeline_replication_slots(&source_pool, pipeline_id, table_ids).await?;
+        for pipeline_id in deleted_pipeline_ids {
+            delete_pipeline_replication_slots(&source_pool, pipeline_id).await?;
         }
     }
 
