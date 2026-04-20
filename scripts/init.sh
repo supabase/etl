@@ -113,7 +113,7 @@ echo "🔗 Database URL: ${DATABASE_URL}"
 # Run database migrations
 echo "🔄 Running database migrations..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-bash "${SCRIPT_DIR}/../etl-api/scripts/run_migrations.sh"
+bash "${SCRIPT_DIR}/run_migrations.sh"
 
 # Seed default replicator image (idempotent).
 echo "🖼️ Seeding default replicator image..."

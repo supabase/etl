@@ -145,6 +145,8 @@ jobs:
       POSTGRES_HOST: localhost
       TESTS_DATABASE_HOST: localhost
       TESTS_DATABASE_PORT: 5430
+      TESTS_DATABASE_START_PORT: 5430
+      NUM_LOCAL_DATABASES: 4
       TESTS_DATABASE_USERNAME: postgres
       TESTS_DATABASE_PASSWORD: postgres
       TESTS_CLICKHOUSE_URL: http://localhost:8123
@@ -165,7 +167,8 @@ jobs:
 
       - name: Start Docker Compose (Postgres ${{ matrix.postgres_version }})
         run: |
-          POSTGRES_VERSION=${{ matrix.postgres_version }} docker compose -f ./scripts/docker-compose.yaml up -d
+          POSTGRES_VERSION=${{ matrix.postgres_version }} \
+            cargo xtask postgres start
 
       - name: Vendor DuckDB Extensions
         run: |
@@ -187,7 +190,7 @@ jobs:
       - name: Migrate Database
         run: |
           sudo apt-get install libpq-dev -y
-          ./etl-api/scripts/run_migrations.sh
+          ./scripts/run_migrations.sh etl-api
 
       - name: Set up BigQuery Credentials
         run: |
@@ -195,21 +198,15 @@ jobs:
           echo "TESTS_BIGQUERY_PROJECT_ID=${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}" >> $GITHUB_ENV
           echo "TESTS_BIGQUERY_SA_KEY_PATH=/tmp/bigquery-sa-key.json" >> $GITHUB_ENV
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@328a871ad8f62ecac78390391f463ccabc974b72 # v2.69.9
+        with:
+          tool: cargo-nextest
+
       - name: Run Unit and Integration Tests
         if: matrix.postgres_version != 18
         run: |
-          cargo test \
-            --workspace \
-            --all-features \
-            --no-fail-fast
-
-      - name: Run Exclusive Tests Sequentially
-        if: matrix.postgres_version != 18
-        run: |
-          cargo test \
-            --workspace \
-            --all-features \
-            -- --ignored exclusive_ --test-threads=1
+          cargo xtask nextest run
 
       - name: Install cargo-llvm-cov
         if: matrix.postgres_version == 18
@@ -224,19 +221,7 @@ jobs:
       - name: Run Unit and Integration Tests with Coverage
         if: matrix.postgres_version == 18
         run: |
-          cargo llvm-cov test \
-            --workspace --no-fail-fast \
-            --all-features \
-            --no-report
-
-      - name: Run Exclusive Tests Sequentially with Coverage
-        if: matrix.postgres_version == 18
-        run: |
-          cargo llvm-cov test \
-            --workspace \
-            --all-features \
-            --no-report \
-            -- --ignored exclusive_ --test-threads=1
+          cargo xtask nextest llvm-cov
 
       - name: Merge Coverage Data
         if: matrix.postgres_version == 18

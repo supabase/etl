@@ -3,6 +3,7 @@ name = "etl"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+autotests = false
 
 rust-version.workspace = true
 repository.workspace = true
@@ -29,6 +30,7 @@ metrics = { workspace = true }
 pg_escape = { workspace = true }
 pin-project-lite = { workspace = true }
 postgres-replication = { workspace = true }
+rand = { workspace = true, features = ["thread_rng"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive", "alloc"] }
 serde_json = { workspace = true, features = ["std"] }
@@ -46,7 +48,9 @@ x509-cert = { workspace = true, default-features = false }
 etl-postgres = { workspace = true, features = ["tokio", "replication", "test-utils"] }
 etl-telemetry = { workspace = true }
 
-rand = { workspace = true, features = ["thread_rng"] }
+[[test]]
+name = "main"
+path = "tests/main.rs"
 
 [lints]
 workspace = true

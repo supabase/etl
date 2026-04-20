@@ -18,8 +18,6 @@ use crate::{
     support::test_app::{spawn_test_app, spawn_test_app_with_trusted_username},
 };
 
-mod support;
-
 fn source_config_from_db_config(source_db_config: &PgConnectionConfig) -> FullApiSourceConfig {
     FullApiSourceConfig {
         host: source_db_config.host.clone(),

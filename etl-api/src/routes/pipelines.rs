@@ -24,7 +24,7 @@ use crate::db::images::ImagesDbError;
 use crate::db::pipelines::{MAX_PIPELINES_PER_TENANT, PipelinesDbError, read_pipeline_components};
 use crate::db::replicators::ReplicatorsDbError;
 use crate::db::sources::SourcesDbError;
-use crate::feature_flags::get_max_pipelines_per_tenant;
+use crate::feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant};
 use crate::k8s::core::{
     create_k8s_object_prefix, create_or_update_pipeline_resources_in_k8s,
     delete_pipeline_resources_in_k8s, is_replicator_pod_stopped,
@@ -526,7 +526,7 @@ pub async fn create_pipeline(
     pool: Data<PgPool>,
     encryption_key: Data<EncryptionKey>,
     pipeline: Json<CreatePipelineRequest>,
-    feature_flags_client: Option<Data<configcat::Client>>,
+    feature_flags_client: Option<Data<FeatureFlagsClient>>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline = pipeline.into_inner();
@@ -1070,7 +1070,7 @@ pub async fn get_pipeline_replication_status(
     let table_names = get_table_names_from_table_ids(source_txn.deref_mut(), &table_ids).await?;
 
     // Convert database states to UI-friendly format
-    let mut tables: Vec<TableReplicationStatus> = Vec::new();
+    let mut tables: Vec<TableReplicationStatus> = Vec::with_capacity(state_rows.len());
     for row in state_rows {
         let table_id = TableId::new(row.table_id.0);
         let table_name = table_names
@@ -1216,7 +1216,7 @@ pub async fn rollback_tables(
         }
     };
 
-    let mut rolled_back_tables = Vec::new();
+    let mut rolled_back_tables = Vec::with_capacity(target_table_ids.len());
     for table_id in target_table_ids {
         let new_state_row = match rollback_type {
             RollbackType::Individual => {

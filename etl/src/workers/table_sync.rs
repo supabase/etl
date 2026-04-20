@@ -20,6 +20,7 @@ use crate::replication::apply::{
     ApplyLoop, ApplyLoopResult, TableSyncWorkerContext, WorkerContext,
 };
 use crate::replication::client::PgReplicationClient;
+use crate::replication::table_cache::SharedTableCache;
 use crate::replication::table_sync::{TableSyncResult, start_table_sync};
 use crate::state::table::{
     RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
@@ -345,6 +346,7 @@ pub struct TableSyncWorker<S, D> {
     table_id: TableId,
     store: S,
     destination: D,
+    shared_table_cache: SharedTableCache,
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
@@ -365,6 +367,7 @@ impl<S, D> TableSyncWorker<S, D> {
         table_id: TableId,
         store: S,
         destination: D,
+        shared_table_cache: SharedTableCache,
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
@@ -377,6 +380,7 @@ impl<S, D> TableSyncWorker<S, D> {
             table_id,
             store,
             destination,
+            shared_table_cache,
             shutdown_rx,
             run_permit,
             memory_monitor,
@@ -430,7 +434,7 @@ where
             RetryDirective::NoRetry => RetryPolicy::NoRetry,
         };
         let mut table_error =
-            TableReplicationError::from_error_policy(table_id, err, &policy, retry_policy.clone());
+            TableReplicationError::from_error_policy(table_id, &err, &policy, retry_policy.clone());
 
         let mut state_guard = state.lock().await;
 
@@ -610,6 +614,7 @@ where
         let config = self.config.clone();
         let pipeline_id = self.pipeline_id;
         let destination = self.destination.clone();
+        let shared_table_cache = self.shared_table_cache.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let run_permit = self.run_permit.clone();
 
@@ -621,6 +626,7 @@ where
                 table_id,
                 store: store.clone(),
                 destination: destination.clone(),
+                shared_table_cache: shared_table_cache.clone(),
                 shutdown_rx: shutdown_rx.clone(),
                 run_permit: run_permit.clone(),
                 memory_monitor: self.memory_monitor.clone(),
@@ -719,6 +725,7 @@ where
             state.clone(),
             self.store.clone(),
             self.destination.clone(),
+            &self.shared_table_cache,
             self.shutdown_rx.clone(),
             self.memory_monitor.clone(),
             self.batch_budget.clone(),
@@ -755,6 +762,7 @@ where
             replication_client.clone(),
             self.store,
             self.destination,
+            self.shared_table_cache,
             worker_context,
             self.shutdown_rx,
             self.memory_monitor.clone(),

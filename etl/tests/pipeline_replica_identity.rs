@@ -1,5 +1,3 @@
-#![cfg(feature = "test-utils")]
-
 use etl::state::table::TableReplicationPhaseType;
 use etl::test_utils::database::{spawn_source_database, test_table_name};
 use etl::test_utils::materialize::{FromTableRow, materialize_events};

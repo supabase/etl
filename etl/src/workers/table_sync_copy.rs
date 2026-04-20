@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use etl_config::shared::BatchConfig;
-use etl_postgres::types::{TableId, TableSchema};
+use etl_postgres::types::TableId;
 use futures::{Stream, StreamExt};
 use metrics::{counter, histogram};
 use tokio::pin;
@@ -15,13 +15,13 @@ use tracing::info;
 use crate::concurrency::batch_budget::BatchBudgetController;
 use crate::concurrency::memory_monitor::MemoryMonitor;
 use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::stream::TryBatchBackpressureStream;
+use crate::concurrency::stream::{TryBatchBackpressureStream, table_sync_worker_copy_stream_id};
 use crate::destination::Destination;
 use crate::destination::async_result::WriteTableRowsResult;
 use crate::error::{ErrorKind, EtlResult};
 use crate::etl_error;
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC, etl_fail_point};
+use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
 use crate::metrics::{
     ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
     ETL_EVENTS_PROCESSED_TOTAL, ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
@@ -33,7 +33,7 @@ use crate::replication::client::{
     PostgresConnectionUpdate,
 };
 use crate::replication::stream::TableCopyStream;
-use crate::types::{PipelineId, TableRow};
+use crate::types::{PipelineId, ReplicatedTableSchema, TableRow};
 
 /// Calculates Load Imbalance Factor (LIF) for a set of values.
 ///
@@ -82,7 +82,7 @@ async fn copy_table_rows_from_stream<D, S>(
     mut table_copy_stream: Pin<&mut S>,
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
-    table_id: TableId,
+    replicated_table_schema: ReplicatedTableSchema,
     _pipeline_id: PipelineId,
     partitioning: &'static str,
     destination: D,
@@ -147,7 +147,7 @@ where
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
 
                 destination
-                    .write_table_rows(table_id, table_rows, flush_result)
+                    .write_table_rows(&replicated_table_schema, table_rows, flush_result)
                     .await?;
                 pending_flush_result.await.into_result()?;
 
@@ -170,7 +170,7 @@ where
                 .record(send_duration_seconds);
 
                 #[cfg(feature = "failpoints")]
-                etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC)?;
+                etl_fail_point(START_TABLE_SYNC_DURING_DATA_SYNC_FP)?;
             }
         }
     }
@@ -198,7 +198,7 @@ enum CopyPartition {
 pub async fn table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction,
     table_id: TableId,
-    table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
     max_copy_connections: u16,
     batch_config: BatchConfig,
@@ -212,7 +212,7 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
         parallel_table_copy(
             transaction,
             table_id,
-            table_schema,
+            replicated_table_schema,
             publication_name,
             max_copy_connections,
             batch_config,
@@ -227,7 +227,7 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
         serial_table_copy(
             transaction,
             table_id,
-            table_schema,
+            replicated_table_schema,
             publication_name,
             batch_config,
             shutdown_rx,
@@ -245,7 +245,7 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
 async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction,
     table_id: TableId,
-    table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
@@ -256,15 +256,22 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
+    let replicated_column_schemas = replicated_table_schema
+        .column_schemas()
+        .cloned()
+        .collect::<Vec<_>>();
     let table_copy_stream = transaction
-        .get_table_copy_stream(table_id, &table_schema.column_schemas, publication_name)
+        .get_table_copy_stream(table_id, &replicated_column_schemas, publication_name)
         .await?;
-    let table_copy_stream = TableCopyStream::wrap(table_copy_stream, &table_schema.column_schemas);
+    let table_copy_stream =
+        TableCopyStream::wrap(table_copy_stream, replicated_column_schemas.iter());
     let connection_updates_rx = transaction.get_cloned_client().connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
+    let stream_id = table_sync_worker_copy_stream_id(table_id);
     let table_copy_stream = TryBatchBackpressureStream::wrap(
         table_copy_stream,
+        stream_id,
         batch_config,
         memory_monitor.subscribe(),
         cached_batch_budget,
@@ -277,7 +284,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         table_copy_stream.as_mut(),
         shutdown_rx,
         connection_updates_rx,
-        table_id,
+        replicated_table_schema,
         pipeline_id,
         "false",
         destination,
@@ -324,7 +331,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction,
     table_id: TableId,
-    table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<&str>,
     max_copy_connections: u16,
     batch_config: BatchConfig,
@@ -408,7 +415,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 
         let replication_client = transaction.get_cloned_client();
         let snapshot_id = snapshot_id.clone();
-        let table_schema = table_schema.clone();
+        let replicated_table_schema = replicated_table_schema.clone();
         let publication_name = publication_name.clone();
         let batch_config = batch_config.clone();
         let shutdown_rx = shutdown_rx.clone();
@@ -424,7 +431,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             let result = copy_partition(
                 child_transaction,
                 table_id,
-                table_schema,
+                replicated_table_schema,
                 publication_name,
                 partition,
                 batch_config,
@@ -533,7 +540,7 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 async fn copy_partition<D>(
     child_transaction: PgReplicationChildTransaction,
     table_id: TableId,
-    table_schema: Arc<TableSchema>,
+    replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<Arc<str>>,
     partition: CopyPartition,
     batch_config: BatchConfig,
@@ -547,6 +554,10 @@ where
     D: Destination + Clone + Send + 'static,
 {
     let start_time = Instant::now();
+    let replicated_column_schemas = replicated_table_schema
+        .column_schemas()
+        .cloned()
+        .collect::<Vec<_>>();
 
     match &partition {
         CopyPartition::CtidRange(ctid) => match ctid {
@@ -587,7 +598,7 @@ where
             child_transaction
                 .get_table_copy_stream_with_ctid_partition(
                     table_id,
-                    &table_schema.column_schemas,
+                    &replicated_column_schemas,
                     publication_name.as_ref().map(Arc::as_ref),
                     ctid,
                 )
@@ -597,21 +608,23 @@ where
             child_transaction
                 .get_table_copy_stream(
                     *leaf_table_id,
-                    &table_schema.column_schemas,
+                    &replicated_column_schemas,
                     publication_name.as_ref().map(Arc::as_ref),
                 )
                 .await?
         }
     };
 
-    let table_copy_stream = TableCopyStream::wrap(copy_stream, &table_schema.column_schemas);
+    let table_copy_stream = TableCopyStream::wrap(copy_stream, replicated_column_schemas.iter());
     let connection_updates_rx = child_transaction
         .get_cloned_client()
         .connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
+    let stream_id = table_sync_worker_copy_stream_id(table_id);
     let table_copy_stream = TryBatchBackpressureStream::wrap(
         table_copy_stream,
+        stream_id,
         batch_config,
         memory_monitor.subscribe(),
         cached_batch_budget,
@@ -622,7 +635,7 @@ where
         table_copy_stream.as_mut(),
         shutdown_rx,
         connection_updates_rx,
-        table_id,
+        replicated_table_schema,
         pipeline_id,
         "true",
         destination,

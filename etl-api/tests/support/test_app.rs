@@ -4,7 +4,7 @@ use aws_lc_rs::aead::{AES_256_GCM, RandomizedNonceKey};
 use aws_lc_rs::rand::fill;
 use base64::prelude::*;
 use etl_api::config::{
-    ApiConfig, ApplicationSettings, EncryptionKey as ConfigEncryptionKey, SourceConfig,
+    ApiConfig, ApplicationSettings, EncryptionKey as ConfigEncryptionKey, K8sConfig, SourceConfig,
 };
 use etl_api::k8s::{K8sClient, TrustedRootCertsCache};
 use etl_api::routes::destinations::{CreateDestinationRequest, UpdateDestinationRequest};
@@ -580,6 +580,7 @@ async fn spawn_test_app_with_services(
             host: base_address.to_string(),
             port,
         },
+        k8s: K8sConfig::default(),
         encryption_key: ConfigEncryptionKey {
             id: 0,
             key: BASE64_STANDARD.encode(key_bytes),

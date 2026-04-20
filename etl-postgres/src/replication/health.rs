@@ -3,7 +3,7 @@ use sqlx::PgExecutor;
 /// Fully-qualified table names required by ETL.
 pub const ETL_TABLE_NAMES: [&str; 4] = [
     "etl.replication_state",
-    "etl.table_mappings",
+    "etl.destination_tables_metadata",
     "etl.table_schemas",
     "etl.table_columns",
 ];
@@ -12,7 +12,7 @@ pub const ETL_TABLE_NAMES: [&str; 4] = [
 ///
 /// Checks presence of the following relations:
 /// - etl.replication_state
-/// - etl.table_mappings
+/// - etl.destination_tables_metadata
 /// - etl.table_schemas
 /// - etl.table_columns
 pub async fn etl_tables_present<'c, E>(executor: E) -> Result<bool, sqlx::Error>
