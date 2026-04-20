@@ -138,8 +138,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
         .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
     assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
-    let mut actual_orders =
-        read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
+    let mut actual_orders = read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
 
     let expected_orders = vec![
         TableRow::new(vec![
@@ -373,8 +372,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
 
     assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
-    let mut actual_orders =
-        read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
+    let mut actual_orders = read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
 
     // Sort deterministically by the primary key (id) and sequence key for stable
     // assertions
@@ -591,8 +589,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     ];
     assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
-    let mut actual_orders =
-        read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
+    let mut actual_orders = read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
     for row in &mut actual_orders {
         let _ = row.values_mut().pop(); // drop sequence_key
     }

@@ -597,22 +597,18 @@ impl Validator for BigQueryValidator {
         &self,
         _ctx: &ValidationContext,
     ) -> Result<Vec<ValidationFailure>, ValidationError> {
-        let client = match BigQueryClient::new_with_key(
-            self.project_id.clone(),
-            &self.service_account_key,
-            1,
-        )
-        .await
-        {
-            Ok(client) => client,
-            Err(_) => {
-                return Ok(vec![ValidationFailure::critical(
-                    "BigQuery Authentication Failed",
-                    "Unable to authenticate with BigQuery.\n\nPlease verify:\n(1) The service \
-                     account key is valid JSON\n(2) The key has not expired or been revoked\n(3) \
-                     The project ID is correct",
-                )]);
-            }
+        let Ok(client) =
+            BigQueryClient::new_with_key(self.project_id.clone(), &self.service_account_key, 1)
+                .await
+        else {
+            return Ok(vec![ValidationFailure::critical(
+                "BigQuery Authentication Failed",
+                "Unable to authenticate with BigQuery.\n\n\
+                     Please verify:\n\
+                     (1) The service account key is valid JSON\n\
+                     (2) The key has not expired or been revoked\n\
+                     (3) The project ID is correct",
+            )]);
         };
 
         match client.dataset_exists(&self.dataset_id).await {
@@ -817,17 +813,15 @@ impl Validator for IcebergValidator {
                 .await
             }
         };
-
-        let client = match client {
-            Ok(client) => client,
-            Err(_) => {
-                return Ok(vec![ValidationFailure::critical(
-                    "Iceberg Authentication Failed",
-                    "Unable to authenticate with Iceberg.\n\nPlease verify:\n(1) The catalog \
-                     token is valid and has not expired\n(2) The S3 access key and secret key are \
-                     correct\n(3) The catalog URI is properly formatted",
-                )]);
-            }
+        let Ok(client) = client else {
+            return Ok(vec![ValidationFailure::critical(
+                "Iceberg Authentication Failed",
+                "Unable to authenticate with Iceberg.\n\n\
+                     Please verify:\n\
+                     (1) The catalog token is valid and has not expired\n\
+                     (2) The S3 access key and secret key are correct\n\
+                     (3) The catalog URI is properly formatted",
+            )]);
         };
 
         match client.validate_connectivity().await {
