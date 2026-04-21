@@ -11,7 +11,7 @@ const APP_TYPE_LABEL: &str = "app_type";
 const APP_TYPE_VALUE: &str = "etl-replicator";
 
 /// Starts background metrics collection tasks for the replicator runtime.
-pub fn spawn_metrics_tasks() {
+pub(crate) fn spawn_metrics_tasks() {
     tokio::spawn_tokio_metrics_task();
 
     #[cfg(not(target_env = "msvc"))]

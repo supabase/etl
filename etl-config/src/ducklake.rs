@@ -1,7 +1,6 @@
 //! DuckLake-specific configuration helpers.
 
-use std::io;
-use std::path::PathBuf;
+use std::{io, path::PathBuf};
 
 use thiserror::Error;
 use url::Url;
@@ -40,9 +39,7 @@ pub fn parse_ducklake_url(value: &str) -> Result<Url, ParseDucklakeUrlError> {
     let path = if path.is_absolute() {
         path
     } else {
-        std::env::current_dir()
-            .map_err(ParseDucklakeUrlError::CurrentDir)?
-            .join(path)
+        std::env::current_dir().map_err(ParseDucklakeUrlError::CurrentDir)?.join(path)
     };
 
     Url::from_file_path(&path).map_err(|_| ParseDucklakeUrlError::FilePath(path))
@@ -50,9 +47,11 @@ pub fn parse_ducklake_url(value: &str) -> Result<Url, ParseDucklakeUrlError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::{Mutex, OnceLock};
+
     use tempfile::TempDir;
+
+    use super::*;
 
     struct CurrentDirGuard(PathBuf);
 
@@ -79,10 +78,7 @@ mod tests {
             parse_ducklake_url("postgres://postgres:postgres@localhost:5432/ducklake_catalog")
                 .unwrap();
 
-        assert_eq!(
-            url.as_str(),
-            "postgres://postgres:postgres@localhost:5432/ducklake_catalog"
-        );
+        assert_eq!(url.as_str(), "postgres://postgres:postgres@localhost:5432/ducklake_catalog");
     }
 
     #[test]

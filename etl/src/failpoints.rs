@@ -1,12 +1,15 @@
 //! Fault injection utilities for testing error scenarios.
 //!
-//! Provides configurable failpoints that can trigger specific error conditions during testing.
-//! Failpoints support different retry policies to test error handling and recovery behavior.
+//! Provides configurable failpoints that can trigger specific error conditions
+//! during testing. Failpoints support different retry policies to test error
+//! handling and recovery behavior.
 
 use fail::fail_point;
 
-use crate::bail;
-use crate::error::{ErrorKind, EtlResult};
+use crate::{
+    bail,
+    error::{ErrorKind, EtlResult},
+};
 
 pub const START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP: &str =
     "start_table_sync.before_data_sync_slot_creation_fp";
@@ -15,9 +18,9 @@ pub const SEND_STATUS_UPDATE_FP: &str = "send_status_update_fp";
 
 /// Executes a configurable failpoint for testing error scenarios.
 ///
-/// When the failpoint is active, and it's set to return an error, this function generates an [`EtlError`] with
-/// the specified retry policy. The retry behavior can be controlled through
-/// the failpoint parameter:
+/// When the failpoint is active, and it's set to return an error, this function
+/// generates an [`EtlError`] with the specified retry policy. The retry
+/// behavior can be controlled through the failpoint parameter:
 ///
 /// - `"no_retry"` - Creates an error that should not be retried
 /// - `"manual_retry"` - Creates an error requiring manual intervention

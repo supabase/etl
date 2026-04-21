@@ -1,15 +1,13 @@
 #![allow(dead_code)]
 #![cfg(all(feature = "bigquery", feature = "test-utils"))]
 
-use base64::Engine;
-use base64::prelude::BASE64_STANDARD;
+use std::{fmt, str::FromStr};
+
+use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::types::PgNumeric;
 use etl_destinations::bigquery::test_utils::parse_table_cell;
-use gcp_bigquery_client::model::table_cell::TableCell;
-use gcp_bigquery_client::model::table_row::TableRow;
-use std::fmt;
-use std::str::FromStr;
+use gcp_bigquery_client::model::{table_cell::TableCell, table_row::TableRow};
 use uuid::Uuid;
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -21,11 +19,7 @@ pub struct BigQueryUser {
 
 impl BigQueryUser {
     pub fn new(id: i32, name: &str, age: i32) -> Self {
-        Self {
-            id,
-            name: name.to_owned(),
-            age,
-        }
+        Self { id, name: name.to_owned(), age }
     }
 }
 
@@ -49,10 +43,7 @@ pub struct BigQueryOrder {
 
 impl BigQueryOrder {
     pub fn new(id: i32, description: &str) -> Self {
-        Self {
-            id,
-            description: description.to_owned(),
-        }
+        Self { id, description: description.to_owned() }
     }
 }
 
@@ -163,16 +154,12 @@ impl From<TableRow> for NullableColsScalar {
 
         // Helper function to parse JSON values
         fn parse_json_value(table_cell: TableCell) -> Option<serde_json::Value> {
-            table_cell
-                .value
-                .and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
+            table_cell.value.and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
         }
 
         // Helper function to parse byte arrays (decode from base64)
         fn parse_bytes(table_cell: TableCell) -> Option<Vec<u8>> {
-            table_cell
-                .value
-                .and_then(|v| v.as_str().and_then(|s| BASE64_STANDARD.decode(s).ok()))
+            table_cell.value.and_then(|v| v.as_str().and_then(|s| BASE64_STANDARD.decode(s).ok()))
         }
 
         // Helper function to parse Unix timestamp from TableCell to DateTime<Utc>
@@ -479,10 +466,7 @@ impl PartialEq for NullableColsArray {
             match (a, b) {
                 (Some(a_vec), Some(b_vec)) => {
                     a_vec.len() == b_vec.len()
-                        && a_vec
-                            .iter()
-                            .zip(b_vec.iter())
-                            .all(|(x, y)| (x - y).abs() < f32::EPSILON)
+                        && a_vec.iter().zip(b_vec.iter()).all(|(x, y)| (x - y).abs() < f32::EPSILON)
                 }
                 (None, None) => true,
                 _ => false,
@@ -493,10 +477,7 @@ impl PartialEq for NullableColsArray {
             match (a, b) {
                 (Some(a_vec), Some(b_vec)) => {
                     a_vec.len() == b_vec.len()
-                        && a_vec
-                            .iter()
-                            .zip(b_vec.iter())
-                            .all(|(x, y)| (x - y).abs() < f64::EPSILON)
+                        && a_vec.iter().zip(b_vec.iter()).all(|(x, y)| (x - y).abs() < f64::EPSILON)
                 }
                 (None, None) => true,
                 _ => false,
@@ -582,26 +563,7 @@ impl NonNullableColsScalar {
         jb: serde_json::Value,
         o: u32,
     ) -> Self {
-        Self {
-            id,
-            b,
-            t,
-            i2,
-            i4,
-            i8,
-            f4,
-            f8,
-            n,
-            by,
-            d,
-            ti,
-            ts,
-            tstz,
-            u,
-            j,
-            jb,
-            o,
-        }
+        Self { id, b, t, i2, i4, i8, f4, f8, n, by, d, ti, ts, tstz, u, j, jb, o }
     }
 }
 

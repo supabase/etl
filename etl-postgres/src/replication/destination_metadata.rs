@@ -1,6 +1,6 @@
-use sqlx::postgres::types::Oid as SqlxTableId;
-use sqlx::{PgExecutor, PgPool, Row, Type};
 use std::collections::HashMap;
+
+use sqlx::{PgExecutor, PgPool, Row, Type, postgres::types::Oid as SqlxTableId};
 
 use crate::types::{SnapshotId, TableId};
 
@@ -8,10 +8,7 @@ use crate::types::{SnapshotId, TableId};
 ///
 /// Maps to the `etl.destination_table_schema_status` PostgreSQL enum type.
 #[derive(Debug, Clone, Copy, Type, PartialEq, Eq)]
-#[sqlx(
-    type_name = "etl.destination_table_schema_status",
-    rename_all = "snake_case"
-)]
+#[sqlx(type_name = "etl.destination_table_schema_status", rename_all = "snake_case")]
 pub enum DestinationTableSchemaStatus {
     /// A schema change is currently being applied.
     Applying,
@@ -21,8 +18,8 @@ pub enum DestinationTableSchemaStatus {
 
 /// Parses snapshot IDs from PG LSN strings.
 ///
-/// Converts a required snapshot_id string and optional previous_snapshot_id string
-/// into their corresponding [`SnapshotId`] values.
+/// Converts a required snapshot_id string and optional previous_snapshot_id
+/// string into their corresponding [`SnapshotId`] values.
 fn parse_snapshot_ids(
     snapshot_id_str: &str,
     previous_snapshot_id_str: Option<String>,

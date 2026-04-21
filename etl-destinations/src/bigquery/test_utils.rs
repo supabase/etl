@@ -3,33 +3,35 @@
 //! Provides a database wrapper for managing BigQuery datasets and constants for
 //! connecting to Google Cloud BigQuery in test environments.
 
-use std::fmt;
-use std::str::FromStr;
-use std::time::Duration;
+use std::{fmt, str::FromStr, time::Duration};
 
-use crate::bigquery::BigQueryDestination;
-use crate::bigquery::table_name_to_bigquery_table_id;
-use crate::retry::{RetryDecision, RetryPolicy, retry_with_backoff};
-use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
-use etl::types::{PipelineId, TableName};
-use gcp_bigquery_client::Client;
-use gcp_bigquery_client::client_builder::ClientBuilder;
-use gcp_bigquery_client::error::BQError;
-use gcp_bigquery_client::model::dataset::Dataset;
-use gcp_bigquery_client::model::query_request::QueryRequest;
-use gcp_bigquery_client::model::table_cell::TableCell;
-use gcp_bigquery_client::model::table_row::TableRow;
-use tokio::runtime::Handle;
-use tokio::time::sleep;
+use etl::{
+    store::{schema::SchemaStore, state::StateStore},
+    types::{PipelineId, TableName},
+};
+use gcp_bigquery_client::{
+    Client,
+    client_builder::ClientBuilder,
+    error::BQError,
+    model::{
+        dataset::Dataset, query_request::QueryRequest, table_cell::TableCell, table_row::TableRow,
+    },
+};
+use tokio::{runtime::Handle, time::sleep};
 use uuid::Uuid;
+
+use crate::{
+    bigquery::{BigQueryDestination, table_name_to_bigquery_table_id},
+    retry::{RetryDecision, RetryPolicy, retry_with_backoff},
+};
 
 /// Maximum number of times we re-run a verification query.
 const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 30;
 /// Delay in milliseconds between verification attempts when querying BigQuery.
 const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
 
-/// Retry policy for BigQuery test setup operations (client creation, dataset creation).
+/// Retry policy for BigQuery test setup operations (client creation, dataset
+/// creation).
 const SETUP_RETRY_POLICY: RetryPolicy = RetryPolicy {
     max_retries: 4,
     initial_delay: Duration::from_secs(1),
@@ -69,10 +71,7 @@ pub fn skip_if_missing_bigquery_env_vars() -> bool {
         missing_env_vars.push(BIGQUERY_PROJECT_ID_ENV);
     }
 
-    eprintln!(
-        "skipping bigquery integration test: missing {}",
-        missing_env_vars.join(", ")
-    );
+    eprintln!("skipping bigquery integration test: missing {}", missing_env_vars.join(", "));
 
     true
 }
@@ -105,7 +104,8 @@ pub fn random_dataset_id() -> String {
 
 /// BigQuery database connection for testing.
 ///
-/// Provides a wrapper around the BigQuery client with automatic dataset cleanup on drop.
+/// Provides a wrapper around the BigQuery client with automatic dataset cleanup
+/// on drop.
 pub struct BigQueryDatabase {
     client: Client,
     project_id: String,
@@ -120,8 +120,8 @@ impl BigQueryDatabase {
     ///
     /// # Panics
     ///
-    /// Panics if the `TESTS_BIGQUERY_PROJECT_ID` environment variable is not set
-    /// or if client creation fails.
+    /// Panics if the `TESTS_BIGQUERY_PROJECT_ID` environment variable is not
+    /// set or if client creation fails.
     pub async fn new(sa_key_path: &str) -> Self {
         let project_id = get_project_id();
         let client = ClientBuilder::new()
@@ -130,12 +130,7 @@ impl BigQueryDatabase {
             .expect("Failed to create BigQuery client");
         let dataset_id = random_dataset_id();
 
-        Self {
-            client,
-            project_id,
-            sa_key_path: sa_key_path.to_string(),
-            dataset_id,
-        }
+        Self { client, project_id, sa_key_path: sa_key_path.to_string(), dataset_id }
     }
 
     /// Creates the dataset in BigQuery, retrying on transient errors.
@@ -168,16 +163,9 @@ impl BigQueryDatabase {
     ///
     /// This function will not panic on errors - it logs them and continues.
     pub async fn drop_dataset(&self) {
-        if let Err(e) = self
-            .client
-            .dataset()
-            .delete(&self.project_id, &self.dataset_id, true)
-            .await
+        if let Err(e) = self.client.dataset().delete(&self.project_id, &self.dataset_id, true).await
         {
-            eprintln!(
-                "warning: failed to delete BigQuery dataset {}: {e}",
-                self.dataset_id
-            );
+            eprintln!("warning: failed to delete BigQuery dataset {}: {e}", self.dataset_id);
         }
     }
 
@@ -199,10 +187,7 @@ impl BigQueryDatabase {
     /// Returns the [`String`] version of the SA key at the `sa_key_path`.
     pub fn sa_key(&self) -> String {
         std::fs::read_to_string(&self.sa_key_path).unwrap_or_else(|_| {
-            panic!(
-                "Failed to read service account key file at {}",
-                self.sa_key_path
-            )
+            panic!("Failed to read service account key file at {}", self.sa_key_path)
         })
     }
 
@@ -213,8 +198,9 @@ impl BigQueryDatabase {
 
     /// Executes a SELECT * query against the specified table.
     ///
-    /// Returns all rows from the table in the test dataset, polling until BigQuery
-    /// surfaces the streamed data or a short retry budget is exhausted.
+    /// Returns all rows from the table in the test dataset, polling until
+    /// BigQuery surfaces the streamed data or a short retry budget is
+    /// exhausted.
     pub async fn query_table(&self, table_name: TableName) -> Option<Vec<TableRow>> {
         let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
         let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
@@ -243,8 +229,8 @@ impl BigQueryDatabase {
     /// Queries the schema (column metadata) for a table.
     ///
     /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS.
-    /// The table name pattern matches using REGEXP_CONTAINS to match the sequenced
-    /// table name format: `{table_id}_{sequence_number}`.
+    /// The table name pattern matches using REGEXP_CONTAINS to match the
+    /// sequenced table name format: `{table_id}_{sequence_number}`.
     pub async fn query_table_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
         let project_id = self.project_id();
         let dataset_id = self.dataset_id();
@@ -254,10 +240,9 @@ impl BigQueryDatabase {
         // BigQuery table names have format: {schema}_{table}_{sequence_number}
         // The regex matches the table_id followed by underscore and one or more digits.
         let query = format!(
-            "SELECT column_name, data_type, ordinal_position \
-             FROM `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` \
-             WHERE REGEXP_CONTAINS(table_name, r'^{table_id}_[0-9]+$') \
-             ORDER BY ordinal_position"
+            "SELECT column_name, data_type, ordinal_position FROM \
+             `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` WHERE \
+             REGEXP_CONTAINS(table_name, r'^{table_id}_[0-9]+$') ORDER BY ordinal_position"
         );
 
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
@@ -282,13 +267,12 @@ impl BigQueryDatabase {
 
     /// Manually creates a table in the test dataset using column definitions.
     ///
-    /// Creates a table by generating a DDL statement from the provided column specifications.
-    /// Each column is specified as a tuple of (column_name, bigquery_type).
+    /// Creates a table by generating a DDL statement from the provided column
+    /// specifications. Each column is specified as a tuple of (column_name,
+    /// bigquery_type).
     pub async fn create_table(&self, table_id: &str, columns: &[(&str, &str)]) {
-        let column_definitions: Vec<String> = columns
-            .iter()
-            .map(|(name, data_type)| format!("{name} {data_type}"))
-            .collect();
+        let column_definitions: Vec<String> =
+            columns.iter().map(|(name, data_type)| format!("{name} {data_type}")).collect();
 
         let ddl = format!(
             "create table `{}.{}.{}` ({})",
@@ -298,11 +282,7 @@ impl BigQueryDatabase {
             column_definitions.join(", ")
         );
 
-        self.client
-            .job()
-            .query(&self.project_id, QueryRequest::new(ddl))
-            .await
-            .unwrap();
+        self.client.job().query(&self.project_id, QueryRequest::new(ddl)).await.unwrap();
     }
 
     /// Creates a [`BigQueryDestination`] configured for this database instance.
@@ -339,11 +319,8 @@ impl Drop for BigQueryDatabase {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tokio::task::block_in_place(|| {
                 Handle::current().block_on(async {
-                    if let Err(e) = self
-                        .client
-                        .dataset()
-                        .delete(&project_id, &dataset_id, true)
-                        .await
+                    if let Err(e) =
+                        self.client.dataset().delete(&project_id, &dataset_id, true).await
                     {
                         eprintln!("warning: failed to delete BigQuery dataset {dataset_id}: {e}");
                     }
@@ -415,7 +392,8 @@ impl BigQueryTableSchema {
         );
     }
 
-    /// Asserts that the schema contains exactly the specified columns (by name).
+    /// Asserts that the schema contains exactly the specified columns (by
+    /// name).
     ///
     /// The order of columns does not matter. CDC columns (`_CHANGE_TYPE` and
     /// `_CHANGE_SEQUENCE_NUMBER`) are excluded from the comparison.
@@ -465,7 +443,8 @@ pub async fn setup_bigquery_database() -> BigQueryDatabase {
     db
 }
 
-/// Sets up a BigQuery database connection for testing without creating a dataset.
+/// Sets up a BigQuery database connection for testing without creating a
+/// dataset.
 ///
 /// Useful for validation tests that don't need an actual dataset.
 /// The dataset ID is still generated but not created in BigQuery.
@@ -483,9 +462,7 @@ where
     O: FromStr,
     <O as FromStr>::Err: fmt::Debug,
 {
-    table_cell
-        .value
-        .map(|value| value.as_str().unwrap().parse().unwrap())
+    table_cell.value.map(|value| value.as_str().unwrap().parse().unwrap())
 }
 
 pub fn parse_bigquery_table_rows<T>(table_rows: Vec<TableRow>) -> Vec<T>

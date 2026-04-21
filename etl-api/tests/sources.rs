@@ -1,12 +1,15 @@
-use etl_api::configs::source::FullApiSourceConfig;
-use etl_api::k8s::PodStatus;
-use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
-use etl_api::routes::sources::{
-    CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
-    UpdateSourceRequest, ValidateSourceRequest, ValidateSourceResponse,
+use etl_api::{
+    configs::source::FullApiSourceConfig,
+    k8s::PodStatus,
+    routes::{
+        pipelines::{CreatePipelineRequest, CreatePipelineResponse},
+        sources::{
+            CreateSourceRequest, CreateSourceResponse, ReadSourceResponse, ReadSourcesResponse,
+            UpdateSourceRequest, ValidateSourceRequest, ValidateSourceResponse,
+        },
+    },
 };
-use etl_config::SerializableSecretString;
-use etl_config::shared::PgConnectionConfig;
+use etl_config::{SerializableSecretString, shared::PgConnectionConfig};
 use etl_postgres::sqlx::test_utils::{create_pg_database, drop_pg_database};
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
@@ -14,19 +17,23 @@ use secrecy::ExposeSecret;
 use sqlx::Executor;
 use uuid::Uuid;
 
-use crate::support::database::{
-    create_test_source_database, create_trusted_source_database, drop_trusted_source_database,
-    get_test_db_config, run_etl_migrations_on_source_database,
+use crate::support::{
+    database::{
+        create_test_source_database, create_trusted_source_database, drop_trusted_source_database,
+        get_test_db_config, run_etl_migrations_on_source_database,
+    },
+    mocks::{
+        create_default_image,
+        destinations::create_destination,
+        pipelines::new_pipeline_config,
+        sources::{
+            create_source, create_source_with_config, new_name, new_source_config, updated_name,
+            updated_source_config,
+        },
+        tenants::create_tenant,
+    },
+    test_app::{TestApp, spawn_test_app, spawn_test_app_with_trusted_username},
 };
-use crate::support::mocks::create_default_image;
-use crate::support::mocks::destinations::create_destination;
-use crate::support::mocks::pipelines::new_pipeline_config;
-use crate::support::mocks::sources::{
-    create_source, create_source_with_config, new_name, new_source_config, updated_name,
-    updated_source_config,
-};
-use crate::support::mocks::tenants::create_tenant;
-use crate::support::test_app::{TestApp, spawn_test_app, spawn_test_app_with_trusted_username};
 
 fn source_config_from_db_config(source_db_config: &PgConnectionConfig) -> FullApiSourceConfig {
     FullApiSourceConfig {
@@ -43,17 +50,12 @@ fn source_config_from_db_config(source_db_config: &PgConnectionConfig) -> FullAp
 
 async fn create_pipeline_for_source(app: &TestApp, tenant_id: &str, source_id: i64) -> i64 {
     let destination_id = create_destination(app, tenant_id).await;
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
+    let pipeline =
+        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
     let pipeline_response = app.create_pipeline(tenant_id, &pipeline).await;
     assert!(pipeline_response.status().is_success());
-    let pipeline_response: CreatePipelineResponse = pipeline_response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let pipeline_response: CreatePipelineResponse =
+        pipeline_response.json().await.expect("failed to deserialize response");
 
     pipeline_response.id
 }
@@ -66,18 +68,13 @@ async fn source_can_be_created() {
     let tenant_id = &create_tenant(&app).await;
 
     // Act
-    let source = CreateSourceRequest {
-        name: new_name(),
-        config: new_source_config(),
-    };
+    let source = CreateSourceRequest { name: new_name(), config: new_source_config() };
     let response = app.create_source(tenant_id, &source).await;
 
     // Assert
     assert!(response.status().is_success());
-    let response: CreateSourceResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateSourceResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, 1);
 }
 
@@ -88,15 +85,10 @@ async fn an_existing_source_can_be_read() {
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
 
-    let source = CreateSourceRequest {
-        name: new_name(),
-        config: new_source_config(),
-    };
+    let source = CreateSourceRequest { name: new_name(), config: new_source_config() };
     let response = app.create_source(tenant_id, &source).await;
-    let response: CreateSourceResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateSourceResponse =
+        response.json().await.expect("failed to deserialize response");
     let source_id = response.id;
 
     // Act
@@ -104,10 +96,8 @@ async fn an_existing_source_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: ReadSourceResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadSourceResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, source_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, source.name);
@@ -135,33 +125,22 @@ async fn an_existing_source_can_be_updated() {
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
 
-    let source = CreateSourceRequest {
-        name: new_name(),
-        config: new_source_config(),
-    };
+    let source = CreateSourceRequest { name: new_name(), config: new_source_config() };
     let response = app.create_source(tenant_id, &source).await;
-    let response: CreateSourceResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateSourceResponse =
+        response.json().await.expect("failed to deserialize response");
     let source_id = response.id;
 
     // Act
-    let updated_config = UpdateSourceRequest {
-        name: updated_name(),
-        config: updated_source_config(),
-    };
-    let response = app
-        .update_source(tenant_id, source_id, &updated_config)
-        .await;
+    let updated_config =
+        UpdateSourceRequest { name: updated_name(), config: updated_source_config() };
+    let response = app.update_source(tenant_id, source_id, &updated_config).await;
 
     // Assert
     assert!(response.status().is_success());
     let response = app.read_source(tenant_id, source_id).await;
-    let response: ReadSourceResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadSourceResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, source_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, updated_config.name);
@@ -176,10 +155,8 @@ async fn non_existing_source_cannot_be_updated() {
     let tenant_id = &create_tenant(&app).await;
 
     // Act
-    let updated_config = UpdateSourceRequest {
-        name: updated_name(),
-        config: updated_source_config(),
-    };
+    let updated_config =
+        UpdateSourceRequest { name: updated_name(), config: updated_source_config() };
     let response = app.update_source(tenant_id, 42, &updated_config).await;
 
     // Assert
@@ -237,10 +214,8 @@ async fn all_sources_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: ReadSourcesResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadSourcesResponse =
+        response.json().await.expect("failed to deserialize response");
     for source in response.sources {
         if source.id == source1_id {
             let name = new_name();
@@ -289,10 +264,7 @@ async fn source_creation_with_matching_trusted_username_succeeds() {
     let tenant_id = &create_tenant(&app).await;
     let source_config = source_config_from_db_config(&trusted_source.trusted_config);
 
-    let source = CreateSourceRequest {
-        name: new_name(),
-        config: source_config,
-    };
+    let source = CreateSourceRequest { name: new_name(), config: source_config };
 
     // Act
     let response = app.create_source(tenant_id, &source).await;
@@ -322,10 +294,8 @@ async fn source_validation_with_matching_trusted_username_succeeds() {
     let response = app.validate_source(tenant_id, &request).await;
 
     assert!(response.status().is_success());
-    let response: ValidateSourceResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ValidateSourceResponse =
+        response.json().await.expect("failed to deserialize response");
     assert!(response.validation_failures.is_empty());
 
     drop_trusted_source_database(trusted_source).await;
@@ -346,13 +316,11 @@ async fn source_creation_with_non_matching_trusted_username_fails() {
     // Create the actual source database.
     let _source_pool = create_pg_database(&source_db_config).await;
 
-    // Create a source config that connects to the test database with the actual username.
+    // Create a source config that connects to the test database with the actual
+    // username.
     let source_config = source_config_from_db_config(&source_db_config);
 
-    let source = CreateSourceRequest {
-        name: new_name(),
-        config: source_config,
-    };
+    let source = CreateSourceRequest { name: new_name(), config: source_config };
 
     // Act
     let response = app.create_source(tenant_id, &source).await;
@@ -380,17 +348,13 @@ async fn source_validation_with_non_matching_trusted_username_returns_failure() 
 
     let _source_pool = create_pg_database(&source_db_config).await;
 
-    let request = ValidateSourceRequest {
-        config: source_config_from_db_config(&source_db_config),
-    };
+    let request = ValidateSourceRequest { config: source_config_from_db_config(&source_db_config) };
 
     let response = app.validate_source(tenant_id, &request).await;
 
     assert!(response.status().is_success());
-    let response: ValidateSourceResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ValidateSourceResponse =
+        response.json().await.expect("failed to deserialize response");
     assert!(
         !response.validation_failures.is_empty(),
         "Expected validation failures for non-matching trusted username"
@@ -409,28 +373,18 @@ async fn source_update_with_matching_trusted_username_succeeds() {
     let tenant_id = &create_tenant(&app).await;
     let source_config = source_config_from_db_config(&trusted_source.trusted_config);
 
-    let source = CreateSourceRequest {
-        name: new_name(),
-        config: source_config.clone(),
-    };
+    let source = CreateSourceRequest { name: new_name(), config: source_config.clone() };
 
     let create_response = app.create_source(tenant_id, &source).await;
     assert!(create_response.status().is_success());
-    let create_response: CreateSourceResponse = create_response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let create_response: CreateSourceResponse =
+        create_response.json().await.expect("failed to deserialize response");
     let source_id = create_response.id;
 
     // Act - Update the source with the same config.
-    let updated_source = UpdateSourceRequest {
-        name: updated_name(),
-        config: source_config,
-    };
+    let updated_source = UpdateSourceRequest { name: updated_name(), config: source_config };
 
-    let response = app
-        .update_source(tenant_id, source_id, &updated_source)
-        .await;
+    let response = app.update_source(tenant_id, source_id, &updated_source).await;
 
     // Assert
     assert!(
@@ -451,17 +405,12 @@ async fn source_with_inactive_pipeline_cannot_be_deleted() {
         spawn_test_app_with_trusted_username(Some(trusted_source.trusted_username.clone())).await;
     let tenant_id = &create_tenant(&app).await;
     let source_config = source_config_from_db_config(&trusted_source.trusted_config);
-    let source = CreateSourceRequest {
-        name: new_name(),
-        config: source_config,
-    };
+    let source = CreateSourceRequest { name: new_name(), config: source_config };
 
     let response = app.create_source(tenant_id, &source).await;
     assert!(response.status().is_success());
-    let response: CreateSourceResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateSourceResponse =
+        response.json().await.expect("failed to deserialize response");
     let source_id = response.id;
 
     run_etl_migrations_on_source_database(&trusted_source.trusted_config).await;

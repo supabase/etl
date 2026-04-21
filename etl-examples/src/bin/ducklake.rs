@@ -31,17 +31,18 @@ absolute `file://` URLs before the destination is created.
 
 */
 
+use std::{error::Error, sync::Once};
+
 use clap::{Args, Parser};
-use etl::config::{
-    BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+use etl::{
+    config::{
+        BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig, parse_ducklake_url,
+    },
+    pipeline::Pipeline,
+    store::PostgresStore,
 };
-use etl::pipeline::Pipeline;
-use etl::store::both::postgres::PostgresStore;
-use etl_config::parse_ducklake_url;
 use etl_destinations::ducklake::{DuckLakeDestination, S3Config};
-use std::error::Error;
-use std::sync::Once;
 use tokio::signal;
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -66,7 +67,8 @@ struct AppArgs {
     db_args: DbArgs,
     #[clap(flatten)]
     ducklake_args: DuckLakeArgs,
-    /// Postgres publication name (must be created beforehand with CREATE PUBLICATION)
+    /// Postgres publication name (must be created beforehand with CREATE
+    /// PUBLICATION)
     #[arg(long)]
     publication: String,
 }
@@ -125,10 +127,12 @@ struct DuckLakeArgs {
     /// S3-compatible endpoint, e.g. `127.0.0.1:5000/s3` for Supabase Storage
     #[arg(long)]
     s3_endpoint: Option<String>,
-    /// S3 URL style: `path` (for MinIO / Supabase Storage) or `vhost` (AWS default)
+    /// S3 URL style: `path` (for MinIO / Supabase Storage) or `vhost` (AWS
+    /// default)
     #[arg(long, default_value = "path")]
     s3_url_style: String,
-    /// Use SSL/TLS for the S3 connection (disable for local S3-compatible services)
+    /// Use SSL/TLS for the S3 connection (disable for local S3-compatible
+    /// services)
     #[arg(long, default_value = "false")]
     s3_use_ssl: bool,
 
@@ -136,7 +140,8 @@ struct DuckLakeArgs {
     #[arg(long)]
     metadata_schema: Option<String>,
 
-    /// Shared DuckDB log storage path used by `CALL enable_logging(storage_path = ...)`.
+    /// Shared DuckDB log storage path used by `CALL enable_logging(storage_path
+    /// = ...)`.
     #[arg(long, requires = "duckdb_log_dump_path")]
     duckdb_log_storage_path: Option<String>,
     /// CSV file written from `duckdb_logs` during graceful shutdown.
@@ -160,11 +165,7 @@ fn init_tracing() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "ducklake=info".into()),
         )
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_line_number(true)
-                .with_file(true),
-        )
+        .with(tracing_subscriber::fmt::layer().with_line_number(true).with_file(true))
         .init();
 }
 
@@ -179,7 +180,6 @@ fn set_log_level() {
 async fn main_impl() -> Result<(), Box<dyn Error>> {
     set_log_level();
     init_tracing();
-    etl_telemetry::metrics::init_metrics(None, None)?;
     install_crypto_provider();
 
     let args = AppArgs::parse();
@@ -191,10 +191,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         name: args.db_args.db_name,
         username: args.db_args.db_username,
         password: args.db_args.db_password.map(Into::into),
-        tls: TlsConfig {
-            trusted_root_certs: String::new(),
-            enabled: false,
-        },
+        tls: TlsConfig { trusted_root_certs: String::new(), enabled: false },
         keepalive: TcpKeepaliveConfig::default(),
     };
 
@@ -206,7 +203,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         pg_connection: pg_connection_config,
         batch: BatchConfig {
             max_fill_ms: args.ducklake_args.max_batch_fill_duration_ms,
-            memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
+            memory_budget_ratio: 0.2,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
@@ -248,9 +245,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     info!("pipeline started, data replication is now active, press ctrl+c to stop");
 
     let shutdown_signal = async {
-        signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
+        signal::ctrl_c().await.expect("Failed to install Ctrl+C handler");
         info!("received ctrl+c signal, initiating graceful shutdown");
     };
 

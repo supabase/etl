@@ -1,8 +1,8 @@
 //! PostgreSQL version constants and utilities.
 //!
-//! This module provides version constants for supported PostgreSQL versions and macros
-//! for ergonomic version comparison. Version numbers follow PostgreSQL's internal format:
-//! `MAJOR * 10000 + MINOR * 100 + PATCH`.
+//! This module provides version constants for supported PostgreSQL versions and
+//! macros for ergonomic version comparison. Version numbers follow PostgreSQL's
+//! internal format: `MAJOR * 10000 + MINOR * 100 + PATCH`.
 //!
 //! # Supported Versions
 //!
@@ -16,19 +16,21 @@ pub const POSTGRES_16: i32 = 160000;
 pub const POSTGRES_17: i32 = 170000;
 pub const POSTGRES_18: i32 = 180000;
 
-/// Returns [`true`] if the server version meets or exceeds the required version.
+/// Returns [`true`] if the server version meets or exceeds the required
+/// version.
 ///
-/// This function handles [`None`] server versions by returning [`false`], making it
-/// safe to use in contexts where version information might not be available.
+/// This function handles [`None`] server versions by returning [`false`],
+/// making it safe to use in contexts where version information might not be
+/// available.
 pub fn meets_version(server_version: Option<NonZeroI32>, required_version: i32) -> bool {
     server_version.is_some_and(|v| v.get() >= required_version)
 }
 
 /// Checks if the server version meets or exceeds the required version.
 ///
-/// This macro provides ergonomic version checking by accepting various input types
-/// for the server version (Option<NonZeroI32>, NonZeroI32, i32) and comparing against
-/// version constants.
+/// This macro provides ergonomic version checking by accepting various input
+/// types for the server version (Option<NonZeroI32>, NonZeroI32, i32) and
+/// comparing against version constants.
 #[macro_export]
 macro_rules! requires_version {
     ($server_version:expr, $required:expr) => {

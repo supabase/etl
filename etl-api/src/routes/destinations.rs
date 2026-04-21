@@ -10,15 +10,21 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::configs::destination::FullApiDestinationConfig;
-use crate::configs::encryption::EncryptionKey;
-use crate::db::destinations::{DestinationsDbError, destination_exists};
-use crate::db::pipelines::{PipelinesDbError, read_pipelines_for_destination_for_deletion};
-use crate::k8s::K8sClient;
-use crate::k8s::core::{K8sCoreError, first_active_pipeline_id};
-use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
-use crate::validation::{FailureType, ValidationContext, ValidationError, ValidationFailure};
-use crate::{db, validation};
+use crate::{
+    configs::{destination::FullApiDestinationConfig, encryption::EncryptionKey},
+    db,
+    db::{
+        destinations::{DestinationsDbError, destination_exists},
+        pipelines::{PipelinesDbError, read_pipelines_for_destination_for_deletion},
+    },
+    k8s::{
+        K8sClient,
+        core::{K8sCoreError, first_active_pipeline_id},
+    },
+    routes::{ErrorMessage, TenantIdError, extract_tenant_id},
+    validation,
+    validation::{FailureType, ValidationContext, ValidationError, ValidationFailure},
+};
 
 #[derive(Debug, Error)]
 pub enum DestinationError {
@@ -92,14 +98,10 @@ impl ResponseError for DestinationError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage {
-            error: self.to_message(),
-        };
+        let error_message = ErrorMessage { error: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::json())
-            .body(body)
+        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
     }
 }
 
@@ -161,11 +163,7 @@ pub struct ValidationFailureResponse {
 
 impl From<ValidationFailure> for ValidationFailureResponse {
     fn from(failure: ValidationFailure) -> Self {
-        Self {
-            name: failure.name,
-            reason: failure.reason,
-            failure_type: failure.failure_type,
-        }
+        Self { name: failure.name, reason: failure.reason, failure_type: failure.failure_type }
     }
 }
 

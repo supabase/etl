@@ -1,8 +1,11 @@
+use std::{
+    collections::hash_map::DefaultHasher,
+    error::Error,
+    hash::{Hash, Hasher},
+    time::Duration,
+};
+
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
-use std::error::Error;
-use std::hash::{Hash, Hasher};
-use std::time::Duration;
 use tracing::{info, warn};
 
 /// Request payload for error notifications.
@@ -10,17 +13,17 @@ use tracing::{info, warn};
 /// Contains error information to be sent to the Supabase API for tracking
 /// and monitoring purposes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NotificationRequest {
+struct NotificationRequest {
     /// Unique identifier for the pipeline that encountered the error.
-    pub pipeline_id: String,
+    pipeline_id: String,
     /// Human-readable error message describing the failure.
-    pub error_message: String,
+    error_message: String,
     /// Stable hash of the error for grouping and deduplication.
     ///
     /// The hash is computed from error kind, description, and detail to
     /// provide a consistent identifier across multiple occurrences of the
     /// same error type.
-    pub error_hash: String,
+    error_hash: String,
 }
 
 /// Response from the error notification API.
@@ -28,11 +31,11 @@ pub struct NotificationRequest {
 /// Contains information about whether the notification was successfully
 /// processed and if it was deduplicated based on the error hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NotificationResponse {
+struct NotificationResponse {
     /// Success message from the API.
-    pub message: String,
+    message: String,
     /// Whether the notification was deduplicated based on the error hash.
-    pub deduplicated: bool,
+    deduplicated: bool,
 }
 
 /// Client for sending error notifications to Supabase API.
@@ -41,7 +44,7 @@ pub struct NotificationResponse {
 /// during replication. Uses reqwest for HTTP communication and handles
 /// errors gracefully without blocking pipeline operations.
 #[derive(Debug, Clone)]
-pub struct ErrorNotificationClient {
+pub(crate) struct ErrorNotificationClient {
     /// HTTP client for making requests.
     client: reqwest::Client,
     /// Supabase API URL for error notifications.
@@ -59,19 +62,16 @@ impl ErrorNotificationClient {
     ///
     /// The client is configured with the necessary credentials and endpoints
     /// to send error notifications to the Supabase API.
-    pub fn new(api_url: String, api_key: String, project_ref: String, pipeline_id: String) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap_or_default();
+    pub(crate) fn new(
+        api_url: String,
+        api_key: String,
+        project_ref: String,
+        pipeline_id: String,
+    ) -> Self {
+        let client =
+            reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap_or_default();
 
-        Self {
-            client,
-            api_url,
-            api_key,
-            project_ref,
-            pipeline_id,
-        }
+        Self { client, api_url, api_key, project_ref, pipeline_id }
     }
 
     /// Sends an error notification to the Supabase API.
@@ -79,7 +79,7 @@ impl ErrorNotificationClient {
     /// This method is fire-and-forget - it logs any failures but does not
     /// propagate them to avoid disrupting the pipeline. The notification is
     /// sent asynchronously without blocking pipeline operations.
-    pub async fn notify_error<H: Hash>(&self, error_message: String, error_hash: H) {
+    pub(crate) async fn notify_error<H: Hash>(&self, error_message: String, error_hash: H) {
         let error_hash = compute_error_hash(error_hash);
 
         let notification = NotificationRequest {
@@ -112,10 +112,7 @@ impl ErrorNotificationClient {
 
     /// Returns the URL for the error notification endpoint.
     fn error_notification_url(&self) -> String {
-        format!(
-            "{}/system/replication/{}/pipeline-error",
-            self.api_url, self.project_ref
-        )
+        format!("{}/system/replication/{}/pipeline-error", self.api_url, self.project_ref)
     }
 
     /// Sends the notification request to the API endpoint.
@@ -134,10 +131,8 @@ impl ErrorNotificationClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unable to read body>".to_string());
+            let body =
+                response.text().await.unwrap_or_else(|_| "<unable to read body>".to_string());
             return Err(format!("API returned status {status}: {body}").into());
         }
 
@@ -150,7 +145,7 @@ impl ErrorNotificationClient {
 ///
 /// This provides a consistent identifier across multiple occurrences of the
 /// same error type, enabling grouping and deduplication in monitoring systems.
-pub fn compute_error_hash<H: Hash>(error_hash: H) -> String {
+fn compute_error_hash<H: Hash>(error_hash: H) -> String {
     let mut hasher = DefaultHasher::new();
     error_hash.hash(&mut hasher);
     let hash_value = hasher.finish();
@@ -160,19 +155,16 @@ pub fn compute_error_hash<H: Hash>(error_hash: H) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use etl::error::{ErrorKind, EtlError};
+
+    use super::*;
 
     #[test]
     fn test_compute_error_hash_stability() {
-        let err1 = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
-            "Database connection failed",
-        ));
-        let err2 = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
-            "Database connection failed",
-        ));
+        let err1 =
+            EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
+        let err2 =
+            EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
 
         let hash1 = compute_error_hash(&err1);
         let hash2 = compute_error_hash(&err2);
@@ -202,10 +194,8 @@ mod tests {
 
     #[test]
     fn test_compute_error_hash_different_errors() {
-        let err1 = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
-            "Database connection failed",
-        ));
+        let err1 =
+            EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
         let err2 = EtlError::from((ErrorKind::SourceQueryFailed, "Query execution failed"));
 
         let hash1 = compute_error_hash(&err1);

@@ -9,9 +9,7 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::db;
-use crate::db::images::ImagesDbError;
-use crate::routes::ErrorMessage;
+use crate::{db, db::images::ImagesDbError, routes::ErrorMessage};
 
 #[derive(Debug, Error)]
 enum ImageError {
@@ -43,14 +41,10 @@ impl ResponseError for ImageError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage {
-            error: self.to_message(),
-        };
+        let error_message = ErrorMessage { error: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::json())
-            .body(body)
+        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
     }
 }
 
@@ -140,11 +134,7 @@ pub async fn read_image(
 
     let response = db::images::read_image(&**pool, image_id)
         .await?
-        .map(|s| ReadImageResponse {
-            id: s.id,
-            name: s.name,
-            is_default: s.is_default,
-        })
+        .map(|s| ReadImageResponse { id: s.id, name: s.name, is_default: s.is_default })
         .ok_or(ImageError::ImageNotFound(image_id))?;
 
     Ok(Json(response))
@@ -200,9 +190,7 @@ pub async fn delete_image(
 ) -> Result<impl Responder, ImageError> {
     let image_id = image_id.into_inner();
 
-    db::images::delete_image(&pool, image_id)
-        .await?
-        .ok_or(ImageError::ImageNotFound(image_id))?;
+    db::images::delete_image(&pool, image_id).await?.ok_or(ImageError::ImageNotFound(image_id))?;
 
     Ok(HttpResponse::Ok().finish())
 }
@@ -220,11 +208,8 @@ pub async fn delete_image(
 pub async fn read_all_images(pool: Data<PgPool>) -> Result<impl Responder, ImageError> {
     let mut images = vec![];
     for image in db::images::read_all_images(&**pool).await? {
-        let image = ReadImageResponse {
-            id: image.id,
-            name: image.name,
-            is_default: image.is_default,
-        };
+        let image =
+            ReadImageResponse { id: image.id, name: image.name, is_default: image.is_default };
         images.push(image);
     }
 

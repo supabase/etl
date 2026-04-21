@@ -1,7 +1,9 @@
-use sqlx::postgres::PgRow;
-use sqlx::postgres::types::Oid as SqlxTableId;
-use sqlx::{PgExecutor, PgPool, Row};
 use std::collections::HashMap;
+
+use sqlx::{
+    PgExecutor, PgPool, Row,
+    postgres::{PgRow, types::Oid as SqlxTableId},
+};
 use tokio_postgres::types::Type as PgType;
 
 use crate::types::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
@@ -137,9 +139,10 @@ define_type_mappings! {
 
 /// Stores a table schema in the database with a specific snapshot ID.
 ///
-/// Upserts table schema and replaces all column information in schema storage tables
-/// using a transaction to ensure atomicity. If a schema version already exists for
-/// the same (pipeline_id, table_id, snapshot_id), columns are deleted and re-inserted.
+/// Upserts table schema and replaces all column information in schema storage
+/// tables using a transaction to ensure atomicity. If a schema version already
+/// exists for the same (pipeline_id, table_id, snapshot_id), columns are
+/// deleted and re-inserted.
 pub async fn store_table_schema(
     pool: &PgPool,
     pipeline_id: i64,
@@ -201,7 +204,8 @@ pub async fn store_table_schema(
     Ok(())
 }
 
-/// Loads all table schemas for a pipeline from the database at the latest snapshot.
+/// Loads all table schemas for a pipeline from the database at the latest
+/// snapshot.
 ///
 /// Retrieves table schemas and columns from schema storage tables,
 /// reconstructing complete [`TableSchema`] objects. This is equivalent to
@@ -213,9 +217,11 @@ pub async fn load_table_schemas(
     load_table_schemas_at_snapshot(pool, pipeline_id, SnapshotId::max()).await
 }
 
-/// Loads a single table schema with the largest snapshot_id <= the requested snapshot.
+/// Loads a single table schema with the largest snapshot_id <= the requested
+/// snapshot.
 ///
-/// Returns `None` if no schema version exists for the table at or before the given snapshot.
+/// Returns `None` if no schema version exists for the table at or before the
+/// given snapshot.
 pub async fn load_table_schema_at_snapshot(
     pool: &PgPool,
     pipeline_id: i64,
@@ -290,7 +296,8 @@ pub async fn load_table_schemas_at_snapshot(
     snapshot_id: SnapshotId,
 ) -> Result<Vec<TableSchema>, sqlx::Error> {
     // Use DISTINCT ON to efficiently find the latest schema version for each table.
-    // PostgreSQL optimizes DISTINCT ON with ORDER BY using index scans when possible.
+    // PostgreSQL optimizes DISTINCT ON with ORDER BY using index scans when
+    // possible.
     let rows = sqlx::query(
         r#"
         with latest_schemas as (
@@ -355,7 +362,8 @@ pub async fn load_table_schemas_at_snapshot(
 /// Deletes all table schemas for a pipeline from the database.
 ///
 /// Removes all table schema records and associated columns for the specified
-/// pipeline, using CASCADE delete for automatic cleanup of related column records.
+/// pipeline, using CASCADE delete for automatic cleanup of related column
+/// records.
 pub async fn delete_table_schemas_for_all_tables<'c, E>(
     executor: E,
     pipeline_id: i64,
@@ -424,8 +432,9 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio_postgres::types::Type;
+
+    use super::*;
 
     #[test]
     fn test_type_string_conversion() {
@@ -447,10 +456,7 @@ mod tests {
         for (original_type, _) in &test_types {
             let type_string = postgres_type_to_string(original_type);
             let converted_back = string_to_postgres_type(&type_string);
-            assert_eq!(
-                converted_back, *original_type,
-                "Roundtrip failed for: {original_type:?}"
-            );
+            assert_eq!(converted_back, *original_type, "Roundtrip failed for: {original_type:?}");
         }
 
         // Test unknown type fallback

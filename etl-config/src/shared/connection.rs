@@ -1,20 +1,24 @@
+use std::{sync::LazyLock, time::Duration};
+
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions as SqlxConnectOptions, PgSslMode as SqlxSslMode};
-use std::sync::LazyLock;
-use std::time::Duration;
 use tokio_postgres::{Config as TokioPgConnectOptions, config::SslMode as TokioPgSslMode};
 
 use crate::Config;
 
 /// Common Postgres settings shared across all ETL connection types.
 ///
-/// These settings ensure consistent behavior across different Postgres installations:
-/// - `datestyle = "ISO"`: Provides consistent date formatting for reliable parsing
+/// These settings ensure consistent behavior across different Postgres
+/// installations:
+/// - `datestyle = "ISO"`: Provides consistent date formatting for reliable
+///   parsing
 /// - `intervalstyle = "postgres"`: Uses standard Postgres interval format
-/// - `extra_float_digits = 3`: Ensures sufficient precision for numeric replication
+/// - `extra_float_digits = 3`: Ensures sufficient precision for numeric
+///   replication
 /// - `client_encoding = "UTF8"`: Supports international character sets
-/// - `timezone = "UTC"`: Eliminates timezone ambiguity in distributed ETL systems
+/// - `timezone = "UTC"`: Eliminates timezone ambiguity in distributed ETL
+///   systems
 const COMMON_DATESTYLE: &str = "ISO";
 const COMMON_INTERVALSTYLE: &str = "postgres";
 const COMMON_EXTRA_FLOAT_DIGITS: i32 = 3;
@@ -35,8 +39,9 @@ const APP_NAME_REPLICATOR_STREAMING: &str = "supabase_etl_replicator_streaming";
 
 /// Connection options for the API's metadata database.
 ///
-/// Uses strict timeouts (30s statement, 5s lock, 60s idle) to maintain responsiveness
-/// and fail fast when contention occurs, preventing API request timeouts.
+/// Uses strict timeouts (30s statement, 5s lock, 60s idle) to maintain
+/// responsiveness and fail fast when contention occurs, preventing API request
+/// timeouts.
 pub static ETL_API_OPTIONS: LazyLock<PgConnectionOptions> = LazyLock::new(|| PgConnectionOptions {
     datestyle: COMMON_DATESTYLE.to_string(),
     intervalstyle: COMMON_INTERVALSTYLE.to_string(),
@@ -51,8 +56,9 @@ pub static ETL_API_OPTIONS: LazyLock<PgConnectionOptions> = LazyLock::new(|| PgC
 
 /// Connection options for database migrations.
 ///
-/// Uses extended statement timeout (5 minutes) to accommodate long-running DDL operations
-/// while maintaining moderate lock and idle timeouts (10s lock, 60s idle).
+/// Uses extended statement timeout (5 minutes) to accommodate long-running DDL
+/// operations while maintaining moderate lock and idle timeouts (10s lock, 60s
+/// idle).
 pub static ETL_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions {
         datestyle: COMMON_DATESTYLE.to_string(),
@@ -68,12 +74,14 @@ pub static ETL_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
 
 /// Connection options for logical replication streams.
 ///
-/// Disables statement, lock, and idle timeouts to allow large COPY operations and long-running
-/// transactions during initial table synchronization and WAL streaming.
+/// Disables statement, lock, and idle timeouts to allow large COPY operations
+/// and long-running transactions during initial table synchronization and WAL
+/// streaming.
 ///
-/// Lock timeout is disabled because `CREATE_REPLICATION_SLOT` must wait for all in-progress
-/// write transactions to reach a consistent snapshot point. On heavily-loaded databases this
-/// can take minutes, and a timeout would only cause retries that will also fail.
+/// Lock timeout is disabled because `CREATE_REPLICATION_SLOT` must wait for all
+/// in-progress write transactions to reach a consistent snapshot point. On
+/// heavily-loaded databases this can take minutes, and a timeout would only
+/// cause retries that will also fail.
 pub static ETL_REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions {
         datestyle: COMMON_DATESTYLE.to_string(),
@@ -89,8 +97,8 @@ pub static ETL_REPLICATION_OPTIONS: LazyLock<PgConnectionOptions> =
 
 /// Connection options for accessing ETL state metadata in the source database.
 ///
-/// Applies moderate timeouts (30s statement, 10s lock, 60s idle) since metadata queries
-/// execute quickly and should not block other operations.
+/// Applies moderate timeouts (30s statement, 10s lock, 60s idle) since metadata
+/// queries execute quickly and should not block other operations.
 pub static ETL_STATE_MANAGEMENT_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions {
         datestyle: COMMON_DATESTYLE.to_string(),
@@ -120,23 +128,30 @@ pub struct PgConnectionOptions {
     pub client_encoding: String,
     /// Sets the time zone for displaying and interpreting time stamps.
     pub timezone: String,
-    /// Aborts any statement that takes more than the specified number of milliseconds.
+    /// Aborts any statement that takes more than the specified number of
+    /// milliseconds.
     pub statement_timeout: u32,
-    /// Aborts any statement that waits longer than the specified milliseconds to acquire a lock.
+    /// Aborts any statement that waits longer than the specified milliseconds
+    /// to acquire a lock.
     pub lock_timeout: u32,
-    /// Terminates any session that has been idle within a transaction for longer than the specified milliseconds.
+    /// Terminates any session that has been idle within a transaction for
+    /// longer than the specified milliseconds.
     pub idle_in_transaction_session_timeout: u32,
-    /// Sets the application name to be reported in statistics views and logs for connection identification.
+    /// Sets the application name to be reported in statistics views and logs
+    /// for connection identification.
     pub application_name: String,
 }
 
 impl PgConnectionOptions {
     /// Formats options as a string for tokio-postgres connection.
     ///
-    /// Returns space-separated `-c key=value` pairs suitable for the options parameter.
+    /// Returns space-separated `-c key=value` pairs suitable for the options
+    /// parameter.
     pub fn to_options_string(&self) -> String {
         format!(
-            "-c datestyle={} -c intervalstyle={} -c extra_float_digits={} -c client_encoding={} -c timezone={} -c statement_timeout={} -c lock_timeout={} -c idle_in_transaction_session_timeout={} -c application_name={}",
+            "-c datestyle={} -c intervalstyle={} -c extra_float_digits={} -c client_encoding={} \
+             -c timezone={} -c statement_timeout={} -c lock_timeout={} -c \
+             idle_in_transaction_session_timeout={} -c application_name={}",
             self.datestyle,
             self.intervalstyle,
             self.extra_float_digits,
@@ -156,25 +171,16 @@ impl PgConnectionOptions {
         vec![
             ("datestyle".to_string(), self.datestyle.clone()),
             ("intervalstyle".to_string(), self.intervalstyle.clone()),
-            (
-                "extra_float_digits".to_string(),
-                self.extra_float_digits.to_string(),
-            ),
+            ("extra_float_digits".to_string(), self.extra_float_digits.to_string()),
             ("client_encoding".to_string(), self.client_encoding.clone()),
             ("timezone".to_string(), self.timezone.clone()),
-            (
-                "statement_timeout".to_string(),
-                self.statement_timeout.to_string(),
-            ),
+            ("statement_timeout".to_string(), self.statement_timeout.to_string()),
             ("lock_timeout".to_string(), self.lock_timeout.to_string()),
             (
                 "idle_in_transaction_session_timeout".to_string(),
                 self.idle_in_transaction_session_timeout.to_string(),
             ),
-            (
-                "application_name".to_string(),
-                self.application_name.clone(),
-            ),
+            ("application_name".to_string(), self.application_name.clone()),
         ]
     }
 }
@@ -196,7 +202,8 @@ pub struct PgConnectionConfig {
     pub name: String,
     /// Username for authenticating with the Postgres server.
     pub username: String,
-    /// Password for the specified user. This field is sensitive and redacted in debug output.
+    /// Password for the specified user. This field is sensitive and redacted in
+    /// debug output.
     pub password: Option<SecretString>,
     /// TLS configuration for secure connections.
     pub tls: TlsConfig,
@@ -254,31 +261,26 @@ pub struct TlsConfig {
 impl TlsConfig {
     /// Returns a TLS configuration that disables TLS.
     pub fn disabled() -> Self {
-        Self {
-            trusted_root_certs: "".to_string(),
-            enabled: false,
-        }
+        Self { trusted_root_certs: "".to_string(), enabled: false }
     }
 }
 
 /// TCP keepalive configuration for Postgres connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpKeepaliveConfig {
-    /// Time in seconds a connection must be idle before sending keepalive probes.
+    /// Time in seconds a connection must be idle before sending keepalive
+    /// probes.
     pub idle_secs: u64,
     /// Time in seconds between individual keepalive probes.
     pub interval_secs: u64,
-    /// Number of keepalive probes to send before considering the connection dead.
+    /// Number of keepalive probes to send before considering the connection
+    /// dead.
     pub retries: u32,
 }
 
 impl Default for TcpKeepaliveConfig {
     fn default() -> Self {
-        Self {
-            idle_secs: 30,
-            interval_secs: 10,
-            retries: 3,
-        }
+        Self { idle_secs: 30, interval_secs: 10, retries: 3 }
     }
 }
 
@@ -309,11 +311,7 @@ pub trait IntoConnectOptions<Output> {
 impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
     /// Creates sqlx connection options without database name.
     fn without_db(&self, options: Option<&PgConnectionOptions>) -> SqlxConnectOptions {
-        let ssl_mode = if self.tls.enabled {
-            SqlxSslMode::VerifyFull
-        } else {
-            SqlxSslMode::Prefer
-        };
+        let ssl_mode = if self.tls.enabled { SqlxSslMode::VerifyFull } else { SqlxSslMode::Prefer };
         let mut connect_options = SqlxConnectOptions::new_without_pgpass()
             .host(&self.host)
             .username(&self.username)
@@ -351,11 +349,8 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
 impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
     /// Creates tokio-postgres connection options without database name.
     fn without_db(&self, options: Option<&PgConnectionOptions>) -> TokioPgConnectOptions {
-        let ssl_mode = if self.tls.enabled {
-            TokioPgSslMode::VerifyFull
-        } else {
-            TokioPgSslMode::Prefer
-        };
+        let ssl_mode =
+            if self.tls.enabled { TokioPgSslMode::VerifyFull } else { TokioPgSslMode::Prefer };
         let mut config = TokioPgConnectOptions::new();
         config
             .host(self.host.clone())
@@ -412,7 +407,10 @@ mod tests {
 
         assert_eq!(
             options_string,
-            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=0 -c idle_in_transaction_session_timeout=0 -c application_name=supabase_etl_replicator_streaming"
+            "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c \
+             client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=0 -c \
+             idle_in_transaction_session_timeout=0 -c \
+             application_name=supabase_etl_replicator_streaming"
         );
     }
 
@@ -428,10 +426,12 @@ mod tests {
         assert!(pairs.contains(&("timezone".to_string(), "UTC".to_string())));
         assert!(pairs.contains(&("statement_timeout".to_string(), "30000".to_string())));
         assert!(pairs.contains(&("lock_timeout".to_string(), "10000".to_string())));
-        assert!(pairs.contains(&(
-            "idle_in_transaction_session_timeout".to_string(),
-            "60000".to_string()
-        )));
+        assert!(
+            pairs.contains(&(
+                "idle_in_transaction_session_timeout".to_string(),
+                "60000".to_string()
+            ))
+        );
         assert!(pairs.contains(&(
             "application_name".to_string(),
             "supabase_etl_replicator_state".to_string()

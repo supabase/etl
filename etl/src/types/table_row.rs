@@ -1,13 +1,17 @@
-use crate::types::cell::{ArrayCell, Cell};
-use crate::types::{PgNumeric, SizeHint};
 use std::mem::size_of;
+
 use tracing::warn;
+
+use crate::types::{
+    PgNumeric, SizeHint,
+    cell::{ArrayCell, Cell},
+};
 
 /// Represents a complete row of data from a database table.
 ///
-/// [`TableRow`] contains a vector of [`Cell`] values corresponding to the columns
-/// of a database table. The values are ordered to match the table's column order
-/// and include proper type information for each cell.
+/// [`TableRow`] contains a vector of [`Cell`] values corresponding to the
+/// columns of a database table. The values are ordered to match the table's
+/// column order and include proper type information for each cell.
 #[derive(Debug, PartialEq)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct TableRow {
@@ -21,14 +25,12 @@ impl TableRow {
     /// Creates a new table row with the given cell values.
     ///
     /// The values should be ordered to match the target table's column schema.
-    /// Each [`Cell`] should contain properly typed data for its corresponding column.
+    /// Each [`Cell`] should contain properly typed data for its corresponding
+    /// column.
     pub fn new(values: Vec<Cell>) -> Self {
         let size_hint_bytes = estimate_table_row_allocated_bytes(&values, values.capacity());
 
-        Self {
-            size_hint_bytes,
-            values,
-        }
+        Self { size_hint_bytes, values }
     }
 
     /// Returns the row values in table column order.
@@ -276,10 +278,7 @@ fn checked_add_or_saturating(left: usize, right: usize, context: &'static str) -
     match left.checked_add(right) {
         Some(value) => value,
         None => {
-            warn!(
-                context,
-                left, right, "size hint addition overflowed, saturating to usize::MAX"
-            );
+            warn!(context, left, right, "size hint addition overflowed, saturating to usize::MAX");
 
             usize::MAX
         }

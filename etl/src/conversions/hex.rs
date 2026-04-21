@@ -1,12 +1,14 @@
-use crate::bail;
-use crate::error::{ErrorKind, EtlResult};
+use crate::{
+    bail,
+    error::{ErrorKind, EtlResult},
+};
 
 /// Converts a Postgres bytea hex string to a byte array.
 ///
 /// This function parses Postgres's hex-encoded bytea format, which uses
 /// the `\x` prefix followed by hexadecimal digits. Each pair of hex digits
 /// represents one byte in the output array.
-pub fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
+pub(crate) fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
     if value.len() < 2 || &value[..2] != "\\x" {
         bail!(
             ErrorKind::ConversionError,

@@ -1,27 +1,30 @@
-use std::future::Future;
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
-use tokio::sync::Mutex;
-use tokio::task::JoinSet;
+use tokio::{sync::Mutex, task::JoinSet};
 use tracing::{error, warn};
 
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
+use crate::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+};
 
-/// Reap completed destination tasks once the tracked set grows past this threshold.
+/// Reap completed destination tasks once the tracked set grows past this
+/// threshold.
 ///
-/// A value of 32 keeps memory bounded while avoiding a lock-and-reap pass for every single write.
+/// A value of 32 keeps memory bounded while avoiding a lock-and-reap pass for
+/// every single write.
 const DESTINATION_TASK_REAP_THRESHOLD: usize = 32;
 
 /// Tracks destination-owned background tasks and reaps them safely.
 ///
-/// This helper is for destinations that want to offload accepted work to background tasks. The
-/// main use case today is the [`write_events`] method.
+/// This helper is for destinations that want to offload accepted work to
+/// background tasks. The main use case today is the [`write_events`] method.
 ///
-/// It intentionally does not add its own concurrency control. ETL already limits concurrent
-/// destination work through the apply worker and table sync workers, so this type only manages the
-/// lifecycle of spawned destination tasks: reap completed work during normal operation and shut
-/// down outstanding tasks safely.
+/// It intentionally does not add its own concurrency control. ETL already
+/// limits concurrent destination work through the apply worker and table sync
+/// workers, so this type only manages the lifecycle of spawned destination
+/// tasks: reap completed work during normal operation and shut down outstanding
+/// tasks safely.
 #[derive(Debug)]
 struct DestinationTaskSetInner {
     join_set: JoinSet<()>,
@@ -38,11 +41,7 @@ pub struct DestinationTaskSet {
 impl DestinationTaskSet {
     /// Creates a new task set for a destination.
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(DestinationTaskSetInner {
-                join_set: JoinSet::new(),
-            })),
-        }
+        Self { inner: Arc::new(Mutex::new(DestinationTaskSetInner { join_set: JoinSet::new() })) }
     }
 
     /// Spawns a new tracked background task.
@@ -54,7 +53,8 @@ impl DestinationTaskSet {
         inner.join_set.spawn(task);
     }
 
-    /// Reaps completed tasks once enough of them may have accumulated to justify the lock.
+    /// Reaps completed tasks once enough of them may have accumulated to
+    /// justify the lock.
     pub async fn try_reap(&self) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
         if inner.join_set.len() <= DESTINATION_TASK_REAP_THRESHOLD {
@@ -70,9 +70,10 @@ impl DestinationTaskSet {
 
     /// Reaps all remaining tasks during shutdown.
     ///
-    /// Destination shutdown is a one-shot lifecycle operation. We therefore intentionally keep the
-    /// mutex locked while draining the remaining tasks so no new work can be submitted
-    /// concurrently once shutdown has begun. We abort all remaining tasks first so shutdown does
+    /// Destination shutdown is a one-shot lifecycle operation. We therefore
+    /// intentionally keep the mutex locked while draining the remaining
+    /// tasks so no new work can be submitted concurrently once shutdown has
+    /// begun. We abort all remaining tasks first so shutdown does
     /// not wait for background writes that are no longer needed.
     pub async fn shutdown(&self) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
@@ -88,8 +89,9 @@ impl DestinationTaskSet {
 
     /// Handles the outcome of a completed task.
     ///
-    /// If a task has panicked, we want to return the error immediately to avoid having invariants
-    /// being violated by the fact that a panic occurred but was swallowed.
+    /// If a task has panicked, we want to return the error immediately to avoid
+    /// having invariants being violated by the fact that a panic occurred
+    /// but was swallowed.
     fn handle_task_result(&self, result: Result<(), tokio::task::JoinError>) -> EtlResult<()> {
         match result {
             Ok(()) => Ok(()),

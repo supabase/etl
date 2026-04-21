@@ -1,16 +1,15 @@
-use std::panic::Location;
-use std::time::Duration;
-use std::{fmt, sync::Arc};
+use std::{fmt, panic::Location, sync::Arc, time::Duration};
 
-use tokio::sync::Notify;
-use tokio::time::timeout;
+use tokio::{sync::Notify, time::timeout};
 
 /// Default timeout duration for notifications.
 ///
-/// This duration was chosen empirically since most waiting should not take more than a few seconds.
+/// This duration was chosen empirically since most waiting should not take more
+/// than a few seconds.
 pub const DEFAULT_NOTIFY_TIMEOUT: Duration = Duration::from_secs(240);
 
-/// A wrapper around [`Arc<Notify>`] that provides automatic timeout functionality for tests.
+/// A wrapper around [`Arc<Notify>`] that provides automatic timeout
+/// functionality for tests.
 ///
 /// This prevents tests from hanging indefinitely when waiting for state changes
 /// that may never occur. The timeout ensures tests fail quickly with a clear
@@ -29,18 +28,16 @@ impl TimedNotify {
 
     /// Creates a new [`TimedNotify`] with a custom timeout duration.
     pub fn with_timeout(notify: Arc<Notify>, timeout_duration: Duration) -> Self {
-        Self {
-            notify,
-            timeout_duration,
-        }
+        Self { notify, timeout_duration }
     }
 
     /// Waits for a notification with timeout.
     ///
     /// # Panics
     ///
-    /// Panics if the timeout duration elapses before the notification is received.
-    /// This is intentional behavior for tests to fail fast rather than hang.
+    /// Panics if the timeout duration elapses before the notification is
+    /// received. This is intentional behavior for tests to fail fast rather
+    /// than hang.
     #[track_caller]
     pub fn notified(&self) -> impl Future<Output = ()> + '_ {
         let caller = Location::caller();
@@ -50,9 +47,9 @@ impl TimedNotify {
                 Ok(()) => {}
                 Err(_) => {
                     panic!(
-                        "Test notification timed out after {:?} at {}:{}:{}. \
-                         This likely indicates the expected state was never reached. \
-                         Check if the condition is reachable.",
+                        "Test notification timed out after {:?} at {}:{}:{}. This likely \
+                         indicates the expected state was never reached. Check if the condition \
+                         is reachable.",
                         self.timeout_duration,
                         caller.file(),
                         caller.line(),
@@ -71,8 +68,6 @@ impl TimedNotify {
 
 impl fmt::Debug for TimedNotify {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TimedNotify")
-            .field("timeout_duration", &self.timeout_duration)
-            .finish()
+        f.debug_struct("TimedNotify").field("timeout_duration", &self.timeout_duration).finish()
     }
 }

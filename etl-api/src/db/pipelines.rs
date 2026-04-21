@@ -1,23 +1,30 @@
-use crate::configs::encryption::EncryptionKey;
-use crate::configs::pipeline::{FullApiPipelineConfig, StoredPipelineConfig};
-use crate::configs::serde::{
-    DbDeserializationError, DbSerializationError, deserialize_from_value, serialize,
-};
-use crate::db;
-use crate::db::destinations::Destination;
-use crate::db::images::Image;
-use crate::db::replicators::{Replicator, ReplicatorsDbError, create_replicator};
-use crate::db::sources::Source;
-use crate::routes::pipelines::PipelineError;
+use std::ops::DerefMut;
+
 use etl_postgres::replication::{destination_metadata, health, schema, slots, state};
 use sqlx::{FromRow, PgConnection, PgExecutor, PgPool, PgTransaction};
-use std::ops::DerefMut;
 use thiserror::Error;
+
+use crate::{
+    configs::{
+        encryption::EncryptionKey,
+        pipeline::{FullApiPipelineConfig, StoredPipelineConfig},
+        serde::{DbDeserializationError, DbSerializationError, deserialize_from_value, serialize},
+    },
+    db,
+    db::{
+        destinations::Destination,
+        images::Image,
+        replicators::{Replicator, ReplicatorsDbError, create_replicator},
+        sources::Source,
+    },
+    routes::pipelines::PipelineError,
+};
 
 /// Maximum number of pipelines allowed per tenant.
 ///
-/// For now, we keep the maximum to 1, this way, we give us a simpler surface area for breaking changes
-/// to the `etl` schema in the source database since only one pipeline will use it.
+/// For now, we keep the maximum to 1, this way, we give us a simpler surface
+/// area for breaking changes to the `etl` schema in the source database since
+/// only one pipeline will use it.
 pub const MAX_PIPELINES_PER_TENANT: i64 = 1;
 
 #[derive(Debug, Clone)]
@@ -221,7 +228,8 @@ pub async fn delete_pipeline_api_and_source_state(
     tenant_id: &str,
     pipeline: &PipelineDeletion,
 ) -> Result<(), PipelinesDbError> {
-    // Delete the pipeline from the main database (this does NOT cascade delete the replicator due to missing constraint).
+    // Delete the pipeline from the main database (this does NOT cascade delete the
+    // replicator due to missing constraint).
     delete_pipeline(&mut *api_connection, tenant_id, pipeline.id).await?;
 
     // Manually delete the replicator since there's no cascade constraint.
@@ -235,7 +243,8 @@ pub async fn delete_pipeline_source_state(
     source_connection: &mut PgConnection,
     pipeline_id: i64,
 ) -> Result<(), PipelinesDbError> {
-    // Delete state, schema, and destination metadata from the source database, only if ETL tables exist.
+    // Delete state, schema, and destination metadata from the source database, only
+    // if ETL tables exist.
     if health::etl_tables_present(&mut *source_connection).await? {
         state::delete_replication_state_for_all_tables(&mut *source_connection, pipeline_id)
             .await?;
@@ -427,14 +436,10 @@ pub async fn read_pipeline_components(
         .await?
         .ok_or(PipelineError::ImageNotFound(replicator.id))?;
 
-    let source = db::sources::read_source(
-        &mut *connection,
-        tenant_id,
-        pipeline.source_id,
-        encryption_key,
-    )
-    .await?
-    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+    let source =
+        db::sources::read_source(&mut *connection, tenant_id, pipeline.source_id, encryption_key)
+            .await?
+            .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
     let destination = db::destinations::read_destination(
         &mut *connection,

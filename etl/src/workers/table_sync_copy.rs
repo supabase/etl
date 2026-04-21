@@ -1,39 +1,41 @@
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{pin::Pin, sync::Arc, time::Instant};
 
 use etl_config::shared::BatchConfig;
 use etl_postgres::types::TableId;
 use futures::{Stream, StreamExt};
 use metrics::{counter, histogram};
-use tokio::pin;
-use tokio::sync::Semaphore;
-use tokio::sync::watch;
-use tokio::task::JoinSet;
+use tokio::{
+    pin,
+    sync::{Semaphore, watch},
+    task::JoinSet,
+};
 use tracing::info;
 
-use crate::concurrency::batch_budget::BatchBudgetController;
-use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::stream::{TryBatchBackpressureStream, table_sync_worker_copy_stream_id};
-use crate::destination::Destination;
-use crate::destination::async_result::WriteTableRowsResult;
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
-use crate::metrics::{
-    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-    ETL_EVENTS_PROCESSED_TOTAL, ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
-    ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE, ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL,
-    WORKER_TYPE_LABEL,
+use crate::{
+    concurrency::{
+        BatchBudgetController, MemoryMonitor, ShutdownResult, ShutdownRx,
+        TryBatchBackpressureStream, table_sync_worker_copy_stream_id,
+    },
+    destination::{Destination, async_result::WriteTableRowsResult},
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    metrics::{
+        ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+        ETL_EVENTS_PROCESSED_TOTAL, ETL_PARALLEL_TABLE_COPY_ROWS_IMBALANCE,
+        ETL_PARALLEL_TABLE_COPY_TIME_IMBALANCE, ETL_TABLE_COPY_ROWS, PARTITIONING_LABEL,
+        WORKER_TYPE_LABEL,
+    },
+    replication::{
+        TableCopyStream,
+        client::{
+            CtidPartition, PgReplicationChildTransaction, PgReplicationTransaction,
+            PostgresConnectionUpdate,
+        },
+    },
+    types::{ReplicatedTableSchema, TableRow},
 };
-use crate::replication::client::{
-    CtidPartition, PgReplicationChildTransaction, PgReplicationTransaction,
-    PostgresConnectionUpdate,
-};
-use crate::replication::stream::TableCopyStream;
-use crate::types::{PipelineId, ReplicatedTableSchema, TableRow};
 
 /// Calculates Load Imbalance Factor (LIF) for a set of values.
 ///
@@ -67,23 +69,20 @@ fn calculate_skew_metrics(values: &[f64]) -> f64 {
 
 /// Result of a table copy operation.
 #[derive(Debug)]
-pub enum TableCopyResult {
+pub(crate) enum TableCopyResult {
     /// All rows copied successfully.
-    Completed {
-        total_rows: u64,
-        total_duration_secs: f64,
-    },
+    Completed { total_rows: u64, total_duration_secs: f64 },
     /// Copy was interrupted by a shutdown signal.
     Shutdown,
 }
 
-/// Copies rows from a batched table-copy stream into the destination with prioritized shutdown handling.
+/// Copies rows from a batched table-copy stream into the destination with
+/// prioritized shutdown handling.
 async fn copy_table_rows_from_stream<D, S>(
     mut table_copy_stream: Pin<&mut S>,
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     replicated_table_schema: ReplicatedTableSchema,
-    _pipeline_id: PipelineId,
     partitioning: &'static str,
     destination: D,
 ) -> EtlResult<ShutdownResult<u64, u64>>
@@ -178,8 +177,9 @@ where
 
 /// Describes which slice of a table a single parallel copy task should read.
 ///
-/// For non-partitioned tables, the table is divided into ctid ranges by page estimation.
-/// For partitioned tables, each leaf partition becomes its own copy unit.
+/// For non-partitioned tables, the table is divided into ctid ranges by page
+/// estimation. For partitioned tables, each leaf partition becomes its own copy
+/// unit.
 #[derive(Debug)]
 enum CopyPartition {
     /// A ctid range within a single (non-partitioned) table.
@@ -188,14 +188,16 @@ enum CopyPartition {
     LeafPartition { leaf_table_id: TableId },
 }
 
-/// Copies a table using the appropriate strategy based on the number of connections.
+/// Copies a table using the appropriate strategy based on the number of
+/// connections.
 ///
-/// When `max_copy_connections` is 1, performs a serial copy using the slot transaction's
-/// consistent snapshot. When greater than 1, performs a parallel copy using ctid-based
-/// partitioning (for regular tables) or per-leaf-partition parallelism (for partitioned
-/// tables) across multiple child connections that share the same exported snapshot.
+/// When `max_copy_connections` is 1, performs a serial copy using the slot
+/// transaction's consistent snapshot. When greater than 1, performs a parallel
+/// copy using ctid-based partitioning (for regular tables) or
+/// per-leaf-partition parallelism (for partitioned tables) across multiple
+/// child connections that share the same exported snapshot.
 #[expect(clippy::too_many_arguments)]
-pub async fn table_copy<D: Destination + Clone + Send + 'static>(
+pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
@@ -203,7 +205,6 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
     max_copy_connections: u16,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
-    pipeline_id: PipelineId,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -217,7 +218,6 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
             max_copy_connections,
             batch_config,
             shutdown_rx,
-            pipeline_id,
             destination,
             memory_monitor,
             batch_budget,
@@ -231,7 +231,6 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
             publication_name,
             batch_config,
             shutdown_rx,
-            pipeline_id,
             destination,
             memory_monitor,
             batch_budget,
@@ -240,7 +239,8 @@ pub async fn table_copy<D: Destination + Clone + Send + 'static>(
     }
 }
 
-/// Copies a table serially using a single COPY stream from the slot transaction.
+/// Copies a table serially using a single COPY stream from the slot
+/// transaction.
 #[expect(clippy::too_many_arguments)]
 async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction,
@@ -249,17 +249,14 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     publication_name: Option<&str>,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
-    pipeline_id: PipelineId,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
-    let replicated_column_schemas = replicated_table_schema
-        .column_schemas()
-        .cloned()
-        .collect::<Vec<_>>();
+    let replicated_column_schemas =
+        replicated_table_schema.column_schemas().cloned().collect::<Vec<_>>();
     let table_copy_stream = transaction
         .get_table_copy_stream(table_id, &replicated_column_schemas, publication_name)
         .await?;
@@ -285,7 +282,6 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
         shutdown_rx,
         connection_updates_rx,
         replicated_table_schema,
-        pipeline_id,
         "false",
         destination,
     )
@@ -293,10 +289,7 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
     {
         ShutdownResult::Ok(total_rows) => total_rows,
         ShutdownResult::Shutdown(total_rows) => {
-            info!(
-                table_id = table_id.0,
-                total_rows, "shutting down serial table copy"
-            );
+            info!(table_id = table_id.0, total_rows, "shutting down serial table copy");
 
             return Ok(TableCopyResult::Shutdown);
         }
@@ -311,22 +304,17 @@ async fn serial_table_copy<D: Destination + Clone + Send + 'static>(
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
 
-    info!(
-        table_id = table_id.0,
-        total_rows, total_duration_secs, "completed serial table copy"
-    );
+    info!(table_id = table_id.0, total_rows, total_duration_secs, "completed serial table copy");
 
-    Ok(TableCopyResult::Completed {
-        total_rows,
-        total_duration_secs,
-    })
+    Ok(TableCopyResult::Completed { total_rows, total_duration_secs })
 }
 
 /// Copies a table in parallel across multiple child connections.
 ///
 /// For non-partitioned tables, uses ctid-based partitioning by page estimation.
 /// For partitioned tables, copies each leaf partition as a separate unit.
-/// A semaphore limits the number of concurrent copy tasks to `max_copy_connections`.
+/// A semaphore limits the number of concurrent copy tasks to
+/// `max_copy_connections`.
 #[expect(clippy::too_many_arguments)]
 async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     transaction: &PgReplicationTransaction,
@@ -336,21 +324,18 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     max_copy_connections: u16,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
-    pipeline_id: PipelineId,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
 ) -> EtlResult<TableCopyResult> {
     let start_time = Instant::now();
 
-    info!(
-        table_id = table_id.0,
-        max_copy_connections, "starting parallel table copy"
-    );
+    info!(table_id = table_id.0, max_copy_connections, "starting parallel table copy");
 
-    // Determine copy partitions: ctid ranges for regular tables, leaf partitions for
-    // partitioned tables. Ctid-based partitioning cannot be used with partitioned tables
-    // because each child partition has its own ctid space, which causes duplicate rows.
+    // Determine copy partitions: ctid ranges for regular tables, leaf partitions
+    // for partitioned tables. Ctid-based partitioning cannot be used with
+    // partitioned tables because each child partition has its own ctid space,
+    // which causes duplicate rows.
     let is_partitioned = transaction.is_partitioned_table(table_id).await?;
     let copy_partitions: Vec<CopyPartition> = if is_partitioned {
         let leave_table_ids = transaction.get_leaf_partitions(table_id).await?;
@@ -366,9 +351,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             .map(|leaf_table_id| CopyPartition::LeafPartition { leaf_table_id })
             .collect()
     } else {
-        let ctid_partitions = transaction
-            .plan_ctid_partitions(table_id, max_copy_connections)
-            .await?;
+        let ctid_partitions =
+            transaction.plan_ctid_partitions(table_id, max_copy_connections).await?;
 
         info!(
             table_id = table_id.0,
@@ -376,27 +360,19 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
             "using ctid-based parallelism"
         );
 
-        ctid_partitions
-            .into_iter()
-            .map(CopyPartition::CtidRange)
-            .collect()
+        ctid_partitions.into_iter().map(CopyPartition::CtidRange).collect()
     };
 
     if copy_partitions.is_empty() {
-        info!(
-            table_id = table_id.0,
-            "table is empty, skipping parallel copy"
-        );
+        info!(table_id = table_id.0, "table is empty, skipping parallel copy");
 
-        return Ok(TableCopyResult::Completed {
-            total_rows: 0,
-            total_duration_secs: 0.0,
-        });
+        return Ok(TableCopyResult::Completed { total_rows: 0, total_duration_secs: 0.0 });
     }
 
-    // Export the snapshot from the main connection's transaction so child connections can
-    // import it via SET TRANSACTION SNAPSHOT. The main transaction must stay open for the
-    // entire duration of the parallel copy to keep the snapshot valid.
+    // Export the snapshot from the main connection's transaction so child
+    // connections can import it via SET TRANSACTION SNAPSHOT. The main
+    // transaction must stay open for the entire duration of the parallel copy
+    // to keep the snapshot valid.
     let snapshot_id = transaction.export_snapshot().await?;
 
     let semaphore = Arc::new(Semaphore::new(max_copy_connections as usize));
@@ -404,7 +380,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     let publication_name = publication_name.map(Arc::<str>::from);
 
     for partition in copy_partitions {
-        // Acquire a concurrency slot to make sure we are always using at most `max_copy_connections`.
+        // Acquire a concurrency slot to make sure we are always using at most
+        // `max_copy_connections`.
         let permit = semaphore.clone().acquire_owned().await.map_err(|err| {
             etl_error!(
                 ErrorKind::InvalidState,
@@ -436,7 +413,6 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                 partition,
                 batch_config,
                 shutdown_rx,
-                pipeline_id,
                 destination,
                 memory_monitor,
                 batch_budget,
@@ -453,14 +429,14 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
     let mut partition_durations = Vec::new();
     let mut partition_row_counts = Vec::new();
 
-    // TODO: we might want to edit retries within the same partition if the copy fails. However, we
-    //  need to investigate the frequency.
+    // TODO: we might want to edit retries within the same partition if the copy
+    // fails. However, we  need to investigate the frequency.
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok(Ok(result)) => {
-                // If all the copy was successful, we collect how many rows were copied but if at least
-                // one received the shutdown result, we shut everything down causing all progress to be
-                // lost.
+                // If all the copy was successful, we collect how many rows were copied but if
+                // at least one received the shutdown result, we shut everything
+                // down causing all progress to be lost.
                 match result {
                     TableCopyResult::Completed {
                         total_rows: partition_total_rows,
@@ -472,7 +448,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
                     }
                     TableCopyResult::Shutdown => {
                         info!(
-                            "shutting down parallel table copy since one or more partitions were interrupted by shutdown"
+                            "shutting down parallel table copy since one or more partitions were \
+                             interrupted by shutdown"
                         );
 
                         return Ok(TableCopyResult::Shutdown);
@@ -496,12 +473,8 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
 
     // Calculate partition skew metrics
     let time_lif = calculate_skew_metrics(&partition_durations);
-    let rows_lif = calculate_skew_metrics(
-        &partition_row_counts
-            .iter()
-            .map(|&r| r as f64)
-            .collect::<Vec<_>>(),
-    );
+    let rows_lif =
+        calculate_skew_metrics(&partition_row_counts.iter().map(|&r| r as f64).collect::<Vec<_>>());
 
     // Record imbalance metrics.
     histogram!(
@@ -525,17 +498,14 @@ async fn parallel_table_copy<D: Destination + Clone + Send + 'static>(
         "completed parallel table copy"
     );
 
-    Ok(TableCopyResult::Completed {
-        total_rows,
-        total_duration_secs,
-    })
+    Ok(TableCopyResult::Completed { total_rows, total_duration_secs })
 }
 
 /// Copies a single partition from the source table to the destination.
 ///
-/// The child transaction is already pinned to the exported snapshot. Depending on the
-/// [`CopyPartition`] variant, streams rows from either a ctid range or an entire leaf
-/// partition. All rows are written under the parent `table_id`.
+/// The child transaction is already pinned to the exported snapshot. Depending
+/// on the [`CopyPartition`] variant, streams rows from either a ctid range or
+/// an entire leaf partition. All rows are written under the parent `table_id`.
 #[expect(clippy::too_many_arguments)]
 async fn copy_partition<D>(
     child_transaction: PgReplicationChildTransaction,
@@ -545,7 +515,6 @@ async fn copy_partition<D>(
     partition: CopyPartition,
     batch_config: BatchConfig,
     shutdown_rx: ShutdownRx,
-    pipeline_id: PipelineId,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_budget: BatchBudgetController,
@@ -554,10 +523,8 @@ where
     D: Destination + Clone + Send + 'static,
 {
     let start_time = Instant::now();
-    let replicated_column_schemas = replicated_table_schema
-        .column_schemas()
-        .cloned()
-        .collect::<Vec<_>>();
+    let replicated_column_schemas =
+        replicated_table_schema.column_schemas().cloned().collect::<Vec<_>>();
 
     match &partition {
         CopyPartition::CtidRange(ctid) => match ctid {
@@ -616,9 +583,7 @@ where
     };
 
     let table_copy_stream = TableCopyStream::wrap(copy_stream, replicated_column_schemas.iter());
-    let connection_updates_rx = child_transaction
-        .get_cloned_client()
-        .connection_updates_rx();
+    let connection_updates_rx = child_transaction.get_cloned_client().connection_updates_rx();
     let _table_copy_stream_guard = batch_budget.register_stream_load(1);
     let cached_batch_budget = batch_budget.cached();
     let stream_id = table_sync_worker_copy_stream_id(table_id);
@@ -636,7 +601,6 @@ where
         shutdown_rx,
         connection_updates_rx,
         replicated_table_schema,
-        pipeline_id,
         "true",
         destination,
     )
@@ -653,8 +617,8 @@ where
         }
     };
 
-    // We commit the transaction for the same reason as the rollback, to let Postgres immediately free
-    // up things related to in-progress transactions.
+    // We commit the transaction for the same reason as the rollback, to let
+    // Postgres immediately free up things related to in-progress transactions.
     child_transaction.commit().await?;
 
     histogram!(
@@ -708,8 +672,5 @@ where
         }
     }
 
-    Ok(TableCopyResult::Completed {
-        total_rows,
-        total_duration_secs,
-    })
+    Ok(TableCopyResult::Completed { total_rows, total_duration_secs })
 }

@@ -1,32 +1,30 @@
-use etl_api::k8s::PodStatus;
-use etl_api::routes::pipelines::{
-    CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
-    GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse, RollbackTablesRequest,
-    RollbackTablesResponse, RollbackTablesTarget, RollbackType, SimpleTableReplicationState,
-    UpdatePipelineRequest, UpdatePipelineVersionRequest,
+use etl_api::{
+    k8s::PodStatus,
+    routes::pipelines::{
+        CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
+        GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
+        RollbackTablesRequest, RollbackTablesResponse, RollbackTablesTarget, RollbackType,
+        SimpleTableReplicationState, UpdatePipelineRequest, UpdatePipelineVersionRequest,
+    },
 };
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
 use reqwest::StatusCode;
-use sqlx::PgPool;
-use sqlx::postgres::types::Oid;
+use sqlx::{PgPool, postgres::types::Oid};
 
-use crate::support::database::{
-    create_test_source_database, run_etl_migrations_on_source_database,
-};
-use crate::support::k8s_client::MockK8sState;
-use crate::support::mocks::create_image_with_name;
-use crate::support::mocks::pipelines::{
-    create_pipeline_with_config, new_pipeline_config, updated_pipeline_config,
-};
-use crate::{
-    support::mocks::create_default_image,
-    support::mocks::destinations::create_destination,
-    support::mocks::sources::create_source,
-    support::mocks::tenants::{create_tenant, create_tenant_with_id_and_name},
-    support::test_app::{TestApp, spawn_test_app, spawn_test_app_with_k8s_state},
+use crate::support::{
+    database::{create_test_source_database, run_etl_migrations_on_source_database},
+    k8s_client::MockK8sState,
+    mocks::{
+        create_default_image, create_image_with_name,
+        destinations::create_destination,
+        pipelines::{create_pipeline_with_config, new_pipeline_config, updated_pipeline_config},
+        sources::create_source,
+        tenants::{create_tenant, create_tenant_with_id_and_name},
+    },
+    test_app::{TestApp, spawn_test_app, spawn_test_app_with_k8s_state},
 };
 
 /// Creates a basic pipeline setup for tests that don't need source databases.
@@ -47,7 +45,8 @@ async fn setup_basic_pipeline() -> (TestApp, String, i64, i64, i64) {
     (app, tenant_id, source_id, destination_id, pipeline_id)
 }
 
-/// Creates a pipeline setup with a real source database for replication state tests.
+/// Creates a pipeline setup with a real source database for replication state
+/// tests.
 async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgConnectionConfig) {
     let app = spawn_test_app().await;
     create_default_image(&app).await;
@@ -67,13 +66,7 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgCon
     // We run the migrations to create all the tables used by `etl`.
     run_etl_migrations_on_source_database(&source_db_config).await;
 
-    (
-        app,
-        tenant_id,
-        pipeline_id,
-        source_db_pool,
-        source_db_config,
-    )
+    (app, tenant_id, pipeline_id, source_db_pool, source_db_config)
 }
 
 /// Creates a table with a chain of replication states.
@@ -90,7 +83,8 @@ async fn create_table_with_state_chain(
     for (i, (state, metadata)) in state_chain.iter().enumerate() {
         let is_current = i == state_chain.len() - 1;
         let id = sqlx::query_scalar::<_, i64>(
-            "insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current) values ($1, $2, $3::etl.table_state, $4::jsonb, $5, $6) returning id"
+            "insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, \
+             is_current) values ($1, $2, $3::etl.table_state, $4::jsonb, $5, $6) returning id",
         )
         .bind(pipeline_id)
         .bind(table_oid)
@@ -122,7 +116,8 @@ async fn create_tables_with_states(
         let table_oid = create_test_table(source_db_pool, table_name).await;
 
         sqlx::query(
-            "insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current) values ($1, $2, $3::etl.table_state, $4::jsonb, NULL, true)"
+            "insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, \
+             is_current) values ($1, $2, $3::etl.table_state, $4::jsonb, NULL, true)",
         )
         .bind(pipeline_id)
         .bind(table_oid)
@@ -139,7 +134,8 @@ async fn create_tables_with_states(
 }
 
 /// Tests rollback functionality and returns response if successful.
-/// Asserts the expected status code and returns the response for successful calls.
+/// Asserts the expected status code and returns the response for successful
+/// calls.
 async fn test_rollback(
     app: &TestApp,
     tenant_id: &str,
@@ -153,9 +149,7 @@ async fn test_rollback(
             tenant_id,
             pipeline_id,
             &RollbackTablesRequest {
-                target: RollbackTablesTarget::SingleTable {
-                    table_id: table_oid.0,
-                },
+                target: RollbackTablesTarget::SingleTable { table_id: table_oid.0 },
                 rollback_type,
             },
         )
@@ -163,18 +157,11 @@ async fn test_rollback(
 
     assert_eq!(response.status(), expected_status);
 
-    if expected_status.is_success() {
-        Some(response.json().await.unwrap())
-    } else {
-        None
-    }
+    if expected_status.is_success() { Some(response.json().await.unwrap()) } else { None }
 }
 
 async fn create_test_table(source_db_pool: &PgPool, table_name: &str) -> Oid {
-    sqlx::query("create schema if not exists test")
-        .execute(source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query("create schema if not exists test").execute(source_db_pool).await.unwrap();
 
     sqlx::query(&format!(
         "create table if not exists test.{} (id serial primary key, name text)",
@@ -185,7 +172,8 @@ async fn create_test_table(source_db_pool: &PgPool, table_name: &str) -> Oid {
     .expect("Failed to create test table");
 
     sqlx::query_scalar::<_, Oid>(
-        "select c.oid from pg_class c join pg_namespace n on c.relnamespace = n.oid where c.relname = $1 and n.nspname = $2"
+        "select c.oid from pg_class c join pg_namespace n on c.relnamespace = n.oid where \
+         c.relname = $1 and n.nspname = $2",
     )
     .bind(table_name)
     .bind("test")
@@ -205,19 +193,14 @@ async fn pipeline_can_be_created() {
     let destination_id = create_destination(&app, tenant_id).await;
 
     // Act
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
+    let pipeline =
+        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
     let response = app.create_pipeline(tenant_id, &pipeline).await;
 
     // Assert
     assert!(response.status().is_success());
-    let response: CreatePipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, 1);
 }
 
@@ -235,11 +218,8 @@ async fn tenant_cannot_create_more_than_max_pipelines() {
     for _ in 0..MAX_PIPELINES_PER_TENANT {
         let source_id = create_source(&app, tenant_id).await;
         let destination_id = create_destination(&app, tenant_id).await;
-        let pipeline = CreatePipelineRequest {
-            source_id,
-            destination_id,
-            config: new_pipeline_config(),
-        };
+        let pipeline =
+            CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
         let response = app.create_pipeline(tenant_id, &pipeline).await;
         assert!(response.status().is_success());
     }
@@ -247,11 +227,8 @@ async fn tenant_cannot_create_more_than_max_pipelines() {
     // Attempt to create one more pipeline should fail
     let source_id = create_source(&app, tenant_id).await;
     let destination_id = create_destination(&app, tenant_id).await;
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
+    let pipeline =
+        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
     let response = app.create_pipeline(tenant_id, &pipeline).await;
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -333,16 +310,11 @@ async fn an_existing_pipeline_can_be_read() {
     let source_id = create_source(&app, tenant_id).await;
     let destination_id = create_destination(&app, tenant_id).await;
 
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
+    let pipeline =
+        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
     let response = app.create_pipeline(tenant_id, &pipeline).await;
-    let response: CreatePipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     let pipeline_id = response.id;
 
     // Act
@@ -350,10 +322,8 @@ async fn an_existing_pipeline_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: ReadPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, destination_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.source_id, source_id);
@@ -386,37 +356,25 @@ async fn an_existing_pipeline_can_be_updated() {
     let source_id = create_source(&app, tenant_id).await;
     let destination_id = create_destination(&app, tenant_id).await;
 
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
+    let pipeline =
+        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
     let response = app.create_pipeline(tenant_id, &pipeline).await;
-    let response: CreatePipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     let pipeline_id = response.id;
 
     // Act
     let source_id = create_source(&app, tenant_id).await;
     let destination_id = create_destination(&app, tenant_id).await;
-    let updated_config = UpdatePipelineRequest {
-        source_id,
-        destination_id,
-        config: updated_pipeline_config(),
-    };
-    let response = app
-        .update_pipeline(tenant_id, pipeline_id, &updated_config)
-        .await;
+    let updated_config =
+        UpdatePipelineRequest { source_id, destination_id, config: updated_pipeline_config() };
+    let response = app.update_pipeline(tenant_id, pipeline_id, &updated_config).await;
 
     // Assert
     assert!(response.status().is_success());
     let response = app.read_pipeline(tenant_id, pipeline_id).await;
-    let response: ReadPipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadPipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, pipeline_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.source_id, source_id);
@@ -451,10 +409,8 @@ async fn pipeline_with_another_tenants_source_cannot_be_updated() {
         config: new_pipeline_config(),
     };
     let response = app.create_pipeline(tenant1_id, &pipeline).await;
-    let response: CreatePipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     let pipeline_id = response.id;
 
     // Act
@@ -464,9 +420,7 @@ async fn pipeline_with_another_tenants_source_cannot_be_updated() {
         destination_id: destination1_id,
         config: updated_pipeline_config(),
     };
-    let response = app
-        .update_pipeline(tenant1_id, pipeline_id, &updated_config)
-        .await;
+    let response = app.update_pipeline(tenant1_id, pipeline_id, &updated_config).await;
 
     // Assert
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -499,10 +453,8 @@ async fn pipeline_with_another_tenants_destination_cannot_be_updated() {
         config: new_pipeline_config(),
     };
     let response = app.create_pipeline(tenant1_id, &pipeline).await;
-    let response: CreatePipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     let pipeline_id = response.id;
 
     // Act
@@ -512,9 +464,7 @@ async fn pipeline_with_another_tenants_destination_cannot_be_updated() {
         destination_id: destination2_id,
         config: updated_pipeline_config(),
     };
-    let response = app
-        .update_pipeline(tenant1_id, pipeline_id, &updated_config)
-        .await;
+    let response = app.update_pipeline(tenant1_id, pipeline_id, &updated_config).await;
 
     // Assert
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -530,11 +480,8 @@ async fn non_existing_pipeline_cannot_be_updated() {
     let destination_id = create_destination(&app, tenant_id).await;
 
     // Act
-    let updated_config = UpdatePipelineRequest {
-        source_id,
-        destination_id,
-        config: updated_pipeline_config(),
-    };
+    let updated_config =
+        UpdatePipelineRequest { source_id, destination_id, config: updated_pipeline_config() };
     let response = app.update_pipeline(tenant_id, 42, &updated_config).await;
 
     // Assert
@@ -618,10 +565,8 @@ async fn all_pipelines_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: ReadPipelinesResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadPipelinesResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.pipelines.len(), 1);
     let pipeline = &response.pipelines[0];
     assert_eq!(pipeline.id, pipeline_id);
@@ -653,8 +598,8 @@ async fn all_pipelines_can_be_read() {
 //     let response = app.create_pipeline(tenant_id, &pipeline).await;
 //     assert!(response.status().is_success());
 //
-//     // Act - Try to create duplicate pipeline with same source and destination
-//     let duplicate_pipeline = CreatePipelineRequest {
+//     // Act - Try to create duplicate pipeline with same source and
+// destination     let duplicate_pipeline = CreatePipelineRequest {
 //         source_id,
 //         destination_id,
 //         config: updated_pipeline_config(),
@@ -732,12 +677,8 @@ async fn pipeline_version_can_be_updated() {
     .await;
 
     // Act
-    let update_request = UpdatePipelineVersionRequest {
-        version_id: default_image_id,
-    };
-    let response = app
-        .update_pipeline_version(tenant_id, pipeline_id, &update_request)
-        .await;
+    let update_request = UpdatePipelineVersionRequest { version_id: default_image_id };
+    let response = app.update_pipeline_version(tenant_id, pipeline_id, &update_request).await;
 
     // Assert
     assert!(response.status().is_success());
@@ -757,11 +698,8 @@ async fn pipeline_version_update_skips_k8s_reconcile_when_pipeline_is_stopped() 
         create_image_with_name(&app, "supabase/replicator:1.2.3".to_string(), true).await;
 
     let pipeline_id = {
-        let req = CreatePipelineRequest {
-            source_id,
-            destination_id,
-            config: new_pipeline_config(),
-        };
+        let req =
+            CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
         let resp = app.create_pipeline(&tenant_id, &req).await;
         let resp: CreatePipelineResponse =
             resp.json().await.expect("failed to deserialize response");
@@ -772,12 +710,8 @@ async fn pipeline_version_update_skips_k8s_reconcile_when_pipeline_is_stopped() 
         create_image_with_name(&app, "supabase/replicator:1.3.0".to_string(), true).await;
 
     // Act
-    let update_request = UpdatePipelineVersionRequest {
-        version_id: default_image_id,
-    };
-    let response = app
-        .update_pipeline_version(&tenant_id, pipeline_id, &update_request)
-        .await;
+    let update_request = UpdatePipelineVersionRequest { version_id: default_image_id };
+    let response = app.update_pipeline_version(&tenant_id, pipeline_id, &update_request).await;
 
     // Assert
     assert!(response.status().is_success());
@@ -785,10 +719,8 @@ async fn pipeline_version_update_skips_k8s_reconcile_when_pipeline_is_stopped() 
 
     let version_response = app.get_pipeline_version(&tenant_id, pipeline_id).await;
     assert!(version_response.status().is_success());
-    let version: GetPipelineVersionResponse = version_response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let version: GetPipelineVersionResponse =
+        version_response.json().await.expect("failed to deserialize response");
     assert_eq!(version.version.id, default_image_id);
     assert_eq!(version.version.name, "1.3.0");
     assert_ne!(version.version.id, old_image_id);
@@ -804,9 +736,7 @@ async fn update_version_fails_for_non_existing_pipeline() {
 
     // Act
     let update_request = UpdatePipelineVersionRequest { version_id: 1 };
-    let response = app
-        .update_pipeline_version(tenant_id, 42, &update_request)
-        .await;
+    let response = app.update_pipeline_version(tenant_id, 42, &update_request).await;
 
     // Assert
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -836,12 +766,8 @@ async fn update_version_fails_when_version_is_not_default() {
         create_image_with_name(&app, "another/image".to_string(), false).await;
 
     // Act - attempt update with a non-default image id
-    let update_request = UpdatePipelineVersionRequest {
-        version_id: non_default_image_id,
-    };
-    let response = app
-        .update_pipeline_version(tenant_id, pipeline_id, &update_request)
-        .await;
+    let update_request = UpdatePipelineVersionRequest { version_id: non_default_image_id };
+    let response = app.update_pipeline_version(tenant_id, pipeline_id, &update_request).await;
 
     // Assert - mismatching image id should be rejected
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -869,16 +795,11 @@ async fn an_existing_pipeline_can_be_stopped() {
     let source_id = create_source(&app, tenant_id).await;
     let destination_id = create_destination(&app, tenant_id).await;
 
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
+    let pipeline =
+        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
     let response = app.create_pipeline(tenant_id, &pipeline).await;
-    let response: CreatePipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
     let pipeline_id = response.id;
 
     // Act
@@ -898,16 +819,11 @@ async fn all_pipelines_can_be_stopped() {
     let source_id = create_source(&app, tenant_id).await;
     let destination_id = create_destination(&app, tenant_id).await;
 
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
+    let pipeline =
+        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
     let response = app.create_pipeline(tenant_id, &pipeline).await;
-    let _response: CreatePipelineResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let _response: CreatePipelineResponse =
+        response.json().await.expect("failed to deserialize response");
 
     // Act
     let response = app.stop_all_pipelines(tenant_id).await;
@@ -934,9 +850,7 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
     .await;
 
     // Test the endpoint
-    let response = app
-        .get_pipeline_replication_status(&tenant_id, pipeline_id)
-        .await;
+    let response = app.get_pipeline_replication_status(&tenant_id, pipeline_id).await;
     let response: GetPipelineReplicationStatusResponse = response.json().await.unwrap();
 
     assert_eq!(response.pipeline_id, pipeline_id);
@@ -955,14 +869,12 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
         assert!(table_status.table_sync_lag.is_none());
 
         match table_name.as_str() {
-            "test.test_table_users" => assert!(matches!(
-                table_status.state,
-                SimpleTableReplicationState::CopyingTable
-            )),
-            "test.test_table_orders" => assert!(matches!(
-                table_status.state,
-                SimpleTableReplicationState::FollowingWal
-            )),
+            "test.test_table_users" => {
+                assert!(matches!(table_status.state, SimpleTableReplicationState::CopyingTable))
+            }
+            "test.test_table_orders" => {
+                assert!(matches!(table_status.state, SimpleTableReplicationState::FollowingWal))
+            }
             _ => panic!("Unexpected table name: {table_name}"),
         }
     }
@@ -976,7 +888,8 @@ async fn rollback_tables_succeeds_for_any_error_type() {
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
-    // Create a state chain with a previous state so rollback has something to rollback to
+    // Create a state chain with a previous state so rollback has something to
+    // rollback to
     let table_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
@@ -1006,10 +919,7 @@ async fn rollback_tables_succeeds_for_any_error_type() {
     // Verify we rolled back to the ready state (maps to FollowingWal)
     assert_eq!(response.tables.len(), 1);
     assert_eq!(response.tables[0].table_id, table_oid.0);
-    assert!(matches!(
-        response.tables[0].new_state,
-        SimpleTableReplicationState::FollowingWal
-    ));
+    assert!(matches!(response.tables[0].new_state, SimpleTableReplicationState::FollowingWal));
 
     drop_pg_database(&source_db_config).await;
 }
@@ -1036,7 +946,8 @@ async fn rollback_tables_with_full_reset_succeeds() {
 
     // Insert a table schema for this table
     let table_schema_id: i64 = sqlx::query_scalar(
-        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'test', 'test_users') returning id"
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
+         ($1, $2, 'test', 'test_users') returning id",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1044,19 +955,27 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .await
     .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1)")
-        .bind(table_schema_id)
-        .execute(&source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, \
+         nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, \
+         false, 1, 1)",
+    )
+    .bind(table_schema_id)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
     // Insert destination metadata for this table
-    sqlx::query("insert into etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
-        .bind(pipeline_id)
-        .bind(table_oid)
-        .execute(&source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into etl.destination_tables_metadata (pipeline_id, table_id, \
+         destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, \
+         'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
     // Verify table schema and metadata exist before reset
     let schema_count_before: i64 = sqlx::query_scalar(
@@ -1070,7 +989,8 @@ async fn rollback_tables_with_full_reset_succeeds() {
     assert_eq!(schema_count_before, 1);
 
     let metadata_count_before: i64 = sqlx::query_scalar(
-        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
+         = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1079,24 +999,15 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .unwrap();
     assert_eq!(metadata_count_before, 1);
 
-    let response = test_rollback(
-        &app,
-        &tenant_id,
-        pipeline_id,
-        table_oid,
-        RollbackType::Full,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap();
+    let response =
+        test_rollback(&app, &tenant_id, pipeline_id, table_oid, RollbackType::Full, StatusCode::OK)
+            .await
+            .unwrap();
 
     assert_eq!(response.pipeline_id, pipeline_id);
     assert_eq!(response.tables.len(), 1);
     assert_eq!(response.tables[0].table_id, table_oid.0);
-    assert!(matches!(
-        response.tables[0].new_state,
-        SimpleTableReplicationState::Queued
-    ));
+    assert!(matches!(response.tables[0].new_state, SimpleTableReplicationState::Queued));
 
     // Verify only one row exists (the reset init state)
     let count: i64 = sqlx::query_scalar(
@@ -1109,7 +1020,8 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .unwrap();
     assert_eq!(count, 1);
 
-    // Verify table schema was preserved (schemas are no longer deleted during reset)
+    // Verify table schema was preserved (schemas are no longer deleted during
+    // reset)
     let schema_count_after: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
     )
@@ -1122,7 +1034,8 @@ async fn rollback_tables_with_full_reset_succeeds() {
 
     // Verify destination metadata was not deleted.
     let metadata_count_after: i64 = sqlx::query_scalar(
-        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
+         = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1157,7 +1070,8 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
 
     // Insert table schema and mapping
     let table_schema_id: i64 = sqlx::query_scalar(
-        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'test', 'test_users') returning id"
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
+         ($1, $2, 'test', 'test_users') returning id",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1165,18 +1079,26 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
     .await
     .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1)")
-        .bind(table_schema_id)
-        .execute(&source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, \
+         nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, \
+         false, 1, 1)",
+    )
+    .bind(table_schema_id)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
-    sqlx::query("insert into etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
-        .bind(pipeline_id)
-        .bind(table_oid)
-        .execute(&source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into etl.destination_tables_metadata (pipeline_id, table_id, \
+         destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, \
+         'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
     // Do individual rollback (not full reset)
     let response = test_rollback(
@@ -1191,12 +1113,10 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
     .unwrap();
 
     assert_eq!(response.tables.len(), 1);
-    assert!(matches!(
-        response.tables[0].new_state,
-        SimpleTableReplicationState::Queued
-    ));
+    assert!(matches!(response.tables[0].new_state, SimpleTableReplicationState::Queued));
 
-    // Verify table schema was preserved (schemas are no longer deleted during rollback)
+    // Verify table schema was preserved (schemas are no longer deleted during
+    // rollback)
     let schema_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
     )
@@ -1209,7 +1129,8 @@ async fn rollback_to_init_keeps_schemas_and_metadata() {
 
     // Verify destination metadata was not deleted.
     let metadata_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
+         = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1227,7 +1148,8 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
-    // Create state chain: ready -> errored (rollback target is ready, not a starting state)
+    // Create state chain: ready -> errored (rollback target is ready, not a
+    // starting state)
     let table_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
@@ -1244,7 +1166,8 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
 
     // Insert table schema and mapping
     let table_schema_id: i64 = sqlx::query_scalar(
-        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'test', 'test_users') returning id"
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
+         ($1, $2, 'test', 'test_users') returning id",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1252,18 +1175,26 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     .await
     .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1)")
-        .bind(table_schema_id)
-        .execute(&source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, \
+         nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, \
+         false, 1, 1)",
+    )
+    .bind(table_schema_id)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
-    sqlx::query("insert into etl.destination_tables_metadata (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, 'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')")
-        .bind(pipeline_id)
-        .bind(table_oid)
-        .execute(&source_db_pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into etl.destination_tables_metadata (pipeline_id, table_id, \
+         destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, \
+         'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')",
+    )
+    .bind(pipeline_id)
+    .bind(table_oid)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
     // Do individual rollback (not full reset)
     let response = test_rollback(
@@ -1278,12 +1209,10 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
     .unwrap();
 
     assert_eq!(response.tables.len(), 1);
-    assert!(matches!(
-        response.tables[0].new_state,
-        SimpleTableReplicationState::FollowingWal
-    ));
+    assert!(matches!(response.tables[0].new_state, SimpleTableReplicationState::FollowingWal));
 
-    // Verify table schema was NOT deleted (because we rolled back to ready, not a starting state)
+    // Verify table schema was NOT deleted (because we rolled back to ready, not a
+    // starting state)
     let schema_count: i64 = sqlx::query_scalar(
         "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
     )
@@ -1296,7 +1225,8 @@ async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
 
     // Verify destination metadata was NOT deleted
     let metadata_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id = $2",
+        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
+         = $2",
     )
     .bind(pipeline_id)
     .bind(table_oid)
@@ -1359,19 +1289,45 @@ async fn deleting_pipeline_removes_table_schemas_from_source_database() {
 
     // Insert table schemas using production schema
     let table_schema_id_1 = sqlx::query_scalar::<_, i64>(
-        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'public', 'test_users') returning id"
-    ).bind(pipeline_id).bind(table1_oid).fetch_one(&source_db_pool).await.unwrap();
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
+         ($1, $2, 'public', 'test_users') returning id",
+    )
+    .bind(pipeline_id)
+    .bind(table1_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
 
     let table_schema_id_2 = sqlx::query_scalar::<_, i64>(
-        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values ($1, $2, 'public', 'test_orders') returning id"
-    ).bind(pipeline_id).bind(table2_oid).fetch_one(&source_db_pool).await.unwrap();
+        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
+         ($1, $2, 'public', 'test_orders') returning id",
+    )
+    .bind(pipeline_id)
+    .bind(table2_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
 
     // Insert multiple columns for each table to test CASCADE behavior
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, false, 1, 1), ($1, 'name', 'TEXT', -1, true, 2, NULL)")
-        .bind(table_schema_id_1).execute(&source_db_pool).await.unwrap();
+    sqlx::query(
+        "insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, \
+         nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, \
+         false, 1, 1), ($1, 'name', 'TEXT', -1, true, 2, NULL)",
+    )
+    .bind(table_schema_id_1)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
-    sqlx::query("insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'order_id', 'INT8', -1, false, 1, 1), ($1, 'amount', 'NUMERIC', -1, false, 2, NULL)")
-        .bind(table_schema_id_2).execute(&source_db_pool).await.unwrap();
+    sqlx::query(
+        "insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, \
+         nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'order_id', \
+         'INT8', -1, false, 1, 1), ($1, 'amount', 'NUMERIC', -1, false, 2, NULL)",
+    )
+    .bind(table_schema_id_2)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
     // Verify data exists before deletion
     let schema_count: i64 =
@@ -1429,11 +1385,8 @@ async fn pipeline_version_returns_current_version_and_no_new_version_when_defaul
     create_image_with_name(&app, "some/image".to_string(), true).await;
 
     let pipeline_id = {
-        let req = CreatePipelineRequest {
-            source_id,
-            destination_id,
-            config: new_pipeline_config(),
-        };
+        let req =
+            CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
         let resp = app.create_pipeline(&tenant_id, &req).await;
         let resp: CreatePipelineResponse =
             resp.json().await.expect("failed to deserialize response");
@@ -1445,10 +1398,8 @@ async fn pipeline_version_returns_current_version_and_no_new_version_when_defaul
 
     // Assert
     assert!(response.status().is_success());
-    let version: GetPipelineVersionResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let version: GetPipelineVersionResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(version.version.name, "latest");
     assert!(version.new_version.is_none());
 }
@@ -1467,11 +1418,8 @@ async fn pipeline_version_includes_new_default_version_when_available() {
         create_image_with_name(&app, "supabase/replicator:1.2.3".to_string(), true).await;
 
     let pipeline_id = {
-        let req = CreatePipelineRequest {
-            source_id,
-            destination_id,
-            config: new_pipeline_config(),
-        };
+        let req =
+            CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
         let resp = app.create_pipeline(&tenant_id, &req).await;
         let resp: CreatePipelineResponse =
             resp.json().await.expect("failed to deserialize response");
@@ -1487,18 +1435,14 @@ async fn pipeline_version_includes_new_default_version_when_available() {
 
     // Assert
     assert!(response.status().is_success());
-    let version: GetPipelineVersionResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let version: GetPipelineVersionResponse =
+        response.json().await.expect("failed to deserialize response");
 
     let current_version = version.version;
     assert_eq!(current_version.id, old_default_image_id);
     assert_eq!(current_version.name, "1.2.3");
 
-    let new_version = version
-        .new_version
-        .expect("expected new_version to be present");
+    let new_version = version.new_version.expect("expected new_version to be present");
     assert_eq!(new_version.id, default_image_id);
     assert_eq!(new_version.name, "1.3.0");
 }
@@ -1549,7 +1493,8 @@ async fn rollback_tables_all_errored_succeeds() {
     )
     .await;
 
-    // table4: errored with no_retry (should be rolled back - all errored tables are now included)
+    // table4: errored with no_retry (should be rolled back - all errored tables are
+    // now included)
     let table4_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
@@ -1589,30 +1534,21 @@ async fn rollback_tables_all_errored_succeeds() {
         .iter()
         .find(|t| t.table_id == table1_oid.0)
         .expect("table1 should be in response");
-    assert!(matches!(
-        table1_result.new_state,
-        SimpleTableReplicationState::FollowingWal
-    ));
+    assert!(matches!(table1_result.new_state, SimpleTableReplicationState::FollowingWal));
 
     let table2_result = response
         .tables
         .iter()
         .find(|t| t.table_id == table2_oid.0)
         .expect("table2 should be in response");
-    assert!(matches!(
-        table2_result.new_state,
-        SimpleTableReplicationState::CopyingTable
-    ));
+    assert!(matches!(table2_result.new_state, SimpleTableReplicationState::CopyingTable));
 
     let table4_result = response
         .tables
         .iter()
         .find(|t| t.table_id == table4_oid.0)
         .expect("table4 should be in response");
-    assert!(matches!(
-        table4_result.new_state,
-        SimpleTableReplicationState::Queued
-    ));
+    assert!(matches!(table4_result.new_state, SimpleTableReplicationState::Queued));
 
     drop_pg_database(&source_db_config).await;
 }
@@ -1653,13 +1589,7 @@ async fn rollback_tables_all_errored_fails_when_no_errored_tables() {
         .await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(
-        response
-            .text()
-            .await
-            .unwrap()
-            .contains("No errored tables found")
-    );
+    assert!(response.text().await.unwrap().contains("No errored tables found"));
 
     drop_pg_database(&source_db_config).await;
 }
@@ -1675,10 +1605,7 @@ async fn rollback_tables_all_tables_succeeds() {
         &source_db_pool,
         pipeline_id,
         "test_users",
-        &[
-            ("init", r#"{"type": "init"}"#),
-            ("ready", r#"{"type": "ready"}"#),
-        ],
+        &[("init", r#"{"type": "init"}"#), ("ready", r#"{"type": "ready"}"#)],
     )
     .await;
 
@@ -1700,14 +1627,12 @@ async fn rollback_tables_all_tables_succeeds() {
         &source_db_pool,
         pipeline_id,
         "test_products",
-        &[
-            ("init", r#"{"type": "init"}"#),
-            ("data_sync", r#"{"type": "data_sync"}"#),
-        ],
+        &[("init", r#"{"type": "init"}"#), ("data_sync", r#"{"type": "data_sync"}"#)],
     )
     .await;
 
-    // Call rollback with all_tables - all tables should be rolled back regardless of state
+    // Call rollback with all_tables - all tables should be rolled back regardless
+    // of state
     let response = app
         .rollback_tables(
             &tenant_id,
@@ -1731,30 +1656,21 @@ async fn rollback_tables_all_tables_succeeds() {
         .iter()
         .find(|t| t.table_id == table1_oid.0)
         .expect("table1 should be in response");
-    assert!(matches!(
-        table1_result.new_state,
-        SimpleTableReplicationState::Queued
-    ));
+    assert!(matches!(table1_result.new_state, SimpleTableReplicationState::Queued));
 
     let table2_result = response
         .tables
         .iter()
         .find(|t| t.table_id == table2_oid.0)
         .expect("table2 should be in response");
-    assert!(matches!(
-        table2_result.new_state,
-        SimpleTableReplicationState::CopyingTable
-    ));
+    assert!(matches!(table2_result.new_state, SimpleTableReplicationState::CopyingTable));
 
     let table3_result = response
         .tables
         .iter()
         .find(|t| t.table_id == table3_oid.0)
         .expect("table3 should be in response");
-    assert!(matches!(
-        table3_result.new_state,
-        SimpleTableReplicationState::Queued
-    ));
+    assert!(matches!(table3_result.new_state, SimpleTableReplicationState::Queued));
 
     drop_pg_database(&source_db_config).await;
 }

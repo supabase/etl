@@ -1,5 +1,4 @@
-use std::ops::Deref;
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 use actix_web::web::Data;
 use tracing::info;
@@ -58,9 +57,7 @@ pub async fn get_max_pipelines_per_tenant(
         Some(client) => {
             let user = configcat::User::new(tenant_id);
 
-            client
-                .get_value("maximumPipelinesPerTenant", default_value, Some(user))
-                .await
+            client.get_value("maximumPipelinesPerTenant", default_value, Some(user)).await
         }
         None => default_value,
     }

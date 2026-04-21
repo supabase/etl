@@ -1,4 +1,8 @@
-pub(crate) mod chaos;
-pub(crate) mod nextest;
-pub(crate) mod postgres;
-pub(crate) mod shared;
+mod chaos;
+mod nextest;
+mod postgres;
+mod shared;
+
+pub(crate) use chaos::ChaosArgs;
+pub(crate) use nextest::NextestArgs;
+pub(crate) use postgres::PostgresArgs;

@@ -1,25 +1,31 @@
-use etl_api::k8s::PodStatus;
-use etl_api::routes::destinations::{
-    CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
-    ReadDestinationsResponse, UpdateDestinationRequest,
+use etl_api::{
+    k8s::PodStatus,
+    routes::{
+        destinations::{
+            CreateDestinationRequest, CreateDestinationResponse, ReadDestinationResponse,
+            ReadDestinationsResponse, UpdateDestinationRequest,
+        },
+        pipelines::{CreatePipelineRequest, CreatePipelineResponse},
+    },
 };
-use etl_api::routes::pipelines::{CreatePipelineRequest, CreatePipelineResponse};
 use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
-use crate::{
-    support::database::{create_test_source_database, run_etl_migrations_on_source_database},
-    support::mocks::create_default_image,
-    support::mocks::destinations::{
-        create_destination, create_destination_with_config, new_bigquery_destination_config,
-        new_iceberg_supabase_destination_config, new_name, updated_destination_config,
-        updated_iceberg_supabase_destination_config, updated_name,
+use crate::support::{
+    database::{create_test_source_database, run_etl_migrations_on_source_database},
+    mocks::{
+        create_default_image,
+        destinations::{
+            create_destination, create_destination_with_config, new_bigquery_destination_config,
+            new_iceberg_supabase_destination_config, new_name, updated_destination_config,
+            updated_iceberg_supabase_destination_config, updated_name,
+        },
+        pipelines::new_pipeline_config,
+        sources::create_source,
+        tenants::create_tenant,
     },
-    support::mocks::pipelines::new_pipeline_config,
-    support::mocks::sources::create_source,
-    support::mocks::tenants::create_tenant,
-    support::test_app::{TestApp, spawn_test_app},
+    test_app::{TestApp, spawn_test_app},
 };
 
 async fn create_destination_pipeline_for_source(
@@ -28,17 +34,12 @@ async fn create_destination_pipeline_for_source(
     source_id: i64,
 ) -> (i64, i64) {
     let destination_id = create_destination(app, tenant_id).await;
-    let pipeline = CreatePipelineRequest {
-        source_id,
-        destination_id,
-        config: new_pipeline_config(),
-    };
+    let pipeline =
+        CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() };
     let pipeline_response = app.create_pipeline(tenant_id, &pipeline).await;
     assert!(pipeline_response.status().is_success());
-    let pipeline_response: CreatePipelineResponse = pipeline_response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let pipeline_response: CreatePipelineResponse =
+        pipeline_response.json().await.expect("failed to deserialize response");
 
     (destination_id, pipeline_response.id)
 }
@@ -51,18 +52,14 @@ async fn bigquery_destination_can_be_created() {
     let tenant_id = &create_tenant(&app).await;
 
     // Act
-    let destination = CreateDestinationRequest {
-        name: new_name(),
-        config: new_bigquery_destination_config(),
-    };
+    let destination =
+        CreateDestinationRequest { name: new_name(), config: new_bigquery_destination_config() };
     let response = app.create_destination(tenant_id, &destination).await;
 
     // Assert
     assert!(response.status().is_success());
-    let response: CreateDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, 1);
 }
 
@@ -82,10 +79,8 @@ async fn iceberg_supabase_destination_can_be_created() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: CreateDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, 1);
 }
 
@@ -96,15 +91,11 @@ async fn an_existing_destination_can_be_read() {
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
 
-    let destination = CreateDestinationRequest {
-        name: new_name(),
-        config: new_bigquery_destination_config(),
-    };
+    let destination =
+        CreateDestinationRequest { name: new_name(), config: new_bigquery_destination_config() };
     let response = app.create_destination(tenant_id, &destination).await;
-    let response: CreateDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     let destination_id = response.id;
 
     // Act
@@ -112,10 +103,8 @@ async fn an_existing_destination_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: ReadDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, destination_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, destination.name);
@@ -143,33 +132,23 @@ async fn an_existing_bigquery_destination_can_be_updated() {
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
 
-    let destination = CreateDestinationRequest {
-        name: new_name(),
-        config: new_bigquery_destination_config(),
-    };
+    let destination =
+        CreateDestinationRequest { name: new_name(), config: new_bigquery_destination_config() };
     let response = app.create_destination(tenant_id, &destination).await;
-    let response: CreateDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     let destination_id = response.id;
 
     // Act
-    let updated_config = UpdateDestinationRequest {
-        name: updated_name(),
-        config: updated_destination_config(),
-    };
-    let response = app
-        .update_destination(tenant_id, destination_id, &updated_config)
-        .await;
+    let updated_config =
+        UpdateDestinationRequest { name: updated_name(), config: updated_destination_config() };
+    let response = app.update_destination(tenant_id, destination_id, &updated_config).await;
 
     // Assert
     assert!(response.status().is_success());
     let response = app.read_destination(tenant_id, destination_id).await;
-    let response: ReadDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, destination_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, updated_config.name);
@@ -188,10 +167,8 @@ async fn an_existing_iceberg_supabase_destination_can_be_updated() {
         config: new_iceberg_supabase_destination_config(),
     };
     let response = app.create_destination(tenant_id, &destination).await;
-    let response: CreateDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     let destination_id = response.id;
 
     // Act
@@ -199,17 +176,13 @@ async fn an_existing_iceberg_supabase_destination_can_be_updated() {
         name: "Iceberg Supabase Destination (Updated)".to_string(),
         config: updated_iceberg_supabase_destination_config(),
     };
-    let response = app
-        .update_destination(tenant_id, destination_id, &updated_config)
-        .await;
+    let response = app.update_destination(tenant_id, destination_id, &updated_config).await;
 
     // Assert
     assert!(response.status().is_success());
     let response = app.read_destination(tenant_id, destination_id).await;
-    let response: ReadDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, destination_id);
     assert_eq!(&response.tenant_id, tenant_id);
     assert_eq!(response.name, updated_config.name);
@@ -224,10 +197,8 @@ async fn non_existing_destination_cannot_be_updated() {
     let tenant_id = &create_tenant(&app).await;
 
     // Act
-    let updated_config = UpdateDestinationRequest {
-        name: updated_name(),
-        config: updated_destination_config(),
-    };
+    let updated_config =
+        UpdateDestinationRequest { name: updated_name(), config: updated_destination_config() };
     let response = app.update_destination(tenant_id, 42, &updated_config).await;
 
     // Assert
@@ -241,15 +212,11 @@ async fn an_existing_destination_can_be_deleted() {
     let app = spawn_test_app().await;
     let tenant_id = &create_tenant(&app).await;
 
-    let destination = CreateDestinationRequest {
-        name: new_name(),
-        config: new_bigquery_destination_config(),
-    };
+    let destination =
+        CreateDestinationRequest { name: new_name(), config: new_bigquery_destination_config() };
     let response = app.create_destination(tenant_id, &destination).await;
-    let response: CreateDestinationResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateDestinationResponse =
+        response.json().await.expect("failed to deserialize response");
     let destination_id = response.id;
 
     // Act
@@ -301,10 +268,8 @@ async fn all_destinations_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: ReadDestinationsResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadDestinationsResponse =
+        response.json().await.expect("failed to deserialize response");
     for destination in response.destinations {
         if destination.id == destination1_id {
             let name = new_name();
