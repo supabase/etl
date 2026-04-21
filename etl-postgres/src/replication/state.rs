@@ -59,7 +59,8 @@ where
 
 /// Updates replication state using raw database types.
 ///
-/// Performs the database update with pre-serialized state data and proper history chaining.
+/// Performs the database update with pre-serialized state data and proper
+/// history chaining.
 pub async fn update_replication_state_raw<'c, E>(
     executor: E,
     pipeline_id: i64,
@@ -116,9 +117,10 @@ pub async fn rollback_replication_state(
     .await?;
 
     if let Some((current_id, Some(prev_id))) = current_row {
-        // Delete the row we are rolling back from to avoid buildup. Technically, we could keep the
-        // previous row for tracking purposes, but especially during timed retries, we might end up
-        // with an infinite growth of the database.
+        // Delete the row we are rolling back from to avoid buildup. Technically, we
+        // could keep the previous row for tracking purposes, but especially
+        // during timed retries, we might end up with an infinite growth of the
+        // database.
         sqlx::query(
             r#"
             delete from etl.replication_state
@@ -161,8 +163,8 @@ pub async fn rollback_replication_state(
 
 /// Resets table replication state to initial state.
 ///
-/// Removes all existing state entries for the table (including history) and creates a new
-/// Init entry, effectively restarting replication from scratch.
+/// Removes all existing state entries for the table (including history) and
+/// creates a new Init entry, effectively restarting replication from scratch.
 /// Table mappings and schemas are preserved for use on restart.
 pub async fn reset_replication_state(
     conn: &mut sqlx::PgConnection,
@@ -249,7 +251,9 @@ where
 
 /// Gets all table IDs that have replication state for a given pipeline.
 ///
-/// Returns a vector of table IDs that are currently being replicated for the specified pipeline.
+/// Returns a vector of table IDs that are currently being replicated for the
+/// specified pipeline. This is useful for operations that need to act on all
+/// tables in a pipeline, such as cleaning up replication slots.
 pub async fn get_pipeline_table_ids<'c, E>(
     executor: E,
     pipeline_id: i64,

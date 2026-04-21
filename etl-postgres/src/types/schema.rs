@@ -1,16 +1,20 @@
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    hash::{Hash, Hasher},
+    str::FromStr,
+    sync::Arc,
+};
+
 use pg_escape::quote_identifier;
-use std::collections::{HashMap, HashSet};
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::str::FromStr;
-use std::sync::Arc;
 use thiserror::Error;
 use tokio_postgres::types::{FromSql, PgLsn, ToSql, Type};
 
 /// Errors that can occur during schema operations.
 #[derive(Debug, Error)]
 pub enum SchemaError {
-    /// Columns were received during replication that do not exist in the stored table schema.
+    /// Columns were received during replication that do not exist in the stored
+    /// table schema.
     #[error("received columns during replication that are not in the stored table schema: {0:?}")]
     UnknownReplicatedColumns(Vec<String>),
 
@@ -24,9 +28,9 @@ type Oid = u32;
 
 /// Snapshot identifier for schema versioning.
 ///
-/// Wraps a [`PgLsn`] to represent the start_lsn of the DDL message that created a schema version.
-/// A value of 0/0 indicates the initial schema before any DDL changes.
-/// Stored as `pg_lsn` in the database.
+/// Wraps a [`PgLsn`] to represent the start_lsn of the DDL message that created
+/// a schema version. A value of 0/0 indicates the initial schema before any DDL
+/// changes. Stored as `pg_lsn` in the database.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub struct SnapshotId(PgLsn);
 
@@ -65,11 +69,10 @@ impl SnapshotId {
     ///
     /// # Errors
     ///
-    /// Returns [`SchemaError::InvalidSnapshotId`] if the string is not a valid `pg_lsn` format.
+    /// Returns [`SchemaError::InvalidSnapshotId`] if the string is not a valid
+    /// `pg_lsn` format.
     pub fn from_pg_lsn_string(s: &str) -> Result<Self, SchemaError> {
-        s.parse::<PgLsn>()
-            .map(Self)
-            .map_err(|_| SchemaError::InvalidSnapshotId(s.to_string()))
+        s.parse::<PgLsn>().map(Self).map_err(|_| SchemaError::InvalidSnapshotId(s.to_string()))
     }
 }
 
@@ -112,8 +115,9 @@ impl fmt::Display for SnapshotId {
 
 /// A fully qualified Postgres table name consisting of a schema and table name.
 ///
-/// This type represents a table identifier in Postgres, which requires both a schema name
-/// and a table name. It provides methods for formatting the name in different contexts.
+/// This type represents a table identifier in Postgres, which requires both a
+/// schema name and a table name. It provides methods for formatting the name in
+/// different contexts.
 #[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord)]
 pub struct TableName {
     /// The schema name containing the table
@@ -129,8 +133,8 @@ impl TableName {
 
     /// Returns the table name as a properly quoted Postgres identifier.
     ///
-    /// This method ensures the schema and table names are properly escaped according to
-    /// Postgres identifier quoting rules.
+    /// This method ensures the schema and table names are properly escaped
+    /// according to Postgres identifier quoting rules.
     pub fn as_quoted_identifier(&self) -> String {
         let quoted_schema = quote_identifier(&self.schema);
         let quoted_name = quote_identifier(&self.name);
@@ -147,14 +151,15 @@ impl fmt::Display for TableName {
 
 /// A type alias for Postgres type modifiers.
 ///
-/// Type modifiers in Postgres are used to specify additional type-specific attributes,
-/// such as length for varchar or precision for numeric types.
+/// Type modifiers in Postgres are used to specify additional type-specific
+/// attributes, such as length for varchar or precision for numeric types.
 type TypeModifier = i32;
 
 /// Represents the schema of a single column in a Postgres table.
 ///
-/// This type contains all metadata about a column including its name, data type,
-/// type modifier, ordinal position, primary key information, and nullability.
+/// This type contains all metadata about a column including its name, data
+/// type, type modifier, ordinal position, primary key information, and
+/// nullability.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ColumnSchema {
     /// The name of the column.
@@ -165,7 +170,8 @@ pub struct ColumnSchema {
     pub modifier: TypeModifier,
     /// The 1-based ordinal position of the column in the table.
     pub ordinal_position: i32,
-    /// The 1-based ordinal position of this column in the primary key, or None if not a primary key.
+    /// The 1-based ordinal position of this column in the primary key, or None
+    /// if not a primary key.
     pub primary_key_ordinal_position: Option<i32>,
     /// Whether the column can contain NULL values.
     pub nullable: bool,
@@ -181,14 +187,7 @@ impl ColumnSchema {
         primary_key_ordinal_position: Option<i32>,
         nullable: bool,
     ) -> ColumnSchema {
-        Self {
-            name,
-            typ,
-            modifier,
-            ordinal_position,
-            primary_key_ordinal_position,
-            nullable,
-        }
+        Self { name, typ, modifier, ordinal_position, primary_key_ordinal_position, nullable }
     }
 
     /// Returns whether this column is part of the table's primary key.
@@ -201,8 +200,8 @@ impl ColumnSchema {
 ///
 /// Table OIDs are unique identifiers assigned to tables in Postgres.
 ///
-/// This newtype provides type safety by preventing accidental use of raw [`Oid`] values
-/// where a table identifier is expected.
+/// This newtype provides type safety by preventing accidental use of raw
+/// [`Oid`] values where a table identifier is expected.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct TableId(pub Oid);
 
@@ -293,7 +292,8 @@ pub struct TableSchema {
     pub column_schemas: Vec<ColumnSchema>,
     /// The snapshot identifier for this schema version.
     ///
-    /// Value 0 indicates the initial schema, other values are start_lsn positions of DDL changes.
+    /// Value 0 indicates the initial schema, other values are start_lsn
+    /// positions of DDL changes.
     pub snapshot_id: SnapshotId,
 }
 
@@ -310,12 +310,7 @@ impl TableSchema {
         column_schemas: Vec<ColumnSchema>,
         snapshot_id: SnapshotId,
     ) -> Self {
-        Self {
-            id,
-            name,
-            column_schemas,
-            snapshot_id,
-        }
+        Self { id, name, column_schemas, snapshot_id }
     }
 
     /// Adds a new column schema to this [`TableSchema`].
@@ -325,7 +320,8 @@ impl TableSchema {
 
     /// Returns whether the table has any primary key columns.
     ///
-    /// This method checks if any column in the table is marked as part of the primary key.
+    /// This method checks if any column in the table is marked as part of the
+    /// primary key.
     pub fn has_primary_keys(&self) -> bool {
         self.column_schemas.iter().any(|cs| cs.primary_key())
     }
@@ -353,18 +349,20 @@ impl fmt::Display for ReplicationMask {
 }
 
 impl ReplicationMask {
-    /// Tries to create a new [`ReplicationMask`] from a table schema and column names.
+    /// Tries to create a new [`ReplicationMask`] from a table schema and column
+    /// names.
     ///
-    /// The mask is constructed by checking which column names from the schema are present
-    /// in the provided set of replicated column names.
+    /// The mask is constructed by checking which column names from the schema
+    /// are present in the provided set of replicated column names.
     ///
     /// # Errors
     ///
     /// Returns [`SchemaError::UnknownReplicatedColumns`] if any column in
     /// `replicated_column_names` does not exist in the table schema.
     ///
-    /// The column validation occurs because we have to make sure that the stored table schema is always
-    /// up to date, if not, it's a critical problem.
+    /// The column validation occurs because we have to make sure that the
+    /// stored table schema is always up to date, if not, it's a critical
+    /// problem.
     pub fn try_build(
         table_schema: &TableSchema,
         replicated_column_names: &HashSet<String>,
@@ -383,22 +381,27 @@ impl ReplicationMask {
 
         // This check ensures all replicated columns are present in the schema.
         //
-        // Limitation: If a column exists in the schema but is absent from the replicated columns,
-        // we assume publication-level column filtering is enabled. However, this is indistinguishable
-        // from an invalid state where the schema has diverged, we cannot detect the difference.
+        // Limitation: If a column exists in the schema but is absent from the
+        // replicated columns, we assume publication-level column filtering is
+        // enabled. However, this is indistinguishable from an invalid state
+        // where the schema has diverged, we cannot detect the difference.
         //
-        // How schema divergence occurs: When progress tracking fails and the system restarts,
-        // we may receive a `Relation` message reflecting the *current* table schema rather than
-        // the schema at the time the in-flight events were emitted. This is how Postgres handles
-        // initial `Relation` messages on reconnection. It's not the wrong behavior since the data
-        // has the columns that it announces, but it conflicts with our schema management logic.
-        // TODO: We are still debugging this case to validate when it happens, since it's hard to
-        //  reproduce. Nonetheless, the error should be raised.
+        // How schema divergence occurs: When progress tracking fails and the system
+        // restarts, we may receive a `Relation` message reflecting the
+        // *current* table schema rather than the schema at the time the
+        // in-flight events were emitted. This is how Postgres handles
+        // initial `Relation` messages on reconnection. It's not the wrong behavior
+        // since the data has the columns that it announces, but it conflicts
+        // with our schema management logic. TODO: We are still debugging this
+        // case to validate when it happens, since it's hard to  reproduce.
+        // Nonetheless, the error should be raised.
         //
-        // Invariant: Our schema management assumes the schema in `Relation` messages is consistent
-        // with the schema under which the corresponding row events were produced.
+        // Invariant: Our schema management assumes the schema in `Relation` messages is
+        // consistent with the schema under which the corresponding row events
+        // were produced.
         //
-        // In the future we might want to implement a system to go around this edge case.
+        // In the future we might want to implement a system to go around this edge
+        // case.
         if !unknown_columns.is_empty() {
             return Err(SchemaError::UnknownReplicatedColumns(unknown_columns));
         }
@@ -406,17 +409,19 @@ impl ReplicationMask {
         Ok(Self::build(table_schema, replicated_column_names))
     }
 
-    /// Creates a new [`ReplicationMask`] from a table schema and column names, falling back
-    /// to an all-replicated mask if validation fails.
+    /// Creates a new [`ReplicationMask`] from a table schema and column names,
+    /// falling back to an all-replicated mask if validation fails.
     ///
-    /// This method attempts to validate that all replicated column names exist in the schema.
-    /// If validation succeeds, it builds a mask based on matching columns. If validation fails
-    /// (unknown columns are present), it returns a mask with all columns marked as replicated.
+    /// This method attempts to validate that all replicated column names exist
+    /// in the schema. If validation succeeds, it builds a mask based on
+    /// matching columns. If validation fails (unknown columns are present),
+    /// it returns a mask with all columns marked as replicated.
     ///
-    /// This fallback behavior handles the case where Postgres sends a `Relation` message on
-    /// reconnection with the current schema, but the stored schema is from an earlier point
-    /// before DDL changes. Rather than failing, we enable all columns and let the system
-    /// converge when the actual DDL message is replayed.
+    /// This fallback behavior handles the case where Postgres sends a
+    /// `Relation` message on reconnection with the current schema, but the
+    /// stored schema is from an earlier point before DDL changes. Rather
+    /// than failing, we enable all columns and let the system converge when
+    /// the actual DDL message is replayed.
     pub fn build_or_all(
         table_schema: &TableSchema,
         replicated_column_names: &HashSet<String>,
@@ -479,11 +484,12 @@ impl ReplicationMask {
     }
 }
 
-/// An iterator wrapper that provides an exact size even when the inner iterator doesn't know its length.
+/// An iterator wrapper that provides an exact size even when the inner iterator
+/// doesn't know its length.
 ///
-/// This is useful for iterators like `FilterMap` where the exact count is not known upfront,
-/// but can be pre-computed. The wrapper stores the pre-computed length and implements
-/// [`ExactSizeIterator`].
+/// This is useful for iterators like `FilterMap` where the exact count is not
+/// known upfront, but can be pre-computed. The wrapper stores the pre-computed
+/// length and implements [`ExactSizeIterator`].
 #[derive(Clone)]
 pub struct SizedIterator<I> {
     inner: I,
@@ -519,10 +525,12 @@ impl<I: Iterator> ExactSizeIterator for SizedIterator<I> {
     }
 }
 
-/// A wrapper around [`TableSchema`] that tracks which columns are being replicated.
+/// A wrapper around [`TableSchema`] that tracks which columns are being
+/// replicated.
 ///
-/// This struct holds a reference to the underlying table schema and a [`ReplicationMask`]
-/// indicating which columns are included in the replication.
+/// This struct holds a reference to the underlying table schema and a
+/// [`ReplicationMask`] indicating which columns are included in the
+/// replication.
 #[derive(Debug, Clone)]
 pub struct ReplicatedTableSchema {
     /// The underlying table schema.
@@ -532,7 +540,8 @@ pub struct ReplicatedTableSchema {
 }
 
 impl ReplicatedTableSchema {
-    /// Creates a [`ReplicatedTableSchema`] from a schema and a pre-computed mask.
+    /// Creates a [`ReplicatedTableSchema`] from a schema and a pre-computed
+    /// mask.
     pub fn from_mask(table_schema: Arc<TableSchema>, replication_mask: ReplicationMask) -> Self {
         debug_assert_eq!(
             table_schema.column_schemas.len(),
@@ -540,19 +549,13 @@ impl ReplicatedTableSchema {
             "mask length must match column count"
         );
 
-        Self {
-            table_schema,
-            replication_mask,
-        }
+        Self { table_schema, replication_mask }
     }
 
     /// Creates a [`ReplicatedTableSchema`] where all columns are replicated.
     pub fn all(table_schema: Arc<TableSchema>) -> Self {
         let replication_mask = ReplicationMask::all(&table_schema);
-        Self {
-            table_schema,
-            replication_mask,
-        }
+        Self { table_schema, replication_mask }
     }
 
     /// Returns the table ID.
@@ -575,16 +578,19 @@ impl ReplicatedTableSchema {
         &self.replication_mask
     }
 
-    /// Returns an iterator over only the column schemas that are being replicated.
+    /// Returns an iterator over only the column schemas that are being
+    /// replicated.
     ///
-    /// This filters the columns based on the mask, returning only those where the
-    /// corresponding mask value is 1. The returned iterator implements [`ExactSizeIterator`].
+    /// This filters the columns based on the mask, returning only those where
+    /// the corresponding mask value is 1. The returned iterator implements
+    /// [`ExactSizeIterator`].
     pub fn column_schemas(&self) -> impl ExactSizeIterator<Item = &ColumnSchema> + Clone + '_ {
-        // Assuming that the schema is created via the constructor, we can safely assume that the
-        // column schemas and replication mask are of the same length.
+        // Assuming that the schema is created via the constructor, we can safely assume
+        // that the column schemas and replication mask are of the same length.
         debug_assert!(
             self.replication_mask.len() == self.table_schema.column_schemas.len(),
-            "the replication mask columns have a different len from the table schema columns, they should be the same"
+            "the replication mask columns have a different len from the table schema columns, \
+             they should be the same"
         );
 
         let len = self.replication_mask.replicated_count();
@@ -600,23 +606,21 @@ impl ReplicatedTableSchema {
 
     /// Computes the diff between this schema (old) and another schema (new).
     ///
-    /// Only consider replicated columns. Uses ordinal positions to track columns:
+    /// Only consider replicated columns. Uses ordinal positions to track
+    /// columns:
     /// - Columns in the same position with different names are renamed.
     /// - Positions in old but not in new are columns to remove.
     /// - Positions in new but not in old are columns to add.
     pub fn diff(&self, new_schema: &ReplicatedTableSchema) -> SchemaDiff {
         // Build maps: ordinal_position -> ColumnSchema for replicated columns only.
-        let old_columns: HashMap<i32, &ColumnSchema> = self
-            .column_schemas()
-            .map(|col| (col.ordinal_position, col))
-            .collect();
+        let old_columns: HashMap<i32, &ColumnSchema> =
+            self.column_schemas().map(|col| (col.ordinal_position, col)).collect();
 
-        let new_columns: HashMap<i32, &ColumnSchema> = new_schema
-            .column_schemas()
-            .map(|col| (col.ordinal_position, col))
-            .collect();
+        let new_columns: HashMap<i32, &ColumnSchema> =
+            new_schema.column_schemas().map(|col| (col.ordinal_position, col)).collect();
 
-        // Same ordinal position means the same logical column, even if the name changed.
+        // Same ordinal position means the same logical column, even if the name
+        // changed.
         let mut columns_to_rename = Vec::new();
         let mut columns_to_remove = Vec::new();
         for (&ordinal_position, &old_column) in &old_columns {
@@ -643,11 +647,7 @@ impl ReplicatedTableSchema {
             .collect();
         columns_to_add.sort_by_key(|c| c.ordinal_position);
 
-        SchemaDiff {
-            columns_to_add,
-            columns_to_remove,
-            columns_to_rename,
-        }
+        SchemaDiff { columns_to_add, columns_to_remove, columns_to_rename }
     }
 }
 
@@ -681,7 +681,8 @@ pub struct ColumnRename {
     pub old_name: String,
     /// The new name of the column.
     pub new_name: String,
-    /// The ordinal position of the column (used to identify the column across renames).
+    /// The ordinal position of the column (used to identify the column across
+    /// renames).
     pub ordinal_position: i32,
 }
 
@@ -704,10 +705,8 @@ mod tests {
     #[test]
     fn test_replication_mask_try_build_all_columns_replicated() {
         let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> = ["id", "name", "age"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let replicated_columns: HashSet<String> =
+            ["id", "name", "age"].into_iter().map(String::from).collect();
 
         let mask = ReplicationMask::try_build(&schema, &replicated_columns).unwrap();
 
@@ -738,10 +737,8 @@ mod tests {
     #[test]
     fn test_replication_mask_try_build_unknown_column_error() {
         let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> = ["id", "unknown_column"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let replicated_columns: HashSet<String> =
+            ["id", "unknown_column"].into_iter().map(String::from).collect();
 
         let result = ReplicationMask::try_build(&schema, &replicated_columns);
 
@@ -788,10 +785,8 @@ mod tests {
     #[test]
     fn test_replication_mask_build_or_all_falls_back_to_all() {
         let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> = ["id", "unknown_column"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let replicated_columns: HashSet<String> =
+            ["id", "unknown_column"].into_iter().map(String::from).collect();
 
         let mask = ReplicationMask::build_or_all(&schema, &replicated_columns);
 
@@ -907,7 +902,8 @@ mod tests {
     fn test_schema_diff_mixed_operations() {
         // Old schema: id (pos 1), name (pos 2), age (pos 3)
         // New schema: id (pos 1), full_name (pos 2), email (pos 4)
-        // Expected: age removed (pos 3), name -> full_name renamed (pos 2), email added (pos 4)
+        // Expected: age removed (pos 3), name -> full_name renamed (pos 2), email added
+        // (pos 4)
         let old_schema = create_replicated_schema(vec![
             ColumnSchema::new("id".to_string(), Type::INT4, -1, 1, Some(1), false),
             ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
@@ -956,11 +952,8 @@ mod tests {
         let diff = old_schema.diff(&new_schema);
 
         assert_eq!(diff.columns_to_add.len(), 2);
-        let added_names: HashSet<&str> = diff
-            .columns_to_add
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect();
+        let added_names: HashSet<&str> =
+            diff.columns_to_add.iter().map(|c| c.name.as_str()).collect();
         assert!(added_names.contains("name"));
         assert!(added_names.contains("email"));
         assert!(diff.columns_to_remove.is_empty());
@@ -987,11 +980,8 @@ mod tests {
 
         assert!(diff.columns_to_add.is_empty());
         assert_eq!(diff.columns_to_remove.len(), 2);
-        let removed_names: HashSet<&str> = diff
-            .columns_to_remove
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect();
+        let removed_names: HashSet<&str> =
+            diff.columns_to_remove.iter().map(|c| c.name.as_str()).collect();
         assert!(removed_names.contains("name"));
         assert!(removed_names.contains("email"));
         assert!(diff.columns_to_rename.is_empty());
@@ -1000,10 +990,8 @@ mod tests {
     #[test]
     fn test_replication_mask_display_all_replicated() {
         let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> = ["id", "name", "age"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let replicated_columns: HashSet<String> =
+            ["id", "name", "age"].into_iter().map(String::from).collect();
 
         let mask = ReplicationMask::build(&schema, &replicated_columns);
 

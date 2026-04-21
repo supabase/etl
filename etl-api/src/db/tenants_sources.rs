@@ -1,12 +1,17 @@
-use sqlx::PgTransaction;
 use std::ops::DerefMut;
+
+use sqlx::PgTransaction;
 use thiserror::Error;
 
-use crate::configs::encryption::EncryptionKey;
-use crate::configs::serde::DbSerializationError;
-use crate::configs::source::FullApiSourceConfig;
-use crate::db::sources::{SourcesDbError, create_source};
-use crate::db::tenants::{TenantsDbError, create_tenant};
+use crate::{
+    configs::{
+        encryption::EncryptionKey, serde::DbSerializationError, source::FullApiSourceConfig,
+    },
+    db::{
+        sources::{SourcesDbError, create_source},
+        tenants::{TenantsDbError, create_tenant},
+    },
+};
 
 #[derive(Debug, Error)]
 pub enum TenantSourceDbError {
@@ -32,14 +37,9 @@ pub async fn create_tenant_and_source(
     encryption_key: &EncryptionKey,
 ) -> Result<(String, i64), TenantSourceDbError> {
     let tenant_id = create_tenant(txn.deref_mut(), tenant_id, tenant_name).await?;
-    let source_id = create_source(
-        txn.deref_mut(),
-        &tenant_id,
-        source_name,
-        source_config,
-        encryption_key,
-    )
-    .await?;
+    let source_id =
+        create_source(txn.deref_mut(), &tenant_id, source_name, source_config, encryption_key)
+            .await?;
 
     Ok((tenant_id, source_id))
 }

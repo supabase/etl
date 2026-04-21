@@ -1,29 +1,39 @@
-use etl_postgres::types::{SnapshotId, TableId, TableSchema};
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
+
 use tokio::sync::Mutex;
 
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
-use crate::state::destination_metadata::{
-    AppliedDestinationTableMetadata, DestinationTableMetadata,
+use crate::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    state::{
+        destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+        table::TableReplicationPhase,
+    },
+    store::{
+        cleanup::CleanupStore,
+        schema::SchemaStore,
+        state::{DestinationTablesMetadata, StateStore, TableReplicationStates},
+    },
+    types::{SnapshotId, TableId, TableSchema},
 };
-use crate::state::table::TableReplicationPhase;
-use crate::store::cleanup::CleanupStore;
-use crate::store::schema::SchemaStore;
-use crate::store::state::{DestinationTablesMetadata, StateStore, TableReplicationStates};
 
 /// Inner state of [`MemoryStore`]
 #[derive(Debug)]
 struct Inner {
-    /// Current replication state for each table - this is the authoritative source of truth
-    /// for table states. Every table being replicated must have an entry here.
+    /// Current replication state for each table - this is the authoritative
+    /// source of truth for table states. Every table being replicated must
+    /// have an entry here.
     table_replication_states: TableReplicationStates,
-    /// Complete history of state transitions for each table, used for debugging and auditing.
-    /// This is an append-only log that grows over time and provides visibility into
-    /// table state evolution. Entries are chronologically ordered.
+    /// Complete history of state transitions for each table, used for debugging
+    /// and auditing. This is an append-only log that grows over time and
+    /// provides visibility into table state evolution. Entries are
+    /// chronologically ordered.
     table_state_history: HashMap<TableId, Vec<TableReplicationPhase>>,
-    /// Cached table schemas keyed by (TableId, SnapshotId) for versioning support.
+    /// Cached table schemas keyed by (TableId, SnapshotId) for versioning
+    /// support.
     table_schemas: HashMap<(TableId, SnapshotId), Arc<TableSchema>>,
     /// Cached destination table metadata indexed by table ID.
     destination_tables_metadata: DestinationTablesMetadata,
@@ -33,10 +43,12 @@ struct Inner {
 ///
 /// [`MemoryStore`] implements both [`StateStore`] and [`SchemaStore`] traits,
 /// providing a complete storage solution that keeps all data in memory. This is
-/// ideal for testing, development, and scenarios where persistence is not required.
+/// ideal for testing, development, and scenarios where persistence is not
+/// required.
 ///
-/// All state information including table replication phases, schema definitions,
-/// and destination table metadata are stored in memory and will be lost on process restart.
+/// All state information including table replication phases, schema
+/// definitions, and destination table metadata are stored in memory and will be
+/// lost on process restart.
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
@@ -45,9 +57,9 @@ pub struct MemoryStore {
 impl MemoryStore {
     /// Creates a new empty memory store.
     ///
-    /// The store initializes with empty collections for all state and schema data.
-    /// As the pipeline runs, it will populate these collections with replication
-    /// state and schema information.
+    /// The store initializes with empty collections for all state and schema
+    /// data. As the pipeline runs, it will populate these collections with
+    /// replication state and schema information.
     pub fn new() -> Self {
         let inner = Inner {
             table_replication_states: Arc::new(BTreeMap::new()),
@@ -56,9 +68,7 @@ impl MemoryStore {
             destination_tables_metadata: Arc::new(HashMap::new()),
         };
 
-        Self {
-            inner: Arc::new(Mutex::new(inner)),
-        }
+        Self { inner: Arc::new(Mutex::new(inner)) }
     }
 }
 
@@ -95,8 +105,8 @@ impl StateStore for MemoryStore {
         updates: Vec<(TableId, TableReplicationPhase)>,
     ) -> EtlResult<()> {
         let mut guard = self.inner.lock().await;
-        // To enable split-borrow (`Arc::make_mut()` borrows `table_replication_states` mutably,
-        // while `inner.table_state_history` borrows different field).
+        // To enable split-borrow (`Arc::make_mut()` borrows `table_replication_states`
+        // mutably, while `inner.table_state_history` borrows different field).
         let inner = &mut *guard;
 
         let states = Arc::make_mut(&mut inner.table_replication_states);
@@ -182,10 +192,12 @@ impl StateStore for MemoryStore {
 }
 
 impl SchemaStore for MemoryStore {
-    /// Returns the table schema for the given table at the specified snapshot point.
+    /// Returns the table schema for the given table at the specified snapshot
+    /// point.
     ///
-    /// Returns the schema version with the largest snapshot_id <= the requested snapshot_id.
-    /// For MemoryStore, this only looks in the in-memory cache.
+    /// Returns the schema version with the largest snapshot_id <= the requested
+    /// snapshot_id. For MemoryStore, this only looks in the in-memory
+    /// cache.
     async fn get_table_schema(
         &self,
         table_id: &TableId,

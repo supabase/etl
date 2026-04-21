@@ -1,17 +1,20 @@
-use sqlx::{FromRow, PgExecutor};
 use std::collections::BTreeMap;
 
-use crate::replication::slots::EtlReplicationSlot;
-use crate::types::TableId;
+use sqlx::{FromRow, PgExecutor};
+
+use crate::{replication::slots::EtlReplicationSlot, types::TableId};
 
 /// Lag metrics associated with a logical replication slot.
 #[derive(Debug)]
 pub struct SlotLagMetrics {
-    /// The number of bytes between the current WAL LSN and the slot restart LSN.
+    /// The number of bytes between the current WAL LSN and the slot restart
+    /// LSN.
     pub restart_lsn_bytes: i64,
-    /// The number of bytes between the current WAL LSN and the confirmed flush LSN.
+    /// The number of bytes between the current WAL LSN and the confirmed flush
+    /// LSN.
     pub confirmed_flush_lsn_bytes: i64,
-    /// How many bytes of WAL are still safe to build up before the limit of the slot is reached.
+    /// How many bytes of WAL are still safe to build up before the limit of the
+    /// slot is reached.
     pub safe_wal_size_bytes: i64,
     /// Write lag in milliseconds relative to the primary.
     pub write_lag_ms: Option<i64>,
@@ -39,11 +42,13 @@ struct SlotLagRow {
     flush_lag_ms: Option<i64>,
 }
 
-/// Fetches replication lag metrics for the given pipeline by inspecting logical replication slots.
+/// Fetches replication lag metrics for the given pipeline by inspecting logical
+/// replication slots.
 ///
-/// Returns aggregated lag metrics for the apply worker slot and each table sync slot associated
-/// with the pipeline. Slots that are not currently active in `pg_stat_replication` still report
-/// their WAL metrics, while the write and flush lag values remain `None`.
+/// Returns aggregated lag metrics for the apply worker slot and each table sync
+/// slot associated with the pipeline. Slots that are not currently active in
+/// `pg_stat_replication` still report their WAL metrics, while the write and
+/// flush lag values remain `None`.
 pub async fn get_pipeline_lag_metrics<'c, E>(
     executor: E,
     pipeline_id: u64,
@@ -90,15 +95,14 @@ where
         };
 
         match EtlReplicationSlot::try_from(row.slot_name.as_str()) {
-            Ok(EtlReplicationSlot::Apply {
-                pipeline_id: slot_pipeline_id,
-            }) if slot_pipeline_id == pipeline_id => {
+            Ok(EtlReplicationSlot::Apply { pipeline_id: slot_pipeline_id })
+                if slot_pipeline_id == pipeline_id =>
+            {
                 metrics.apply = Some(slot_lag_metrics);
             }
-            Ok(EtlReplicationSlot::TableSync {
-                pipeline_id: slot_pipeline_id,
-                table_id,
-            }) if slot_pipeline_id == pipeline_id => {
+            Ok(EtlReplicationSlot::TableSync { pipeline_id: slot_pipeline_id, table_id })
+                if slot_pipeline_id == pipeline_id =>
+            {
                 metrics.table_sync.insert(table_id, slot_lag_metrics);
             }
             _ => {}

@@ -34,10 +34,7 @@ pub async fn get_tables(pool: &PgPool) -> Result<Vec<Table>, TablesDbError> {
         .fetch_all(query)
         .await?
         .iter()
-        .map(|r| Table {
-            schema: r.get("schema"),
-            name: r.get("name"),
-        })
+        .map(|r| Table { schema: r.get("schema"), name: r.get("name") })
         .collect();
 
     Ok(tables)

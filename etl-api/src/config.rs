@@ -1,9 +1,14 @@
-use base64::{Engine, prelude::BASE64_STANDARD};
-use etl_config::Config;
-use etl_config::shared::{PgConnectionConfig, SentryConfig};
-use serde::de::{MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, de};
 use std::fmt;
+
+use base64::{Engine, prelude::BASE64_STANDARD};
+use etl_config::{
+    Config,
+    shared::{PgConnectionConfig, SentryConfig},
+};
+use serde::{
+    Deserialize, Deserializer,
+    de::{self, MapAccess, Visitor},
+};
 use thiserror::Error;
 
 /// Required length in bytes for a valid API key.
@@ -91,10 +96,7 @@ pub struct SourceConfig {
 
 impl Default for SourceConfig {
     fn default() -> Self {
-        Self {
-            tls_enabled: default_source_tls_enabled(),
-            trusted_username: None,
-        }
+        Self { tls_enabled: default_source_tls_enabled(), trusted_username: None }
     }
 }
 
@@ -146,7 +148,8 @@ pub enum ApiKeyConversionError {
 
 /// Validated API key as a 32-byte array.
 ///
-/// Ensures API keys meet length requirements and are properly decoded from base64.
+/// Ensures API keys meet length requirements and are properly decoded from
+/// base64.
 #[derive(Debug)]
 pub struct ApiKey {
     /// The 32-byte decoded API key.
@@ -158,31 +161,28 @@ impl TryFrom<&str> for ApiKey {
 
     /// Creates an [`ApiKey`] from a base64-encoded string.
     ///
-    /// Validates that the string is valid base64 and decodes to exactly 32 bytes.
+    /// Validates that the string is valid base64 and decodes to exactly 32
+    /// bytes.
     ///
     /// # Panics
     /// Panics if the decoded key cannot be converted to a 32-byte array.
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let key = BASE64_STANDARD
-            .decode(value)
-            .map_err(|_| ApiKeyConversionError::NotBase64Encoded)?;
+        let key =
+            BASE64_STANDARD.decode(value).map_err(|_| ApiKeyConversionError::NotBase64Encoded)?;
 
         if key.len() != API_KEY_LENGTH_IN_BYTES {
             return Err(ApiKeyConversionError::LengthNot32Bytes(key.len()));
         }
 
-        Ok(ApiKey {
-            key: key
-                .try_into()
-                .expect("failed to convert api key into array"),
-        })
+        Ok(ApiKey { key: key.try_into().expect("failed to convert api key into array") })
     }
 }
 
 impl<'de> Deserialize<'de> for ApiKey {
     /// Deserializes an [`ApiKey`] from configuration.
     ///
-    /// Expects a struct with a base64-encoded `key` field that decodes to 32 bytes.
+    /// Expects a struct with a base64-encoded `key` field that decodes to 32
+    /// bytes.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,

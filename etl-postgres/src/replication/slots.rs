@@ -1,9 +1,11 @@
-use crate::types::TableId;
-use sqlx::PgPool;
 use std::time::Duration;
+
+use sqlx::PgPool;
 use thiserror::Error;
 use tokio_postgres::types::Oid;
 use tracing::{debug, warn};
+
+use crate::types::TableId;
 
 /// Maximum length for a Postgres replication slot name in bytes.
 const MAX_SLOT_NAME_LENGTH: usize = 63;
@@ -39,10 +41,7 @@ impl EtlReplicationSlot {
 
     /// Creates a new [`EtlReplicationSlot`] for the table sync worker.
     pub fn for_table_sync_worker(pipeline_id: u64, table_id: TableId) -> Self {
-        Self::TableSync {
-            pipeline_id,
-            table_id,
-        }
+        Self::TableSync { pipeline_id, table_id }
     }
 
     /// Returns the prefix of apply sync slot for a pipeline.
@@ -123,14 +122,8 @@ impl TryFrom<EtlReplicationSlot> for String {
             EtlReplicationSlot::Apply { pipeline_id } => {
                 format!("{APPLY_WORKER_PREFIX}_{pipeline_id}")
             }
-            EtlReplicationSlot::TableSync {
-                pipeline_id,
-                table_id,
-            } => {
-                format!(
-                    "{TABLE_SYNC_WORKER_PREFIX}_{pipeline_id}_{}",
-                    table_id.into_inner()
-                )
+            EtlReplicationSlot::TableSync { pipeline_id, table_id } => {
+                format!("{TABLE_SYNC_WORKER_PREFIX}_{pipeline_id}_{}", table_id.into_inner())
             }
         };
 
@@ -144,22 +137,25 @@ impl TryFrom<EtlReplicationSlot> for String {
 
 /// Deletes all replication slots for a given pipeline.
 ///
-/// This function deletes both the apply worker slot and all table sync worker slots
-/// associated with the pipeline.
+/// This function deletes both the apply worker slot and all table sync worker
+/// slots associated with the pipeline.
 ///
-/// The cleanup derives slot names directly from `pipeline_id`: the apply worker slot is matched
-/// exactly and table sync worker slots are matched by the known slot prefix for that pipeline.
-/// This gives us the best chance of cleaning up all ETL-managed slots even after source-side ETL
-/// metadata has already been deleted, without having to thread table ids through every caller.
+/// The cleanup derives slot names directly from `pipeline_id`: the apply worker
+/// slot is matched exactly and table sync worker slots are matched by the known
+/// slot prefix for that pipeline. This gives us the best chance of cleaning up
+/// all ETL-managed slots even after source-side ETL metadata has already been
+/// deleted, without having to thread table ids through every caller.
 ///
-/// The tradeoff is that this function identifies slots by our naming convention rather than by
-/// state stored in ETL tables. If a user-created replication slot happens to reuse one of these
-/// ETL slot names, it could be deleted too.
+/// The tradeoff is that this function identifies slots by our naming convention
+/// rather than by state stored in ETL tables. If a user-created replication
+/// slot happens to reuse one of these ETL slot names, it could be deleted too.
 ///
-/// This function forcefully terminates active walsender processes and drops slots even if they
-/// are active. It retries up to 3 times with exponential backoff to handle transient failures.
+/// This function forcefully terminates active walsender processes and drops
+/// slots even if they are active. It retries up to 3 times with exponential
+/// backoff to handle transient failures.
 ///
-/// If the slot name can't be computed, this function logs a warning and skips deletion.
+/// If the slot name can't be computed, this function logs a warning and skips
+/// deletion.
 pub async fn delete_pipeline_replication_slots(
     pool: &PgPool,
     pipeline_id: u64,
@@ -179,9 +175,10 @@ pub async fn delete_pipeline_replication_slots(
     const INITIAL_BACKOFF_MS: u64 = 100;
 
     for attempt in 0..MAX_RETRIES {
-        // Phase 1: terminate active walsender processes for the ETL-managed slots associated with
-        // this pipeline id. We use both the exact apply slot name and the table-sync prefix so
-        // cleanup can still succeed even if ETL metadata was already removed.
+        // Phase 1: terminate active walsender processes for the ETL-managed slots
+        // associated with this pipeline id. We use both the exact apply slot
+        // name and the table-sync prefix so cleanup can still succeed even if
+        // ETL metadata was already removed.
         let terminate_query = String::from(
             r#"
             select pg_terminate_backend(r.active_pid)
@@ -205,8 +202,9 @@ pub async fn delete_pipeline_replication_slots(
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        // Phase 2: drop all matching replication slots, whether still active or already inactive.
-        // Note: pg_drop_replication_slot will signal walsenders to terminate if still active
+        // Phase 2: drop all matching replication slots, whether still active or already
+        // inactive. Note: pg_drop_replication_slot will signal walsenders to
+        // terminate if still active
         let drop_query = String::from(
             r#"
             select pg_drop_replication_slot(r.slot_name)
@@ -249,9 +247,7 @@ mod tests {
     #[test]
     fn test_apply_worker_slot_name() {
         let pipeline_id = 1;
-        let result: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
-            .try_into()
-            .unwrap();
+        let result: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
 
         assert!(result.starts_with(APPLY_WORKER_PREFIX));
         assert!(result.len() <= MAX_SLOT_NAME_LENGTH);
@@ -286,10 +282,7 @@ mod tests {
         assert!(slot_name.len() <= MAX_SLOT_NAME_LENGTH);
 
         // The longest possible slot name with current prefixes should still be valid
-        assert_eq!(
-            slot_name,
-            "supabase_etl_table_sync_9223372036854775807_4294967295"
-        );
+        assert_eq!(slot_name, "supabase_etl_table_sync_9223372036854775807_4294967295");
         assert!(slot_name.len() <= MAX_SLOT_NAME_LENGTH);
     }
 
@@ -316,10 +309,7 @@ mod tests {
         let parsed = EtlReplicationSlot::try_from("supabase_etl_table_sync_7_12345").unwrap();
         assert_eq!(
             parsed,
-            EtlReplicationSlot::TableSync {
-                pipeline_id: 7,
-                table_id: TableId::new(12345_u32),
-            }
+            EtlReplicationSlot::TableSync { pipeline_id: 7, table_id: TableId::new(12345_u32) }
         );
     }
 

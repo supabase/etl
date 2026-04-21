@@ -116,9 +116,13 @@ jobs:
         if: matrix.check == 'sort'
         run: cargo install cargo-sort
 
+      - name: Install pinned nightly rustfmt
+        if: matrix.check == 'fmt'
+        run: rustup toolchain install nightly-2026-04-15 --profile minimal --component rustfmt
+
       - name: Run Cargo Fmt
         if: matrix.check == 'fmt'
-        run: cargo fmt --check
+        run: ./scripts/fmt-check
 
       - name: Run Cargo Clippy
         if: matrix.check == 'clippy'

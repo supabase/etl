@@ -5,27 +5,32 @@ use tracing::trace;
 
 // Global cache for the Prometheus handle used by [`init_metrics_handle`].
 //
-// A [`Mutex`] is used instead of [`Once`], [`OnceCell`], or [`OnceLock`] because the
-// initialization code is fallible. Ideally, we would use `OnceLock::get_or_try_init`,
-// which allows fallible initialization, but it is currently unstable.
+// A [`Mutex`] is used instead of [`Once`], [`OnceCell`], or [`OnceLock`]
+// because the initialization code is fallible. Ideally, we would use
+// `OnceLock::get_or_try_init`, which allows fallible initialization, but it is
+// currently unstable.
 //
-// The reason we must initialize only once is that [`PrometheusBuilder::install_recorder`]
-// installs a global metrics recorder, and any later calls to it fail. While
-// [`init_metrics`] is not called multiple times during normal operations, it is called
-// multiple times during tests, so this caching mechanism is essential.
+// The reason we must initialize only once is that
+// [`PrometheusBuilder::install_recorder`] installs a global metrics recorder,
+// and any later calls to it fail. While [`init_metrics`] is not called multiple
+// times during normal operations, it is called multiple times during tests, so
+// this caching mechanism is essential.
 static PROMETHEUS_HANDLE: Mutex<Option<PrometheusHandle>> = Mutex::new(None);
 
-/// Initializes metrics with manual endpoint management and returns a handle for rendering.
+/// Initializes metrics with manual endpoint management and returns a handle for
+/// rendering.
 ///
-/// This function is designed for web services that need to integrate metrics into their
-/// existing HTTP framework (e.g., Actix Web, Axum). Unlike [`init_metrics`], this does
-/// not automatically start an HTTP server. Instead, it returns a [`PrometheusHandle`]
-/// that the caller uses to manually render metrics at a custom endpoint.
+/// This function is designed for web services that need to integrate metrics
+/// into their existing HTTP framework (e.g., Actix Web, Axum). Unlike
+/// [`init_metrics`], this does not automatically start an HTTP server. Instead,
+/// it returns a [`PrometheusHandle`] that the caller uses to manually render
+/// metrics at a custom endpoint.
 ///
 /// # Thread Safety
 ///
-/// Multiple threads can safely call this method to get a handle. Initialization happens
-/// only once, and subsequent calls return cloned handles from the cache.
+/// Multiple threads can safely call this method to get a handle. Initialization
+/// happens only once, and subsequent calls return cloned handles from the
+/// cache.
 ///
 /// # Use Case
 ///
@@ -47,11 +52,12 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 
     let handle_clone = handle.clone();
 
-    // This task periodically performs upkeep to avoid unbounded memory growth due to
-    // metrics collection.
+    // This task periodically performs upkeep to avoid unbounded memory growth due
+    // to metrics collection.
     tokio::spawn(async move {
         loop {
-            // upkeep_timeout hardcoded for now. Will make it configurable later if it creates a problem
+            // upkeep_timeout hardcoded for now. Will make it configurable later if it
+            // creates a problem
             let upkeep_timeout = Duration::from_secs(5);
             tokio::time::sleep(upkeep_timeout).await;
             trace!("running metrics upkeep");
@@ -64,10 +70,10 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 
 /// Initializes metrics with an automatic HTTP server on port 9000.
 ///
-/// This function is designed for standalone services where metrics should be exposed
-/// automatically without manual endpoint management. It installs a global metrics recorder
-/// and starts an HTTP server that listens on `[::]:9000/metrics`, making metrics available
-/// for Prometheus scraping.
+/// This function is designed for standalone services where metrics should be
+/// exposed automatically without manual endpoint management. It installs a
+/// global metrics recorder and starts an HTTP server that listens on
+/// `[::]:9000/metrics`, making metrics available for Prometheus scraping.
 ///
 /// When provided, `project_ref` and `pipeline_id` are attached as global
 /// labels to all exported metrics for the current process.

@@ -70,7 +70,7 @@ Tracks replication progress and destination table metadata.
 pub trait StateStore {
     // Replication state
     fn get_table_replication_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<TableReplicationPhase>>> + Send;
-    fn get_table_replication_states(&self) -> impl Future<Output = EtlResult<HashMap<TableId, TableReplicationPhase>>> + Send;
+    fn get_table_replication_states(&self) -> impl Future<Output = EtlResult<TableReplicationStates>> + Send;
     fn load_table_replication_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
     fn update_table_replication_states(&self, updates: Vec<(TableId, TableReplicationPhase)>) -> impl Future<Output = EtlResult<()>> + Send;
     fn update_table_replication_state(&self, table_id: TableId, state: TableReplicationPhase) -> impl Future<Output = EtlResult<()>> + Send;
@@ -89,7 +89,7 @@ pub trait StateStore {
 | Method | Purpose |
 |--------|---------|
 | `get_table_replication_state()` | Returns current phase for a table from cache |
-| `get_table_replication_states()` | Returns phases for all tables from cache |
+| `get_table_replication_states()` | Returns phases for all tables from cache as [`TableReplicationStates`] |
 | `load_table_replication_states()` | Loads phases from persistent storage into cache. Call once at startup. Returns the number of states loaded |
 | `update_table_replication_states()` | Atomically updates multiple table phases in both cache and persistent storage |
 | `update_table_replication_state()` | Updates phase in both cache and persistent storage |

@@ -1,4 +1,9 @@
 use core::str;
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
+
 use etl_postgres::types::{
     ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
     convert_type_oid_to_type,
@@ -6,21 +11,24 @@ use etl_postgres::types::{
 use metrics::{counter, histogram};
 use postgres_replication::protocol;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
 use tokio_postgres::types::PgLsn;
 
-use crate::conversions::text::{default_value_for_type, parse_cell_from_postgres_text};
-use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::metrics::{ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL};
-use crate::types::{
-    BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow, TruncateEvent, UpdateEvent,
+use crate::{
+    bail,
+    conversions::text::{default_value_for_type, parse_cell_from_postgres_text},
+    error::{ErrorKind, EtlError, EtlResult},
+    etl_error,
+    metrics::{ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL},
+    types::{
+        BeginEvent, Cell, CommitEvent, DeleteEvent, InsertEvent, TableRow, TruncateEvent,
+        UpdateEvent,
+    },
 };
-use crate::{bail, etl_error};
 
-/// The prefix used for DDL schema change messages emitted by the `etl.emit_schema_change_messages`
-/// event trigger. Messages with this prefix contain JSON-encoded schema information.
-pub const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
+/// The prefix used for DDL schema change messages emitted by the
+/// `etl.emit_schema_change_messages` event trigger. Messages with this prefix
+/// contain JSON-encoded schema information.
+pub(crate) const DDL_MESSAGE_PREFIX: &str = "supabase_etl_ddl";
 
 /// Represents a schema change message emitted by Postgres event trigger.
 ///
@@ -39,9 +47,10 @@ pub(crate) struct SchemaChangeMessage {
     pub(crate) relname: String,
     /// The table OID from `pg_class.oid`.
     ///
-    /// PostgreSQL table OIDs are `u32` values, but JSON serialization from the event trigger
-    /// uses `bigint` (i64) for transmission. The cast back to `u32` in [`into_table_schema`]
-    /// is safe because PostgreSQL OIDs are always within the `u32` range.
+    /// PostgreSQL table OIDs are `u32` values, but JSON serialization from the
+    /// event trigger uses `bigint` (i64) for transmission. The cast back to
+    /// `u32` in [`into_table_schema`] is safe because PostgreSQL OIDs are
+    /// always within the `u32` range.
     pub(crate) oid: i64,
     /// The identity metadata emitted by Postgres for this table snapshot.
     pub(crate) identity: IdentityMessage,
@@ -55,10 +64,12 @@ impl SchemaChangeMessage {
         TableId::new(self.oid as u32)
     }
 
-    /// Converts a [`SchemaChangeMessage`] to a [`TableSchema`] with a specific snapshot ID.
+    /// Converts a [`SchemaChangeMessage`] to a [`TableSchema`] with a specific
+    /// snapshot ID.
     ///
-    /// This is used to update the stored table schema when a DDL change is detected.
-    /// The snapshot_id should be the start_lsn of the DDL message.
+    /// This is used to update the stored table schema when a DDL change is
+    /// detected. The snapshot_id should be the start_lsn of the DDL
+    /// message.
     pub(crate) fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
         let table_id = self.table_id();
         build_table_schema(
@@ -88,7 +99,8 @@ impl FromStr for SchemaChangeMessage {
 /// The identity metadata emitted by Postgres.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct IdentityMessage {
-    /// The primary key columns in key order, expressed as `pg_attribute.attnum` values.
+    /// The primary key columns in key order, expressed as `pg_attribute.attnum`
+    /// values.
     pub(crate) primary_key_attnums: Vec<i32>,
 }
 
@@ -107,10 +119,12 @@ pub(crate) struct ColumnSchemaMessage {
     pub(crate) attnotnull: bool,
 }
 
-/// Builds [`ColumnSchema`] values from PostgreSQL-native schema and identity snapshots.
+/// Builds [`ColumnSchema`] values from PostgreSQL-native schema and identity
+/// snapshots.
 ///
-/// The resulting columns are always sorted by `attnum`, preserving physical table order, while
-/// `primary_key_ordinal_position` stays tied to the order of `primary_key_attnums`.
+/// The resulting columns are always sorted by `attnum`, preserving physical
+/// table order, while `primary_key_ordinal_position` stays tied to the order of
+/// `primary_key_attnums`.
 pub(crate) fn build_column_schemas(
     mut columns: Vec<ColumnSchemaMessage>,
     primary_key_attnums: Vec<i32>,
@@ -121,8 +135,8 @@ pub(crate) fn build_column_schemas(
         .map(|(index, attnum)| (attnum, (index + 1) as i32))
         .collect();
 
-    // We sort columns by their ordinal position to keep the ordering consistent within the
-    // application.
+    // We sort columns by their ordinal position to keep the ordering consistent
+    // within the application.
     columns.sort_by_key(|column| column.attnum);
 
     columns
@@ -141,10 +155,11 @@ pub(crate) fn build_column_schemas(
         .collect()
 }
 
-/// Builds a [`TableSchema`] from PostgreSQL-native schema and identity snapshots.
+/// Builds a [`TableSchema`] from PostgreSQL-native schema and identity
+/// snapshots.
 ///
-/// This is shared by bootstrap schema loading and DDL message handling so both paths produce
-/// the exact same [`TableSchema`] representation.
+/// This is shared by bootstrap schema loading and DDL message handling so both
+/// paths produce the exact same [`TableSchema`] representation.
 pub(crate) fn build_table_schema(
     table_id: TableId,
     table_name: TableName,
@@ -177,7 +192,7 @@ fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
 ///
 /// This method parses the replication protocol begin message and extracts
 /// transaction metadata for use in the ETL pipeline.
-pub fn parse_event_from_begin_message(
+pub(crate) fn parse_event_from_begin_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
@@ -196,7 +211,7 @@ pub fn parse_event_from_begin_message(
 ///
 /// This method parses the replication protocol commit message and extracts
 /// transaction completion metadata for use in the ETL pipeline.
-pub fn parse_event_from_commit_message(
+pub(crate) fn parse_event_from_commit_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
@@ -213,7 +228,7 @@ pub fn parse_event_from_commit_message(
 }
 
 /// Returns the set of column names to replicate from a relation message.
-pub fn parse_replicated_column_names(
+pub(crate) fn parse_replicated_column_names(
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<HashSet<String>> {
     let column_names = relation_body
@@ -228,8 +243,9 @@ pub fn parse_replicated_column_names(
 /// Converts a Postgres insert message into an [`InsertEvent`].
 ///
 /// This function processes an insert operation from the replication stream
-/// and constructs an insert event with the new row data ready for ETL processing.
-pub fn parse_event_from_insert_message(
+/// and constructs an insert event with the new row data ready for ETL
+/// processing.
+pub(crate) fn parse_event_from_insert_message(
     replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
@@ -250,13 +266,7 @@ pub fn parse_event_from_insert_message(
         false,
     )?;
 
-    Ok(InsertEvent {
-        start_lsn,
-        commit_lsn,
-        tx_ordinal,
-        replicated_table_schema,
-        table_row,
-    })
+    Ok(InsertEvent { start_lsn, commit_lsn, tx_ordinal, replicated_table_schema, table_row })
 }
 
 /// Converts a Postgres update message into an [`UpdateEvent`].
@@ -265,15 +275,15 @@ pub fn parse_event_from_insert_message(
 /// handling both the old and new row data. The old row data may be either
 /// the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
-pub fn parse_event_from_update_message(
+pub(crate) fn parse_event_from_update_message(
     replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     update_body: &protocol::UpdateBody,
 ) -> EtlResult<UpdateEvent> {
-    // We try to extract the old tuple by either taking the entire old tuple or the key of the old
-    // tuple.
+    // We try to extract the old tuple by either taking the entire old tuple or the
+    // key of the old tuple.
     let is_key = update_body.old_tuple().is_none();
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
 
@@ -323,15 +333,15 @@ pub fn parse_event_from_update_message(
 /// extracting the old row data that was deleted. The old row data may be
 /// either the complete row or just the key columns, depending on the table's
 /// `REPLICA IDENTITY` setting in Postgres.
-pub fn parse_event_from_delete_message(
+pub(crate) fn parse_event_from_delete_message(
     replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     delete_body: &protocol::DeleteBody,
 ) -> EtlResult<DeleteEvent> {
-    // We try to extract the old tuple by either taking the entire old tuple or the key of the old
-    // tuple.
+    // We try to extract the old tuple by either taking the entire old tuple or the
+    // key of the old tuple.
     let is_key = delete_body.old_tuple().is_none();
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
 
@@ -354,20 +364,14 @@ pub fn parse_event_from_delete_message(
     }
     .map(|row| (is_key, row));
 
-    Ok(DeleteEvent {
-        start_lsn,
-        commit_lsn,
-        tx_ordinal,
-        replicated_table_schema,
-        old_table_row,
-    })
+    Ok(DeleteEvent { start_lsn, commit_lsn, tx_ordinal, replicated_table_schema, old_table_row })
 }
 
 /// Creates a [`TruncateEvent`] from Postgres protocol data.
 ///
 /// This method parses the replication protocol truncate message and extracts
 /// information about which tables were truncated and with what options.
-pub fn parse_event_from_truncate_message(
+pub(crate) fn parse_event_from_truncate_message(
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
@@ -386,14 +390,14 @@ pub fn parse_event_from_truncate_message(
 /// Converts Postgres tuple data into a [`TableRow`] using column schemas.
 ///
 /// This function transforms raw tuple data from the replication protocol into
-/// a structured row representation. It handles null values, unchanged TOAST data,
-/// and binary data according to Postgres semantics. For unchanged TOAST values,
-/// it attempts to reuse data from the old row if available.
+/// a structured row representation. It handles null values, unchanged TOAST
+/// data, and binary data according to Postgres semantics. For unchanged TOAST
+/// values, it attempts to reuse data from the old row if available.
 ///
 /// Returns an error with [`ErrorKind::InvalidData`] if a non-nullable column
 /// receives NULL data and `use_default_for_missing_cols` is false, indicating
 /// protocol-level corruption.
-pub fn convert_tuple_to_row<'a>(
+pub(crate) fn convert_tuple_to_row<'a>(
     column_schemas: impl Iterator<Item = &'a ColumnSchema>,
     tuple_data: &[protocol::TupleData],
     old_table_row: &mut Option<TableRow>,
@@ -402,13 +406,10 @@ pub fn convert_tuple_to_row<'a>(
     let mut values = Vec::with_capacity(tuple_data.len());
 
     for (i, column_schema) in column_schemas.enumerate() {
-        // We are expecting that for each column, there is corresponding tuple data, even for null
-        // values.
+        // We are expecting that for each column, there is corresponding tuple data,
+        // even for null values.
         let Some(tuple_data) = &tuple_data.get(i) else {
-            bail!(
-                ErrorKind::ConversionError,
-                "Tuple data missing value at index"
-            );
+            bail!(ErrorKind::ConversionError, "Tuple data missing value at index");
         };
 
         let cell = match tuple_data {
@@ -422,17 +423,20 @@ pub fn convert_tuple_to_row<'a>(
                         ErrorKind::InvalidData,
                         "Required column missing from tuple",
                         format!(
-                            "Non-nullable column '{}' received NULL value, indicating protocol-level corruption",
+                            "Non-nullable column '{}' received NULL value, indicating \
+                             protocol-level corruption",
                             column_schema.name
                         )
                     );
                 }
             }
             protocol::TupleData::UnchangedToast => {
-                // For unchanged toast values we try to use the value from the old row if it is present
-                // but only if it is not null. In all other cases we send the default value for
-                // consistency. As a bit of a practical hack we take the value out of the old row and
-                // move a null value in its place to avoid a clone because toast values tend to be large.
+                // For unchanged toast values we try to use the value from the old row if it is
+                // present but only if it is not null. In all other cases we
+                // send the default value for consistency. As a bit of a
+                // practical hack we take the value out of the old row and
+                // move a null value in its place to avoid a clone because toast values tend to
+                // be large.
                 if let Some(row) = old_table_row {
                     let old_row_value = std::mem::replace(&mut row.values_mut()[i], Cell::Null);
                     if old_row_value == Cell::Null {
@@ -445,10 +449,7 @@ pub fn convert_tuple_to_row<'a>(
                 }
             }
             protocol::TupleData::Binary(_) => {
-                bail!(
-                    ErrorKind::ConversionError,
-                    "Binary format not supported in tuple data"
-                );
+                bail!(ErrorKind::ConversionError, "Binary format not supported in tuple data");
             }
             protocol::TupleData::Text(bytes) => {
                 let str = str::from_utf8(&bytes[..])?;

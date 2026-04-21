@@ -2,14 +2,15 @@
 //!
 //! # PostgreSQL Configuration Requirements
 //!
-//! For tests to complete in a timely manner, the PostgreSQL instance must be configured
-//! with a low `wal_sender_timeout` value. PostgreSQL uses `wal_sender_timeout / 2` to
-//! determine the interval for sending status updates (keep-alive messages) during idle
-//! periods in logical replication.
+//! For tests to complete in a timely manner, the PostgreSQL instance must be
+//! configured with a low `wal_sender_timeout` value. PostgreSQL uses
+//! `wal_sender_timeout / 2` to determine the interval for sending status
+//! updates (keep-alive messages) during idle periods in logical replication.
 //!
-//! For example, with `wal_sender_timeout = 10s`, keep-alive messages are sent every 5
-//! seconds. This is important because the apply loop relies on these messages to trigger
-//! table synchronization state transitions when there is no WAL activity.
+//! For example, with `wal_sender_timeout = 10s`, keep-alive messages are sent
+//! every 5 seconds. This is important because the apply loop relies on these
+//! messages to trigger table synchronization state transitions when there is no
+//! WAL activity.
 //!
 //! The recommended configuration for tests is:
 //! ```text
@@ -19,9 +20,9 @@
 //! See `scripts/docker-compose.yaml` for the test database configuration.
 
 use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
-use etl_postgres::replication::connect_to_source_database;
-use etl_postgres::tokio::test_utils::PgDatabase;
-use etl_postgres::types::TableName;
+use etl_postgres::{
+    replication::connect_to_source_database, tokio::test_utils::PgDatabase, types::TableName,
+};
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 use uuid::Uuid;
@@ -34,21 +35,19 @@ pub const TEST_DATABASE_SCHEMA: &str = "test";
 
 /// Creates a [`TableName`] in the test schema.
 ///
-/// This helper function constructs a [`TableName`] with the schema set to the test schema
-/// and the provided name as the table name. It's used to ensure consistent table naming
-/// across test scenarios.
+/// This helper function constructs a [`TableName`] with the schema set to the
+/// test schema and the provided name as the table name. It's used to ensure
+/// consistent table naming across test scenarios.
 pub fn test_table_name(name: &str) -> TableName {
-    TableName {
-        schema: TEST_DATABASE_SCHEMA.to_owned(),
-        name: name.to_owned(),
-    }
+    TableName { schema: TEST_DATABASE_SCHEMA.to_owned(), name: name.to_owned() }
 }
 
 /// Generates Postgres connection configuration for isolated test databases.
 ///
-/// This function creates connection parameters for a local Postgres instance with
-/// test-specific settings designed for isolation, reproducibility, and ease of debugging.
-/// Each invocation creates a unique database name to prevent test interference.
+/// This function creates connection parameters for a local Postgres instance
+/// with test-specific settings designed for isolation, reproducibility, and
+/// ease of debugging. Each invocation creates a unique database name to prevent
+/// test interference.
 ///
 /// Configuration is read from environment variables:
 /// - `TESTS_DATABASE_HOST`: Postgres server hostname (required)
@@ -66,13 +65,8 @@ fn local_pg_connection_config() -> PgConnectionConfig {
         name: Uuid::new_v4().to_string(),
         username: std::env::var("TESTS_DATABASE_USERNAME")
             .expect("TESTS_DATABASE_USERNAME must be set"),
-        password: std::env::var("TESTS_DATABASE_PASSWORD")
-            .ok()
-            .map(Into::into),
-        tls: TlsConfig {
-            trusted_root_certs: String::new(),
-            enabled: false,
-        },
+        password: std::env::var("TESTS_DATABASE_PASSWORD").ok().map(Into::into),
+        tls: TlsConfig { trusted_root_certs: String::new(), enabled: false },
         keepalive: TcpKeepaliveConfig::default(),
     }
 }
@@ -80,8 +74,8 @@ fn local_pg_connection_config() -> PgConnectionConfig {
 /// Creates a new test database instance with a unique name and runs migrations.
 ///
 /// This function spawns a new Postgres database with a random UUID as its name,
-/// using default credentials and disabled SSL. It automatically creates the test schema
-/// for organizing test tables and runs all ETL migrations.
+/// using default credentials and disabled SSL. It automatically creates the
+/// test schema for organizing test tables and runs all ETL migrations.
 ///
 /// # Panics
 ///
@@ -96,18 +90,14 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
         .client
         .as_ref()
         .expect("database client should be initialized")
-        .execute(
-            &format!("create schema {}", quote_identifier(TEST_DATABASE_SCHEMA)),
-            &[],
-        )
+        .execute(&format!("create schema {}", quote_identifier(TEST_DATABASE_SCHEMA)), &[])
         .await
         .expect("Failed to create test schema");
 
-    // We now connect via sqlx just to run the migrations, but we still use the original tokio postgres
-    // connection for the db object returned.
-    let pool = connect_to_source_database(&config, 1, 1, None)
-        .await
-        .expect("Failed to connect with sqlx");
+    // We now connect via sqlx just to run the migrations, but we still use the
+    // original tokio postgres connection for the db object returned.
+    let pool =
+        connect_to_source_database(&config, 1, 1, None).await.expect("Failed to connect with sqlx");
 
     // Create the `etl` schema first.
     sqlx::query("create schema if not exists etl")
@@ -115,18 +105,15 @@ pub async fn spawn_source_database() -> PgDatabase<Client> {
         .await
         .expect("Failed to create 'etl' schema");
 
-    // Set the `etl` schema as search path (this is done to have the migrations metadata table created
-    // by sqlx within the `etl` schema).
+    // Set the `etl` schema as search path (this is done to have the migrations
+    // metadata table created by sqlx within the `etl` schema).
     sqlx::query("set search_path = 'etl';")
         .execute(&pool)
         .await
         .expect("Failed to set search path to 'etl'");
 
     // Run migrations to create the state store tables.
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
+    sqlx::migrate!("./migrations").run(&pool).await.expect("Failed to run migrations");
 
     database
 }

@@ -1,15 +1,21 @@
-use etl::error::{EtlError, EtlResult};
-use etl::state::destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata};
-use etl::state::table::TableReplicationPhase;
-use etl::store::cleanup::CleanupStore;
-use etl::store::schema::SchemaStore;
-use etl::store::state::{StateStore, TableReplicationStates};
-use etl::types::{SnapshotId, TableId, TableSchema};
 use std::sync::Arc;
+
+use etl::{
+    error::{EtlError, EtlResult},
+    state::{
+        destination_metadata::{AppliedDestinationTableMetadata, DestinationTableMetadata},
+        table::TableReplicationPhase,
+    },
+    store::{
+        cleanup::CleanupStore,
+        schema::SchemaStore,
+        state::{StateStore, TableReplicationStates},
+    },
+    types::{SnapshotId, TableId, TableSchema},
+};
 use tracing::info;
 
-use crate::error_notification::ErrorNotificationClient;
-use crate::sentry;
+use crate::{error_notification::ErrorNotificationClient, sentry};
 
 /// State store decorator that reports persisted table replication errors.
 ///
@@ -17,7 +23,7 @@ use crate::sentry;
 /// reports each [`TableReplicationPhase::Errored`] update to Sentry and, when
 /// configured, to the Supabase error-notification endpoint.
 #[derive(Debug, Clone)]
-pub struct ErrorReportingStateStore<S> {
+pub(crate) struct ErrorReportingStateStore<S> {
     inner: S,
     notification_client: Option<Arc<ErrorNotificationClient>>,
 }
@@ -33,11 +39,8 @@ struct ReportableTableError {
 
 impl<S> ErrorReportingStateStore<S> {
     /// Creates a reporting wrapper around `inner`.
-    pub fn new(inner: S, notification_client: Option<ErrorNotificationClient>) -> Self {
-        Self {
-            inner,
-            notification_client: notification_client.map(Arc::new),
-        }
+    pub(crate) fn new(inner: S, notification_client: Option<ErrorNotificationClient>) -> Self {
+        Self { inner, notification_client: notification_client.map(Arc::new) }
     }
 
     /// Reports persisted errored table state updates.
@@ -45,10 +48,7 @@ impl<S> ErrorReportingStateStore<S> {
         let notification_client = self.notification_client.as_ref();
 
         for update in updates {
-            info!(
-                table_id = update.table_id.0,
-                "reporting table replication error"
-            );
+            info!(table_id = update.table_id.0, "reporting table replication error");
 
             sentry::capture_table_error(update.table_id, &update.source_err);
             if let Some(notification_client) = notification_client {
@@ -59,7 +59,8 @@ impl<S> ErrorReportingStateStore<S> {
         }
     }
 
-    /// Extracts only the errored state updates that need post-persistence reporting.
+    /// Extracts only the errored state updates that need post-persistence
+    /// reporting.
     fn collect_reportable_errors(
         updates: &[(TableId, TableReplicationPhase)],
     ) -> Vec<ReportableTableError> {
@@ -104,9 +105,10 @@ where
 
         self.inner.update_table_replication_states(updates).await?;
 
-        // This operation must be infallible or at least not propagate failures, otherwise the
-        // error thrown here, will be caught and handled by the core of etl itself. There is no
-        // infinite recursion problem, but it might make the system harder to understand.
+        // This operation must be infallible or at least not propagate failures,
+        // otherwise the error thrown here, will be caught and handled by the
+        // core of etl itself. There is no infinite recursion problem, but it
+        // might make the system harder to understand.
         self.report_errored_updates(reportable_errors).await;
 
         Ok(())
@@ -130,9 +132,7 @@ where
         &self,
         table_id: TableId,
     ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
-        self.inner
-            .get_applied_destination_table_metadata(table_id)
-            .await
+        self.inner.get_applied_destination_table_metadata(table_id).await
     }
 
     async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
@@ -144,9 +144,7 @@ where
         table_id: TableId,
         metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
-        self.inner
-            .store_destination_table_metadata(table_id, metadata)
-            .await
+        self.inner.store_destination_table_metadata(table_id, metadata).await
     }
 }
 

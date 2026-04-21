@@ -8,13 +8,15 @@ use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use crate::config::ApiConfig;
-use crate::db::connect_to_source_database_from_api;
-use crate::db::tables::TablesDbError;
-use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
 use crate::{
+    config::ApiConfig,
     configs::encryption::EncryptionKey,
-    db::{self, sources::SourcesDbError, tables::Table},
+    db::{
+        self, connect_to_source_database_from_api,
+        sources::SourcesDbError,
+        tables::{Table, TablesDbError},
+    },
+    k8s::{TrustedRootCertsCache, TrustedRootCertsError},
     routes::{ErrorMessage, TenantIdError, extract_tenant_id},
 };
 
@@ -72,14 +74,10 @@ impl ResponseError for TableError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage {
-            error: self.to_message(),
-        };
+        let error_message = ErrorMessage { error: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::json())
-            .body(body)
+        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
     }
 }
 
@@ -112,9 +110,7 @@ pub async fn read_table_names(
         .map(|s| s.config)
         .ok_or(TableError::SourceNotFound(source_id))?;
 
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source.tls_enabled)
-        .await?;
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let source_pool =
         connect_to_source_database_from_api(&source_config.into_connection_config(tls_config))
             .await?;

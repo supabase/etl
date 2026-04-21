@@ -6,4 +6,7 @@ pub mod schema;
 pub mod slots;
 pub mod state;
 
-pub use db::*;
+pub use db::{
+    TableLookupError, connect_to_source_database, extract_server_version,
+    get_table_names_from_table_ids,
+};

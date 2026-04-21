@@ -1,22 +1,29 @@
 //! ETL replicator service binary.
 //!
-//! Initializes and runs the replicator pipeline that handles Postgres logical replication
-//! and routes data to configured destinations. Includes telemetry, error handling, and
-//! graceful shutdown capabilities.
+//! Initializes and runs the replicator pipeline that handles Postgres logical
+//! replication and routes data to configured destinations. Includes telemetry,
+//! error handling, and graceful shutdown capabilities.
 
-/// Jemalloc allocator for better memory management in high-throughput async workloads.
+/// Jemalloc allocator for better memory management in high-throughput async
+/// workloads.
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 /// Jemalloc configuration optimized for high-throughput async CDC workloads.
 ///
-/// - `narenas:8`: Fixed arena count for predictable memory behavior in containers.
-/// - `background_thread:true`: Offloads memory purging to background threads (Linux only).
-/// - `metadata_thp:auto`: Enables transparent huge pages for jemalloc metadata, reducing TLB misses.
-/// - `dirty_decay_ms:10000`: Returns unused dirty pages to the OS after 10 seconds.
-/// - `muzzy_decay_ms:10000`: Returns unused muzzy pages to the OS after 10 seconds.
-/// - `tcache_max:8192`: Reduces thread-local cache size for better container memory efficiency.
+/// - `narenas:8`: Fixed arena count for predictable memory behavior in
+///   containers.
+/// - `background_thread:true`: Offloads memory purging to background threads
+///   (Linux only).
+/// - `metadata_thp:auto`: Enables transparent huge pages for jemalloc metadata,
+///   reducing TLB misses.
+/// - `dirty_decay_ms:10000`: Returns unused dirty pages to the OS after 10
+///   seconds.
+/// - `muzzy_decay_ms:10000`: Returns unused muzzy pages to the OS after 10
+///   seconds.
+/// - `tcache_max:8192`: Reduces thread-local cache size for better container
+///   memory efficiency.
 /// - `abort_conf:true`: Aborts on invalid configuration for fail-fast behavior.
 ///
 /// On Linux, this can be overridden via `MALLOC_CONF` env var.
@@ -24,23 +31,28 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[cfg(all(target_os = "linux", not(target_env = "msvc")))]
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "malloc_conf")]
-pub static malloc_conf: &[u8] =
+static malloc_conf: &[u8] =
     b"narenas:8,background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
 
-/// Jemalloc configuration for macOS (uses prefixed symbol since unprefixed not supported).
+/// Jemalloc configuration for macOS (uses prefixed symbol since unprefixed not
+/// supported).
 #[cfg(all(target_os = "macos", not(target_env = "msvc")))]
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "_rjem_malloc_conf")]
-pub static malloc_conf: &[u8] =
+static malloc_conf: &[u8] =
     b"narenas:8,background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
 
-use crate::core::start_replicator_with_config;
-use crate::error::{ReplicatorError, ReplicatorResult};
-use crate::error_notification::ErrorNotificationClient;
+use std::process::ExitCode;
+
 use ::tracing::{debug, error};
 use etl_config::shared::ReplicatorConfig;
-use std::process::ExitCode;
 use tracing::info;
+
+use crate::{
+    core::start_replicator_with_config,
+    error::{ReplicatorError, ReplicatorResult},
+    error_notification::ErrorNotificationClient,
+};
 
 mod core;
 mod error;
@@ -50,14 +62,15 @@ mod init;
 mod metrics;
 mod sentry;
 
-/// The name of the environment variable which contains version information for this replicator.
+/// The name of the environment variable which contains version information for
+/// this replicator.
 const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
 
 /// Entry point for the replicator service.
 ///
-/// Loads configuration, initializes tracing and Sentry, starts the async runtime,
-/// and launches the replicator pipeline. Handles all errors and ensures proper
-/// service initialization sequence.
+/// Loads configuration, initializes tracing and Sentry, starts the async
+/// runtime, and launches the replicator pipeline. Handles all errors and
+/// ensures proper service initialization sequence.
 fn main() -> ExitCode {
     match try_main() {
         Ok(()) => ExitCode::SUCCESS,
@@ -76,22 +89,22 @@ fn try_main() -> ReplicatorResult<()> {
     // the cost of building the async runtime unless startup can actually proceed.
 
     // Install rustls crypto provider before any TLS operations.
-    init::crypto::init();
+    init::init_crypto();
 
     // Load the replicator config.
-    let replicator_config = init::config::init()?;
+    let replicator_config = init::init_config()?;
 
     // Keep the tracing and sentry guards alive until process shutdown.
-    let _log_flusher = init::tracing::init(&replicator_config)?;
-    let _sentry_guard = init::sentry::init(&replicator_config)?;
+    let _log_flusher = init::init_tracing(&replicator_config)?;
+    let _sentry_guard = init::init_sentry(&replicator_config)?;
 
     info!("replicator bootstrap initialized");
 
     // We prepare the notification client used to send errors.
-    let notification_client = init::error_notification::init(&replicator_config);
+    let notification_client = init::init_error_notification(&replicator_config);
 
     // We initialize the Prometheus recorder.
-    init::metrics::init(&replicator_config)?;
+    init::init_metrics(&replicator_config)?;
 
     debug!("starting tokio runtime");
 
@@ -112,14 +125,14 @@ fn run_async_runtime(
 
 /// Main async entry point that starts the replicator pipeline.
 ///
-/// Launches the replicator with the provided configuration and captures any errors
-/// to Sentry and optionally sends notifications to the Supabase API.
+/// Launches the replicator with the provided configuration and captures any
+/// errors to Sentry and optionally sends notifications to the Supabase API.
 async fn async_main(
     replicator_config: ReplicatorConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
     // Keep the feature flags client alive for the full async runtime lifetime.
-    let _feature_flags_client = init::feature_flags::init(&replicator_config)?;
+    let _feature_flags_client = init::init_feature_flags(&replicator_config)?;
 
     info!("replicator bootstrap completed");
 
@@ -140,9 +153,7 @@ async fn async_main(
                     client.notify_error(error_message.clone(), etl_err).await;
                 }
                 _ => {
-                    client
-                        .notify_error(error_message.clone(), error_message)
-                        .await;
+                    client.notify_error(error_message.clone(), error_message).await;
                 }
             }
         }

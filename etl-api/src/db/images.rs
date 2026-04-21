@@ -67,11 +67,7 @@ where
     .fetch_optional(executor)
     .await?;
 
-    Ok(record.map(|r| Image {
-        id: r.id,
-        name: r.name,
-        is_default: r.is_default,
-    }))
+    Ok(record.map(|r| Image { id: r.id, name: r.name, is_default: r.is_default }))
 }
 
 pub async fn read_image<'c, E>(executor: E, image_id: i64) -> Result<Option<Image>, ImagesDbError>
@@ -89,11 +85,7 @@ where
     .fetch_optional(executor)
     .await?;
 
-    Ok(record.map(|r| Image {
-        id: r.id,
-        name: r.name,
-        is_default: r.is_default,
-    }))
+    Ok(record.map(|r| Image { id: r.id, name: r.name, is_default: r.is_default }))
 }
 
 pub async fn update_image(
@@ -197,11 +189,7 @@ where
 
     Ok(record
         .drain(..)
-        .map(|r| Image {
-            id: r.id,
-            name: r.name,
-            is_default: r.is_default,
-        })
+        .map(|r| Image { id: r.id, name: r.name, is_default: r.is_default })
         .collect())
 }
 
@@ -224,9 +212,5 @@ where
     .fetch_optional(executor)
     .await?;
 
-    Ok(record.map(|r| Image {
-        id: r.id,
-        name: r.name,
-        is_default: r.is_default,
-    }))
+    Ok(record.map(|r| Image { id: r.id, name: r.name, is_default: r.is_default }))
 }

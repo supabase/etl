@@ -1,3 +1,5 @@
+use std::ops::DerefMut;
+
 use actix_web::{
     HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
@@ -6,24 +8,29 @@ use actix_web::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::ops::DerefMut;
 use thiserror::Error;
 use tracing_actix_web::RootSpan;
 use utoipa::ToSchema;
 
-use crate::config::ApiConfig;
-use crate::configs::encryption::EncryptionKey;
-use crate::db;
-use crate::db::connect_to_source_database_from_api;
-use crate::db::pipelines::{
-    PipelinesDbError, delete_pipeline_replication_slots, delete_pipelines_source_state,
-    read_all_pipelines_for_deletion,
+use crate::{
+    config::ApiConfig,
+    configs::encryption::EncryptionKey,
+    db,
+    db::{
+        connect_to_source_database_from_api,
+        pipelines::{
+            PipelinesDbError, delete_pipeline_replication_slots, delete_pipelines_source_state,
+            read_all_pipelines_for_deletion,
+        },
+        sources::SourcesDbError,
+        tenants::TenantsDbError,
+    },
+    k8s::{
+        K8sClient, TrustedRootCertsCache, TrustedRootCertsError,
+        core::{K8sCoreError, first_active_pipeline_id},
+    },
+    routes::ErrorMessage,
 };
-use crate::db::sources::SourcesDbError;
-use crate::db::tenants::TenantsDbError;
-use crate::k8s::core::{K8sCoreError, first_active_pipeline_id};
-use crate::k8s::{K8sClient, TrustedRootCertsCache, TrustedRootCertsError};
-use crate::routes::ErrorMessage;
 
 #[derive(Debug, Error)]
 pub enum TenantError {
@@ -84,14 +91,10 @@ impl ResponseError for TenantError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage {
-            error: self.to_message(),
-        };
+        let error_message = ErrorMessage { error: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::json())
-            .body(body)
+        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
     }
 }
 
@@ -229,10 +232,7 @@ pub async fn read_tenant(
 
     let response = db::tenants::read_tenant(&**pool, &tenant_id)
         .await?
-        .map(|t| ReadTenantResponse {
-            id: t.id,
-            name: t.name,
-        })
+        .map(|t| ReadTenantResponse { id: t.id, name: t.name })
         .ok_or(TenantError::TenantNotFound(tenant_id))?;
 
     Ok(Json(response))
@@ -308,24 +308,21 @@ pub async fn delete_tenant(
 
     let sources =
         db::sources::read_all_source_connections(&**pool, &tenant_id, &encryption_key).await?;
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source.tls_enabled)
-        .await?;
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     let mut pipelines_by_source = std::collections::BTreeMap::new();
     for pipeline in pipelines {
-        pipelines_by_source
-            .entry(pipeline.source_id)
-            .or_insert_with(Vec::new)
-            .push(pipeline);
+        pipelines_by_source.entry(pipeline.source_id).or_insert_with(Vec::new).push(pipeline);
     }
 
-    // We intentionally visit every stored source connection. If multiple source records happen to
-    // target the same physical database, the source-side cleanup stays idempotent, so repeated
-    // passes are still safe without deduplicating connection configs.
+    // We intentionally visit every stored source connection. If multiple source
+    // records happen to target the same physical database, the source-side
+    // cleanup stays idempotent, so repeated passes are still safe without
+    // deduplicating connection configs.
     for source in sources {
         let source_pipelines = pipelines_by_source.remove(&source.id).unwrap_or_default();
-        // If the source database is already unreachable during tenant teardown, we treat it as
-        // effectively deleted and keep removing the tenant's API-side state.
+        // If the source database is already unreachable during tenant teardown, we
+        // treat it as effectively deleted and keep removing the tenant's
+        // API-side state.
         let source_pool = match connect_to_source_database_from_api(
             &source.config.into_connection_config(tls_config.clone()),
         )
@@ -353,8 +350,9 @@ pub async fn delete_tenant(
         }
     }
 
-    // Deleting the tenant is enough for API-side cleanup because Postgres cascades tenant-owned
-    // rows in the app schema; we only clean source databases manually above.
+    // Deleting the tenant is enough for API-side cleanup because Postgres cascades
+    // tenant-owned rows in the app schema; we only clean source databases
+    // manually above.
     db::tenants::delete_tenant(&**pool, &tenant_id).await?;
 
     Ok(HttpResponse::Ok().finish())
@@ -374,10 +372,7 @@ pub async fn read_all_tenants(pool: Data<PgPool>) -> Result<impl Responder, Tena
     let tenants: Vec<ReadTenantResponse> = db::tenants::read_all_tenants(&**pool)
         .await?
         .drain(..)
-        .map(|t| ReadTenantResponse {
-            id: t.id,
-            name: t.name,
-        })
+        .map(|t| ReadTenantResponse { id: t.id, name: t.name })
         .collect();
 
     let response = ReadTenantsResponse { tenants };

@@ -1,6 +1,8 @@
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Duration;
+use std::{
+    process::{Command, Stdio},
+    thread,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
@@ -10,7 +12,8 @@ use super::shared::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT};
 const COMPOSE_FILE: &str = "./scripts/docker-compose.yaml";
 
 /// Returns the program and initial args for docker compose.
-/// Prefers `docker compose` (v2 plugin) and falls back to `docker-compose` (standalone).
+/// Prefers `docker compose` (v2 plugin) and falls back to `docker-compose`
+/// (standalone).
 fn docker_compose_command() -> (&'static str, &'static [&'static str]) {
     if Command::new("docker")
         .args(["compose", "version"])
@@ -50,7 +53,8 @@ struct StartArgs {
     #[arg(long, env = "NUM_LOCAL_DATABASES", default_value_t = DEFAULT_PG_SHARD_COUNT)]
     shards: u16,
 
-    /// Base port for the first cluster. Additional clusters use consecutive ports.
+    /// Base port for the first cluster. Additional clusters use consecutive
+    /// ports.
     #[arg(long, env = "TESTS_DATABASE_START_PORT", default_value_t = DEFAULT_BASE_PORT)]
     base_port: u16,
 
@@ -92,11 +96,7 @@ impl StartArgs {
         for shard in 2..=self.shards {
             let port = self.base_port + shard - 1;
             let project = format!("etl-stack-pg-{}-shard-{shard}", self.pg_version);
-            self.docker_compose_up(
-                &self.pg_version,
-                Some((&project, port)),
-                &["source-postgres"],
-            )?;
+            self.docker_compose_up(&self.pg_version, Some((&project, port)), &["source-postgres"])?;
         }
 
         // Wait for all clusters to accept connections.
@@ -143,14 +143,7 @@ impl StartArgs {
     fn wait_for_pg(&self, port: u16) -> Result<()> {
         loop {
             let status = Command::new("pg_isready")
-                .args([
-                    "-h",
-                    "localhost",
-                    "-p",
-                    &port.to_string(),
-                    "-U",
-                    &self.pg_user,
-                ])
+                .args(["-h", "localhost", "-p", &port.to_string(), "-U", &self.pg_user])
                 .status()
                 .context("failed to run pg_isready")?;
 

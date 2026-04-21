@@ -1,29 +1,35 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
-use etl::failpoints::{
-    SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
-    START_TABLE_SYNC_DURING_DATA_SYNC_FP,
+use etl::{
+    failpoints::{
+        SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
+        START_TABLE_SYNC_DURING_DATA_SYNC_FP,
+    },
+    state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType},
+    store::state::StateStore,
+    test_utils::{
+        database::{spawn_source_database, test_table_name},
+        event::group_events_by_type_and_table_id,
+        memory_destination::MemoryDestination,
+        notifying_store::NotifyingStore,
+        pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline},
+        schema::{
+            assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
+            assert_table_schema_column_names_types,
+        },
+        test_destination_wrapper::TestDestinationWrapper,
+        test_schema::{
+            TableSelection, assert_events_equal, insert_users_data, setup_test_database_schema,
+        },
+    },
+    types::{Event, EventType, InsertEvent, PipelineId, TableId, Type},
 };
-use etl::state::table::{RetryPolicy, TableReplicationPhase, TableReplicationPhaseType};
-use etl::store::state::StateStore;
-use etl::test_utils::database::{spawn_source_database, test_table_name};
-use etl::test_utils::event::group_events_by_type_and_table_id;
-use etl::test_utils::memory_destination::MemoryDestination;
-use etl::test_utils::notifying_store::NotifyingStore;
-use etl::test_utils::pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline};
-use etl::test_utils::schema::{
-    assert_replicated_schema_column_names_types, assert_schema_snapshots_ordering,
-    assert_table_schema_column_names_types,
+use etl_postgres::{
+    below_version,
+    tokio::test_utils::TableModification,
+    types::{SnapshotId, TableSchema},
+    version::POSTGRES_15,
 };
-use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::assert_events_equal;
-use etl::test_utils::test_schema::{TableSelection, insert_users_data, setup_test_database_schema};
-use etl::types::Type;
-use etl::types::{Event, EventType, InsertEvent, PipelineId, TableId};
-use etl_postgres::below_version;
-use etl_postgres::tokio::test_utils::TableModification;
-use etl_postgres::types::{SnapshotId, TableSchema};
-use etl_postgres::version::POSTGRES_15;
 use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use rand::random;
@@ -34,11 +40,7 @@ enum ExpectedReplicatedEvent<'a> {
 }
 
 fn collect_table_events(events: &[Event], table_id: TableId) -> Vec<Event> {
-    events
-        .iter()
-        .filter(|event| event.has_table_id(&table_id))
-        .cloned()
-        .collect()
+    events.iter().filter(|event| event.has_table_id(&table_id)).cloned().collect()
 }
 
 fn assert_table_event_sequence(
@@ -55,13 +57,7 @@ fn assert_table_event_sequence(
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        table_events
-            .iter()
-            .map(Event::event_type)
-            .collect::<Vec<_>>(),
-        expected_types
-    );
+    assert_eq!(table_events.iter().map(Event::event_type).collect::<Vec<_>>(), expected_types);
     assert_eq!(table_events.len(), expected.len());
 
     for (actual_event, expected_event) in table_events.iter().zip(expected) {
@@ -104,21 +100,14 @@ fn assert_restarted_schema_snapshot_pairs(
     restarted_snapshots: &[(SnapshotId, TableSchema)],
     initial_snapshots: &[(SnapshotId, TableSchema)],
 ) {
-    assert!(
-        initial_snapshots.len() >= 2,
-        "expected at least one non-initial schema snapshot"
-    );
+    assert!(initial_snapshots.len() >= 2, "expected at least one non-initial schema snapshot");
     assert_eq!(restarted_snapshots, initial_snapshots);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     let _scenario = FailScenario::setup();
-    fail::cfg(
-        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
-        "1*return(no_retry)",
-    )
-    .unwrap();
+    fail::cfg(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, "1*return(no_retry)").unwrap();
 
     init_test_tracing();
 
@@ -127,12 +116,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
 
     // Insert initial test data.
     let rows_inserted = 10;
-    insert_users_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        1..=rows_inserted,
-    )
-    .await;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=rows_inserted).await;
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
@@ -168,10 +152,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
         .unwrap();
     assert!(matches!(
         table_state,
-        TableReplicationPhase::Errored {
-            retry_policy: RetryPolicy::NoRetry,
-            ..
-        }
+        TableReplicationPhase::Errored { retry_policy: RetryPolicy::NoRetry, .. }
     ));
 
     // Verify no data is there.
@@ -186,13 +167,9 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     let _scenario = FailScenario::setup();
-    // Since we have table_error_retry_max_attempts: 2, we want to fail 3 times, so that on the 3rd
-    // time, the system switches to manual retry.
-    fail::cfg(
-        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
-        "3*return(timed_retry)",
-    )
-    .unwrap();
+    // Since we have table_error_retry_max_attempts: 2, we want to fail 3 times, so
+    // that on the 3rd time, the system switches to manual retry.
+    fail::cfg(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, "3*return(timed_retry)").unwrap();
 
     init_test_tracing();
 
@@ -201,12 +178,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
 
     // Insert initial test data.
     let rows_inserted = 10;
-    insert_users_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        1..=rows_inserted,
-    )
-    .await;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=rows_inserted).await;
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
@@ -221,16 +193,13 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
         destination.clone(),
     );
 
-    // Register notifications for waiting on the manual retry which is expected to be flipped by the
-    // max attempts handling.
+    // Register notifications for waiting on the manual retry which is expected to
+    // be flipped by the max attempts handling.
     let users_state_notify = store
         .notify_on_table_state(database_schema.users_schema().id, |phase| {
             matches!(
                 phase,
-                TableReplicationPhase::Errored {
-                    retry_policy: RetryPolicy::ManualRetry,
-                    ..
-                }
+                TableReplicationPhase::Errored { retry_policy: RetryPolicy::ManualRetry, .. }
             )
         })
         .await;
@@ -248,10 +217,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
         .unwrap();
     assert!(matches!(
         table_state,
-        TableReplicationPhase::Errored {
-            retry_policy: RetryPolicy::ManualRetry,
-            ..
-        }
+        TableReplicationPhase::Errored { retry_policy: RetryPolicy::ManualRetry, .. }
     ));
 
     // Verify no data is there.
@@ -266,11 +232,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retry() {
     let _scenario = FailScenario::setup();
-    fail::cfg(
-        START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP,
-        "1*return(timed_retry)",
-    )
-    .unwrap();
+    fail::cfg(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, "1*return(timed_retry)").unwrap();
 
     init_test_tracing();
 
@@ -279,12 +241,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
 
     // Insert initial test data.
     let rows_inserted = 10;
-    insert_users_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        1..=rows_inserted,
-    )
-    .await;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=rows_inserted).await;
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
@@ -323,9 +280,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
-        *table_schemas
-            .get(&database_schema.users_schema().id)
-            .unwrap(),
+        *table_schemas.get(&database_schema.users_schema().id).unwrap(),
         database_schema.users_schema()
     );
 }
@@ -333,11 +288,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_retry() {
     let _scenario = FailScenario::setup();
-    fail::cfg(
-        START_TABLE_SYNC_DURING_DATA_SYNC_FP,
-        "1*return(timed_retry)",
-    )
-    .unwrap();
+    fail::cfg(START_TABLE_SYNC_DURING_DATA_SYNC_FP, "1*return(timed_retry)").unwrap();
 
     init_test_tracing();
 
@@ -346,12 +297,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
 
     // Insert initial test data.
     let rows_inserted = 10;
-    insert_users_data(
-        &mut database,
-        &database_schema.users_schema().name,
-        1..=rows_inserted,
-    )
-    .await;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=rows_inserted).await;
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
@@ -390,9 +336,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     let table_schemas = store.get_latest_table_schemas().await;
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
-        *table_schemas
-            .get(&database_schema.users_schema().id)
-            .unwrap(),
+        *table_schemas.get(&database_schema.users_schema().id).unwrap(),
         database_schema.users_schema()
     );
 }
@@ -443,28 +387,17 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .unwrap();
 
     transaction
-        .insert_values(
-            table_name.clone(),
-            &["name", "age", "status"],
-            &[&"second", &28, &"active"],
-        )
+        .insert_values(table_name.clone(), &["name", "age", "status"], &[&"second", &28, &"active"])
         .await
         .unwrap();
 
     transaction
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::DropColumn { name: "age" }],
-        )
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
         .await
         .unwrap();
 
     transaction
-        .insert_values(
-            table_name.clone(),
-            &["name", "status"],
-            &[&"third", &"pending"],
-        )
+        .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
         .await
         .unwrap();
 
@@ -519,22 +452,14 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     assert_table_schema_snapshots(
         table_schemas_snapshots,
         &[
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-            ],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
             &[
                 ("id", Type::INT8),
                 ("name", Type::TEXT),
                 ("age", Type::INT4),
                 ("status", Type::TEXT),
             ],
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("status", Type::TEXT),
-            ],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)],
         ],
     );
     let initial_events = collect_table_events(&events, table_id);
@@ -561,10 +486,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     pipeline.shutdown_and_wait().await.unwrap();
 
     let restarted_events = destination.get_events().await;
-    assert_events_equal(
-        &collect_table_events(&restarted_events, table_id),
-        &initial_events,
-    );
+    assert_events_equal(&collect_table_events(&restarted_events, table_id), &initial_events);
 
     let restarted_table_schemas = store.get_table_schemas().await;
     assert_restarted_schema_snapshot_pairs(
@@ -592,10 +514,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .wait_for_events_count(vec![(EventType::Relation, 3), (EventType::Insert, 3)])
         .await;
 
-    database
-        .insert_values(table_name.clone(), &["name", "age"], &[&"first", &25])
-        .await
-        .unwrap();
+    database.insert_values(table_name.clone(), &["name", "age"], &[&"first", &25]).await.unwrap();
 
     database
         .alter_table(
@@ -609,28 +528,17 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .unwrap();
 
     database
-        .insert_values(
-            table_name.clone(),
-            &["name", "age", "status"],
-            &[&"second", &28, &"active"],
-        )
+        .insert_values(table_name.clone(), &["name", "age", "status"], &[&"second", &28, &"active"])
         .await
         .unwrap();
 
     database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::DropColumn { name: "age" }],
-        )
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
         .await
         .unwrap();
 
     database
-        .insert_values(
-            table_name.clone(),
-            &["name", "status"],
-            &[&"third", &"pending"],
-        )
+        .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
         .await
         .unwrap();
 
@@ -683,22 +591,14 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     assert_table_schema_snapshots(
         table_schemas_snapshots,
         &[
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-            ],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
             &[
                 ("id", Type::INT8),
                 ("name", Type::TEXT),
                 ("age", Type::INT4),
                 ("status", Type::TEXT),
             ],
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("status", Type::TEXT),
-            ],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)],
         ],
     );
     let initial_events = collect_table_events(&events, table_id);
@@ -725,10 +625,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     pipeline.shutdown_and_wait().await.unwrap();
 
     let restarted_events = destination.get_events().await;
-    assert_events_equal(
-        &collect_table_events(&restarted_events, table_id),
-        &initial_events,
-    );
+    assert_events_equal(&collect_table_events(&restarted_events, table_id), &initial_events);
 
     let restarted_table_schemas = store.get_table_schemas().await;
     assert_restarted_schema_snapshot_pairs(
@@ -780,28 +677,17 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .unwrap();
 
     transaction
-        .insert_values(
-            table_name.clone(),
-            &["name", "age", "status"],
-            &[&"second", &28, &"active"],
-        )
+        .insert_values(table_name.clone(), &["name", "age", "status"], &[&"second", &28, &"active"])
         .await
         .unwrap();
 
     transaction
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::DropColumn { name: "age" }],
-        )
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
         .await
         .unwrap();
 
     transaction
-        .insert_values(
-            table_name.clone(),
-            &["name", "status"],
-            &[&"third", &"pending"],
-        )
+        .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
         .await
         .unwrap();
 
@@ -846,22 +732,14 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     assert_table_schema_snapshots(
         table_schemas_snapshots,
         &[
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-            ],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
             &[
                 ("id", Type::INT8),
                 ("name", Type::TEXT),
                 ("age", Type::INT4),
                 ("status", Type::TEXT),
             ],
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("status", Type::TEXT),
-            ],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)],
         ],
     );
     let initial_events = collect_table_events(&events, table_id);
@@ -888,10 +766,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     pipeline.shutdown_and_wait().await.unwrap();
 
     let restarted_events = destination.get_events().await;
-    assert_events_equal(
-        &collect_table_events(&restarted_events, table_id),
-        &initial_events,
-    );
+    assert_events_equal(&collect_table_events(&restarted_events, table_id), &initial_events);
 
     let restarted_table_schemas = store.get_table_schemas().await;
     assert_restarted_schema_snapshot_pairs(
@@ -931,28 +806,17 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .unwrap();
 
     database
-        .insert_values(
-            table_name.clone(),
-            &["name", "age", "status"],
-            &[&"second", &28, &"active"],
-        )
+        .insert_values(table_name.clone(), &["name", "age", "status"], &[&"second", &28, &"active"])
         .await
         .unwrap();
 
     database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::DropColumn { name: "age" }],
-        )
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
         .await
         .unwrap();
 
     database
-        .insert_values(
-            table_name.clone(),
-            &["name", "status"],
-            &[&"third", &"pending"],
-        )
+        .insert_values(table_name.clone(), &["name", "status"], &[&"third", &"pending"])
         .await
         .unwrap();
 
@@ -995,22 +859,14 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     assert_table_schema_snapshots(
         table_schemas_snapshots,
         &[
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-            ],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
             &[
                 ("id", Type::INT8),
                 ("name", Type::TEXT),
                 ("age", Type::INT4),
                 ("status", Type::TEXT),
             ],
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("status", Type::TEXT),
-            ],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("status", Type::TEXT)],
         ],
     );
     let initial_events = collect_table_events(&events, table_id);
@@ -1037,10 +893,7 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     pipeline.shutdown_and_wait().await.unwrap();
 
     let restarted_events = destination.get_events().await;
-    assert_events_equal(
-        &collect_table_events(&restarted_events, table_id),
-        &initial_events,
-    );
+    assert_events_equal(&collect_table_events(&restarted_events, table_id), &initial_events);
 
     let restarted_table_schemas = store.get_table_schemas().await;
     assert_restarted_schema_snapshot_pairs(
@@ -1063,15 +916,15 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         )
         .await;
 
-    // The reason for why we wait for two `Relation` messages is that since we have a DDL event before
-    // DML statements, Postgres likely avoids sending an initial `Relation` message since it's already
-    // sent given the DDL event.
+    // The reason for why we wait for two `Relation` messages is that since we have
+    // a DDL event before DML statements, Postgres likely avoids sending an
+    // initial `Relation` message since it's already sent given the DDL event.
     let notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 2), (EventType::Insert, 2)])
         .await;
 
-    // We immediately add a column to the table without any DML, to show the case where we can recover
-    // in case we immediately start with a DDL event.
+    // We immediately add a column to the table without any DML, to show the case
+    // where we can recover in case we immediately start with a DDL event.
     database
         .alter_table(
             table_name.clone(),
@@ -1093,19 +946,12 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
         .unwrap();
 
     database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::DropColumn { name: "age" }],
-        )
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "age" }])
         .await
         .unwrap();
 
     database
-        .insert_values(
-            table_name.clone(),
-            &["name", "email"],
-            &[&"Matt", &"matt@example.com"],
-        )
+        .insert_values(table_name.clone(), &["name", "email"], &[&"Matt", &"matt@example.com"])
         .await
         .unwrap();
 
@@ -1116,16 +962,11 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    assert_eq!(
-        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
-        2
-    );
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        2
-    );
+    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 2);
+    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 2);
 
-    // Assert that we have 3 schema snapshots stored in order (1 base snapshot + 2 relation changes).
+    // Assert that we have 3 schema snapshots stored in order (1 base snapshot + 2
+    // relation changes).
     let table_schemas = store.get_table_schemas().await;
     let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
     assert_eq!(table_schemas_snapshots.len(), 3);
@@ -1135,34 +976,21 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     let (_, first_schema) = &table_schemas_snapshots[0];
     assert_table_schema_column_names_types(
         first_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
     );
 
     // Verify the first snapshot has the new schema (id, name, age, email).
     let (_, first_schema) = &table_schemas_snapshots[1];
     assert_table_schema_column_names_types(
         first_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("age", Type::INT4),
-            ("email", Type::TEXT),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
 
     // Verify the second snapshot doesn't have the age column (id, name, email).
     let (_, second_schema) = &table_schemas_snapshots[2];
     assert_table_schema_column_names_types(
         second_schema,
-        &[
-            ("id", Type::INT8),
-            ("name", Type::TEXT),
-            ("email", Type::TEXT),
-        ],
+        &[("id", Type::INT8), ("name", Type::TEXT), ("email", Type::TEXT)],
     );
 
     // Clear up the events.
@@ -1199,14 +1027,8 @@ async fn table_schema_snapshots_are_consistent_after_missing_status_update_with_
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    assert_eq!(
-        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
-        2
-    );
-    assert_eq!(
-        grouped.get(&(EventType::Insert, table_id)).unwrap().len(),
-        3
-    );
+    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 2);
+    assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1229,11 +1051,7 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
         .create_table(
             table_name.clone(),
             true,
-            &[
-                ("name", "text not null"),
-                ("age", "integer not null"),
-                ("email", "text not null"),
-            ],
+            &[("name", "text not null"), ("age", "integer not null"), ("email", "text not null")],
         )
         .await
         .unwrap();
@@ -1261,9 +1079,8 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
     );
 
     // Wait for the table to finish syncing.
-    let sync_done_notify = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let sync_done_notify =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1375,47 +1192,26 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
 
         // Verify replication masks.
         assert_eq!(
-            relation_events[0]
-                .replicated_table_schema
-                .replication_mask()
-                .as_slice(),
+            relation_events[0].replicated_table_schema.replication_mask().as_slice(),
             &[1, 1, 1, 1]
         );
         assert_eq!(
-            relation_events[1]
-                .replicated_table_schema
-                .replication_mask()
-                .as_slice(),
+            relation_events[1].replicated_table_schema.replication_mask().as_slice(),
             &[1, 1, 1, 0]
         );
         assert_eq!(
-            relation_events[2]
-                .replicated_table_schema
-                .replication_mask()
-                .as_slice(),
+            relation_events[2].replicated_table_schema.replication_mask().as_slice(),
             &[1, 1, 0, 0]
         );
 
         // Verify underlying schema always has 4 columns.
         for relation in &relation_events {
-            assert_eq!(
-                relation
-                    .replicated_table_schema
-                    .inner()
-                    .column_schemas
-                    .len(),
-                4
-            );
+            assert_eq!(relation.replicated_table_schema.inner().column_schemas.len(), 4);
         }
 
         // Verify we have 3 insert events.
         let insert_events = grouped.get(&(EventType::Insert, table_id)).unwrap();
-        assert_eq!(
-            insert_events.len(),
-            3,
-            "Expected 3 insert events, got {}",
-            insert_events.len()
-        );
+        assert_eq!(insert_events.len(), 3, "Expected 3 insert events, got {}", insert_events.len());
 
         // Verify insert events have decreasing value counts: 4 -> 3 -> 2.
         let insert_value_counts: Vec<usize> = insert_events
@@ -1445,29 +1241,22 @@ async fn table_schema_replication_masks_are_consistent_after_restart() {
     // Verify schema snapshots are stored correctly.
     let table_schemas = store.get_table_schemas().await;
     let table_schemas_snapshots = table_schemas.get(&table_id).unwrap();
-    assert!(
-        !table_schemas_snapshots.is_empty(),
-        "Expected at least 1 schema snapshot"
-    );
+    assert!(!table_schemas_snapshots.is_empty(), "Expected at least 1 schema snapshot");
     assert_schema_snapshots_ordering(table_schemas_snapshots, true);
 
     // The underlying table schema should always have 4 columns.
     for (_, schema) in table_schemas_snapshots {
         assert_table_schema_column_names_types(
             schema,
-            &[
-                ("id", Type::INT8),
-                ("name", Type::TEXT),
-                ("age", Type::INT4),
-                ("email", Type::TEXT),
-            ],
+            &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
         );
     }
 
     // Clear up the events.
     destination.clear_events().await;
 
-    // Restart the pipeline - Postgres will resend the data since we don't track progress exactly.
+    // Restart the pipeline - Postgres will resend the data since we don't track
+    // progress exactly.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,

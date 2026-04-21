@@ -1,13 +1,3 @@
-use crate::config::ApiConfig;
-use crate::configs::encryption::EncryptionKey;
-use crate::configs::source::{FullApiSourceConfig, StoredSourceConfig, StrippedApiSourceConfig};
-use crate::db::pipelines::{PipelinesDbError, read_pipelines_for_source_for_deletion};
-use crate::db::sources::{SourcesDbError, source_exists};
-use crate::k8s::core::{K8sCoreError, first_active_pipeline_id};
-use crate::k8s::{K8sClient, TrustedRootCertsCache};
-use crate::routes::{ErrorMessage, TenantIdError, extract_tenant_id};
-use crate::validation::{FailureType, ValidationError, ValidationFailure};
-use crate::{db, routes::common, routes::utils};
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete, get,
     http::{StatusCode, header::ContentType},
@@ -18,6 +8,25 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
+
+use crate::{
+    config::ApiConfig,
+    configs::{
+        encryption::EncryptionKey,
+        source::{FullApiSourceConfig, StoredSourceConfig, StrippedApiSourceConfig},
+    },
+    db,
+    db::{
+        pipelines::{PipelinesDbError, read_pipelines_for_source_for_deletion},
+        sources::{SourcesDbError, source_exists},
+    },
+    k8s::{
+        K8sClient, TrustedRootCertsCache,
+        core::{K8sCoreError, first_active_pipeline_id},
+    },
+    routes::{ErrorMessage, TenantIdError, common, extract_tenant_id, utils},
+    validation::{FailureType, ValidationError, ValidationFailure},
+};
 
 pub mod publications;
 pub mod tables;
@@ -81,14 +90,10 @@ impl ResponseError for SourceError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage {
-            error: self.to_message(),
-        };
+        let error_message = ErrorMessage { error: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::json())
-            .body(body)
+        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
     }
 }
 
@@ -101,9 +106,7 @@ async fn validate_source_config(
         common::validate_source_config(source_config, api_config, trusted_root_certs_cache).await?;
 
     if !failures.is_empty() {
-        return Err(SourceError::ValidationFailed(
-            utils::format_validation_failures(failures),
-        ));
+        return Err(SourceError::ValidationFailed(utils::format_validation_failures(failures)));
     }
 
     Ok(())
@@ -167,11 +170,7 @@ pub struct ValidationFailureResponse {
 
 impl From<ValidationFailure> for ValidationFailureResponse {
     fn from(failure: ValidationFailure) -> Self {
-        Self {
-            name: failure.name,
-            reason: failure.reason,
-            failure_type: failure.failure_type,
-        }
+        Self { name: failure.name, reason: failure.reason, failure_type: failure.failure_type }
     }
 }
 

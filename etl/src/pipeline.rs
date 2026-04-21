@@ -1,58 +1,57 @@
 //! Core pipeline orchestration and execution.
 //!
-//! Contains the main [`Pipeline`] struct that coordinates Postgres logical replication
-//! with destination systems. Manages worker lifecycles, shutdown coordination, and error handling.
+//! Contains the main [`Pipeline`] struct that coordinates Postgres logical
+//! replication with destination systems. Manages worker lifecycles, shutdown
+//! coordination, and error handling.
 
-use crate::bail;
-use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::concurrency::shutdown::{ShutdownTx, create_shutdown_channel};
-use crate::destination::Destination;
-use crate::error::{ErrorKind, EtlResult};
-use crate::metrics::register_metrics;
-use crate::replication::client::PgReplicationClient;
-use crate::replication::table_cache::SharedTableCache;
-use crate::state::table::TableReplicationPhase;
-use crate::store::cleanup::CleanupStore;
-use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
-use crate::types::PipelineId;
-use crate::workers::apply::{ApplyWorker, ApplyWorkerHandle};
-use crate::workers::pool::TableSyncWorkerPool;
-use etl_config::shared::PipelineConfig;
+use std::{collections::HashSet, sync::Arc};
+
 use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::TableId;
-use std::collections::HashSet;
-use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
+use crate::{
+    bail,
+    concurrency::{MemoryMonitor, ShutdownTx, create_shutdown_channel},
+    config::PipelineConfig,
+    destination::Destination,
+    error::{ErrorKind, EtlResult},
+    metrics::register_metrics,
+    replication::{SharedTableCache, client::PgReplicationClient},
+    state::table::TableReplicationPhase,
+    store::{cleanup::CleanupStore, schema::SchemaStore, state::StateStore},
+    types::{PipelineId, TableId},
+    workers::{ApplyWorker, ApplyWorkerHandle, TableSyncWorkerPool},
+};
+
 /// Internal state tracking for pipeline lifecycle.
 ///
-/// Tracks whether the pipeline has been started and maintains handles to running workers.
-/// The pipeline can only be in one of these states at a time.
+/// Tracks whether the pipeline has been started and maintains handles to
+/// running workers. The pipeline can only be in one of these states at a time.
 #[derive(Debug)]
 enum PipelineState {
     /// Pipeline has been created but not yet started.
     NotStarted,
     /// Pipeline is running with active workers.
-    Started {
-        apply_worker: ApplyWorkerHandle,
-        pool: Arc<TableSyncWorkerPool>,
-    },
+    Started { apply_worker: ApplyWorkerHandle, pool: Arc<TableSyncWorkerPool> },
 }
 
 /// Core ETL pipeline that orchestrates Postgres logical replication.
 ///
-/// A [`Pipeline`] represents a complete ETL workflow connecting a Postgres publication
-/// to a destination through configurable transformations. It manages the replication
-/// stream, coordinates worker processes, and handles failures gracefully.
+/// A [`Pipeline`] represents a complete ETL workflow connecting a Postgres
+/// publication to a destination through configurable transformations. It
+/// manages the replication stream, coordinates worker processes, and handles
+/// failures gracefully.
 ///
 /// The pipeline operates in two main phases:
-/// 1. **Initial table synchronization** - Copies existing data from source tables
-/// 2. **Continuous replication** - Streams ongoing changes from the replication log
+/// 1. **Initial table synchronization** - Copies existing data from source
+///    tables
+/// 2. **Continuous replication** - Streams ongoing changes from the replication
+///    log
 ///
-/// Multiple table sync workers run in parallel during the initial phase, while a single
-/// apply worker processes the replication stream of table that were already copied.
+/// Multiple table sync workers run in parallel during the initial phase, while
+/// a single apply worker processes the replication stream of table that were
+/// already copied.
 #[derive(Debug)]
 pub struct Pipeline<S, D> {
     config: Arc<PipelineConfig>,
@@ -70,22 +69,23 @@ where
     /// Creates a new pipeline with the given configuration.
     ///
     /// The pipeline is initially in the not-started state and must be
-    /// explicitly started using [`Pipeline::start`]. The state store is used for tracking
-    /// replication progress, table schemas, and destination table metadata, while the
-    /// destination receives replicated data.
-    /// The pipeline ID is extracted from the configuration, ensuring consistency between
-    /// pipeline identity and configuration settings.
+    /// explicitly started using [`Pipeline::start`]. The state store is used
+    /// for tracking replication progress, table schemas, and destination
+    /// table metadata, while the destination receives replicated data.
+    /// The pipeline ID is extracted from the configuration, ensuring
+    /// consistency between pipeline identity and configuration settings.
     pub fn new(config: PipelineConfig, state_store: S, destination: D) -> Self {
         // Register metrics here during pipeline creation to avoid burdening the
         // users of etl crate to explicitly calling it. Since this method is safe to
         // call multiple times, it is ok even if there are multiple pipelines created.
         register_metrics();
 
-        // We create a watch channel of unit types since this is just used to notify all subscribers
-        // that shutdown is needed.
+        // We create a watch channel of unit types since this is just used to notify all
+        // subscribers that shutdown is needed.
         //
-        // Here we are not taking the `shutdown_rx` since we will just extract it from the `shutdown_tx`
-        // via the `subscribe` method. This is done to make the code cleaner.
+        // Here we are not taking the `shutdown_rx` since we will just extract it from
+        // the `shutdown_tx` via the `subscribe` method. This is done to make
+        // the code cleaner.
         let (shutdown_tx, _) = create_shutdown_channel();
 
         Self {
@@ -104,9 +104,9 @@ where
 
     /// Returns a handle for sending shutdown signals to this pipeline.
     ///
-    /// Multiple components can hold shutdown handles to coordinate graceful termination.
-    /// When shutdown is signaled, all workers will complete their current operations
-    /// and terminate cleanly.
+    /// Multiple components can hold shutdown handles to coordinate graceful
+    /// termination. When shutdown is signaled, all workers will complete
+    /// their current operations and terminate cleanly.
     pub fn shutdown_tx(&self) -> ShutdownTx {
         self.shutdown_tx.clone()
     }
@@ -125,7 +125,6 @@ where
         );
         // We always start memory monitoring to keep total memory snapshots available.
         let memory_monitor = MemoryMonitor::new(
-            self.config.id,
             self.shutdown_tx.subscribe(),
             self.config.memory_backpressure.clone(),
             self.config.memory_refresh_interval_ms,
@@ -135,28 +134,32 @@ where
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
-        // We load the destination table metadata and schemas from the store to have them cached
-        // for quick access.
+        // We load the destination table metadata and schemas from the store to have
+        // them cached for quick access.
         //
-        // It's really important to load the metadata and schemas before starting the apply worker
-        // since downstream code relies on the assumption that they are loaded in the cache.
+        // It's really important to load the metadata and schemas before starting the
+        // apply worker since downstream code relies on the assumption that they
+        // are loaded in the cache.
         self.store.load_destination_tables_metadata().await?;
         self.store.load_table_schemas().await?;
 
-        // We load the table states by checking the table ids of a publication and loading/creating
-        // the table replication states based on the current state.
+        // We load the table states by checking the table ids of a publication and
+        // loading/creating the table replication states based on the current
+        // state.
         self.initialize_table_states(&replication_client).await?;
 
-        // We create the table sync workers pool to manage all table sync workers in a central place.
+        // We create the table sync workers pool to manage all table sync workers in a
+        // central place.
         let pool = Arc::new(TableSyncWorkerPool::new());
 
-        // We create the permits semaphore which is used to control how many table sync workers can
-        // be running at the same time.
+        // We create the permits semaphore which is used to control how many table sync
+        // workers can be running at the same time.
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
-        // We create the shared per-table protocol cache used by both the apply worker and table
-        // sync workers. It tracks the latest schema snapshot and replication mask for each table.
+        // We create the shared per-table protocol cache used by both the apply worker
+        // and table sync workers. It tracks the latest schema snapshot and
+        // replication mask for each table.
         let shared_table_cache = SharedTableCache::new();
 
         // We create and start the apply worker.
@@ -180,12 +183,14 @@ where
 
     /// Waits for the pipeline to complete all processing and terminate.
     ///
-    /// This method blocks until both the apply worker and all table sync workers have
-    /// finished their work. If the pipeline was never started, this returns immediately.
-    /// If any workers encounter errors, those errors are collected and returned.
+    /// This method blocks until both the apply worker and all table sync
+    /// workers have finished their work. If the pipeline was never started,
+    /// this returns immediately. If any workers encounter errors, those
+    /// errors are collected and returned.
     ///
     /// The wait process ensures proper shutdown ordering:
-    /// 1. Apply worker completes first (may spawn additional table sync workers)
+    /// 1. Apply worker completes first (may spawn additional table sync
+    ///    workers)
     /// 2. All table sync workers complete
     /// 3. Any errors from workers are aggregated and returned
     pub async fn wait(self) -> EtlResult<()> {
@@ -199,9 +204,10 @@ where
 
         let mut errors = vec![];
 
-        // We first wait for the apply worker to finish, since that must be done before waiting for
-        // the table sync workers to finish, otherwise if we wait for sync workers first, we might
-        // be having the apply worker that spawns new sync workers after we waited for the current
+        // We first wait for the apply worker to finish, since that must be done before
+        // waiting for the table sync workers to finish, otherwise if we wait
+        // for sync workers first, we might be having the apply worker that
+        // spawns new sync workers after we waited for the current
         // ones to finish.
         let apply_worker_result = apply_worker.wait().await;
         if let Err(err) = apply_worker_result {
@@ -209,13 +215,15 @@ where
 
             errors.push(err);
 
-            // TODO: in the future we might build a system based on the `ReactiveFuture` that
-            //  automatically sends a shutdown signal to table sync workers on apply worker failure.
-            // If there was an error in the apply worker, we want to shut down all table sync
-            // workers, since without an apply worker they are lost.
+            // TODO: in the future we might build a system based on the `ReactiveFuture`
+            // that  automatically sends a shutdown signal to table sync workers
+            // on apply worker failure. If there was an error in the apply
+            // worker, we want to shut down all table sync workers, since
+            // without an apply worker they are lost.
             //
-            // If we fail to send the shutdown signal, we are not going to capture the error since
-            // it means that no table sync workers are running, which is fine.
+            // If we fail to send the shutdown signal, we are not going to capture the error
+            // since it means that no table sync workers are running, which is
+            // fine.
             let _ = self.shutdown_tx.shutdown();
         }
 
@@ -226,10 +234,7 @@ where
         if let Err(err) = table_sync_workers_result {
             // We naively use the `kinds` as number of errors.
             let errors_number = err.kinds().len();
-            warn!(
-                error_count = errors_number,
-                "table sync workers failed, collecting errors"
-            );
+            warn!(error_count = errors_number, "table sync workers failed, collecting errors");
 
             errors.push(err);
         }
@@ -252,11 +257,13 @@ where
 
     /// Initiates graceful shutdown of the pipeline.
     ///
-    /// Sends shutdown signals to all workers, instructing them to complete their current
-    /// operations and terminate. This method returns immediately after sending the signals
-    /// and does not wait for workers to actually stop.
+    /// Sends shutdown signals to all workers, instructing them to complete
+    /// their current operations and terminate. This method returns
+    /// immediately after sending the signals and does not wait for workers
+    /// to actually stop.
     ///
-    /// Use [`Pipeline::wait`] after calling this method to wait for complete shutdown.
+    /// Use [`Pipeline::wait`] after calling this method to wait for complete
+    /// shutdown.
     pub fn shutdown(&self) {
         info!("initiating pipeline shutdown");
 
@@ -270,9 +277,10 @@ where
 
     /// Initiates shutdown and waits for complete pipeline termination.
     ///
-    /// This convenience method combines [`Pipeline::shutdown`] and [`Pipeline::wait`]
-    /// to provide a single call that both initiates shutdown and waits for completion.
-    /// Returns any errors encountered during the shutdown process.
+    /// This convenience method combines [`Pipeline::shutdown`] and
+    /// [`Pipeline::wait`] to provide a single call that both initiates
+    /// shutdown and waits for completion. Returns any errors encountered
+    /// during the shutdown process.
     pub async fn shutdown_and_wait(self) -> EtlResult<()> {
         self.shutdown();
         self.wait().await
@@ -288,17 +296,14 @@ where
     /// Also detects tables for which we have stored state but are no longer
     /// part of the publication, performs a best-effort cleanup of their table
     /// sync replication slots, and deletes their stored state (replication
-    /// state, destination table metadata, and table schemas) without touching the actual
-    /// destination tables.
+    /// state, destination table metadata, and table schemas) without touching
+    /// the actual destination tables.
     async fn initialize_table_states(
         &self,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<()> {
         // We need to make sure that the publication exists.
-        if !replication_client
-            .publication_exists(&self.config.publication_name)
-            .await?
-        {
+        if !replication_client.publication_exists(&self.config.publication_name).await? {
             bail!(
                 ErrorKind::ConfigError,
                 "Missing publication",
@@ -309,9 +314,8 @@ where
             );
         }
 
-        let publication_table_ids = replication_client
-            .get_publication_table_ids(&self.config.publication_name)
-            .await?;
+        let publication_table_ids =
+            replication_client.get_publication_table_ids(&self.config.publication_name).await?;
 
         info!(
             publication_name = %self.config.publication_name,
@@ -321,28 +325,30 @@ where
 
         // Validate that the publication is configured correctly for partitioned tables.
         //
-        // When `publish_via_partition_root = false`, logical replication messages contain
-        // child partition OIDs instead of parent table OIDs. Since our schema cache only
-        // contains parent table IDs (from `get_publication_table_ids`), relation messages
-        // with child OIDs would cause pipeline failures.
+        // When `publish_via_partition_root = false`, logical replication messages
+        // contain child partition OIDs instead of parent table OIDs. Since our
+        // schema cache only contains parent table IDs (from
+        // `get_publication_table_ids`), relation messages with child OIDs would
+        // cause pipeline failures.
         let publish_via_partition_root = replication_client
             .get_publish_via_partition_root(&self.config.publication_name)
             .await?;
 
         if !publish_via_partition_root {
-            let has_partitioned_tables = replication_client
-                .has_partitioned_tables(&publication_table_ids)
-                .await?;
+            let has_partitioned_tables =
+                replication_client.has_partitioned_tables(&publication_table_ids).await?;
 
             if has_partitioned_tables {
                 bail!(
                     ErrorKind::ConfigError,
                     "Invalid publication configuration for partitioned tables",
                     format!(
-                        "The publication '{}' contains partitioned tables but has publish_via_partition_root=false. \
-                         This configuration causes replication messages to use child partition OIDs, which are not \
-                         tracked by the pipeline and will cause failures. Please recreate the publication with \
-                         publish_via_partition_root=true or use: ALTER PUBLICATION {} SET (publish_via_partition_root = true);",
+                        "The publication '{}' contains partitioned tables but has \
+                         publish_via_partition_root=false. This configuration causes replication \
+                         messages to use child partition OIDs, which are not tracked by the \
+                         pipeline and will cause failures. Please recreate the publication with \
+                         publish_via_partition_root=true or use: ALTER PUBLICATION {} SET \
+                         (publish_via_partition_root = true);",
                         self.config.publication_name, self.config.publication_name
                     )
                 );
@@ -364,8 +370,8 @@ where
 
         // Detect and purge tables that have been removed from the publication.
         //
-        // The purging doesn't delete any data in the destination, it just removes internal state for
-        // that table.
+        // The purging doesn't delete any data in the destination, it just removes
+        // internal state for that table.
         let publication_set: HashSet<TableId> = publication_table_ids.iter().copied().collect();
         for &table_id in table_replication_states.keys() {
             if !publication_set.contains(&table_id) {
@@ -374,8 +380,8 @@ where
                     "table removed from publication, purging stored state and slot"
                 );
 
-                // We clean up all table state before removing the slot, so that we don't incur in the
-                // case where we have a slot tied to an invalid state.
+                // We clean up all table state before removing the slot, so that we don't incur
+                // in the case where we have a slot tied to an invalid state.
                 self.store.cleanup_table_state(table_id).await?;
 
                 // We try to delete the replication slot.

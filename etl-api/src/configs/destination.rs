@@ -1,14 +1,18 @@
-use etl_config::SerializableSecretString;
-use etl_config::shared::{DestinationConfig, IcebergConfig};
+use etl_config::{
+    SerializableSecretString,
+    shared::{DestinationConfig, IcebergConfig},
+};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::configs::encryption::{
-    Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
-    decrypt_text, encrypt_text,
+use crate::configs::{
+    encryption::{
+        Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
+        decrypt_text, encrypt_text,
+    },
+    store::Store,
 };
-use crate::configs::store::Store;
 
 /// Returns the default connection pool size for BigQuery destinations.
 pub const fn default_connection_pool_size() -> usize {
@@ -384,10 +388,8 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size,
             } => {
-                let encrypted_service_account_key = encrypt_text(
-                    service_account_key.expose_secret().to_owned(),
-                    encryption_key,
-                )?;
+                let encrypted_service_account_key =
+                    encrypt_text(service_account_key.expose_secret().to_owned(), encryption_key)?;
 
                 Ok(EncryptedStoredDestinationConfig::BigQuery {
                     project_id,
@@ -743,9 +745,10 @@ pub enum EncryptedStoredIcebergConfig {
 
 #[cfg(test)]
 mod tests {
+    use insta::assert_json_snapshot;
+
     use super::*;
     use crate::configs::encryption::{EncryptionKey, generate_random_key};
-    use insta::assert_json_snapshot;
 
     #[test]
     fn test_stored_destination_config_encryption_decryption_bigquery() {
@@ -757,10 +760,7 @@ mod tests {
             connection_pool_size: 8,
         };
 
-        let key = EncryptionKey {
-            id: 1,
-            key: generate_random_key::<32>().unwrap(),
-        };
+        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -807,10 +807,7 @@ mod tests {
             },
         };
 
-        let key = EncryptionKey {
-            id: 1,
-            key: generate_random_key::<32>().unwrap(),
-        };
+        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -851,10 +848,7 @@ mod tests {
                 );
                 assert_eq!(p1_s3_region, p2_s3_region);
                 // Assert that secret fields were encrypted and decrypted correctly
-                assert_eq!(
-                    p1_catalog_token.expose_secret(),
-                    p2_catalog_token.expose_secret()
-                );
+                assert_eq!(p1_catalog_token.expose_secret(), p2_catalog_token.expose_secret());
                 assert_eq!(
                     p1_s3_secret_access_key.expose_secret(),
                     p2_s3_secret_access_key.expose_secret()
@@ -878,10 +872,7 @@ mod tests {
             },
         };
 
-        let key = EncryptionKey {
-            id: 1,
-            key: generate_random_key::<32>().unwrap(),
-        };
+        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -1023,10 +1014,7 @@ mod tests {
                 assert_eq!(p1_project_ref, p2_project_ref);
                 assert_eq!(p1_warehouse_name, p2_warehouse_name);
                 assert_eq!(p1_namespace, p2_namespace);
-                assert_eq!(
-                    p1_catalog_token.expose_secret(),
-                    p2_catalog_token.expose_secret()
-                );
+                assert_eq!(p1_catalog_token.expose_secret(), p2_catalog_token.expose_secret());
                 assert_eq!(
                     p1_s3_access_key_id.expose_secret(),
                     p2_s3_access_key_id.expose_secret()
@@ -1115,10 +1103,7 @@ mod tests {
             metadata_schema: Some("ducklake".to_string()),
         };
 
-        let key = EncryptionKey {
-            id: 1,
-            key: generate_random_key::<32>().unwrap(),
-        };
+        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -1333,10 +1318,7 @@ mod tests {
                 assert_eq!(orig_project_ref, &deser_project_ref);
                 assert_eq!(orig_warehouse_name, &deser_warehouse_name);
                 assert_eq!(orig_namespace, &deser_namespace);
-                assert_eq!(
-                    orig_catalog_token.expose_secret(),
-                    deser_catalog_token.expose_secret()
-                );
+                assert_eq!(orig_catalog_token.expose_secret(), deser_catalog_token.expose_secret());
                 assert_eq!(
                     orig_s3_access_key_id.expose_secret(),
                     deser_s3_access_key_id.expose_secret()

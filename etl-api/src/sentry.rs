@@ -1,8 +1,9 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use etl_api::config::ApiConfig;
 use etl_config::{Environment, load_config};
 use secrecy::ExposeSecret;
-use std::sync::Arc;
 use tracing::debug;
 
 /// Initializes Sentry error tracking and performance monitoring for the API.
@@ -22,9 +23,7 @@ pub fn init() -> Result<Option<sentry::ClientInitGuard>> {
                 sample_trace_rate(ctx)
             })),
             max_request_body_size: sentry::MaxRequestBodySize::Always,
-            integrations: vec![Arc::new(
-                sentry::integrations::panic::PanicIntegration::new(),
-            )],
+            integrations: vec![Arc::new(sentry::integrations::panic::PanicIntegration::new())],
             attach_stacktrace: true,
             ..Default::default()
         });

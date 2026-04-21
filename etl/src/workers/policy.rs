@@ -2,7 +2,7 @@ use crate::error::{ErrorKind, EtlError};
 
 /// Retry behavior for a classified error.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum RetryDirective {
+pub(crate) enum RetryDirective {
     /// The operation can be retried automatically with worker-defined timing.
     Timed,
     /// The operation should only be retried after manual intervention.
@@ -13,7 +13,7 @@ pub enum RetryDirective {
 
 /// Policy describing how an [`EtlError`] should be handled by workers.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct ErrorHandlingPolicy {
+pub(crate) struct ErrorHandlingPolicy {
     retry_directive: RetryDirective,
     solution: Option<&'static str>,
 }
@@ -21,34 +21,32 @@ pub struct ErrorHandlingPolicy {
 impl ErrorHandlingPolicy {
     /// Creates a new policy with all directives.
     const fn new(retry_directive: RetryDirective, solution: Option<&'static str>) -> Self {
-        Self {
-            retry_directive,
-            solution,
-        }
+        Self { retry_directive, solution }
     }
 
     /// Returns `true` if this policy involves a retry.
-    pub fn should_retry(&self) -> bool {
+    pub(crate) fn should_retry(&self) -> bool {
         self.retry_directive == RetryDirective::Timed
     }
 
     /// Returns the retry directive for this policy.
-    pub fn retry_directive(&self) -> RetryDirective {
+    pub(crate) fn retry_directive(&self) -> RetryDirective {
         self.retry_directive
     }
 
     /// Returns an optional operator-facing solution message.
-    pub fn solution(&self) -> Option<&'static str> {
+    pub(crate) fn solution(&self) -> Option<&'static str> {
         self.solution
     }
 }
 
-/// Builds an [`ErrorHandlingPolicy`] from an [`EtlError`] to determine in a unified way how errors
-/// should be handled.
-pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
+/// Builds an [`ErrorHandlingPolicy`] from an [`EtlError`] to determine in a
+/// unified way how errors should be handled.
+pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
     match error.kind() {
-        // Automatically retriable errors. Keep this list narrow and limited to transient source or destination
-        // connectivity/capacity failures that are expected to recover without operator intervention.
+        // Automatically retriable errors. Keep this list narrow and limited to transient source or
+        // destination connectivity/capacity failures that are expected to recover without
+        // operator intervention.
         ErrorKind::SourceConnectionFailed
         | ErrorKind::DestinationConnectionFailed
         | ErrorKind::DestinationAtomicBatchRetryable
@@ -81,7 +79,8 @@ pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
         ErrorKind::SourceConfigurationLimitExceeded => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some(
-                "Verify the configured limits for Postgres, for example, the maximum number of replication slots.",
+                "Verify the configured limits for Postgres, for example, the maximum number of \
+                 replication slots.",
             ),
         ),
         ErrorKind::ReplicationSlotNotCreated => ErrorHandlingPolicy::new(
@@ -113,7 +112,9 @@ pub fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
         _ => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some(
-                "There is no single prescribed solution for this error. The issue may still be recoverable with manual intervention based on the specific context. If it persists after rollback and targeted fixes, please contact support.",
+                "There is no single prescribed solution for this error. The issue may still be \
+                 recoverable with manual intervention based on the specific context. If it \
+                 persists after rollback and targeted fixes, please contact support.",
             ),
         ),
     }

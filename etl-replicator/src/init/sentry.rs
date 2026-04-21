@@ -1,15 +1,17 @@
-use ::sentry::ClientInitGuard;
-use etl_config::Environment;
-use etl_config::shared::ReplicatorConfig;
-use secrecy::ExposeSecret;
 use std::sync::Arc;
+
+use ::sentry::ClientInitGuard;
+use etl_config::{Environment, shared::ReplicatorConfig};
+use secrecy::ExposeSecret;
 use tracing::debug;
 
-use crate::APP_VERSION_ENV_NAME;
-use crate::error::{ReplicatorError, ReplicatorResult};
+use crate::{
+    APP_VERSION_ENV_NAME,
+    error::{ReplicatorError, ReplicatorResult},
+};
 
 /// Initializes Sentry error tracking for the replicator service.
-pub fn init(config: &ReplicatorConfig) -> ReplicatorResult<Option<ClientInitGuard>> {
+pub(crate) fn init(config: &ReplicatorConfig) -> ReplicatorResult<Option<ClientInitGuard>> {
     let Some(sentry_config) = &config.sentry else {
         debug!("sentry not configured for replicator, skipping initialization");
 
@@ -19,18 +21,12 @@ pub fn init(config: &ReplicatorConfig) -> ReplicatorResult<Option<ClientInitGuar
     debug!("initializing sentry with supplied dsn");
 
     let environment = Environment::load().map_err(ReplicatorError::config)?;
-    let dsn = sentry_config
-        .dsn
-        .expose_secret()
-        .parse()
-        .map_err(ReplicatorError::config)?;
+    let dsn = sentry_config.dsn.expose_secret().parse().map_err(ReplicatorError::config)?;
 
     let guard = ::sentry::init(::sentry::ClientOptions {
         dsn: Some(dsn),
         environment: Some(environment.to_string().into()),
-        integrations: vec![Arc::new(
-            ::sentry::integrations::panic::PanicIntegration::new(),
-        )],
+        integrations: vec![Arc::new(::sentry::integrations::panic::PanicIntegration::new())],
         attach_stacktrace: true,
         ..Default::default()
     });
