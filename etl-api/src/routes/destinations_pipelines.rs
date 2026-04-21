@@ -94,6 +94,9 @@ enum DestinationPipelineError {
 
     #[error("The pipeline with id {0} is active. Stop it before deleting it.")]
     ActivePipeline(i64),
+
+    #[error("{0}")]
+    InvalidPipelineRequest(String),
 }
 
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
@@ -146,9 +149,8 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::SourceNotFound(_)
             | DestinationPipelineError::DestinationNotFound(_)
             | DestinationPipelineError::PipelineNotFound(_)
-            | DestinationPipelineError::PipelineDestinationMismatch(_, _) => {
-                StatusCode::BAD_REQUEST
-            }
+            | DestinationPipelineError::PipelineDestinationMismatch(_, _)
+            | DestinationPipelineError::InvalidPipelineRequest(_) => StatusCode::BAD_REQUEST,
             DestinationPipelineError::DuplicatePipeline
             | DestinationPipelineError::ActivePipeline(_) => StatusCode::CONFLICT,
             DestinationPipelineError::PipelineLimitReached { .. } => {
@@ -209,6 +211,12 @@ pub struct DeleteDestinationPipelineResponse {
     pub destination_deleted: bool,
 }
 
+fn validate_pipeline_request(
+    config: &FullApiPipelineConfig,
+) -> Result<(), DestinationPipelineError> {
+    config.validate().map_err(DestinationPipelineError::InvalidPipelineRequest)
+}
+
 #[utoipa::path(
     summary = "Create destination and pipeline",
     description = "Creates a destination and a pipeline linked to the specified source.",
@@ -234,6 +242,7 @@ pub async fn create_destination_and_pipeline(
 ) -> Result<impl Responder, DestinationPipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let destination_and_pipeline = destination_and_pipeline.into_inner();
+    validate_pipeline_request(&destination_and_pipeline.pipeline_config)?;
 
     let mut txn = pool.begin().await?;
 
@@ -310,6 +319,7 @@ pub async fn update_destination_and_pipeline(
     let tenant_id = extract_tenant_id(&req)?;
     let (destination_id, pipeline_id) = destination_and_pipeline_ids.into_inner();
     let destination_and_pipeline = destination_and_pipeline.into_inner();
+    validate_pipeline_request(&destination_and_pipeline.pipeline_config)?;
 
     let mut txn = pool.begin().await?;
 
