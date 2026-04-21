@@ -49,10 +49,6 @@ impl MemorySnapshot {
 
         used_percent.clamp(0.0, 1.0)
     }
-
-    pub fn total(&self) -> u64 {
-        self.total
-    }
 }
 
 /// Internal shared state for memory backpressure.
