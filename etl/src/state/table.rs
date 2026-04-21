@@ -450,7 +450,6 @@ impl TableReplicationPhaseType {
     /// Returns `true` if the phase should be saved into the state store,
     /// `false` otherwise.
     pub fn should_store(&self) -> bool {
-        #[allow(clippy::match_same_arms)]
         match self {
             Self::Init => true,
             Self::DataSync => true,
@@ -469,7 +468,6 @@ impl TableReplicationPhaseType {
     /// A table is done processing, when its events are being processed by the
     /// apply worker instead of a table sync worker or when it has errored.
     pub fn is_done(&self) -> bool {
-        #[allow(clippy::match_same_arms)]
         match self {
             Self::Init => false,
             Self::DataSync => false,

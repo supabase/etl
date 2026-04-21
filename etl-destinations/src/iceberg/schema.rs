@@ -1,5 +1,3 @@
-#![allow(clippy::match_same_arms)]
-
 use std::sync::Arc;
 
 use etl::types::{ColumnSchema, Type, is_array_type};
