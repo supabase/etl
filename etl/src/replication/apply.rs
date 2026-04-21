@@ -316,13 +316,6 @@ impl ReplicationProgress {
     }
 }
 
-/// An enum representing if the batch should be ended or not.
-#[derive(Debug)]
-enum EndBatch {
-    /// The batch should include the last processed event and end.
-    Inclusive,
-}
-
 /// Result returned from [`ApplyLoop::handle_replication_message`] and related
 /// functions.
 #[derive(Debug, Default)]
@@ -333,7 +326,7 @@ struct HandleMessageResult {
     end_lsn: Option<PgLsn>,
     /// Set when a batch should be ended earlier than the normal batching
     /// parameters.
-    end_batch: Option<EndBatch>,
+    end_batch: bool,
     /// Set when the table has encountered an error.
     table_replication_error: Option<TableReplicationError>,
 }
@@ -1369,10 +1362,7 @@ where
     ) -> EtlResult<()> {
         let result = self.handle_replication_message(events_stream.as_mut(), message).await?;
 
-        let should_include_event = matches!(result.end_batch, None | Some(EndBatch::Inclusive));
-        if let Some(event) = result.event
-            && should_include_event
-        {
+        if let Some(event) = result.event {
             // We add the element to the pending batch.
             self.state.add_event_to_batch(event);
 
@@ -1388,7 +1378,7 @@ where
         // or not.
         let batch_size_reached =
             self.state.events_batch_bytes >= self.cached_batch_budget.current_batch_size_bytes();
-        let early_flush_requested = result.end_batch.is_some();
+        let early_flush_requested = result.end_batch;
         let should_flush = batch_size_reached || early_flush_requested;
 
         if should_flush {
@@ -1736,7 +1726,7 @@ where
         // path requesting a pause exit, which lets that case reuse the normal
         // commit flush flow.
         if should_end_batch {
-            result.end_batch = Some(EndBatch::Inclusive);
+            result.end_batch = true;
         }
 
         Ok(result)

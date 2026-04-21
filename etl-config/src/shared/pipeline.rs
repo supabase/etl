@@ -431,7 +431,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_table_sync_copy_serialization_skip_all() {
+    fn table_sync_copy_serialization_skip_all() {
         let selection = TableSyncCopyConfig::SkipAllTables;
         let json = serde_json::to_string(&selection).unwrap();
         let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
@@ -440,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_sync_copy_serialization_include_tables() {
+    fn table_sync_copy_serialization_include_tables() {
         let selection = TableSyncCopyConfig::IncludeTables { table_ids: vec![1, 2, 3] };
         let json = serde_json::to_string(&selection).unwrap();
         let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();
@@ -449,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_sync_copy_serialization_exclude_tables() {
+    fn table_sync_copy_serialization_exclude_tables() {
         let selection = TableSyncCopyConfig::SkipTables { table_ids: vec![4, 5] };
         let json = serde_json::to_string(&selection).unwrap();
         let decoded: TableSyncCopyConfig = serde_json::from_str(&json).unwrap();

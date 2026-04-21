@@ -321,10 +321,8 @@ fn old_table_rows_equal_ignoring_size(
 ) -> bool {
     match (left, right) {
         (Some(left_row), Some(right_row)) => match (left_row, right_row) {
-            (OldTableRow::Full(left), OldTableRow::Full(right)) => {
-                table_rows_equal_ignoring_size(left, right)
-            }
-            (OldTableRow::Key(left), OldTableRow::Key(right)) => {
+            (OldTableRow::Full(left), OldTableRow::Full(right))
+            | (OldTableRow::Key(left), OldTableRow::Key(right)) => {
                 table_rows_equal_ignoring_size(left, right)
             }
             _ => false,

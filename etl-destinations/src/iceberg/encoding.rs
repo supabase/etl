@@ -1,3 +1,5 @@
+#![allow(clippy::match_same_arms)]
+
 use std::sync::Arc;
 
 use arrow::{
@@ -900,7 +902,7 @@ fn append_array_cell_as_strings(
             for item in vec {
                 match item {
                     Some(d) => {
-                        list_builder.values().append_value(d.format(DATE_FORMAT).to_string())
+                        list_builder.values().append_value(d.format(DATE_FORMAT).to_string());
                     }
                     None => list_builder.values().append_null(),
                 }
@@ -910,7 +912,7 @@ fn append_array_cell_as_strings(
             for item in vec {
                 match item {
                     Some(t) => {
-                        list_builder.values().append_value(t.format(TIME_FORMAT).to_string())
+                        list_builder.values().append_value(t.format(TIME_FORMAT).to_string());
                     }
                     None => list_builder.values().append_null(),
                 }
@@ -920,7 +922,7 @@ fn append_array_cell_as_strings(
             for item in vec {
                 match item {
                     Some(ts) => {
-                        list_builder.values().append_value(ts.format(TIMESTAMP_FORMAT).to_string())
+                        list_builder.values().append_value(ts.format(TIMESTAMP_FORMAT).to_string());
                     }
                     None => list_builder.values().append_null(),
                 }
@@ -966,7 +968,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cell_to_bool() {
+    fn cell_to_bool_fn() {
         assert_eq!(cell_to_bool(&Cell::Bool(true)), Some(true));
         assert_eq!(cell_to_bool(&Cell::Bool(false)), Some(false));
         assert_eq!(cell_to_bool(&Cell::Null), None);
@@ -975,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_i32() {
+    fn cell_to_i32_fn() {
         assert_eq!(cell_to_i32(&Cell::I16(42)), Some(42));
         assert_eq!(cell_to_i32(&Cell::I32(42)), Some(42));
         assert_eq!(cell_to_i32(&Cell::Null), None);
@@ -984,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_i64() {
+    fn cell_to_i64_fn() {
         assert_eq!(cell_to_i64(&Cell::I64(42)), Some(42));
         assert_eq!(cell_to_i64(&Cell::I64(-42)), Some(-42));
         assert_eq!(cell_to_i64(&Cell::U32(42)), Some(42));
@@ -995,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_f32() {
+    fn cell_to_f32_fn() {
         assert_eq!(cell_to_f32(&Cell::F32(2.5)), Some(2.5));
         assert_eq!(cell_to_f32(&Cell::F32(-2.5)), Some(-2.5));
         assert_eq!(cell_to_f32(&Cell::Null), None);
@@ -1004,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_f64() {
+    fn cell_to_f64_fn() {
         assert_eq!(cell_to_f64(&Cell::F64(1.234567)), Some(1.234567));
         assert_eq!(cell_to_f64(&Cell::F64(-1.234567)), Some(-1.234567));
         assert_eq!(cell_to_f64(&Cell::Null), None);
@@ -1013,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_bytes() {
+    fn cell_to_bytes_fn() {
         let test_bytes = vec![1, 2, 3, 4];
         assert_eq!(cell_to_bytes(&Cell::Bytes(test_bytes.clone())), Some(test_bytes));
         assert_eq!(cell_to_bytes(&Cell::Bytes(vec![])), Some(vec![]));
@@ -1022,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_date32() {
+    fn cell_to_date32_fn() {
         use chrono::NaiveDate;
         let test_date = NaiveDate::from_ymd_opt(2023, 5, 15).unwrap();
         let expected_days = test_date.signed_duration_since(UNIX_EPOCH).num_days() as i32;
@@ -1034,7 +1036,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_time64() {
+    fn cell_to_time64_fn() {
         use chrono::NaiveTime;
         let test_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
         let expected_micros = test_time.signed_duration_since(MIDNIGHT).num_microseconds();
@@ -1046,7 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_timestamp() {
+    fn cell_to_timestamp_fn() {
         use chrono::DateTime;
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap().naive_utc();
         let expected_micros = test_ts.and_utc().timestamp_micros();
@@ -1057,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_timestamptz() {
+    fn cell_to_timestamptz_fn() {
         use chrono::DateTime;
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap();
         let expected_micros = test_ts.timestamp_micros();
@@ -1068,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_uuid() {
+    fn cell_to_uuid_fn() {
         use uuid::Uuid;
         let test_uuid = Uuid::new_v4();
         let expected_bytes = test_uuid.as_bytes();
@@ -1079,7 +1081,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_string() {
+    fn cell_to_string_fn() {
         use chrono::{NaiveDate, NaiveTime};
         use uuid::Uuid;
 
@@ -1120,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_boolean_array() {
+    fn build_boolean_array() {
         let rows = vec![
             TableRow::new(vec![Cell::Bool(true)]),
             TableRow::new(vec![Cell::Bool(false)]),
@@ -1139,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_i32_array() {
+    fn build_i32_array() {
         let rows = vec![
             TableRow::new(vec![Cell::I16(42)]),
             TableRow::new(vec![Cell::I32(-123)]),
@@ -1158,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_i64_array() {
+    fn build_i64_array() {
         let rows = vec![
             TableRow::new(vec![Cell::I64(123456789)]),
             TableRow::new(vec![Cell::I64(-987654321)]),
@@ -1179,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_f32_array() {
+    fn build_f32_array() {
         let rows = vec![
             TableRow::new(vec![Cell::F32(2.5)]),
             TableRow::new(vec![Cell::F32(-1.25)]),
@@ -1198,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_f64_array() {
+    fn build_f64_array() {
         let rows = vec![
             TableRow::new(vec![Cell::F64(1.23456789)]),
             TableRow::new(vec![Cell::F64(-9.87654321)]),
@@ -1217,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_string_array() {
+    fn build_string_array() {
         let rows = vec![
             TableRow::new(vec![Cell::String("hello".to_string())]),
             TableRow::new(vec![Cell::Bool(true)]), // Converted to string
@@ -1236,7 +1238,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_binary_array() {
+    fn build_binary_array() {
         let test_bytes = vec![1, 2, 3, 4, 5];
         let rows = vec![
             TableRow::new(vec![Cell::Bytes(test_bytes.clone())]),
@@ -1257,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_date32_array() {
+    fn build_date32_array() {
         use chrono::NaiveDate;
         let test_date = NaiveDate::from_ymd_opt(2023, 5, 15).unwrap();
         let expected_days = test_date.signed_duration_since(UNIX_EPOCH).num_days() as i32;
@@ -1280,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_time64_array() {
+    fn build_time64_array() {
         use chrono::NaiveTime;
         let test_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
         let expected_micros = test_time.signed_duration_since(MIDNIGHT).num_microseconds().unwrap();
@@ -1304,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_timestamp_array() {
+    fn build_timestamp_array() {
         use chrono::DateTime;
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap().naive_utc();
         let expected_micros = test_ts.and_utc().timestamp_micros();
@@ -1327,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_timestamptz_array() {
+    fn build_timestamptz_array() {
         use chrono::DateTime;
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap();
         let expected_micros = test_ts.timestamp_micros();
@@ -1354,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_uuid_array() {
+    fn build_uuid_array() {
         use uuid::Uuid;
         let test_uuid = Uuid::new_v4();
         let expected_bytes = test_uuid.as_bytes();
@@ -1377,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rows_to_record_batch_simple() {
+    fn rows_to_record_batch_simple() {
         use arrow::datatypes::{Field, Schema};
 
         let rows = vec![
@@ -1417,7 +1419,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rows_to_record_batch_with_nulls() {
+    fn rows_to_record_batch_with_nulls() {
         use arrow::datatypes::{Field, Schema};
 
         let rows = vec![
@@ -1446,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rows_to_record_batch_temporal_types() {
+    fn rows_to_record_batch_temporal_types() {
         use arrow::datatypes::{Field, Schema};
         use chrono::{DateTime, NaiveDate, NaiveTime};
 
@@ -1511,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rows_to_record_batch_binary_and_uuid() {
+    fn rows_to_record_batch_binary_and_uuid() {
         use arrow::datatypes::{Field, Schema};
         use uuid::Uuid;
 
@@ -1541,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rows_to_record_batch_empty() {
+    fn rows_to_record_batch_empty() {
         use arrow::datatypes::{Field, Schema};
 
         let rows: Vec<TableRow> = vec![];
@@ -1557,7 +1559,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rows_to_record_batch_unsupported_fallback() {
+    fn rows_to_record_batch_unsupported_fallback() {
         use arrow::datatypes::{Field, Schema};
 
         // Test with a data type that doesn't have a direct converter
@@ -1594,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rows_to_record_batch_schema_mismatch_length() {
+    fn rows_to_record_batch_schema_mismatch_length() {
         use arrow::datatypes::{Field, Schema};
 
         // Test what happens when row has different number of columns than schema
@@ -1627,13 +1629,13 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_array_cell() {
+    fn cell_to_array_cell_fn() {
         let bool_array = ArrayCell::Bool(vec![Some(true), Some(false), None]);
         let string_array = ArrayCell::String(vec![Some("hello".to_string()), None]);
 
         // Test extraction from Cell::Array
         assert!(cell_to_array_cell(&Cell::Array(bool_array.clone())).is_some());
-        assert!(cell_to_array_cell(&Cell::Array(string_array.clone())).is_some());
+        assert!(cell_to_array_cell(&Cell::Array(string_array)).is_some());
 
         // Test non-array cells return None
         assert!(cell_to_array_cell(&Cell::Null).is_none());
@@ -1642,7 +1644,7 @@ mod tests {
         assert!(cell_to_array_cell(&Cell::I32(42)).is_none());
 
         // Verify the extracted array cell is the same
-        if let Some(extracted) = cell_to_array_cell(&Cell::Array(bool_array.clone())) {
+        if let Some(extracted) = cell_to_array_cell(&Cell::Array(bool_array)) {
             if let ArrayCell::Bool(vec) = extracted {
                 assert_eq!(vec.len(), 3);
                 assert_eq!(vec[0], Some(true));
@@ -1655,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_boolean_list_array() {
+    fn build_boolean_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Boolean, true);
@@ -1670,7 +1672,7 @@ mod tests {
             TableRow::new(vec![Cell::String("not an array".to_string())]), // Non-array cell,
         ];
 
-        let array_ref = build_boolean_list_array(&rows, 0, field_ref.clone());
+        let array_ref = build_boolean_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 5);
@@ -1704,7 +1706,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_boolean_list_array_fallback() {
+    fn build_boolean_list_array_fallback() {
         use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Boolean, true);
@@ -1724,7 +1726,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_int32_list_array() {
+    fn build_int32_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Int32, true);
@@ -1737,7 +1739,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]),                          // Null cell,
         ];
 
-        let array_ref = build_int32_list_array(&rows, 0, field_ref.clone());
+        let array_ref = build_int32_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -1769,7 +1771,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_int64_list_array() {
+    fn build_int64_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Int64, true);
@@ -1786,7 +1788,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]),                          // Null cell,
         ];
 
-        let array_ref = build_int64_list_array(&rows, 0, field_ref.clone());
+        let array_ref = build_int64_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -1818,7 +1820,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_float32_list_array() {
+    fn build_float32_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Float32, true);
@@ -1831,7 +1833,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]),                          // Null cell,
         ];
 
-        let array_ref = build_float32_list_array(&rows, 0, field_ref.clone());
+        let array_ref = build_float32_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -1863,7 +1865,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_float64_list_array() {
+    fn build_float64_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Float64, true);
@@ -1880,7 +1882,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]),                          // Null cell,
         ];
 
-        let array_ref = build_float64_list_array(&rows, 0, field_ref.clone());
+        let array_ref = build_float64_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -1912,7 +1914,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_string_list_array() {
+    fn build_string_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
         use etl::types::PgNumeric;
 
@@ -1939,7 +1941,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]),                             // Null cell,
         ];
 
-        let array_ref = build_string_list_array(&rows, 0, field_ref.clone());
+        let array_ref = build_string_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 5);
@@ -1982,7 +1984,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_binary_list_array() {
+    fn build_binary_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::LargeBinary, true);
@@ -2003,7 +2005,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]),                            // Null cell,
         ];
 
-        let array_ref = build_binary_list_array(&rows, 0, field_ref.clone());
+        let array_ref = build_binary_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -2036,7 +2038,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_date32_list_array() {
+    fn build_date32_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
         use chrono::NaiveDate;
 
@@ -2058,7 +2060,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]),                           // Null cell,
         ];
 
-        let array_ref = build_date32_list_array(&rows, 0, field_ref.clone());
+        let array_ref = build_date32_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -2098,7 +2100,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_time64_list_array() {
+    fn build_time64_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
         use chrono::NaiveTime;
 
@@ -2120,7 +2122,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]),                           // Null cell,
         ];
 
-        let array_ref = build_time64_list_array(&rows, 0, field_ref.clone());
+        let array_ref = build_time64_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -2162,7 +2164,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_timestamp_list_array() {
+    fn build_timestamp_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
         use chrono::DateTime;
 
@@ -2184,7 +2186,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]),                                // Null cell,
         ];
 
-        let array_ref = build_timestamp_list_array(&rows, 0, field_ref.clone());
+        let array_ref = build_timestamp_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -2217,7 +2219,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_timestamptz_list_array() {
+    fn build_timestamptz_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
         use chrono::DateTime;
 
@@ -2243,7 +2245,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]),                                  // Null cell,
         ];
 
-        let array_ref = build_timestamptz_list_array(&rows, 0, field_ref.clone());
+        let array_ref = build_timestamptz_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -2279,7 +2281,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_uuid_list_array() {
+    fn build_uuid_list_array_fn() {
         use arrow::{array::ListArray, datatypes::Field};
         use uuid::Uuid;
 
@@ -2301,7 +2303,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]),                           // Null cell,
         ];
 
-        let array_ref = build_uuid_list_array(&rows, 0, field_ref.clone());
+        let array_ref = build_uuid_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -2334,7 +2336,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_list_array_for_strings() {
+    fn build_list_array_for_strings_fn() {
         use arrow::{array::ListArray, datatypes::Field};
         use chrono::{DateTime, NaiveDate, NaiveTime};
         use etl::types::PgNumeric;
@@ -2377,7 +2379,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]), // Null cell,
         ];
 
-        let array_ref = build_list_array_for_strings(&rows, 0, field_ref.clone());
+        let array_ref = build_list_array_for_strings(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 13);
@@ -2485,7 +2487,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_array_cell_as_strings_comprehensive() {
+    fn append_array_cell_as_strings_comprehensive() {
         use arrow::array::ListBuilder;
         use chrono::{DateTime, NaiveDate, NaiveTime};
         use etl::types::PgNumeric;
@@ -2622,7 +2624,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_list_array_dispatch() {
+    fn build_list_array_dispatch() {
         use arrow::datatypes::Field;
 
         // Test that build_list_array correctly dispatches to the right type-specific
@@ -2661,7 +2663,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_list_array_unsupported_type_fallback() {
+    fn build_list_array_unsupported_type_fallback() {
         use arrow::datatypes::Field;
 
         // Test with an unsupported inner type that should fall back to string
@@ -2687,7 +2689,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rows_to_record_batch_with_list_fields() {
+    fn rows_to_record_batch_with_list_fields() {
         use arrow::datatypes::{Field, Schema};
         use uuid::Uuid;
 
@@ -2848,7 +2850,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rows_to_record_batch_mixed_scalar_and_array() {
+    fn rows_to_record_batch_mixed_scalar_and_array() {
         use arrow::datatypes::{Field, Schema};
 
         // Test mixing scalar and array columns in the same record batch

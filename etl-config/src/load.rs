@@ -297,22 +297,22 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_json() {
+    fn roundtrip_json() {
         test_roundtrip_with_extension("json");
     }
 
     #[test]
-    fn test_roundtrip_yaml() {
+    fn roundtrip_yaml() {
         test_roundtrip_with_extension("yaml");
     }
 
     #[test]
-    fn test_roundtrip_yml() {
+    fn roundtrip_yml() {
         test_roundtrip_with_extension("yml");
     }
 
     #[test]
-    fn test_all_supported_extensions_detected() {
+    fn all_supported_extensions_detected() {
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path().join("configuration");
         fs::create_dir(&config_dir).unwrap();
@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn test_app_config_dir_env_var() {
+    fn app_config_dir_env_var() {
         let _guard = env_lock().lock().unwrap();
 
         let temp_dir = TempDir::new().unwrap();
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fallback_to_current_dir_when_app_config_dir_not_set() {
+    fn fallback_to_current_dir_when_app_config_dir_not_set() {
         let _guard = env_lock().lock().unwrap();
 
         let temp_dir = TempDir::new().unwrap();

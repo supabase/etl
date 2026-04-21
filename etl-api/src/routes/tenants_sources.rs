@@ -41,9 +41,11 @@ impl TenantSourceError {
     fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages
-            TenantSourceError::TenantSourceDb(TenantSourceDbError::Database(_))
-            | TenantSourceError::TenantSourceDb(TenantSourceDbError::Sources(_))
-            | TenantSourceError::TenantSourceDb(TenantSourceDbError::Tenants(_))
+            TenantSourceError::TenantSourceDb(
+                TenantSourceDbError::Database(_)
+                | TenantSourceDbError::Sources(_)
+                | TenantSourceDbError::Tenants(_),
+            )
             | TenantSourceError::Database(_)
             | TenantSourceError::Validation(_) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information

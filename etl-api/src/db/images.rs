@@ -144,12 +144,9 @@ pub async fn delete_image(pool: &PgPool, image_id: i64) -> Result<Option<i64>, I
     .fetch_optional(&mut *txn)
     .await?;
 
-    let image = match image {
-        Some(img) => img,
-        None => {
-            // Image doesn't exist, return None
-            return Ok(None);
-        }
+    let Some(image) = image else {
+        // Image doesn't exist, return None
+        return Ok(None);
     };
 
     // Prevent deletion if it's a default image

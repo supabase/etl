@@ -277,12 +277,10 @@ impl SupabaseClient {
 
         let file_io = self.load_file_io(Some(metadata_location), Some(config))?;
 
-        let table_ident = TableIdent::new(namespace.clone(), creation.name.to_string());
+        let table_ident = TableIdent::new(namespace.clone(), creation.name.clone());
 
-        let table_builder = Table::builder()
-            .identifier(table_ident.clone())
-            .file_io(file_io)
-            .metadata(response.metadata);
+        let table_builder =
+            Table::builder().identifier(table_ident).file_io(file_io).metadata(response.metadata);
 
         if let Some(metadata_location) = response.metadata_location {
             table_builder.metadata_location(metadata_location).build()
@@ -370,7 +368,7 @@ impl SupabaseClient {
         }
 
         if let Some(query) = query {
-            request = request.query(query)
+            request = request.query(query);
         }
 
         let response = request

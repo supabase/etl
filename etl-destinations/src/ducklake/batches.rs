@@ -1279,7 +1279,7 @@ fn apply_truncate_batch_action(conn: &duckdb::Connection, table_name: &str) -> E
 
 /// Formats an optional LSN for marker-table inserts.
 fn optional_lsn_to_sql_literal(lsn: Option<PgLsn>) -> String {
-    lsn.map(|value| u64::from(value).to_string()).unwrap_or_else(|| "NULL".to_string())
+    lsn.map_or_else(|| "NULL".to_string(), |value| u64::from(value).to_string())
 }
 
 /// Applies one prepared table mutation inside an open transaction.
@@ -1660,7 +1660,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_predicate_from_row_uses_only_primary_key_columns() {
+    fn delete_predicate_from_row_uses_only_primary_key_columns() {
         let table_schema = TableSchema::new(
             TableId::new(1),
             TableName::new("public".to_string(), "users".to_string()),
@@ -1682,7 +1682,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_predicate_from_row_supports_filtered_schema() {
+    fn delete_predicate_from_row_supports_filtered_schema() {
         let table_schema = TableSchema::new(
             TableId::new(1),
             TableName::new("public".to_string(), "users".to_string()),
@@ -1704,7 +1704,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_table_mutations_replace_emits_delete_then_upsert() {
+    fn prepare_table_mutations_replace_emits_delete_then_upsert() {
         let replicated_table_schema = make_streaming_schema();
         let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]);
 
@@ -1734,7 +1734,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_table_mutations_update_emits_delete_then_upsert() {
+    fn prepare_table_mutations_update_emits_delete_then_upsert() {
         let replicated_table_schema = make_streaming_schema();
         let prepared = prepare_table_mutations(
             &replicated_table_schema,
@@ -1800,7 +1800,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_mutation_table_batches_insert_only_uses_single_upsert_operation() {
+    fn prepare_mutation_table_batches_insert_only_uses_single_upsert_operation() {
         let replicated_table_schema = make_streaming_schema();
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
@@ -1847,7 +1847,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_mutation_table_batches_split_mixed_cdc_at_delete_boundaries() {
+    fn prepare_mutation_table_batches_split_mixed_cdc_at_delete_boundaries() {
         let replicated_table_schema = make_streaming_schema();
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
@@ -1901,7 +1901,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_mutation_table_batches_group_contiguous_deletes() {
+    fn prepare_mutation_table_batches_group_contiguous_deletes() {
         let replicated_table_schema = make_streaming_schema();
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
@@ -1945,7 +1945,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_mutation_table_batches_group_contiguous_updates() {
+    fn prepare_mutation_table_batches_group_contiguous_updates() {
         let replicated_table_schema = make_streaming_schema();
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
@@ -2003,7 +2003,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_mutation_table_batches_split_non_inserts_at_cap() {
+    fn prepare_mutation_table_batches_split_non_inserts_at_cap() {
         let replicated_table_schema = make_streaming_schema();
         let tracked = (0..=CDC_MUTATION_BATCH_SIZE)
             .map(|idx| {
@@ -2050,7 +2050,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_mutation_table_batches_isolate_update_in_its_own_atomic_batch() {
+    fn prepare_mutation_table_batches_isolate_update_in_its_own_atomic_batch() {
         let replicated_table_schema = make_streaming_schema();
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
@@ -2114,7 +2114,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_mutation_batch_identity_is_deterministic() {
+    fn build_mutation_batch_identity_is_deterministic() {
         let replicated_table_schema = make_streaming_schema();
         let tracked = vec![
             TrackedTableMutation::new(
@@ -2148,7 +2148,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_mutation_batch_identity_changes_with_order_and_lsn() {
+    fn build_mutation_batch_identity_changes_with_order_and_lsn() {
         let replicated_table_schema = make_streaming_schema();
         let original = build_mutation_batch_identity(
             "public_users",
@@ -2215,7 +2215,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_truncate_batch_identity_changes_with_lsn() {
+    fn build_truncate_batch_identity_changes_with_lsn() {
         let first = build_truncate_batch_identity(
             "public_users",
             &[TrackedTruncateEvent::new(PgLsn::from(300), PgLsn::from(400), 0)],

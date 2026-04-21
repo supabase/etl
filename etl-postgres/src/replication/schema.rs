@@ -437,7 +437,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_type_string_conversion() {
+    fn type_string_conversion() {
         let test_types = get_test_type_mappings();
 
         // Test type to string conversion

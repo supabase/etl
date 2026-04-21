@@ -189,11 +189,11 @@ fn cell_encode_prost(cell: &CellNonOptional, tag: u32, buf: &mut impl bytes::Buf
         }
         CellNonOptional::Uuid(u) => {
             let s = u.to_string();
-            prost::encoding::string::encode(tag, &s, buf)
+            prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::Json(j) => {
             let s = j.to_string();
-            prost::encoding::string::encode(tag, &s, buf)
+            prost::encoding::string::encode(tag, &s, buf);
         }
         CellNonOptional::U32(i) => {
             prost::encoding::uint32::encode(tag, i, buf);
@@ -298,7 +298,7 @@ fn array_cell_encode_prost(
             prost::encoding::double::encode_packed(tag, vec, buf);
         }
         ArrayCellNonOptional::Numeric(vec) => {
-            let values: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Date(vec) => {
@@ -322,11 +322,11 @@ fn array_cell_encode_prost(
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Uuid(vec) => {
-            let values: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Json(vec) => {
-            let values: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encode_repeated(tag, &values, buf);
         }
         ArrayCellNonOptional::Bytes(vec) => {
@@ -357,7 +357,7 @@ fn array_cell_non_optional_encoded_len_prost(array_cell: &ArrayCellNonOptional, 
         ArrayCellNonOptional::F32(vec) => prost::encoding::float::encoded_len_packed(tag, vec),
         ArrayCellNonOptional::F64(vec) => prost::encoding::double::encoded_len_packed(tag, vec),
         ArrayCellNonOptional::Numeric(vec) => {
-            let values: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Date(vec) => {
@@ -381,11 +381,11 @@ fn array_cell_non_optional_encoded_len_prost(array_cell: &ArrayCellNonOptional, 
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Uuid(vec) => {
-            let values: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Json(vec) => {
-            let values: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+            let values: Vec<String> = vec.iter().map(ToString::to_string).collect();
             prost::encoding::string::encoded_len_repeated(tag, &values)
         }
         ArrayCellNonOptional::Bytes(vec) => prost::encoding::bytes::encoded_len_repeated(tag, vec),
@@ -405,7 +405,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_bigquery_table_row_try_from_valid() {
+    fn bigquery_table_row_try_from_valid() {
         let table_row = TableRow::new(vec![
             Cell::I32(42),
             Cell::String("test".to_string()),
@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bigquery_table_row_try_from_invalid_numeric_nan() {
+    fn bigquery_table_row_try_from_invalid_numeric_nan() {
         let table_row = TableRow::new(vec![Cell::I32(42), Cell::Numeric(PgNumeric::NaN)]);
 
         let result = BigQueryTableRow::try_from(table_row);
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bigquery_table_row_try_from_invalid_numeric_infinity() {
+    fn bigquery_table_row_try_from_invalid_numeric_infinity() {
         let table_row = TableRow::new(vec![
             Cell::String("valid".to_string()),
             Cell::Numeric(PgNumeric::PositiveInfinity),
@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bigquery_table_row_try_from_invalid_date() {
+    fn bigquery_table_row_try_from_invalid_date() {
         let invalid_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap(); // Date before year 1
 
         let table_row = TableRow::new(vec![Cell::Date(invalid_date)]);
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bigquery_table_row_try_from_array_with_nulls() {
+    fn bigquery_table_row_try_from_array_with_nulls() {
         let array_with_nulls = etl::types::ArrayCell::I32(vec![Some(1), None, Some(3)]);
         let table_row = TableRow::new(vec![Cell::Array(array_with_nulls)]);
 
@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bigquery_table_row_try_from_array_with_invalid_elements() {
+    fn bigquery_table_row_try_from_array_with_invalid_elements() {
         let array_with_invalid_numeric = etl::types::ArrayCell::Numeric(vec![
             Some(PgNumeric::from_str("123.456").unwrap()),
             Some(PgNumeric::NaN),
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bigquery_table_row_try_from_valid_array() {
+    fn bigquery_table_row_try_from_valid_array() {
         let valid_array = etl::types::ArrayCell::I32(vec![Some(1), Some(2), Some(3)]);
         let table_row = TableRow::new(vec![
             Cell::String("prefix".to_string()),
@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bigquery_table_row_try_from_multiple_errors_first_wins() {
+    fn bigquery_table_row_try_from_multiple_errors_first_wins() {
         let table_row = TableRow::new(vec![
             Cell::Numeric(PgNumeric::NaN), // First invalid cell
             Cell::Numeric(PgNumeric::PositiveInfinity), /* Second invalid cell (should not be
@@ -518,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bigquery_table_row_try_from_valid_temporal_values() {
+    fn bigquery_table_row_try_from_valid_temporal_values() {
         let valid_date = NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
         let valid_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
         let valid_datetime = NaiveDateTime::new(valid_date, valid_time);
@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bigquery_table_row_try_from_oversized_numeric_fails() {
+    fn bigquery_table_row_try_from_oversized_numeric_fails() {
         // Create a numeric value that exceeds BigQuery's limits
         let oversized_numeric = PgNumeric::from_str(
             "123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890"

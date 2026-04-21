@@ -435,14 +435,14 @@ mod tests {
     }
 
     #[test]
-    fn test_duckdb_blocking_operation_kind_timeouts() {
+    fn duckdb_blocking_operation_kind_timeouts() {
         assert_eq!(DuckDbBlockingOperationKind::Foreground.timeout(), FOREGROUND_QUERY_TIMEOUT);
         assert_eq!(DuckDbBlockingOperationKind::Maintenance.timeout(), MAINTENANCE_QUERY_TIMEOUT);
         assert_eq!(DuckDbBlockingOperationKind::Metrics.timeout(), METRICS_QUERY_TIMEOUT);
     }
 
     #[tokio::test]
-    async fn test_run_duckdb_blocking_timeout_releases_resources_for_follow_up_queries() {
+    async fn run_duckdb_blocking_timeout_releases_resources_for_follow_up_queries() {
         let pool = Arc::new(
             build_warm_ducklake_pool(make_blocking_test_manager(), 1, "test")
                 .await
@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_query_error_detail_compacts_sql_and_includes_source() {
+    fn format_query_error_detail_compacts_sql_and_includes_source() {
         let sql = r#"CREATE TABLE lake."orders" ("id" INTEGER NOT NULL)"#;
         let error = duckdb::Error::DuckDBFailure(
             duckdb::ffi::Error::new(1),
@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_watchdog_marks_timeout_when_handle_arrives_after_deadline() {
+    async fn query_watchdog_marks_timeout_when_handle_arrives_after_deadline() {
         let conn = make_blocking_test_manager()
             .open_duckdb_connection()
             .expect("failed to open blocking test connection");

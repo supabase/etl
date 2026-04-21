@@ -245,7 +245,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_apply_worker_slot_name() {
+    fn apply_worker_slot_name() {
         let pipeline_id = 1;
         let result: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
 
@@ -255,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_sync_slot_name() {
+    fn table_sync_slot_name() {
         let pipeline_id = 1;
         let result: String =
             EtlReplicationSlot::for_table_sync_worker(pipeline_id, TableId::new(123))
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_slot_name_length_validation() {
+    fn slot_name_length_validation() {
         // Test that normal slot names are within limits
         // Max u64
         let pipeline_id = 9223372036854775807_u64;
@@ -287,25 +287,25 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_sync_slot_prefix() {
+    fn apply_sync_slot_prefix() {
         let prefix = EtlReplicationSlot::apply_prefix(42).unwrap();
         assert_eq!(prefix, "supabase_etl_apply_42");
     }
 
     #[test]
-    fn test_table_sync_slot_prefix() {
+    fn table_sync_slot_prefix() {
         let prefix = EtlReplicationSlot::table_sync_prefix(42).unwrap();
         assert_eq!(prefix, "supabase_etl_table_sync_42_");
     }
 
     #[test]
-    fn test_parse_apply_slot() {
+    fn parse_apply_slot() {
         let parsed = EtlReplicationSlot::try_from("supabase_etl_apply_13").unwrap();
         assert_eq!(parsed, EtlReplicationSlot::Apply { pipeline_id: 13 });
     }
 
     #[test]
-    fn test_parse_table_sync_slot() {
+    fn parse_table_sync_slot() {
         let parsed = EtlReplicationSlot::try_from("supabase_etl_table_sync_7_12345").unwrap();
         assert_eq!(
             parsed,
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_invalid_slot() {
+    fn parse_invalid_slot() {
         assert!(EtlReplicationSlot::try_from("unknown_slot").is_err());
         assert!(EtlReplicationSlot::try_from("supabase_etl_apply_").is_err());
         assert!(EtlReplicationSlot::try_from("supabase_etl_table_sync_abc").is_err());

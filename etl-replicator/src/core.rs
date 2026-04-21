@@ -106,7 +106,7 @@ pub(crate) async fn start_replicator_with_config(
             .await
             .map_err(ReplicatorError::config)?;
             let namespace = match namespace {
-                Some(ns) => DestinationNamespace::Single(ns.to_string()),
+                Some(ns) => DestinationNamespace::Single(ns.clone()),
                 None => DestinationNamespace::OnePerSchema,
             };
             let destination = IcebergDestination::new(client, namespace, state_store.clone());
@@ -139,7 +139,7 @@ pub(crate) async fn start_replicator_with_config(
             .await
             .map_err(ReplicatorError::config)?;
             let namespace = match namespace {
-                Some(ns) => DestinationNamespace::Single(ns.to_string()),
+                Some(ns) => DestinationNamespace::Single(ns.clone()),
                 None => DestinationNamespace::OnePerSchema,
             };
             let destination = IcebergDestination::new(client, namespace, state_store.clone());

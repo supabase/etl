@@ -162,7 +162,10 @@ impl PipelineError {
             | PipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | PipelineError::ReplicatorsDb(ReplicatorsDbError::Database(_))
             | PipelineError::ImagesDb(ImagesDbError::Database(_))
-            | PipelineError::Database(_) => "internal server error".to_string(),
+            | PipelineError::Database(_)
+            | PipelineError::Validation(
+                ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
+            ) => "internal server error".to_string(),
             // Do not expose validation error details as they may contain credential info.
             PipelineError::Validation(ValidationError::BigQuery(_)) => {
                 "BigQuery validation failed".to_string()
@@ -173,16 +176,11 @@ impl PipelineError {
             PipelineError::Validation(ValidationError::Database(_)) => {
                 "database validation failed".to_string()
             }
-            PipelineError::Validation(ValidationError::TrustedRootCerts(_))
-            | PipelineError::Validation(ValidationError::Environment(_)) => {
-                "internal server error".to_string()
-            }
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
     }
 }
-
 impl ResponseError for PipelineError {
     fn status_code(&self) -> StatusCode {
         match self {
@@ -203,7 +201,9 @@ impl ResponseError for PipelineError {
             | PipelineError::MissingEnvironment
             | PipelineError::MissingTableReplicationState
             | PipelineError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            PipelineError::ActivePipeline(_) => StatusCode::CONFLICT,
+            PipelineError::ActivePipeline(_) | PipelineError::DuplicatePipeline => {
+                StatusCode::CONFLICT
+            }
             PipelineError::PipelineNotFound(_)
             | PipelineError::EtlStateNotInitialized
             | PipelineError::ImageIdNotDefault(_)
@@ -212,7 +212,6 @@ impl ResponseError for PipelineError {
             PipelineError::TenantId(_) | PipelineError::NotRollbackable(_) => {
                 StatusCode::BAD_REQUEST
             }
-            PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             PipelineError::PipelineLimitReached { .. } => StatusCode::UNPROCESSABLE_ENTITY,
         }
     }
@@ -326,8 +325,8 @@ impl From<TableReplicationPhase> for SimpleTableReplicationState {
             TableReplicationPhase::FinishedCopy => SimpleTableReplicationState::CopiedTable,
             TableReplicationPhase::SyncDone { .. }
             | TableReplicationPhase::SyncWait { .. }
-            | TableReplicationPhase::Catchup { .. } => SimpleTableReplicationState::FollowingWal,
-            TableReplicationPhase::Ready => SimpleTableReplicationState::FollowingWal,
+            | TableReplicationPhase::Catchup { .. }
+            | TableReplicationPhase::Ready => SimpleTableReplicationState::FollowingWal,
             TableReplicationPhase::Errored { reason, solution, retry_policy, .. } => {
                 let simple_retry_policy = match retry_policy {
                     RetryPolicy::NoRetry => SimpleRetryPolicy::NoRetry,

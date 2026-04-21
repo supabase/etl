@@ -870,10 +870,10 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
 
         match table_name.as_str() {
             "test.test_table_users" => {
-                assert!(matches!(table_status.state, SimpleTableReplicationState::CopyingTable))
+                assert!(matches!(table_status.state, SimpleTableReplicationState::CopyingTable));
             }
             "test.test_table_orders" => {
-                assert!(matches!(table_status.state, SimpleTableReplicationState::FollowingWal))
+                assert!(matches!(table_status.state, SimpleTableReplicationState::FollowingWal));
             }
             _ => panic!("Unexpected table name: {table_name}"),
         }

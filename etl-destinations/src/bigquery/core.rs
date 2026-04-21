@@ -528,7 +528,7 @@ where
             self.prepare_table_for_streaming(replicated_table_schema, false).await?;
 
         // Add the CDC operation type to all rows (no lock needed).
-        for table_row in table_rows.iter_mut() {
+        for table_row in &mut table_rows {
             table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
         }
         let table_rows = table_rows
@@ -1271,19 +1271,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_table_name_to_bigquery_table_id_no_underscores() {
+    fn table_name_to_bigquery_table_id_no_underscores() {
         let table_name = TableName::new("schema".to_string(), "table".to_string());
         assert_eq!(table_name_to_bigquery_table_id(&table_name).unwrap(), "schema_table");
     }
 
     #[test]
-    fn test_table_name_to_bigquery_table_id_with_underscores() {
+    fn table_name_to_bigquery_table_id_with_underscores() {
         let table_name = TableName::new("a_b".to_string(), "c_d".to_string());
         assert_eq!(table_name_to_bigquery_table_id(&table_name).unwrap(), "a__b_c__d");
     }
 
     #[test]
-    fn test_table_name_to_bigquery_table_id_collision_prevention() {
+    fn table_name_to_bigquery_table_id_collision_prevention() {
         // These two cases previously collided to "a_b_c"
         let table_name1 = TableName::new("a_b".to_string(), "c".to_string());
         let table_name2 = TableName::new("a".to_string(), "b_c".to_string());
@@ -1297,13 +1297,13 @@ mod tests {
     }
 
     #[test]
-    fn test_table_name_to_bigquery_table_id_multiple_underscores() {
+    fn table_name_to_bigquery_table_id_multiple_underscores() {
         let table_name = TableName::new("a__b".to_string(), "c__d".to_string());
         assert_eq!(table_name_to_bigquery_table_id(&table_name).unwrap(), "a____b_c____d");
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_from_str_valid() {
+    fn sequenced_bigquery_table_id_from_str_valid() {
         let table_id = "users_table_123";
         let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
         assert_eq!(parsed.to_bigquery_table_id(), "users_table");
@@ -1311,7 +1311,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_from_str_zero_sequence() {
+    fn sequenced_bigquery_table_id_from_str_zero_sequence() {
         let table_id = "simple_table_0";
         let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
         assert_eq!(parsed.to_bigquery_table_id(), "simple_table");
@@ -1319,7 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_from_str_large_sequence() {
+    fn sequenced_bigquery_table_id_from_str_large_sequence() {
         let table_id = "test_table_18446744073709551615"; // u64::MAX
         let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
         assert_eq!(parsed.to_bigquery_table_id(), "test_table");
@@ -1327,7 +1327,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_from_str_escaped_underscores() {
+    fn sequenced_bigquery_table_id_from_str_escaped_underscores() {
         let table_id = "a__b_c__d_42";
         let parsed = table_id.parse::<SequencedBigQueryTableId>().unwrap();
         assert_eq!(parsed.to_bigquery_table_id(), "a__b_c__d");
@@ -1335,45 +1335,45 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_display_formatting() {
+    fn sequenced_bigquery_table_id_display_formatting() {
         let table_id = SequencedBigQueryTableId("users_table".to_string(), 123);
         assert_eq!(table_id.to_string(), "users_table_123");
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_display_zero_sequence() {
+    fn sequenced_bigquery_table_id_display_zero_sequence() {
         let table_id = SequencedBigQueryTableId("simple_table".to_string(), 0);
         assert_eq!(table_id.to_string(), "simple_table_0");
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_display_large_sequence() {
+    fn sequenced_bigquery_table_id_display_large_sequence() {
         let table_id = SequencedBigQueryTableId("test_table".to_string(), u64::MAX);
         assert_eq!(table_id.to_string(), "test_table_18446744073709551615");
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_display_with_escaped_underscores() {
+    fn sequenced_bigquery_table_id_display_with_escaped_underscores() {
         let table_id = SequencedBigQueryTableId("a__b_c__d".to_string(), 42);
         assert_eq!(table_id.to_string(), "a__b_c__d_42");
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_new() {
+    fn sequenced_bigquery_table_id_new() {
         let table_id = SequencedBigQueryTableId::new("users_table".to_string());
         assert_eq!(table_id.to_bigquery_table_id(), "users_table");
         assert_eq!(table_id.1, 0);
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_new_with_underscores() {
+    fn sequenced_bigquery_table_id_new_with_underscores() {
         let table_id = SequencedBigQueryTableId::new("a__b_c__d".to_string());
         assert_eq!(table_id.to_bigquery_table_id(), "a__b_c__d");
         assert_eq!(table_id.1, 0);
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_next() {
+    fn sequenced_bigquery_table_id_next() {
         let table_id = SequencedBigQueryTableId::new("users_table".to_string());
         let next_table_id = table_id.next();
 
@@ -1383,7 +1383,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_next_increments_correctly() {
+    fn sequenced_bigquery_table_id_next_increments_correctly() {
         let table_id = SequencedBigQueryTableId("test_table".to_string(), 42);
         let next_table_id = table_id.next();
 
@@ -1392,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_next_max_value() {
+    fn sequenced_bigquery_table_id_next_max_value() {
         let table_id = SequencedBigQueryTableId("test_table".to_string(), u64::MAX - 1);
         let next_table_id = table_id.next();
 
@@ -1401,25 +1401,25 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_to_bigquery_table_id() {
+    fn sequenced_bigquery_table_id_to_bigquery_table_id() {
         let table_id = SequencedBigQueryTableId("users_table".to_string(), 123);
         assert_eq!(table_id.to_bigquery_table_id(), "users_table");
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_to_bigquery_table_id_with_underscores() {
+    fn sequenced_bigquery_table_id_to_bigquery_table_id_with_underscores() {
         let table_id = SequencedBigQueryTableId("a__b_c__d".to_string(), 42);
         assert_eq!(table_id.to_bigquery_table_id(), "a__b_c__d");
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_to_bigquery_table_id_zero_sequence() {
+    fn sequenced_bigquery_table_id_to_bigquery_table_id_zero_sequence() {
         let table_id = SequencedBigQueryTableId("simple_table".to_string(), 0);
         assert_eq!(table_id.to_bigquery_table_id(), "simple_table");
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_from_str_no_underscore() {
+    fn sequenced_bigquery_table_id_from_str_no_underscore() {
         let result = "tablewithoutsequence".parse::<SequencedBigQueryTableId>();
         assert!(result.is_err());
 
@@ -1431,7 +1431,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_from_str_invalid_sequence_number() {
+    fn sequenced_bigquery_table_id_from_str_invalid_sequence_number() {
         let result = "users_table_not_a_number".parse::<SequencedBigQueryTableId>();
         assert!(result.is_err());
 
@@ -1444,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_from_str_sequence_is_word() {
+    fn sequenced_bigquery_table_id_from_str_sequence_is_word() {
         let result = "table_word".parse::<SequencedBigQueryTableId>();
         assert!(result.is_err());
 
@@ -1457,7 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_from_str_negative_sequence() {
+    fn sequenced_bigquery_table_id_from_str_negative_sequence() {
         let result = "users_table_-123".parse::<SequencedBigQueryTableId>();
         assert!(result.is_err());
 
@@ -1469,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_from_str_sequence_overflow() {
+    fn sequenced_bigquery_table_id_from_str_sequence_overflow() {
         let result = "users_table_18446744073709551616".parse::<SequencedBigQueryTableId>(); // u64::MAX + 1
         assert!(result.is_err());
 
@@ -1481,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_from_str_empty_string() {
+    fn sequenced_bigquery_table_id_from_str_empty_string() {
         let result = "".parse::<SequencedBigQueryTableId>();
         assert!(result.is_err());
 
@@ -1493,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_from_str_empty_sequence() {
+    fn sequenced_bigquery_table_id_from_str_empty_sequence() {
         let result = "users_table_".parse::<SequencedBigQueryTableId>();
         assert!(result.is_err());
 
@@ -1505,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_from_str_empty_table_name() {
+    fn sequenced_bigquery_table_id_from_str_empty_table_name() {
         let result = "_123".parse::<SequencedBigQueryTableId>();
         assert!(result.is_err());
 
@@ -1517,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_round_trip() {
+    fn sequenced_bigquery_table_id_round_trip() {
         let original = "users_table_123";
         let parsed = original.parse::<SequencedBigQueryTableId>().unwrap();
         let formatted = parsed.to_string();
@@ -1525,7 +1525,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sequenced_bigquery_table_id_round_trip_complex() {
+    fn sequenced_bigquery_table_id_round_trip_complex() {
         let original = "a__b_c__d_999";
         let parsed = original.parse::<SequencedBigQueryTableId>().unwrap();
         let formatted = parsed.to_string();
@@ -1535,14 +1535,14 @@ mod tests {
     }
 
     #[test]
-    fn test_split_table_rows_empty_input() {
+    fn split_table_rows_empty_input() {
         let rows: Vec<BigQueryTableRow> = vec![];
         let result = split_table_rows(rows, 4);
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_split_table_rows_zero_concurrent_streams() {
+    fn split_table_rows_zero_concurrent_streams() {
         let rows = vec![BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()];
         let result = split_table_rows(rows, 0);
         assert_eq!(result.len(), 1);
@@ -1550,7 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_table_rows_single_concurrent_stream() {
+    fn split_table_rows_single_concurrent_stream() {
         let rows = vec![
             BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
             BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
@@ -1561,7 +1561,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_table_rows_fewer_rows_than_streams() {
+    fn split_table_rows_fewer_rows_than_streams() {
         let rows = vec![
             BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
             BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap(),
@@ -1572,7 +1572,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_table_rows_equal_distribution() {
+    fn split_table_rows_equal_distribution() {
         let rows =
             (0..4).map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()).collect();
         let result = split_table_rows(rows, 2);
@@ -1582,7 +1582,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_table_rows_uneven_distribution() {
+    fn split_table_rows_uneven_distribution() {
         let rows =
             (0..5).map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()).collect();
         let result = split_table_rows(rows, 3);
@@ -1593,14 +1593,14 @@ mod tests {
     }
 
     #[test]
-    fn test_split_table_rows_many_streams() {
+    fn split_table_rows_many_streams() {
         let rows =
             (0..10).map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()).collect();
         let result = split_table_rows(rows, 4);
         assert_eq!(result.len(), 4);
 
         // Verify all rows are accounted for
-        let total_rows: usize = result.iter().map(|batch| batch.len()).sum();
+        let total_rows: usize = result.iter().map(Vec::len).sum();
         assert_eq!(total_rows, 10);
 
         // Verify approximately equal distribution
@@ -1611,7 +1611,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_table_rows_single_row() {
+    fn split_table_rows_single_row() {
         let rows = vec![BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()];
         let result = split_table_rows(rows, 5);
         assert_eq!(result.len(), 1);
@@ -1619,14 +1619,14 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_target_batches_empty_rows() {
+    fn calculate_target_batches_empty_rows() {
         let rows: Vec<BigQueryTableRow> = vec![];
         let result = calculate_target_batches_for_table_copy(&rows).unwrap();
         assert_eq!(result, 0);
     }
 
     #[test]
-    fn test_calculate_target_batches_single_small_row() {
+    fn calculate_target_batches_single_small_row() {
         // Create a single row with one small string value
         let rows = vec![
             BigQueryTableRow::try_from(TableRow::new(vec![Cell::String("test".to_string())]))
@@ -1637,7 +1637,7 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_target_batches_many_small_rows() {
+    fn calculate_target_batches_many_small_rows() {
         // Create many rows with small values (estimated ~50 bytes each when encoded)
         let rows: Vec<BigQueryTableRow> = (0..100_000)
             .map(|i| {
@@ -1651,7 +1651,7 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_target_batches_large_rows() {
+    fn calculate_target_batches_large_rows() {
         // Create rows with large string values (each ~1MB)
         let large_string = "x".repeat(1024 * 1024); // 1MB string
         let rows: Vec<BigQueryTableRow> = (0..50)
@@ -1666,7 +1666,7 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_target_batches_very_large_single_row() {
+    fn calculate_target_batches_very_large_single_row() {
         // Create a row larger than max batch size (>10MB)
         let huge_string = "x".repeat(15 * 1024 * 1024); // 15MB string
         let rows = vec![
