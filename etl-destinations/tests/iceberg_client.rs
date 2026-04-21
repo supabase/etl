@@ -184,23 +184,13 @@ async fn create_table_if_missing() {
     ];
 
     // table doesn't exist yet
-    assert!(
-        !client
-            .table_exists(namespace, table_name.clone())
-            .await
-            .unwrap()
-    );
+    assert!(!client.table_exists(namespace, table_name.clone()).await.unwrap());
 
     // Create table for the first time
     client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     // table should exist now
-    assert!(
-        client
-            .table_exists(namespace, table_name.clone())
-            .await
-            .unwrap()
-    );
+    assert!(client.table_exists(namespace, table_name.clone()).await.unwrap());
 
     // Verify identifier fields are set correctly.
     let table = client.load_table(namespace.to_string(), table_name.clone()).await.unwrap();
@@ -214,12 +204,7 @@ async fn create_table_if_missing() {
     client.create_table_if_missing(namespace, table_name.clone(), &column_schemas).await.unwrap();
 
     // table should still exist
-    assert!(
-        client
-            .table_exists(namespace, table_name.clone())
-            .await
-            .unwrap()
-    );
+    assert!(client.table_exists(namespace, table_name.clone()).await.unwrap());
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
     // warehouse level This feature is planned for future releases. We'll start
@@ -732,27 +717,21 @@ async fn insert_nullable_array() {
 
     // numeric_array_col (index 12): NUMERIC_ARRAY maps to String in Iceberg
     if let Cell::Array(ArrayCell::Numeric(vec)) = &values[12] {
-        let converted: Vec<Option<String>> = vec
-            .iter()
-            .map(|opt| opt.as_ref().map(ToString::to_string))
-            .collect();
+        let converted: Vec<Option<String>> =
+            vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[12] = Cell::Array(ArrayCell::String(converted));
     }
 
     // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to
     // String in Iceberg
     if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
-        let converted: Vec<Option<String>> = vec
-            .iter()
-            .map(|opt| opt.as_ref().map(ToString::to_string))
-            .collect();
+        let converted: Vec<Option<String>> =
+            vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[18] = Cell::Array(ArrayCell::String(converted));
     }
     if let Cell::Array(ArrayCell::Json(vec)) = &values[19] {
-        let converted: Vec<Option<String>> = vec
-            .iter()
-            .map(|opt| opt.as_ref().map(ToString::to_string))
-            .collect();
+        let converted: Vec<Option<String>> =
+            vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[19] = Cell::Array(ArrayCell::String(converted));
     }
 
@@ -921,27 +900,21 @@ async fn insert_non_nullable_array() {
 
     // numeric_array_col (index 12): NUMERIC_ARRAY maps to String in Iceberg
     if let Cell::Array(ArrayCell::Numeric(vec)) = &values[12] {
-        let converted: Vec<Option<String>> = vec
-            .iter()
-            .map(|opt| opt.as_ref().map(ToString::to_string))
-            .collect();
+        let converted: Vec<Option<String>> =
+            vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[12] = Cell::Array(ArrayCell::String(converted));
     }
 
     // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to
     // String in Iceberg
     if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
-        let converted: Vec<Option<String>> = vec
-            .iter()
-            .map(|opt| opt.as_ref().map(ToString::to_string))
-            .collect();
+        let converted: Vec<Option<String>> =
+            vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[18] = Cell::Array(ArrayCell::String(converted));
     }
     if let Cell::Array(ArrayCell::Json(vec)) = &values[19] {
-        let converted: Vec<Option<String>> = vec
-            .iter()
-            .map(|opt| opt.as_ref().map(ToString::to_string))
-            .collect();
+        let converted: Vec<Option<String>> =
+            vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
         values[19] = Cell::Array(ArrayCell::String(converted));
     }
 

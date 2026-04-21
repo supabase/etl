@@ -603,11 +603,9 @@ impl Validator for BigQueryValidator {
         else {
             return Ok(vec![ValidationFailure::critical(
                 "BigQuery Authentication Failed",
-                "Unable to authenticate with BigQuery.\n\n\
-                     Please verify:\n\
-                     (1) The service account key is valid JSON\n\
-                     (2) The key has not expired or been revoked\n\
-                     (3) The project ID is correct",
+                "Unable to authenticate with BigQuery.\n\nPlease verify:\n(1) The service account \
+                 key is valid JSON\n(2) The key has not expired or been revoked\n(3) The project \
+                 ID is correct",
             )]);
         };
 
@@ -816,11 +814,9 @@ impl Validator for IcebergValidator {
         let Ok(client) = client else {
             return Ok(vec![ValidationFailure::critical(
                 "Iceberg Authentication Failed",
-                "Unable to authenticate with Iceberg.\n\n\
-                     Please verify:\n\
-                     (1) The catalog token is valid and has not expired\n\
-                     (2) The S3 access key and secret key are correct\n\
-                     (3) The catalog URI is properly formatted",
+                "Unable to authenticate with Iceberg.\n\nPlease verify:\n(1) The catalog token is \
+                 valid and has not expired\n(2) The S3 access key and secret key are correct\n(3) \
+                 The catalog URI is properly formatted",
             )]);
         };
 

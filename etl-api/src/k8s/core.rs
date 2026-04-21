@@ -566,16 +566,9 @@ mod tests {
 
     #[tokio::test]
     async fn failed_pod_is_considered_active_for_deletion_guards() {
-        let client = RecordingK8sClient {
-            pod_status: PodStatus::Failed,
-            ..Default::default()
-        };
-        let pipeline = PipelineDeletion {
-            id: 1,
-            source_id: 2,
-            destination_id: 3,
-            replicator_id: 4,
-        };
+        let client = RecordingK8sClient { pod_status: PodStatus::Failed, ..Default::default() };
+        let pipeline =
+            PipelineDeletion { id: 1, source_id: 2, destination_id: 3, replicator_id: 4 };
 
         let is_active = is_replicator_active(&client, "tenant-42", pipeline.replicator_id)
             .await

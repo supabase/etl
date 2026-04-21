@@ -161,14 +161,10 @@ mod tests {
 
     #[test]
     fn compute_error_hash_stability() {
-        let err1 = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
-            "Database connection failed",
-        ));
-        let err2 = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
-            "Database connection failed",
-        ));
+        let err1 =
+            EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
+        let err2 =
+            EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
 
         let hash1 = compute_error_hash(&err1);
         let hash2 = compute_error_hash(&err2);
@@ -198,10 +194,8 @@ mod tests {
 
     #[test]
     fn compute_error_hash_different_errors() {
-        let err1 = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
-            "Database connection failed",
-        ));
+        let err1 =
+            EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
         let err2 = EtlError::from((ErrorKind::SourceQueryFailed, "Query execution failed"));
 
         let hash1 = compute_error_hash(&err1);

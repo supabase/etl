@@ -262,12 +262,10 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
 
     let events_before = destination.get_events().await;
     let grouped_before = group_events_by_type_and_table_id(&events_before);
-    let delete_count_before = grouped_before
-        .get(&(EventType::Delete, parent_table_id))
-        .map_or(0, Vec::len);
-    let truncate_count_before = grouped_before
-        .get(&(EventType::Truncate, parent_table_id))
-        .map_or(0, Vec::len);
+    let delete_count_before =
+        grouped_before.get(&(EventType::Delete, parent_table_id)).map_or(0, Vec::len);
+    let truncate_count_before =
+        grouped_before.get(&(EventType::Truncate, parent_table_id)).map_or(0, Vec::len);
 
     // Detach and drop one child partition (DDL should not generate DML events).
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
@@ -301,12 +299,10 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
 
     let events_after = destination.get_events().await;
     let grouped_after = group_events_by_type_and_table_id(&events_after);
-    let delete_count_after = grouped_after
-        .get(&(EventType::Delete, parent_table_id))
-        .map_or(0, Vec::len);
-    let truncate_count_after = grouped_after
-        .get(&(EventType::Truncate, parent_table_id))
-        .map_or(0, Vec::len);
+    let delete_count_after =
+        grouped_after.get(&(EventType::Delete, parent_table_id)).map_or(0, Vec::len);
+    let truncate_count_after =
+        grouped_after.get(&(EventType::Truncate, parent_table_id)).map_or(0, Vec::len);
 
     assert_eq!(delete_count_after, delete_count_before);
     assert_eq!(truncate_count_after, truncate_count_before);
@@ -374,9 +370,8 @@ async fn parent_table_truncate_does_emit_truncate_event() {
 
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
-    let truncate_count = grouped_events
-        .get(&(EventType::Truncate, parent_table_id))
-        .map_or(0, Vec::len);
+    let truncate_count =
+        grouped_events.get(&(EventType::Truncate, parent_table_id)).map_or(0, Vec::len);
 
     assert_eq!(truncate_count, 1);
 }
@@ -452,9 +447,8 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
 
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
-    let truncate_count = grouped_events
-        .get(&(EventType::Truncate, parent_table_id))
-        .map_or(0, Vec::len);
+    let truncate_count =
+        grouped_events.get(&(EventType::Truncate, parent_table_id)).map_or(0, Vec::len);
 
     assert_eq!(truncate_count, 0);
 }

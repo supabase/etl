@@ -1658,8 +1658,7 @@ mod tests {
 
     #[test]
     fn build_boolean_list_array_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Boolean, true);
         let field_ref = Arc::new(field);
@@ -1708,8 +1707,7 @@ mod tests {
 
     #[test]
     fn build_boolean_list_array_fallback() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Boolean, true);
         let field_ref = Arc::new(field);
@@ -1729,8 +1727,7 @@ mod tests {
 
     #[test]
     fn build_int32_list_array_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Int32, true);
         let field_ref = Arc::new(field);
@@ -1775,8 +1772,7 @@ mod tests {
 
     #[test]
     fn build_int64_list_array_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Int64, true);
         let field_ref = Arc::new(field);
@@ -1825,8 +1821,7 @@ mod tests {
 
     #[test]
     fn build_float32_list_array_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Float32, true);
         let field_ref = Arc::new(field);
@@ -1871,8 +1866,7 @@ mod tests {
 
     #[test]
     fn build_float64_list_array_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::Float64, true);
         let field_ref = Arc::new(field);
@@ -1921,8 +1915,7 @@ mod tests {
 
     #[test]
     fn build_string_list_array_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use etl::types::PgNumeric;
 
         let field = Field::new("items", DataType::Utf8, true);
@@ -1992,8 +1985,7 @@ mod tests {
 
     #[test]
     fn build_binary_list_array_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
 
         let field = Field::new("items", DataType::LargeBinary, true);
         let field_ref = Arc::new(field);
@@ -2047,8 +2039,7 @@ mod tests {
 
     #[test]
     fn build_date32_list_array_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use chrono::NaiveDate;
 
         let field = Field::new("items", DataType::Date32, true);
@@ -2110,8 +2101,7 @@ mod tests {
 
     #[test]
     fn build_time64_list_array_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use chrono::NaiveTime;
 
         let field = Field::new("items", DataType::Time64(TimeUnit::Microsecond), true);
@@ -2175,8 +2165,7 @@ mod tests {
 
     #[test]
     fn build_timestamp_list_array_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use chrono::DateTime;
 
         let field = Field::new("items", DataType::Timestamp(TimeUnit::Microsecond, None), true);
@@ -2231,8 +2220,7 @@ mod tests {
 
     #[test]
     fn build_timestamptz_list_array_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use chrono::DateTime;
 
         let field = Field::new(
@@ -2294,8 +2282,7 @@ mod tests {
 
     #[test]
     fn build_uuid_list_array_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use uuid::Uuid;
 
         let field = Field::new("items", DataType::FixedSizeBinary(UUID_BYTE_WIDTH), true);
@@ -2350,8 +2337,7 @@ mod tests {
 
     #[test]
     fn build_list_array_for_strings_fn() {
-        use arrow::array::ListArray;
-        use arrow::datatypes::Field;
+        use arrow::{array::ListArray, datatypes::Field};
         use chrono::{DateTime, NaiveDate, NaiveTime};
         use etl::types::PgNumeric;
         use uuid::Uuid;

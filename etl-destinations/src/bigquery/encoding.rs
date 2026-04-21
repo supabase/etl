@@ -437,10 +437,7 @@ mod tests {
 
     #[test]
     fn bigquery_table_row_try_from_invalid_date() {
-        let invalid_date = NaiveDate::from_ymd_opt(1, 1, 1)
-            .unwrap()
-            .pred_opt()
-            .unwrap(); // Date before year 1
+        let invalid_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap(); // Date before year 1
 
         let table_row = TableRow::new(vec![Cell::Date(invalid_date)]);
 

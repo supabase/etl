@@ -272,8 +272,9 @@ fn validate_timestamptz_for_bigquery(timestamptz: &DateTime<Utc>) -> EtlResult<(
 /// Validates that a [`CellNonOptional`] value is within BigQuery's supported
 /// ranges.
 ///
-/// Returns an error if any value is outside BigQuery's supported range for its type.
-/// This function checks all temporal types and numeric types for BigQuery compatibility.
+/// Returns an error if any value is outside BigQuery's supported range for its
+/// type. This function checks all temporal types and numeric types for BigQuery
+/// compatibility.
 pub fn validate_cell_for_bigquery(cell: &CellNonOptional) -> EtlResult<()> {
     #[allow(clippy::match_same_arms)]
     match cell {
@@ -301,7 +302,8 @@ pub fn validate_cell_for_bigquery(cell: &CellNonOptional) -> EtlResult<()> {
 /// Validates that an [`ArrayCellNonOptional`] contains values within BigQuery's
 /// supported ranges.
 ///
-/// Returns an error if any array element is outside BigQuery's supported range for its type.
+/// Returns an error if any array element is outside BigQuery's supported range
+/// for its type.
 pub fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> EtlResult<()> {
     #[allow(clippy::match_same_arms)]
     match array_cell {
@@ -458,10 +460,7 @@ mod tests {
 
     #[test]
     fn validate_date_before_min_fails() {
-        let date = NaiveDate::from_ymd_opt(1, 1, 1)
-            .unwrap()
-            .pred_opt()
-            .unwrap();
+        let date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap();
         let result = validate_date_for_bigquery(&date);
         assert!(result.is_err());
         let err = result.unwrap_err();

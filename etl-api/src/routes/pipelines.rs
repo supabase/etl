@@ -328,12 +328,7 @@ impl From<TableReplicationPhase> for SimpleTableReplicationState {
             | TableReplicationPhase::SyncWait { .. }
             | TableReplicationPhase::Catchup { .. }
             | TableReplicationPhase::Ready => SimpleTableReplicationState::FollowingWal,
-            TableReplicationPhase::Errored {
-                reason,
-                solution,
-                retry_policy,
-                ..
-            } => {
+            TableReplicationPhase::Errored { reason, solution, retry_policy, .. } => {
                 let simple_retry_policy = match retry_policy {
                     RetryPolicy::NoRetry => SimpleRetryPolicy::NoRetry,
                     RetryPolicy::ManualRetry => SimpleRetryPolicy::ManualRetry,

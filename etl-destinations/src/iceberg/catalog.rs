@@ -279,10 +279,8 @@ impl SupabaseClient {
 
         let table_ident = TableIdent::new(namespace.clone(), creation.name.clone());
 
-        let table_builder = Table::builder()
-            .identifier(table_ident)
-            .file_io(file_io)
-            .metadata(response.metadata);
+        let table_builder =
+            Table::builder().identifier(table_ident).file_io(file_io).metadata(response.metadata);
 
         if let Some(metadata_location) = response.metadata_location {
             table_builder.metadata_location(metadata_location).build()

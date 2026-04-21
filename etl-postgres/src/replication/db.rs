@@ -118,14 +118,8 @@ mod tests {
 
     #[test]
     fn extract_server_version_with_suffixes() {
-        assert_eq!(
-            extract_server_version("15.5 (Homebrew)"),
-            NonZeroI32::new(150500)
-        );
-        assert_eq!(
-            extract_server_version("14.2 on x86_64-pc-linux-gnu"),
-            NonZeroI32::new(140200)
-        );
+        assert_eq!(extract_server_version("15.5 (Homebrew)"), NonZeroI32::new(150500));
+        assert_eq!(extract_server_version("14.2 on x86_64-pc-linux-gnu"), NonZeroI32::new(140200));
         assert_eq!(
             extract_server_version("13.7 (Ubuntu 13.7-1.pgdg20.04+1)"),
             NonZeroI32::new(130700)

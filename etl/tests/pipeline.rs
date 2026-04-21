@@ -281,9 +281,8 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
 
     // Validate that we have users data.
     let table_rows = destination.get_table_rows().await;
-    let users_table_copied_rows = table_rows
-        .get(&database_schema.users_schema().id)
-        .map_or(0, Vec::len);
+    let users_table_copied_rows =
+        table_rows.get(&database_schema.users_schema().id).map_or(0, Vec::len);
     assert_eq!(users_table_copied_rows, 5);
 
     // Wait for the slot to become inactive.
@@ -323,9 +322,8 @@ async fn exclusive_pipeline_recovers_when_slot_invalidated_with_recreate_behavio
 
     // Validate that we have users data.
     let table_rows = destination.get_table_rows().await;
-    let users_table_copied_rows = table_rows
-        .get(&database_schema.users_schema().id)
-        .map_or(0, Vec::len);
+    let users_table_copied_rows =
+        table_rows.get(&database_schema.users_schema().id).map_or(0, Vec::len);
     assert_eq!(users_table_copied_rows, 5);
 
     // Verify the slot was recreated and is active.
@@ -1880,17 +1878,14 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
 
-    let users_copied_rows = table_rows
-        .get(&database_schema.users_schema().id)
-        .map_or(0, Vec::len);
+    let users_copied_rows = table_rows.get(&database_schema.users_schema().id).map_or(0, Vec::len);
     let users_insert_events = grouped_events
         .get(&(EventType::Insert, database_schema.users_schema().id))
         .map_or(0, Vec::len);
     let total_users = users_copied_rows + users_insert_events;
 
-    let orders_copied_rows = table_rows
-        .get(&database_schema.orders_schema().id)
-        .map_or(0, Vec::len);
+    let orders_copied_rows =
+        table_rows.get(&database_schema.orders_schema().id).map_or(0, Vec::len);
     let orders_insert_events = grouped_events
         .get(&(EventType::Insert, database_schema.orders_schema().id))
         .map_or(0, Vec::len);

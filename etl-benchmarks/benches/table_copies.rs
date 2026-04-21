@@ -319,10 +319,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         name: args.database,
         username: args.username,
         password: args.password.map(Into::into),
-        tls: TlsConfig {
-            trusted_root_certs: args.tls_certs,
-            enabled: args.tls_enabled,
-        },
+        tls: TlsConfig { trusted_root_certs: args.tls_certs, enabled: args.tls_enabled },
         keepalive: TcpKeepaliveConfig::default(),
     };
 

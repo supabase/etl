@@ -436,18 +436,9 @@ mod tests {
 
     #[test]
     fn duckdb_blocking_operation_kind_timeouts() {
-        assert_eq!(
-            DuckDbBlockingOperationKind::Foreground.timeout(),
-            FOREGROUND_QUERY_TIMEOUT
-        );
-        assert_eq!(
-            DuckDbBlockingOperationKind::Maintenance.timeout(),
-            MAINTENANCE_QUERY_TIMEOUT
-        );
-        assert_eq!(
-            DuckDbBlockingOperationKind::Metrics.timeout(),
-            METRICS_QUERY_TIMEOUT
-        );
+        assert_eq!(DuckDbBlockingOperationKind::Foreground.timeout(), FOREGROUND_QUERY_TIMEOUT);
+        assert_eq!(DuckDbBlockingOperationKind::Maintenance.timeout(), MAINTENANCE_QUERY_TIMEOUT);
+        assert_eq!(DuckDbBlockingOperationKind::Metrics.timeout(), METRICS_QUERY_TIMEOUT);
     }
 
     #[tokio::test]

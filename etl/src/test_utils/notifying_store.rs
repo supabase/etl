@@ -287,11 +287,8 @@ impl StateStore for NotifyingStore {
         let mut inner = self.inner.write().await;
 
         // Get the previous state from history
-        let previous_state = inner
-            .table_state_history
-            .get_mut(&table_id)
-            .and_then(Vec::pop)
-            .ok_or_else(|| {
+        let previous_state =
+            inner.table_state_history.get_mut(&table_id).and_then(Vec::pop).ok_or_else(|| {
                 etl_error!(
                     ErrorKind::StateRollbackError,
                     "No previous state available to roll back to"

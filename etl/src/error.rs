@@ -458,10 +458,9 @@ impl From<serde_json::Error> for EtlError {
             serde_json::error::Category::Io => (ErrorKind::IoError, "JSON I/O operation failed"),
             serde_json::error::Category::Syntax
             | serde_json::error::Category::Data
-            | serde_json::error::Category::Eof => (
-                ErrorKind::DeserializationError,
-                "JSON deserialization failed",
-            ),
+            | serde_json::error::Category::Eof => {
+                (ErrorKind::DeserializationError, "JSON deserialization failed")
+            }
         };
 
         let detail = err.to_string();
@@ -997,10 +996,7 @@ mod tests {
 
     #[test]
     fn simple_error_creation() {
-        let err = EtlError::from((
-            ErrorKind::SourceConnectionFailed,
-            "Database connection failed",
-        ));
+        let err = EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
         assert_eq!(err.kind(), ErrorKind::SourceConnectionFailed);
         assert_eq!(err.detail(), None);
         assert_eq!(err.kinds(), vec![ErrorKind::SourceConnectionFailed]);
@@ -1211,8 +1207,10 @@ mod tests {
 
     #[test]
     fn hash_stability() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use std::{
+            collections::hash_map::DefaultHasher,
+            hash::{Hash, Hasher},
+        };
 
         // Same error kind and description should produce same hash.
         let err1 =
@@ -1233,8 +1231,10 @@ mod tests {
 
     #[test]
     fn hash_ignores_detail() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use std::{
+            collections::hash_map::DefaultHasher,
+            hash::{Hash, Hasher},
+        };
 
         // Same kind and description with different details should produce same hash.
         let err1 = EtlError::from((
@@ -1261,8 +1261,10 @@ mod tests {
 
     #[test]
     fn hash_distinguishes_different_errors() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use std::{
+            collections::hash_map::DefaultHasher,
+            hash::{Hash, Hasher},
+        };
 
         // Different error kinds should produce different hashes.
         let err1 = EtlError::from((ErrorKind::SourceConnectionFailed, "Connection failed"));
@@ -1281,8 +1283,10 @@ mod tests {
 
     #[test]
     fn hash_aggregated_errors() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use std::{
+            collections::hash_map::DefaultHasher,
+            hash::{Hash, Hasher},
+        };
 
         // Aggregated errors should hash all contained errors.
         let errors1 = vec![

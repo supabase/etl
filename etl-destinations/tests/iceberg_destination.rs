@@ -565,7 +565,8 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     event_notify.notified().await;
     destination.clear_events().await;
 
-    // After truncate, pre-truncate CDC rows should be gone (tables were dropped). Only post-truncate rows remain.
+    // After truncate, pre-truncate CDC rows should be gone (tables were dropped).
+    // Only post-truncate rows remain.
     let mut actual_users = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
     for row in &mut actual_users {
         let _ = row.values_mut().pop(); // drop sequence_key

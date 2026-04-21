@@ -160,10 +160,7 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
         ArrayCell::F32(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(
-                    || "NULL".to_string(),
-                    |value| float_literal(value as f64, false),
-                )
+                o.map_or_else(|| "NULL".to_string(), |value| float_literal(value as f64, false))
             })
             .collect(),
         ArrayCell::F64(v) => v
@@ -173,10 +170,7 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
         ArrayCell::Numeric(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(
-                    || "NULL".to_string(),
-                    |value| quote_literal(&value.to_string()),
-                )
+                o.map_or_else(|| "NULL".to_string(), |value| quote_literal(&value.to_string()))
             })
             .collect(),
         ArrayCell::Date(v) => v
@@ -318,42 +312,21 @@ fn cell_to_value(cell: Cell) -> Value {
 /// Converts an [`ArrayCell`] (with nullable elements) to a `Value::List`.
 fn array_cell_to_value(arr: ArrayCell) -> Value {
     let values = match arr {
-        ArrayCell::Bool(v) => v
-            .into_iter()
-            .map(|o| o.map_or(Value::Null, Value::Boolean))
-            .collect(),
-        ArrayCell::String(v) => v
-            .into_iter()
-            .map(|o| o.map_or(Value::Null, Value::Text))
-            .collect(),
-        ArrayCell::I16(v) => v
-            .into_iter()
-            .map(|o| o.map_or(Value::Null, Value::SmallInt))
-            .collect(),
-        ArrayCell::I32(v) => v
-            .into_iter()
-            .map(|o| o.map_or(Value::Null, Value::Int))
-            .collect(),
-        ArrayCell::U32(v) => v
-            .into_iter()
-            .map(|o| o.map_or(Value::Null, Value::UInt))
-            .collect(),
-        ArrayCell::I64(v) => v
-            .into_iter()
-            .map(|o| o.map_or(Value::Null, Value::BigInt))
-            .collect(),
-        ArrayCell::F32(v) => v
-            .into_iter()
-            .map(|o| o.map_or(Value::Null, Value::Float))
-            .collect(),
-        ArrayCell::F64(v) => v
-            .into_iter()
-            .map(|o| o.map_or(Value::Null, Value::Double))
-            .collect(),
-        ArrayCell::Numeric(v) => v
-            .into_iter()
-            .map(|o| o.map_or(Value::Null, |n| Value::Text(n.to_string())))
-            .collect(),
+        ArrayCell::Bool(v) => {
+            v.into_iter().map(|o| o.map_or(Value::Null, Value::Boolean)).collect()
+        }
+        ArrayCell::String(v) => v.into_iter().map(|o| o.map_or(Value::Null, Value::Text)).collect(),
+        ArrayCell::I16(v) => {
+            v.into_iter().map(|o| o.map_or(Value::Null, Value::SmallInt)).collect()
+        }
+        ArrayCell::I32(v) => v.into_iter().map(|o| o.map_or(Value::Null, Value::Int)).collect(),
+        ArrayCell::U32(v) => v.into_iter().map(|o| o.map_or(Value::Null, Value::UInt)).collect(),
+        ArrayCell::I64(v) => v.into_iter().map(|o| o.map_or(Value::Null, Value::BigInt)).collect(),
+        ArrayCell::F32(v) => v.into_iter().map(|o| o.map_or(Value::Null, Value::Float)).collect(),
+        ArrayCell::F64(v) => v.into_iter().map(|o| o.map_or(Value::Null, Value::Double)).collect(),
+        ArrayCell::Numeric(v) => {
+            v.into_iter().map(|o| o.map_or(Value::Null, |n| Value::Text(n.to_string()))).collect()
+        }
         ArrayCell::Date(v) => {
             let epoch_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
             v.into_iter()
@@ -369,10 +342,8 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
             v.into_iter()
                 .map(|o| {
                     o.map_or(Value::Null, |t| {
-                        let micros = t
-                            .signed_duration_since(epoch_time)
-                            .num_microseconds()
-                            .unwrap_or(0);
+                        let micros =
+                            t.signed_duration_since(epoch_time).num_microseconds().unwrap_or(0);
                         Value::Time64(TimeUnit::Microsecond, micros)
                     })
                 })
@@ -394,18 +365,13 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
                 })
             })
             .collect(),
-        ArrayCell::Uuid(v) => v
-            .into_iter()
-            .map(|o| o.map_or(Value::Null, |u| Value::Text(u.to_string())))
-            .collect(),
-        ArrayCell::Json(v) => v
-            .into_iter()
-            .map(|o| o.map_or(Value::Null, |j| Value::Text(j.to_string())))
-            .collect(),
-        ArrayCell::Bytes(v) => v
-            .into_iter()
-            .map(|o| o.map_or(Value::Null, Value::Blob))
-            .collect(),
+        ArrayCell::Uuid(v) => {
+            v.into_iter().map(|o| o.map_or(Value::Null, |u| Value::Text(u.to_string()))).collect()
+        }
+        ArrayCell::Json(v) => {
+            v.into_iter().map(|o| o.map_or(Value::Null, |j| Value::Text(j.to_string()))).collect()
+        }
+        ArrayCell::Bytes(v) => v.into_iter().map(|o| o.map_or(Value::Null, Value::Blob)).collect(),
     };
     Value::List(values)
 }

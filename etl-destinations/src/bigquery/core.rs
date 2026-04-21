@@ -528,9 +528,7 @@ where
 
         // Add the CDC operation type to all rows (no lock needed).
         for table_row in &mut table_rows {
-            table_row
-                .values_mut()
-                .push(BigQueryOperationType::Upsert.into_cell());
+            table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
         }
         let table_rows = table_rows
             .into_iter()
@@ -1490,9 +1488,8 @@ mod tests {
 
     #[test]
     fn split_table_rows_equal_distribution() {
-        let rows = (0..4)
-            .map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap())
-            .collect();
+        let rows =
+            (0..4).map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()).collect();
         let result = split_table_rows(rows, 2);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].len(), 2);
@@ -1501,9 +1498,8 @@ mod tests {
 
     #[test]
     fn split_table_rows_uneven_distribution() {
-        let rows = (0..5)
-            .map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap())
-            .collect();
+        let rows =
+            (0..5).map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()).collect();
         let result = split_table_rows(rows, 3);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].len(), 2); // Gets extra row
@@ -1513,9 +1509,8 @@ mod tests {
 
     #[test]
     fn split_table_rows_many_streams() {
-        let rows = (0..10)
-            .map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap())
-            .collect();
+        let rows =
+            (0..10).map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap()).collect();
         let result = split_table_rows(rows, 4);
         assert_eq!(result.len(), 4);
 

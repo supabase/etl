@@ -634,14 +634,8 @@ mod tests {
 
     #[test]
     fn quote_libpq_conninfo_value_fn() {
-        assert_eq!(
-            quote_libpq_conninfo_value("pa'ss\\word"),
-            "'pa\\'ss\\\\word'"
-        );
-        assert_eq!(
-            quote_libpq_conninfo_value("value with spaces"),
-            "'value with spaces'"
-        );
+        assert_eq!(quote_libpq_conninfo_value("pa'ss\\word"), "'pa\\'ss\\\\word'");
+        assert_eq!(quote_libpq_conninfo_value("value with spaces"), "'value with spaces'");
     }
 
     #[test]
