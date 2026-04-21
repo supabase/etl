@@ -180,7 +180,7 @@ async fn collect_ddl_messages(
 
         let content = message.content().expect("message content should decode");
         let json = serde_json::from_str(content).expect("ddl message should be valid json");
-        println!("{}", json);
+        println!("{json}");
         messages.push(json);
     }
 
@@ -260,7 +260,7 @@ async fn collect_stream_markers(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_replication_client_creates_slot() {
+async fn replication_client_creates_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -279,7 +279,7 @@ async fn test_replication_client_creates_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_create_and_delete_slot() {
+async fn create_and_delete_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -303,7 +303,7 @@ async fn test_create_and_delete_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_delete_nonexistent_slot() {
+async fn delete_nonexistent_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -317,7 +317,7 @@ async fn test_delete_nonexistent_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_delete_slot_if_exists_deletes_existing_slot() {
+async fn delete_slot_if_exists_deletes_existing_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -333,7 +333,7 @@ async fn test_delete_slot_if_exists_deletes_existing_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_delete_slot_if_exists_on_nonexistent_slot() {
+async fn delete_slot_if_exists_on_nonexistent_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -344,7 +344,7 @@ async fn test_delete_slot_if_exists_on_nonexistent_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_replication_client_doesnt_recreate_slot() {
+async fn replication_client_doesnt_recreate_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -359,7 +359,7 @@ async fn test_replication_client_doesnt_recreate_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_replication_client_reads_wal_sender_timeout() {
+async fn replication_client_reads_wal_sender_timeout() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -371,7 +371,7 @@ async fn test_replication_client_reads_wal_sender_timeout() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_schema_copy_is_consistent() {
+async fn table_schema_copy_is_consistent() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -397,7 +397,7 @@ async fn test_table_schema_copy_is_consistent() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_schema_copy_across_multiple_connections() {
+async fn table_schema_copy_across_multiple_connections() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -457,7 +457,7 @@ async fn test_table_schema_copy_across_multiple_connections() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_schema_preserves_primary_key_constraint_order() {
+async fn table_schema_preserves_primary_key_constraint_order() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -510,7 +510,7 @@ async fn test_table_schema_preserves_primary_key_constraint_order() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_ddl_message_primary_key_order_matches_loaded_table_schema() {
+async fn ddl_message_primary_key_order_matches_loaded_table_schema() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -584,7 +584,7 @@ async fn test_ddl_message_primary_key_order_matches_loaded_table_schema() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_copy_stream_is_consistent() {
+async fn table_copy_stream_is_consistent() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -628,7 +628,7 @@ async fn test_table_copy_stream_is_consistent() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_copy_stream_respects_row_filter() {
+async fn table_copy_stream_respects_row_filter() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -693,7 +693,7 @@ async fn test_table_copy_stream_respects_row_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_replicated_column_names_respects_column_filter() {
+async fn get_replicated_column_names_respects_column_filter() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -790,7 +790,7 @@ async fn test_get_replicated_column_names_respects_column_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_replicated_column_names_for_all_tables_publication() {
+async fn get_replicated_column_names_for_all_tables_publication() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -851,7 +851,7 @@ async fn test_get_replicated_column_names_for_all_tables_publication() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_replicated_column_names_for_tables_in_schema_publication() {
+async fn get_replicated_column_names_for_tables_in_schema_publication() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -913,7 +913,7 @@ async fn test_get_replicated_column_names_for_tables_in_schema_publication() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_replicated_column_names_errors_when_table_not_in_publication() {
+async fn get_replicated_column_names_errors_when_table_not_in_publication() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -966,7 +966,7 @@ async fn test_get_replicated_column_names_errors_when_table_not_in_publication()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_publication_table_ids_errors_when_empty() {
+async fn get_publication_table_ids_errors_when_empty() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -987,7 +987,7 @@ async fn test_get_publication_table_ids_errors_when_empty() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_copy_stream_no_row_filter() {
+async fn table_copy_stream_no_row_filter() {
     init_test_tracing();
     let database = spawn_source_database().await;
     // We create a table and insert one row.
@@ -1041,7 +1041,7 @@ async fn test_table_copy_stream_no_row_filter() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_publication_creation_and_check() {
+async fn publication_creation_and_check() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1083,7 +1083,7 @@ async fn test_publication_creation_and_check() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_publication_table_ids_collapse_partitioned_root() {
+async fn publication_table_ids_collapse_partitioned_root() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1109,7 +1109,7 @@ async fn test_publication_table_ids_collapse_partitioned_root() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_start_logical_replication() {
+async fn start_logical_replication() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1156,7 +1156,7 @@ async fn test_start_logical_replication() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_schema_change_messages_emit_enriched_payload_for_multiple_alter_table_variants() {
+async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_variants() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1328,7 +1328,7 @@ async fn test_schema_change_messages_emit_enriched_payload_for_multiple_alter_ta
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_schema_change_messages_skip_unpublished_and_temporary_tables() {
+async fn schema_change_messages_skip_unpublished_and_temporary_tables() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1377,7 +1377,7 @@ async fn test_schema_change_messages_skip_unpublished_and_temporary_tables() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_schema_change_messages_allow_alter_table_from_table_owner_role() {
+async fn schema_change_messages_allow_alter_table_from_table_owner_role() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1432,7 +1432,7 @@ async fn test_schema_change_messages_allow_alter_table_from_table_owner_role() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_single_alter_table_statement_with_multiple_subcommands_emits_one_ddl_message() {
+async fn single_alter_table_statement_with_multiple_subcommands_emits_one_ddl_message() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1488,7 +1488,7 @@ async fn test_single_alter_table_statement_with_multiple_subcommands_emits_one_d
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_schema_change_messages_respect_skip_ddl_log_setting() {
+async fn schema_change_messages_respect_skip_ddl_log_setting() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1523,7 +1523,7 @@ async fn test_schema_change_messages_respect_skip_ddl_log_setting() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_same_transaction_ddl_messages_precede_relation_and_insert_in_pgoutput() {
+async fn same_transaction_ddl_messages_precede_relation_and_insert_in_pgoutput() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
 
@@ -1610,7 +1610,7 @@ async fn test_same_transaction_ddl_messages_precede_relation_and_insert_in_pgout
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_slot_state_returns_valid_for_healthy_slot() {
+async fn get_slot_state_returns_valid_for_healthy_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1626,7 +1626,7 @@ async fn test_get_slot_state_returns_valid_for_healthy_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_slot_state_returns_error_for_nonexistent_slot() {
+async fn get_slot_state_returns_error_for_nonexistent_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1669,7 +1669,7 @@ async fn exclusive_get_slot_state_returns_invalidated_for_lost_slot() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_plan_ctid_partitions_returns_correct_partitions() {
+async fn plan_ctid_partitions_returns_correct_partitions() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1732,7 +1732,7 @@ async fn test_plan_ctid_partitions_returns_correct_partitions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_plan_ctid_partitions_returns_empty_for_empty_table() {
+async fn plan_ctid_partitions_returns_empty_for_empty_table() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -1754,7 +1754,7 @@ async fn test_plan_ctid_partitions_returns_empty_for_empty_table() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_table_copy_stream_with_ctid_partition() {
+async fn table_copy_stream_with_ctid_partition() {
     init_test_tracing();
     let database = spawn_source_database().await;
 

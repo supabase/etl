@@ -8,7 +8,7 @@ use etl::{
 use iceberg::{
     Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent,
     io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_REGION, S3_SECRET_ACCESS_KEY},
-    spec::TableProperties,
+    spec::{DataFile, TableProperties},
     table::Table,
     transaction::{ApplyTransactionAction, Transaction},
     writer::{
@@ -361,8 +361,7 @@ impl IcebergClient {
         // Close writer and get data files
         let data_files = data_file_writer.close().await?;
 
-        let bytes_sent: u64 =
-            data_files.iter().map(|data_file| data_file.file_size_in_bytes()).sum();
+        let bytes_sent: u64 = data_files.iter().map(DataFile::file_size_in_bytes).sum();
 
         // Create transaction and fast append action
         let transaction = Transaction::new(table);

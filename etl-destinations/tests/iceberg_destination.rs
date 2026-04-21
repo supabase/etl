@@ -60,7 +60,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let namespace = match destination_namespace {
         DestinationNamespace::Single(ref ns) => {
             client.create_namespace_if_missing(ns).await.unwrap();
-            ns.to_string()
+            ns.clone()
         }
         DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_string(),
     };
@@ -113,7 +113,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     )
     .unwrap();
 
-    let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
+    let mut actual_users = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
 
     let expected_users = vec![
         TableRow::new(vec![
@@ -138,8 +138,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
         .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
     assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
-    let mut actual_orders =
-        read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
+    let mut actual_orders = read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
 
     let expected_orders = vec![
         TableRow::new(vec![
@@ -200,7 +199,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     let namespace = match destination_namespace {
         DestinationNamespace::Single(ref ns) => {
             client.create_namespace_if_missing(ns).await.unwrap();
-            ns.to_string()
+            ns.clone()
         }
         DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_string(),
     };
@@ -316,7 +315,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     )
     .unwrap();
 
-    let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
+    let mut actual_users = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
 
     // Sort deterministically by the sequence key for stable assertions
     actual_users.sort_by(|a, b| {
@@ -373,8 +372,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
 
     assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
-    let mut actual_orders =
-        read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
+    let mut actual_orders = read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
 
     // Sort deterministically by the primary key (id) and sequence key for stable
     // assertions
@@ -465,7 +463,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     let namespace = match destination_namespace {
         DestinationNamespace::Single(ref ns) => {
             client.create_namespace_if_missing(ns).await.unwrap();
-            ns.to_string()
+            ns.clone()
         }
         DestinationNamespace::OnePerSchema => TestDatabaseSchema::schema().to_string(),
     };
@@ -544,8 +542,8 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     )
     .unwrap();
 
-    let actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
-    let actual_orders = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
+    let actual_users = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
+    let actual_orders = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
 
     assert!(actual_users.is_empty());
     assert!(actual_orders.is_empty());
@@ -569,7 +567,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
 
     // After truncate, pre-truncate CDC rows should be gone (tables were dropped).
     // Only post-truncate rows remain.
-    let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
+    let mut actual_users = read_all_rows(&client, namespace.clone(), users_table.clone()).await;
     for row in &mut actual_users {
         let _ = row.values_mut().pop(); // drop sequence_key
     }
@@ -592,8 +590,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     ];
     assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
 
-    let mut actual_orders =
-        read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
+    let mut actual_orders = read_all_rows(&client, namespace.clone(), orders_table.clone()).await;
     for row in &mut actual_orders {
         let _ = row.values_mut().pop(); // drop sequence_key
     }

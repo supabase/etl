@@ -33,7 +33,6 @@ pub fn etl_fail_point(name: &str) -> EtlResult<()> {
         let mut error_kind = ErrorKind::WithNoRetry;
         if let Some(parameter) = parameter {
             error_kind = match parameter.as_str() {
-                "no_retry" => ErrorKind::WithNoRetry,
                 "manual_retry" => ErrorKind::WithManualRetry,
                 "timed_retry" => ErrorKind::WithTimedRetry,
                 _ => ErrorKind::WithNoRetry,

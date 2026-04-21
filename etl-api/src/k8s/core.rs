@@ -100,7 +100,7 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
 
     let supabase_config = SupabaseConfigWithoutSecrets {
         project_ref: tenant_id.to_owned(),
-        api_url: supabase_api_url.map(|url| url.to_owned()),
+        api_url: supabase_api_url.map(ToOwned::to_owned),
     };
 
     let log_level = pipeline.config.log_level.clone().unwrap_or_default();
@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_failed_pod_is_considered_active_for_deletion_guards() {
+    async fn failed_pod_is_considered_active_for_deletion_guards() {
         let client = RecordingK8sClient { pod_status: PodStatus::Failed, ..Default::default() };
         let pipeline =
             PipelineDeletion { id: 1, source_id: 2, destination_id: 3, replicator_id: 4 };
@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ducklake_creates_postgres_and_s3_secrets() {
+    async fn ducklake_creates_postgres_and_s3_secrets() {
         let source_config = StoredSourceConfig {
             host: "localhost".to_string(),
             port: 5432,
@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ducklake_without_s3_still_creates_postgres_secret() {
+    async fn ducklake_without_s3_still_creates_postgres_secret() {
         let source_config = StoredSourceConfig {
             host: "localhost".to_string(),
             port: 5432,

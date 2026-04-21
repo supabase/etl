@@ -166,7 +166,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_stored_pipeline_config_serialization() {
+    fn stored_pipeline_config_serialization() {
         let config = StoredPipelineConfig {
             publication_name: "test_publication".to_string(),
             batch: BatchConfig { max_fill_ms: 5000, memory_budget_ratio: 0.2 },
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn test_full_api_pipeline_config_conversion() {
+    fn full_api_pipeline_config_conversion() {
         let full_config = FullApiPipelineConfig {
             publication_name: "test_publication".to_string(),
             batch: None,
@@ -223,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn test_full_api_pipeline_config_defaults() {
+    fn full_api_pipeline_config_defaults() {
         let full_config = FullApiPipelineConfig {
             publication_name: "test_publication".to_string(),
             batch: None,

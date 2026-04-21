@@ -179,7 +179,7 @@ pub async fn store_table_schema(
         .await?;
 
     // Insert all columns
-    for column_schema in table_schema.column_schemas.iter() {
+    for column_schema in &table_schema.column_schemas {
         sqlx::query(
             r#"
             insert into etl.table_columns
@@ -437,7 +437,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_type_string_conversion() {
+    fn type_string_conversion() {
         let test_types = get_test_type_mappings();
 
         // Test type to string conversion

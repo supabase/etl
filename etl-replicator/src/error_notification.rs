@@ -160,7 +160,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_compute_error_hash_stability() {
+    fn compute_error_hash_stability() {
         let err1 =
             EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
         let err2 =
@@ -174,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_error_hash_with_detail() {
+    fn compute_error_hash_with_detail() {
         let err1 = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "Query execution failed",
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_error_hash_different_errors() {
+    fn compute_error_hash_different_errors() {
         let err1 =
             EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
         let err2 = EtlError::from((ErrorKind::SourceQueryFailed, "Query execution failed"));

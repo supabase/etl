@@ -1021,7 +1021,7 @@ where
 
     /// Waits until the keep alive deadline expires.
     async fn wait_for_keep_alive_deadline(deadline: Instant) {
-        tokio::time::sleep_until(deadline.into()).await
+        tokio::time::sleep_until(deadline.into()).await;
     }
 
     /// Computes the keep alive deadline from PostgreSQL's `wal_sender_timeout`.
@@ -1753,8 +1753,7 @@ where
         let shared_table_state = self.shared_table_cache.get(&table_id).await;
         let used_bootstrap_snapshot = shared_table_state.is_none();
         let table_snapshot_id = shared_table_state
-            .map(|state| state.snapshot_id)
-            .unwrap_or_else(|| self.state.bootstrap_snapshot_id());
+            .map_or_else(|| self.state.bootstrap_snapshot_id(), |state| state.snapshot_id);
         let table_schema = get_table_schema(
             &self.schema_store,
             &table_id,
@@ -1915,7 +1914,7 @@ where
 
         // Collect the replicated schemas for tables this worker currently owns.
         let mut truncated_tables = Vec::with_capacity(message.rel_ids().len());
-        for &rel_id in message.rel_ids().iter() {
+        for &rel_id in message.rel_ids() {
             let table_id = TableId::new(rel_id);
 
             // Exactly one worker owns protocol interpretation for a table at a time, so

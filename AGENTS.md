@@ -103,6 +103,7 @@
 - Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
+- Do not prefix `#[test]` functions with `test_`. Name them after what they verify — e.g. `fn parses_empty_input()` not `fn test_parses_empty_input()`.
 
 ## Review Checklist
 - Code compiles for the changed target or workspace as appropriate.
