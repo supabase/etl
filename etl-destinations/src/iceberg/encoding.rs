@@ -902,7 +902,7 @@ fn append_array_cell_as_strings(
             for item in vec {
                 match item {
                     Some(d) => {
-                        list_builder.values().append_value(d.format(DATE_FORMAT).to_string())
+                        list_builder.values().append_value(d.format(DATE_FORMAT).to_string());
                     }
                     None => list_builder.values().append_null(),
                 }
@@ -912,7 +912,7 @@ fn append_array_cell_as_strings(
             for item in vec {
                 match item {
                     Some(t) => {
-                        list_builder.values().append_value(t.format(TIME_FORMAT).to_string())
+                        list_builder.values().append_value(t.format(TIME_FORMAT).to_string());
                     }
                     None => list_builder.values().append_null(),
                 }
@@ -922,7 +922,7 @@ fn append_array_cell_as_strings(
             for item in vec {
                 match item {
                     Some(ts) => {
-                        list_builder.values().append_value(ts.format(TIMESTAMP_FORMAT).to_string())
+                        list_builder.values().append_value(ts.format(TIMESTAMP_FORMAT).to_string());
                     }
                     None => list_builder.values().append_null(),
                 }

@@ -1,15 +1,11 @@
 #![allow(clippy::match_same_arms)]
 
-use etl::error::{ErrorKind, EtlError, EtlResult};
-use etl::etl_error;
-use etl::types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type};
-use gcp_bigquery_client::client_builder::ClientBuilder;
-use gcp_bigquery_client::google::cloud::bigquery::storage::v1::RowError;
-use gcp_bigquery_client::google::cloud::bigquery::storage::v1::StorageError;
-use gcp_bigquery_client::google::cloud::bigquery::storage::v1::storage_error::StorageErrorCode;
-use gcp_bigquery_client::google::rpc::Status as GoogleRpcStatus;
-use gcp_bigquery_client::storage::{
-    BatchAppendRequest, BatchAppendResult, ColumnMode, StorageApiConfig,
+use std::fmt;
+
+use etl::{
+    error::{ErrorKind, EtlError, EtlResult},
+    etl_error,
+    types::{Cell, ColumnSchema, PipelineId, ReplicatedTableSchema, Type, is_array_type},
 };
 use gcp_bigquery_client::{
     Client,
@@ -1108,11 +1104,8 @@ impl BigQueryClient {
         table_descriptor: TableDescriptor,
         validated_rows: Vec<BigQueryTableRow>,
     ) -> EtlResult<BatchAppendRequest<BigQueryTableRow>> {
-        let stream_name = StreamName::new_default(
-            self.project_id.clone(),
-            dataset_id.clone(),
-            table_id.clone(),
-        );
+        let stream_name =
+            StreamName::new_default(self.project_id.clone(), dataset_id.clone(), table_id.clone());
 
         let table_batch = TableBatch::new(stream_name, table_descriptor, validated_rows);
         let trace_id =
@@ -1447,50 +1440,20 @@ mod tests {
 
     #[test]
     fn postgres_to_bigquery_type_basic_types() {
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::BOOL),
-            "bool"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::TEXT),
-            "string"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::INT4),
-            "int64"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8),
-            "float64"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP),
-            "timestamp"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::JSON),
-            "json"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::BYTEA),
-            "bytes"
-        );
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL), "bool");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TEXT), "string");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4), "int64");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8), "float64");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TIMESTAMP), "timestamp");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::JSON), "json");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BYTEA), "bytes");
     }
 
     #[test]
     fn postgres_to_bigquery_type_array_types() {
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::BOOL_ARRAY),
-            "array<bool>"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::TEXT_ARRAY),
-            "array<string>"
-        );
-        assert_eq!(
-            BigQueryClient::postgres_to_bigquery_type(&Type::INT4_ARRAY),
-            "array<int64>"
-        );
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::BOOL_ARRAY), "array<bool>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::TEXT_ARRAY), "array<string>");
+        assert_eq!(BigQueryClient::postgres_to_bigquery_type(&Type::INT4_ARRAY), "array<int64>");
         assert_eq!(
             BigQueryClient::postgres_to_bigquery_type(&Type::FLOAT8_ARRAY),
             "array<float64>"
