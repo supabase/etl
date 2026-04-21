@@ -1338,6 +1338,11 @@ impl BigQueryClient {
 
             let mode = if is_array_type(&column_schema.typ) {
                 ColumnMode::Repeated
+            } else if use_cdc_sequence_column {
+                // CDC delete rows can omit non-key columns, so the writer
+                // schema must accept missing scalar fields even when the
+                // destination table column is defined as NOT NULL.
+                ColumnMode::Nullable
             } else if column_schema.nullable {
                 ColumnMode::Nullable
             } else {
@@ -1586,7 +1591,7 @@ mod tests {
         // Check regular columns
         assert_eq!(descriptor.field_descriptors[0].name, "id");
         assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::Int32));
-        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Required));
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Nullable));
 
         assert_eq!(descriptor.field_descriptors[1].name, "name");
         assert!(matches!(descriptor.field_descriptors[1].typ, ColumnType::String));
@@ -1594,7 +1599,7 @@ mod tests {
 
         assert_eq!(descriptor.field_descriptors[2].name, "active");
         assert!(matches!(descriptor.field_descriptors[2].typ, ColumnType::Bool));
-        assert!(matches!(descriptor.field_descriptors[2].mode, ColumnMode::Required));
+        assert!(matches!(descriptor.field_descriptors[2].mode, ColumnMode::Nullable));
 
         // Check array column
         assert_eq!(descriptor.field_descriptors[3].name, "tags");
@@ -1609,6 +1614,21 @@ mod tests {
         assert_eq!(descriptor.field_descriptors[5].name, BIGQUERY_CDC_SEQUENCE_COLUMN);
         assert!(matches!(descriptor.field_descriptors[5].typ, ColumnType::String));
         assert!(matches!(descriptor.field_descriptors[5].mode, ColumnMode::Required));
+    }
+
+    #[test]
+    fn test_column_schemas_to_table_descriptor_preserves_required_mode_for_table_copy() {
+        let columns = vec![
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
+        ];
+        let schema = test_replicated_schema(columns);
+
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, false);
+
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Required));
+        assert!(matches!(descriptor.field_descriptors[1].mode, ColumnMode::Nullable));
+        assert_eq!(descriptor.field_descriptors.len(), 3);
     }
 
     #[test]

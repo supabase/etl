@@ -156,7 +156,7 @@ mod tests {
         let table_id = TableId::new(123);
         let replication_mask = create_test_mask();
 
-        cache.upsert(table_id, SnapshotId::new(11.into()), Some(replication_mask.clone())).await;
+        cache.upsert(table_id, SnapshotId::new(11.into()), Some(replication_mask)).await;
         cache.upsert(table_id, SnapshotId::new(10.into()), None).await;
     }
 

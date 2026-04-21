@@ -301,23 +301,50 @@ where
                         });
                         entry.1.push(insert.table_row);
                     }
-                    Event::Update(mut update) => {
+                    Event::Update(update) => {
                         let sequence_key = update.event_sequence_key().to_string();
-                        update.table_row.values_mut().push(IcebergOperationType::Update.into());
-                        update.table_row.values_mut().push(Cell::String(sequence_key));
+                        let mut table_row = match update.updated_table_row {
+                            etl::types::UpdatedTableRow::Full(row) => row,
+                            etl::types::UpdatedTableRow::Partial(_) => {
+                                return Err(etl_error!(
+                                    ErrorKind::InvalidState,
+                                    "Iceberg update requires a full new row image",
+                                    format!(
+                                        "Table '{}' emitted a partial update row. Configure \
+                                         replication so all updated values are available before \
+                                         writing to Iceberg.",
+                                        update.replicated_table_schema.name()
+                                    )
+                                ));
+                            }
+                        };
+                        table_row.values_mut().push(IcebergOperationType::Update.into());
+                        table_row.values_mut().push(Cell::String(sequence_key));
 
                         let table_id = update.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
                             (update.replicated_table_schema.clone(), Vec::new())
                         });
-                        entry.1.push(update.table_row);
+                        entry.1.push(table_row);
                     }
                     Event::Delete(delete) => {
                         let sequence_key = delete.event_sequence_key().to_string();
-                        let Some((_, mut old_table_row)) = delete.old_table_row else {
+                        let Some(old_table_row) = delete.old_table_row else {
                             debug!("delete event has no row, skipping");
                             continue;
                         };
+                        if old_table_row.is_key() {
+                            return Err(etl_error!(
+                                ErrorKind::InvalidState,
+                                "Iceberg delete requires a full old row image",
+                                format!(
+                                    "Table '{}' emitted a key-only delete image. Configure \
+                                     REPLICA IDENTITY FULL for Iceberg delete support.",
+                                    delete.replicated_table_schema.name()
+                                )
+                            ));
+                        }
+                        let mut old_table_row = old_table_row.into_full().expect("checked above");
                         old_table_row.values_mut().push(IcebergOperationType::Delete.into());
                         old_table_row.values_mut().push(Cell::String(sequence_key));
 

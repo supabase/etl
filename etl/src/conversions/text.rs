@@ -1,6 +1,6 @@
 use core::str;
 
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
 use etl_postgres::types::{
     DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, TIMESTAMPTZ_FORMAT_HHMM,
 };
@@ -9,68 +9,10 @@ use uuid::Uuid;
 
 use crate::{
     bail,
-    conversions::{PgNumeric, bool::parse_bool, hex},
+    conversions::{bool::parse_bool, hex},
     error::{ErrorKind, EtlResult},
     types::{ArrayCell, Cell},
 };
-
-/// Creates a default [`Cell`] value for the given Postgres type.
-///
-/// This helper method provides sensible default values for Postgres types,
-/// primarily used during cell initialization and error recovery scenarios.
-/// The defaults are chosen to be the zero/empty value for each type where
-/// possible.
-///
-/// For complex types like arrays, empty vectors are returned. For temporal
-/// types, minimal valid timestamps are used (year 1, month 1, day 1).
-pub fn default_value_for_type(typ: &Type) -> EtlResult<Cell> {
-    const DEFAULT_DATE: NaiveDate = NaiveDate::MIN;
-    const DEFAULT_TIMESTAMP: NaiveDateTime = NaiveDateTime::new(DEFAULT_DATE, NaiveTime::MIN);
-    const DEFAULT_TIMESTAMPTZ: DateTime<Utc> =
-        DateTime::<Utc>::from_naive_utc_and_offset(DEFAULT_TIMESTAMP, Utc);
-
-    match *typ {
-        Type::BOOL => Ok(Cell::Bool(bool::default())),
-        Type::BOOL_ARRAY => Ok(Cell::Array(ArrayCell::Bool(Vec::default()))),
-        Type::CHAR | Type::BPCHAR | Type::VARCHAR | Type::NAME | Type::TEXT => {
-            Ok(Cell::String(String::default()))
-        }
-        Type::CHAR_ARRAY
-        | Type::BPCHAR_ARRAY
-        | Type::VARCHAR_ARRAY
-        | Type::NAME_ARRAY
-        | Type::TEXT_ARRAY => Ok(Cell::Array(ArrayCell::String(Vec::default()))),
-        Type::INT2 => Ok(Cell::I16(i16::default())),
-        Type::INT2_ARRAY => Ok(Cell::Array(ArrayCell::I16(Vec::default()))),
-        Type::INT4 => Ok(Cell::I32(i32::default())),
-        Type::INT4_ARRAY => Ok(Cell::Array(ArrayCell::I32(Vec::default()))),
-        Type::INT8 => Ok(Cell::I64(i64::default())),
-        Type::INT8_ARRAY => Ok(Cell::Array(ArrayCell::I64(Vec::default()))),
-        Type::FLOAT4 => Ok(Cell::F32(f32::default())),
-        Type::FLOAT4_ARRAY => Ok(Cell::Array(ArrayCell::F32(Vec::default()))),
-        Type::FLOAT8 => Ok(Cell::F64(f64::default())),
-        Type::FLOAT8_ARRAY => Ok(Cell::Array(ArrayCell::F64(Vec::default()))),
-        Type::NUMERIC => Ok(Cell::Numeric(PgNumeric::default())),
-        Type::NUMERIC_ARRAY => Ok(Cell::Array(ArrayCell::Numeric(Vec::default()))),
-        Type::BYTEA => Ok(Cell::Bytes(Vec::default())),
-        Type::BYTEA_ARRAY => Ok(Cell::Array(ArrayCell::Bytes(Vec::default()))),
-        Type::DATE => Ok(Cell::Date(DEFAULT_DATE)),
-        Type::DATE_ARRAY => Ok(Cell::Array(ArrayCell::Date(Vec::default()))),
-        Type::TIME => Ok(Cell::Time(NaiveTime::MIN)),
-        Type::TIME_ARRAY => Ok(Cell::Array(ArrayCell::Time(Vec::default()))),
-        Type::TIMESTAMP => Ok(Cell::Timestamp(DEFAULT_TIMESTAMP)),
-        Type::TIMESTAMP_ARRAY => Ok(Cell::Array(ArrayCell::Timestamp(Vec::default()))),
-        Type::TIMESTAMPTZ => Ok(Cell::TimestampTz(DEFAULT_TIMESTAMPTZ)),
-        Type::TIMESTAMPTZ_ARRAY => Ok(Cell::Array(ArrayCell::TimestampTz(Vec::default()))),
-        Type::UUID => Ok(Cell::Uuid(Uuid::default())),
-        Type::UUID_ARRAY => Ok(Cell::Array(ArrayCell::Uuid(Vec::default()))),
-        Type::JSON | Type::JSONB => Ok(Cell::Json(serde_json::Value::default())),
-        Type::JSON_ARRAY | Type::JSONB_ARRAY => Ok(Cell::Array(ArrayCell::Json(Vec::default()))),
-        Type::OID => Ok(Cell::U32(u32::default())),
-        Type::OID_ARRAY => Ok(Cell::Array(ArrayCell::U32(Vec::default()))),
-        _ => Ok(Cell::String(String::default())),
-    }
-}
 
 /// Converts a Postgres text-format string to a typed [`Cell`] value.
 ///
@@ -162,6 +104,8 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             ArrayCell::Timestamp,
         ),
         Type::TIMESTAMPTZ => {
+            // PostgreSQL can render UTC offsets either as `+00` or `+00:00`,
+            // so we accept both text formats here.
             let val = match DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HHMM) {
                 Ok(val) => val,
                 Err(_) => DateTime::<FixedOffset>::parse_from_str(str, TIMESTAMPTZ_FORMAT_HH_MM)?,
@@ -281,8 +225,13 @@ where
             }
         }
 
-        let val =
-            if !val_quoted && val_str.to_lowercase() == "null" { None } else { parse(&val_str)? };
+        // PostgreSQL treats unquoted `NULL` as a null array element, while
+        // quoted `"NULL"` is just the literal string. Keep that distinction.
+        let val = if !val_quoted && val_str.eq_ignore_ascii_case("null") {
+            None
+        } else {
+            parse(&val_str)?
+        };
 
         res.push(val);
         val_str.clear();
@@ -297,6 +246,7 @@ mod tests {
     use chrono::{Datelike, Timelike};
 
     use super::*;
+    use crate::types::PgNumeric;
 
     #[test]
     fn parse_text_array_quoted_null_as_string() {
@@ -627,9 +577,6 @@ mod tests {
             tokio_postgres::types::Kind::Simple,
             "public".to_string(),
         );
-
-        let cell = default_value_for_type(&custom_type).unwrap();
-        assert_eq!(cell, Cell::String(String::new()));
 
         let cell = parse_cell_from_postgres_text(&custom_type, "test").unwrap();
         assert_eq!(cell, Cell::String("test".to_string()));

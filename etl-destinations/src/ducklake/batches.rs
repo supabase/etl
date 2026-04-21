@@ -19,7 +19,7 @@ use std::{
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    types::{Cell, ReplicatedTableSchema, TableRow},
+    types::{Cell, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableRow, UpdatedTableRow},
 };
 use metrics::{counter, histogram};
 #[cfg(feature = "test-utils")]
@@ -84,8 +84,8 @@ const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
 /// Event-level table mutations that must be applied in order.
 pub(super) enum TableMutation {
     Insert(TableRow),
-    Delete(TableRow),
-    Update { delete_row: TableRow, upsert_row: TableRow },
+    Delete(OldTableRow),
+    Update { delete_row: OldTableRow, new_row: UpdatedTableRow },
     Replace(TableRow),
 }
 
@@ -98,6 +98,31 @@ enum PreparedTableMutation {
         // To know if it's coming from an update or delete operation.
         origin: &'static str,
     },
+    Update {
+        assignments: Vec<String>,
+        predicate: String,
+    },
+}
+
+/// Borrowed row shape used to build delete predicates.
+enum DeletePredicateRowRef<'a> {
+    Full(&'a TableRow),
+    Key(&'a TableRow),
+}
+
+impl<'a> From<&'a TableRow> for DeletePredicateRowRef<'a> {
+    fn from(value: &'a TableRow) -> Self {
+        Self::Full(value)
+    }
+}
+
+impl<'a> From<&'a OldTableRow> for DeletePredicateRowRef<'a> {
+    fn from(value: &'a OldTableRow) -> Self {
+        match value {
+            OldTableRow::Full(row) => Self::Full(row),
+            OldTableRow::Key(row) => Self::Key(row),
+        }
+    }
 }
 
 /// Event-level table mutation annotated with source LSNs for idempotent replay.
@@ -642,9 +667,15 @@ fn prepare_table_mutations(
                         std::mem::take(&mut upsert_rows),
                     )));
                 }
-                delete_predicates.push(delete_predicate_from_row(replicated_table_schema, &row)?);
+                delete_predicates.push(delete_predicate_from_row(
+                    replicated_table_schema,
+                    match &row {
+                        OldTableRow::Full(row) => DeletePredicateRowRef::Full(row),
+                        OldTableRow::Key(row) => DeletePredicateRowRef::Key(row),
+                    },
+                )?);
             }
-            TableMutation::Update { delete_row, upsert_row } => {
+            TableMutation::Update { delete_row, new_row } => {
                 if !upsert_rows.is_empty() {
                     prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(
                         std::mem::take(&mut upsert_rows),
@@ -656,16 +687,37 @@ fn prepare_table_mutations(
                         origin: "delete",
                     });
                 }
-
-                prepared_mutations.push(PreparedTableMutation::Delete {
-                    predicates: vec![delete_predicate_from_row(
-                        replicated_table_schema,
-                        &delete_row,
-                    )?],
-                    origin: "update",
-                });
-                prepared_mutations
-                    .push(PreparedTableMutation::Upsert(prepare_rows(vec![upsert_row])));
+                match new_row {
+                    UpdatedTableRow::Full(upsert_row) => {
+                        prepared_mutations.push(PreparedTableMutation::Delete {
+                            predicates: vec![delete_predicate_from_row(
+                                replicated_table_schema,
+                                match &delete_row {
+                                    OldTableRow::Full(row) => DeletePredicateRowRef::Full(row),
+                                    OldTableRow::Key(row) => DeletePredicateRowRef::Key(row),
+                                },
+                            )?],
+                            origin: "update",
+                        });
+                        prepared_mutations
+                            .push(PreparedTableMutation::Upsert(prepare_rows(vec![upsert_row])));
+                    }
+                    UpdatedTableRow::Partial(partial_row) => {
+                        prepared_mutations.push(PreparedTableMutation::Update {
+                            assignments: update_assignments_from_partial_row(
+                                replicated_table_schema,
+                                &partial_row,
+                            )?,
+                            predicate: delete_predicate_from_row(
+                                replicated_table_schema,
+                                match &delete_row {
+                                    OldTableRow::Full(row) => DeletePredicateRowRef::Full(row),
+                                    OldTableRow::Key(row) => DeletePredicateRowRef::Key(row),
+                                },
+                            )?,
+                        });
+                    }
+                }
             }
             TableMutation::Replace(row) => {
                 if !upsert_rows.is_empty() {
@@ -681,7 +733,10 @@ fn prepare_table_mutations(
                 }
 
                 prepared_mutations.push(PreparedTableMutation::Delete {
-                    predicates: vec![delete_predicate_from_row(replicated_table_schema, &row)?],
+                    predicates: vec![delete_predicate_from_row(
+                        replicated_table_schema,
+                        DeletePredicateRowRef::Full(&row),
+                    )?],
                     origin: "replace",
                 });
                 prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(vec![row])));
@@ -703,10 +758,11 @@ fn prepare_table_mutations(
 }
 
 /// Builds a `WHERE` clause from the primary-key values stored in `row`.
-fn delete_predicate_from_row(
+fn delete_predicate_from_row<'a>(
     replicated_table_schema: &ReplicatedTableSchema,
-    row: &TableRow,
+    row: impl Into<DeletePredicateRowRef<'a>>,
 ) -> EtlResult<String> {
+    let row = row.into();
     let replicated_column_schemas: Vec<_> = replicated_table_schema.column_schemas().collect();
 
     if !replicated_column_schemas
@@ -723,26 +779,59 @@ fn delete_predicate_from_row(
         ));
     }
 
-    if row.values().len() != replicated_column_schemas.len() {
-        return Err(etl_error!(
-            ErrorKind::InvalidState,
-            "DuckLake row shape does not match schema",
-            format!(
-                "Expected {} values for table '{}', got {}",
-                replicated_column_schemas.len(),
-                replicated_table_schema.name(),
-                row.values().len()
-            )
-        ));
-    }
-
     let mut predicates = Vec::new();
 
-    for (column_schema, value) in replicated_column_schemas
-        .into_iter()
-        .zip(row.values())
-        .filter(|(column_schema, _)| column_schema.primary_key_ordinal_position.is_some())
-    {
+    let key_values: Vec<_> = match row {
+        DeletePredicateRowRef::Full(row) => {
+            if row.values().len() != replicated_column_schemas.len() {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "DuckLake row shape does not match schema",
+                    format!(
+                        "Expected {} values for table '{}', got {}",
+                        replicated_column_schemas.len(),
+                        replicated_table_schema.name(),
+                        row.values().len()
+                    )
+                ));
+            }
+
+            let mut identity_columns = replicated_table_schema.identity_column_schemas().peekable();
+            let mut key_values =
+                Vec::with_capacity(replicated_table_schema.identity_column_schemas().len());
+
+            for (column_schema, value) in replicated_column_schemas.iter().zip(row.values()) {
+                if identity_columns.peek().is_some_and(|identity_column| {
+                    identity_column.ordinal_position == column_schema.ordinal_position
+                }) {
+                    let identity_column = identity_columns.next().expect("peeked identity column");
+                    key_values.push((identity_column, value));
+                }
+            }
+
+            key_values
+        }
+        DeletePredicateRowRef::Key(row) => {
+            let key_column_schemas: Vec<_> =
+                replicated_table_schema.identity_column_schemas().collect();
+            if row.values().len() != key_column_schemas.len() {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "DuckLake key image does not match replica identity",
+                    format!(
+                        "Expected {} key values for table '{}', got {}",
+                        key_column_schemas.len(),
+                        replicated_table_schema.name(),
+                        row.values().len()
+                    )
+                ));
+            }
+
+            key_column_schemas.into_iter().zip(row.values()).collect()
+        }
+    };
+
+    for (column_schema, value) in key_values {
         let quoted_column = quote_identifier(&column_schema.name).into_owned();
         let predicate = match value {
             Cell::Null => format!("{quoted_column} IS NULL"),
@@ -752,6 +841,89 @@ fn delete_predicate_from_row(
     }
 
     Ok(predicates.join(" AND "))
+}
+
+/// Builds SQL `SET` assignments from a partial update row.
+fn update_assignments_from_partial_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    partial_row: &PartialTableRow,
+) -> EtlResult<Vec<String>> {
+    let replicated_column_schemas: Vec<_> = replicated_table_schema.column_schemas().collect();
+    if partial_row.total_columns() != replicated_column_schemas.len() {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "DuckLake partial update row does not match schema",
+            format!(
+                "Expected {} replicated columns for table '{}', got {}",
+                replicated_column_schemas.len(),
+                replicated_table_schema.name(),
+                partial_row.total_columns()
+            )
+        ));
+    }
+
+    if partial_row.values().is_empty() {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "DuckLake partial update row has no assignments",
+            format!(
+                "Table '{}' emitted an empty partial update row",
+                replicated_table_schema.name()
+            )
+        ));
+    }
+
+    if partial_row.values().len() + partial_row.missing_column_indexes().len()
+        != partial_row.total_columns()
+    {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "DuckLake partial update row shape is inconsistent",
+            format!(
+                "Table '{}' partial row reports {} total columns but has {} present and {} missing",
+                replicated_table_schema.name(),
+                partial_row.total_columns(),
+                partial_row.values().len(),
+                partial_row.missing_column_indexes().len()
+            )
+        ));
+    }
+
+    let mut assignments = Vec::with_capacity(partial_row.values().len());
+    let mut missing_indexes = partial_row.missing_column_indexes().iter().copied().peekable();
+    let mut present_values = partial_row.values().iter();
+    for (column_index, column_schema) in replicated_column_schemas.iter().enumerate() {
+        if missing_indexes.peek().copied() == Some(column_index) {
+            missing_indexes.next();
+            continue;
+        }
+
+        let Some(value) = present_values.next() else {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake partial update row ended early",
+                format!(
+                    "Table '{}' did not provide enough values for its partial update row",
+                    replicated_table_schema.name()
+                )
+            ));
+        };
+        let quoted_column = quote_identifier(&column_schema.name).into_owned();
+        assignments.push(format!("{quoted_column} = {}", cell_to_sql_literal_ref(value)));
+    }
+
+    if missing_indexes.next().is_some() || present_values.next().is_some() {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "DuckLake partial update row shape is inconsistent",
+            format!(
+                "Table '{}' partial row has leftover values or missing indexes after decoding",
+                replicated_table_schema.name()
+            )
+        ));
+    }
+
+    Ok(assignments)
 }
 
 /// Builds a deterministic identity for one ordered mutation batch.
@@ -775,16 +947,37 @@ fn build_mutation_batch_identity(
             }
             TableMutation::Delete(row) => {
                 "delete".hash(&mut hasher);
-                delete_predicate_from_row(replicated_table_schema, row)?.hash(&mut hasher);
+                delete_predicate_from_row(
+                    replicated_table_schema,
+                    match row {
+                        OldTableRow::Full(row) => DeletePredicateRowRef::Full(row),
+                        OldTableRow::Key(row) => DeletePredicateRowRef::Key(row),
+                    },
+                )?
+                .hash(&mut hasher);
             }
-            TableMutation::Update { delete_row, upsert_row } => {
+            TableMutation::Update { delete_row, new_row } => {
                 "update".hash(&mut hasher);
-                delete_predicate_from_row(replicated_table_schema, delete_row)?.hash(&mut hasher);
-                hash_table_row_ref(&mut hasher, upsert_row);
+                delete_predicate_from_row(
+                    replicated_table_schema,
+                    match delete_row {
+                        OldTableRow::Full(row) => DeletePredicateRowRef::Full(row),
+                        OldTableRow::Key(row) => DeletePredicateRowRef::Key(row),
+                    },
+                )?
+                .hash(&mut hasher);
+                match new_row {
+                    UpdatedTableRow::Full(row) => hash_table_row_ref(&mut hasher, row),
+                    UpdatedTableRow::Partial(row) => hash_partial_table_row_ref(&mut hasher, row),
+                }
             }
             TableMutation::Replace(row) => {
                 "replace".hash(&mut hasher);
-                delete_predicate_from_row(replicated_table_schema, row)?.hash(&mut hasher);
+                delete_predicate_from_row(
+                    replicated_table_schema,
+                    DeletePredicateRowRef::Full(row),
+                )?
+                .hash(&mut hasher);
                 hash_table_row_ref(&mut hasher, row);
             }
         }
@@ -863,6 +1056,26 @@ fn build_batch_identity(
 /// appender encoding.
 fn hash_table_row_ref(hasher: &mut BatchIdHasher, row: &TableRow) {
     table_row_to_sql_literal_ref(row).hash(hasher);
+}
+
+/// Hashes a partial row using column indexes and SQL literal forms.
+fn hash_partial_table_row_ref(hasher: &mut BatchIdHasher, row: &PartialTableRow) {
+    row.total_columns().hash(hasher);
+    let mut missing_indexes = row.missing_column_indexes().iter().copied().peekable();
+    let mut present_values = row.values().iter();
+
+    for column_index in 0..row.total_columns() {
+        if missing_indexes.peek().copied() == Some(column_index) {
+            missing_indexes.next();
+            continue;
+        }
+
+        let value = present_values
+            .next()
+            .expect("partial row present value count should match missing indexes");
+        column_index.hash(hasher);
+        cell_to_sql_literal_ref(value).hash(hasher);
+    }
 }
 
 /// Returns whether the atomic batch marker already exists.
@@ -1055,6 +1268,9 @@ fn apply_table_mutation(
             .record(predicates.len() as f64);
             apply_delete_mutation(conn, table_name, predicates.as_slice())
         }
+        PreparedTableMutation::Update { assignments, predicate } => {
+            apply_partial_update_mutation(conn, table_name, assignments, predicate)
+        }
     }
 }
 
@@ -1193,6 +1409,29 @@ fn apply_delete_mutation(
     Ok(())
 }
 
+/// Applies one partial update inside an open DuckLake transaction.
+fn apply_partial_update_mutation(
+    conn: &duckdb::Connection,
+    table_name: &str,
+    assignments: &[String],
+    predicate: &str,
+) -> EtlResult<()> {
+    if assignments.is_empty() {
+        return Ok(());
+    }
+
+    let sql_query = format!(
+        r#"UPDATE {LAKE_CATALOG}."{table_name}" SET {} WHERE {predicate};"#,
+        assignments.join(", ")
+    );
+    conn.execute_batch(&sql_query).map_err(|error| {
+        tracing::error!(?error, "error UPDATE");
+        etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake UPDATE failed", source: error)
+    })?;
+
+    Ok(())
+}
+
 /// Returns the number of values carried by a prepared row payload.
 fn prepared_rows_count(prepared_rows: &PreparedRows) -> usize {
     match prepared_rows {
@@ -1232,7 +1471,7 @@ fn apply_sub_batch_rows(batch: &PreparedDuckLakeTableBatch) -> Option<usize> {
             PreparedRows::Appender(values) => values.len(),
             PreparedRows::SqlLiterals(values) => values.len(),
         }),
-        PreparedTableMutation::Delete { .. } => None,
+        PreparedTableMutation::Delete { .. } | PreparedTableMutation::Update { .. } => None,
     }
 }
 
@@ -1244,6 +1483,7 @@ fn batch_log_kind(batch: &PreparedDuckLakeTableBatch) -> &'static str {
             match prepared_mutations.as_slice() {
                 [PreparedTableMutation::Upsert(_)] => "insert",
                 [PreparedTableMutation::Delete { origin, .. }] => origin,
+                [PreparedTableMutation::Update { .. }] => "update",
                 [
                     PreparedTableMutation::Delete { origin, .. },
                     PreparedTableMutation::Upsert(_),
@@ -1432,6 +1672,7 @@ mod tests {
                 assert_eq!(origin, &"replace");
             }
             PreparedTableMutation::Upsert(_) => panic!("expected delete first"),
+            PreparedTableMutation::Update { .. } => panic!("expected delete first"),
         }
         match &prepared[1] {
             PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
@@ -1441,6 +1682,7 @@ mod tests {
                 panic!("expected appender payload")
             }
             PreparedTableMutation::Delete { .. } => panic!("expected upsert second"),
+            PreparedTableMutation::Update { .. } => panic!("expected upsert second"),
         }
     }
 
@@ -1450,8 +1692,14 @@ mod tests {
         let prepared = prepare_table_mutations(
             &replicated_table_schema,
             vec![TableMutation::Update {
-                delete_row: TableRow::new(vec![Cell::I32(1), Cell::String("before".to_string())]),
-                upsert_row: TableRow::new(vec![Cell::I32(1), Cell::String("after".to_string())]),
+                delete_row: OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("before".to_string()),
+                ])),
+                new_row: UpdatedTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("after".to_string()),
+                ])),
             }],
         )
         .unwrap();
@@ -1463,6 +1711,7 @@ mod tests {
                 assert_eq!(origin, &"update");
             }
             PreparedTableMutation::Upsert(_) => panic!("expected delete first"),
+            PreparedTableMutation::Update { .. } => panic!("expected delete first"),
         }
         match &prepared[1] {
             PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
@@ -1472,6 +1721,34 @@ mod tests {
                 panic!("expected appender payload")
             }
             PreparedTableMutation::Delete { .. } => panic!("expected upsert second"),
+            PreparedTableMutation::Update { .. } => panic!("expected upsert second"),
+        }
+    }
+
+    #[test]
+    fn test_prepare_table_mutations_partial_update_emits_single_update() {
+        let replicated_table_schema = make_replicated_schema();
+        let prepared = prepare_table_mutations(
+            &replicated_table_schema,
+            vec![TableMutation::Update {
+                delete_row: OldTableRow::Key(TableRow::new(vec![Cell::I32(1)])),
+                new_row: UpdatedTableRow::Partial(PartialTableRow::new(
+                    2,
+                    TableRow::new(vec![Cell::I32(1), Cell::String("after".to_string())]),
+                    vec![],
+                )),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(prepared.len(), 1);
+        match &prepared[0] {
+            PreparedTableMutation::Update { assignments, predicate } => {
+                assert_eq!(assignments, &vec!["id = 1".to_string(), "name = 'after'".to_string()]);
+                assert_eq!(predicate, "id = 1");
+            }
+            PreparedTableMutation::Delete { .. } => panic!("expected direct update"),
+            PreparedTableMutation::Upsert(_) => panic!("expected direct update"),
         }
     }
 
@@ -1515,6 +1792,7 @@ mod tests {
                         panic!("expected appender payload")
                     }
                     PreparedTableMutation::Delete { .. } => panic!("expected upsert"),
+                    PreparedTableMutation::Update { .. } => panic!("expected upsert"),
                 }
             }
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
@@ -1539,10 +1817,10 @@ mod tests {
                 TrackedTableMutation::new(
                     PgLsn::from(100),
                     PgLsn::from(110),
-                    TableMutation::Delete(TableRow::new(vec![
+                    TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                         Cell::I32(0),
                         Cell::String("seed".to_string()),
-                    ])),
+                    ]))),
                 ),
                 TrackedTableMutation::new(
                     PgLsn::from(100),
@@ -1585,18 +1863,18 @@ mod tests {
                 TrackedTableMutation::new(
                     PgLsn::from(100),
                     PgLsn::from(110),
-                    TableMutation::Delete(TableRow::new(vec![
+                    TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                         Cell::I32(1),
                         Cell::String("alice".to_string()),
-                    ])),
+                    ]))),
                 ),
                 TrackedTableMutation::new(
                     PgLsn::from(110),
                     PgLsn::from(120),
-                    TableMutation::Delete(TableRow::new(vec![
+                    TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                         Cell::I32(2),
                         Cell::String("bob".to_string()),
-                    ])),
+                    ]))),
                 ),
             ],
         )
@@ -1612,6 +1890,7 @@ mod tests {
                         assert_eq!(predicates, &vec!["id = 1".to_string(), "id = 2".to_string()]);
                     }
                     PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
+                    PreparedTableMutation::Update { .. } => panic!("expected delete batch"),
                 }
             }
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
@@ -1629,28 +1908,28 @@ mod tests {
                     PgLsn::from(100),
                     PgLsn::from(110),
                     TableMutation::Update {
-                        delete_row: TableRow::new(vec![
+                        delete_row: OldTableRow::Full(TableRow::new(vec![
                             Cell::I32(1),
                             Cell::String("before-a".to_string()),
-                        ]),
-                        upsert_row: TableRow::new(vec![
+                        ])),
+                        new_row: UpdatedTableRow::Full(TableRow::new(vec![
                             Cell::I32(1),
                             Cell::String("after-a".to_string()),
-                        ]),
+                        ])),
                     },
                 ),
                 TrackedTableMutation::new(
                     PgLsn::from(110),
                     PgLsn::from(120),
                     TableMutation::Update {
-                        delete_row: TableRow::new(vec![
+                        delete_row: OldTableRow::Full(TableRow::new(vec![
                             Cell::I32(2),
                             Cell::String("before-b".to_string()),
-                        ]),
-                        upsert_row: TableRow::new(vec![
+                        ])),
+                        new_row: UpdatedTableRow::Full(TableRow::new(vec![
                             Cell::I32(2),
                             Cell::String("after-b".to_string()),
-                        ]),
+                        ])),
                     },
                 ),
             ],
@@ -1684,10 +1963,10 @@ mod tests {
                 TrackedTableMutation::new(
                     PgLsn::from(100 + idx as u64),
                     PgLsn::from(200 + idx as u64),
-                    TableMutation::Delete(TableRow::new(vec![
+                    TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                         Cell::I32(idx as i32),
                         Cell::String(format!("name-{idx}")),
-                    ])),
+                    ]))),
                 )
             })
             .collect();
@@ -1706,6 +1985,7 @@ mod tests {
                     assert_eq!(predicates.len(), CDC_MUTATION_BATCH_SIZE);
                 }
                 PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
+                PreparedTableMutation::Update { .. } => panic!("expected delete batch"),
             },
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
         }
@@ -1716,6 +1996,7 @@ mod tests {
                     assert_eq!(predicates.len(), 1);
                 }
                 PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
+                PreparedTableMutation::Update { .. } => panic!("expected delete batch"),
             },
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
         }
@@ -1740,14 +2021,14 @@ mod tests {
                     PgLsn::from(110),
                     PgLsn::from(120),
                     TableMutation::Update {
-                        delete_row: TableRow::new(vec![
+                        delete_row: OldTableRow::Full(TableRow::new(vec![
                             Cell::I32(0),
                             Cell::String("seed".to_string()),
-                        ]),
-                        upsert_row: TableRow::new(vec![
+                        ])),
+                        new_row: UpdatedTableRow::Full(TableRow::new(vec![
                             Cell::I32(0),
                             Cell::String("grown".to_string()),
-                        ]),
+                        ])),
                     },
                 ),
                 TrackedTableMutation::new(
@@ -1800,10 +2081,10 @@ mod tests {
             TrackedTableMutation::new(
                 PgLsn::from(100),
                 PgLsn::from(200),
-                TableMutation::Delete(TableRow::new(vec![
+                TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("alice".to_string()),
-                ])),
+                ]))),
             ),
         ];
 

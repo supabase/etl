@@ -84,7 +84,7 @@ fn events_equal(a: &Event, b: &Event) -> bool {
         }
         (Event::Update(a), Event::Update(b)) => {
             a.replicated_table_schema.id() == b.replicated_table_schema.id()
-                && a.table_row == b.table_row
+                && a.updated_table_row == b.updated_table_row
                 && a.old_table_row == b.old_table_row
         }
         (Event::Delete(a), Event::Delete(b)) => {

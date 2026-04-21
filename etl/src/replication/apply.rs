@@ -47,7 +47,8 @@ use crate::{
         DDL_MESSAGE_PREFIX, SchemaChangeMessage, parse_event_from_begin_message,
         parse_event_from_commit_message, parse_event_from_delete_message,
         parse_event_from_insert_message, parse_event_from_truncate_message,
-        parse_event_from_update_message, parse_replicated_column_names,
+        parse_event_from_update_message, parse_replica_identity_column_names,
+        parse_replicated_column_names,
     },
     destination::{
         Destination,
@@ -1758,6 +1759,22 @@ where
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
+        // TODO: support replica identity `using index` by storing replica-identity
+        //  metadata on the schema itself instead of inferring identity columns from the
+        //  primary key.
+        if matches!(message.replica_identity(), protocol::ReplicaIdentity::Index) {
+            let replica_identity_columns = parse_replica_identity_column_names(message)?;
+            bail!(
+                ErrorKind::SourceSchemaError,
+                "Unsupported replica identity",
+                format!(
+                    "Table {} uses replica identity `using index` with columns {:?}, but only \
+                     primary-key replica identity is currently supported",
+                    table_id, replica_identity_columns
+                )
+            );
+        }
+
         // Exactly one worker owns protocol interpretation for a table at a time.
         // Non-owning workers skip `RELATION` handling and rely on the owner to
         // refresh shared table state.
@@ -1788,6 +1805,7 @@ where
         )
         .await?;
         let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
+
         self.shared_table_cache
             .upsert(table_id, table_schema.snapshot_id, Some(replication_mask.clone()))
             .await;

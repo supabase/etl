@@ -537,6 +537,10 @@ pub struct ReplicatedTableSchema {
     table_schema: Arc<TableSchema>,
     /// A bitmask where 1 indicates the column at that index is replicated.
     replication_mask: ReplicationMask,
+    /// Cached number of replicated columns.
+    replicated_column_count: usize,
+    /// Cached number of replica-identity columns among replicated columns.
+    identity_column_count: usize,
 }
 
 impl ReplicatedTableSchema {
@@ -549,13 +553,27 @@ impl ReplicatedTableSchema {
             "mask length must match column count"
         );
 
-        Self { table_schema, replication_mask }
+        let mut identity_column_count = 0;
+        for (column_schema, &replicated) in
+            table_schema.column_schemas.iter().zip(replication_mask.as_slice().iter())
+        {
+            if replicated == 1 && column_schema.primary_key() {
+                identity_column_count += 1;
+            }
+        }
+
+        Self {
+            replicated_column_count: replication_mask.replicated_count(),
+            identity_column_count,
+            table_schema,
+            replication_mask,
+        }
     }
 
     /// Creates a [`ReplicatedTableSchema`] where all columns are replicated.
     pub fn all(table_schema: Arc<TableSchema>) -> Self {
         let replication_mask = ReplicationMask::all(&table_schema);
-        Self { table_schema, replication_mask }
+        Self::from_mask(table_schema, replication_mask)
     }
 
     /// Returns the table ID.
@@ -593,7 +611,6 @@ impl ReplicatedTableSchema {
              they should be the same"
         );
 
-        let len = self.replication_mask.replicated_count();
         let inner = self
             .table_schema
             .column_schemas
@@ -601,7 +618,28 @@ impl ReplicatedTableSchema {
             .zip(self.replication_mask.as_slice().iter())
             .filter_map(|(cs, &m)| if m == 1 { Some(cs) } else { None });
 
-        SizedIterator::new(inner, len)
+        SizedIterator::new(inner, self.replicated_column_count)
+    }
+
+    /// Returns an iterator over only the column schemas that are part of the
+    /// replica identity, preserving replicated table-column order.
+    pub fn identity_column_schemas(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &ColumnSchema> + Clone + '_ {
+        let inner = self
+            .table_schema
+            .column_schemas
+            .iter()
+            .zip(self.replication_mask.as_slice().iter())
+            .filter_map(|(column_schema, &replicated)| {
+                if replicated == 1 && column_schema.primary_key() {
+                    Some(column_schema)
+                } else {
+                    None
+                }
+            });
+
+        SizedIterator::new(inner, self.identity_column_count)
     }
 
     /// Computes the diff between this schema (old) and another schema (new).

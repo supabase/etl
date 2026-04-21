@@ -3,7 +3,7 @@ use std::{fmt, mem::size_of};
 use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use tokio_postgres::types::PgLsn;
 
-use crate::types::{SizeHint, TableRow};
+use crate::types::{OldTableRow, SizeHint, TableRow, UpdatedTableRow};
 
 /// Transaction begin event from Postgres logical replication.
 ///
@@ -87,9 +87,12 @@ impl InsertEvent {
 
 /// Row update event from Postgres logical replication.
 ///
-/// [`UpdateEvent`] represents an existing row being modified. It contains
-/// both the new row data and optionally the old row data for comparison
-/// and conflict resolution in the destination system.
+/// [`UpdateEvent`] represents an existing row being modified.
+///
+/// The new row may be full or partial depending on whether all column values
+/// are known after decoding `UnchangedToast` fields. The optional old row is
+/// either a full old image or a key-only image, depending on PostgreSQL
+/// replica-identity semantics.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct UpdateEvent {
@@ -102,13 +105,9 @@ pub struct UpdateEvent {
     /// The replicated table schema for this event.
     pub replicated_table_schema: ReplicatedTableSchema,
     /// New row data after the update.
-    pub table_row: TableRow,
-    /// Previous row data before the update.
-    ///
-    /// The boolean indicates whether the row contains only key columns (`true`)
-    /// or the complete row data (`false`). This depends on the Postgres
-    /// `REPLICA IDENTITY` setting for the table.
-    pub old_table_row: Option<(bool, TableRow)>,
+    pub updated_table_row: UpdatedTableRow,
+    /// Previous row data before the update, when PostgreSQL emitted one.
+    pub old_table_row: Option<OldTableRow>,
 }
 
 impl UpdateEvent {
@@ -120,9 +119,10 @@ impl UpdateEvent {
 
 /// Row deletion event from Postgres logical replication.
 ///
-/// [`DeleteEvent`] represents a row being removed from a table. It contains
-/// information about the deleted row for proper cleanup in the destination
-/// system.
+/// [`DeleteEvent`] represents a row being removed from a table.
+///
+/// The old row image is either a full old row or a key-only row depending on
+/// PostgreSQL replica-identity semantics.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct DeleteEvent {
@@ -135,11 +135,7 @@ pub struct DeleteEvent {
     /// The replicated table schema for this event.
     pub replicated_table_schema: ReplicatedTableSchema,
     /// Data from the deleted row.
-    ///
-    /// The boolean indicates whether the row contains only key columns (`true`)
-    /// or the complete row data (`false`). This depends on the Postgres
-    /// `REPLICA IDENTITY` setting for the table.
-    pub old_table_row: Option<(bool, TableRow)>,
+    pub old_table_row: Option<OldTableRow>,
 }
 
 impl DeleteEvent {
@@ -231,30 +227,6 @@ pub enum Event {
     Unsupported,
 }
 
-/// Pair used to build a CDC sequence key for destinations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EventSequenceKey {
-    /// Commit LSN identifying transaction order across transactions.
-    pub commit_lsn: PgLsn,
-    /// Zero-based ordinal identifying order within the same transaction.
-    pub tx_ordinal: u64,
-}
-
-impl EventSequenceKey {
-    /// Creates a new sequence key from commit LSN and transaction-local
-    /// ordinal.
-    pub fn new(commit_lsn: PgLsn, tx_ordinal: u64) -> Self {
-        Self { commit_lsn, tx_ordinal }
-    }
-}
-
-impl fmt::Display for EventSequenceKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let commit_lsn = u64::from(self.commit_lsn);
-        write!(f, "{commit_lsn:016x}/{:016x}", self.tx_ordinal)
-    }
-}
-
 impl Event {
     /// Returns the [`EventType`] that corresponds to this event.
     ///
@@ -288,19 +260,13 @@ impl SizeHint for Event {
             Self::Commit(_) => size_of::<CommitEvent>(),
             Self::Insert(event) => size_of::<InsertEvent>() + event.table_row.size_hint(),
             Self::Update(event) => {
-                let old_row_size = event
-                    .old_table_row
-                    .as_ref()
-                    .map(|(_, row)| row.size_hint())
-                    .unwrap_or_default();
-                size_of::<UpdateEvent>() + event.table_row.size_hint() + old_row_size
+                let old_row_size =
+                    event.old_table_row.as_ref().map(SizeHint::size_hint).unwrap_or_default();
+                size_of::<UpdateEvent>() + event.updated_table_row.size_hint() + old_row_size
             }
             Self::Delete(event) => {
-                let old_row_size = event
-                    .old_table_row
-                    .as_ref()
-                    .map(|(_, row)| row.size_hint())
-                    .unwrap_or_default();
+                let old_row_size =
+                    event.old_table_row.as_ref().map(SizeHint::size_hint).unwrap_or_default();
                 size_of::<DeleteEvent>() + old_row_size
             }
             Self::Truncate(event) => {
@@ -310,6 +276,30 @@ impl SizeHint for Event {
             Self::Relation(_) => size_of::<RelationEvent>(),
             Self::Unsupported => 0,
         }
+    }
+}
+
+/// Pair used to build a CDC sequence key for destinations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventSequenceKey {
+    /// Commit LSN identifying transaction order across transactions.
+    pub commit_lsn: PgLsn,
+    /// Zero-based ordinal identifying order within the same transaction.
+    pub tx_ordinal: u64,
+}
+
+impl EventSequenceKey {
+    /// Creates a new sequence key from commit LSN and transaction-local
+    /// ordinal.
+    pub fn new(commit_lsn: PgLsn, tx_ordinal: u64) -> Self {
+        Self { commit_lsn, tx_ordinal }
+    }
+}
+
+impl fmt::Display for EventSequenceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let commit_lsn = u64::from(self.commit_lsn);
+        write!(f, "{commit_lsn:016x}/{:016x}", self.tx_ordinal)
     }
 }
 

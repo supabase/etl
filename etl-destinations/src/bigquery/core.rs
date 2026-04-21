@@ -18,7 +18,8 @@ use etl::{
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Cell, Event, PipelineId, ReplicatedTableSchema, SchemaDiff, TableId, TableName, TableRow,
+        Cell, Event, OldTableRow, PipelineId, ReplicatedTableSchema, SchemaDiff, TableId,
+        TableName, TableRow, UpdatedTableRow,
     },
 };
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
@@ -783,8 +784,10 @@ where
         while events_iter.peek().is_some() {
             // Maps table ID to (schema, rows). We are assuming that the table schema is the
             // same for all events within two Relation event boundaries.
-            let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<TableRow>)> =
-                HashMap::new();
+            let mut table_id_to_data: HashMap<
+                TableId,
+                (ReplicatedTableSchema, Vec<BigQueryTableRow>),
+            > = HashMap::new();
 
             // Process events until we hit a truncate or relation event, or run out of
             // events. Truncate and Relation events require flushing all batched
@@ -809,36 +812,49 @@ where
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
                             (insert.replicated_table_schema.clone(), Vec::new())
                         });
-                        entry.1.push(insert.table_row);
+                        entry.1.push(BigQueryTableRow::try_from(insert.table_row)?);
                     }
-                    Event::Update(mut update) => {
+                    Event::Update(update) => {
                         let sequence_key = update.event_sequence_key().to_string();
-                        update
-                            .table_row
-                            .values_mut()
-                            .push(BigQueryOperationType::Upsert.into_cell());
-                        update.table_row.values_mut().push(Cell::String(sequence_key));
-
                         let table_id = update.replicated_table_schema.id();
+                        let mut table_row = match update.updated_table_row {
+                            UpdatedTableRow::Full(row) => row,
+                            UpdatedTableRow::Partial(_) => {
+                                return Err(etl_error!(
+                                    ErrorKind::InvalidState,
+                                    "BigQuery update requires a full new row image",
+                                    format!(
+                                        "Table '{}' emitted a partial update row. BigQuery CDC \
+                                         UPSERT does not preserve omitted columns.",
+                                        update.replicated_table_schema.name()
+                                    )
+                                ));
+                            }
+                        };
+                        table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
+                        table_row.values_mut().push(Cell::String(sequence_key));
+
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
                             (update.replicated_table_schema.clone(), Vec::new())
                         });
-                        entry.1.push(update.table_row);
+                        entry.1.push(BigQueryTableRow::try_from(table_row)?);
                     }
                     Event::Delete(delete) => {
                         let sequence_key = delete.event_sequence_key().to_string();
-                        let Some((_, mut old_table_row)) = delete.old_table_row else {
+                        let Some(old_table_row) = delete.old_table_row else {
                             info!("delete event has no row, skipping");
                             continue;
                         };
-                        old_table_row.values_mut().push(BigQueryOperationType::Delete.into_cell());
-                        old_table_row.values_mut().push(Cell::String(sequence_key));
 
                         let table_id = delete.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
                             (delete.replicated_table_schema.clone(), Vec::new())
                         });
-                        entry.1.push(old_table_row);
+                        entry.1.push(bigquery_delete_row(
+                            &delete.replicated_table_schema,
+                            old_table_row,
+                            sequence_key,
+                        )?);
                     }
                     event => {
                         // Every other event type is currently not supported.
@@ -858,10 +874,6 @@ where
                         self.prepare_table_for_streaming(&replicated_table_schema, true).await?;
                     let sequenced_bigquery_table_id_string =
                         sequenced_bigquery_table_id.to_string();
-                    let table_rows = table_rows
-                        .into_iter()
-                        .map(BigQueryTableRow::try_from)
-                        .collect::<EtlResult<Vec<BigQueryTableRow>>>()?;
                     histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
 
                     let append_request = self.client.create_batch_append_request(
@@ -1104,6 +1116,70 @@ where
             .await;
 
         Ok(())
+    }
+}
+
+/// Builds a CDC delete row for BigQuery from either a full old row image or a
+/// replica-identity key image.
+fn bigquery_delete_row(
+    replicated_table_schema: &ReplicatedTableSchema,
+    old_table_row: OldTableRow,
+    sequence_key: String,
+) -> EtlResult<BigQueryTableRow> {
+    match old_table_row {
+        OldTableRow::Full(mut row) => {
+            row.values_mut().push(BigQueryOperationType::Delete.into_cell());
+            row.values_mut().push(Cell::String(sequence_key));
+
+            BigQueryTableRow::try_from(row)
+        }
+        OldTableRow::Key(row) => {
+            let source_column_count = replicated_table_schema.column_schemas().count();
+            let identity_column_count = replicated_table_schema.identity_column_schemas().len();
+            if row.values().len() != identity_column_count {
+                bail!(
+                    ErrorKind::InvalidState,
+                    "BigQuery delete key image does not match replica identity",
+                    format!(
+                        "Expected {} key values for table '{}', got {}",
+                        identity_column_count,
+                        replicated_table_schema.name(),
+                        row.values().len()
+                    )
+                );
+            }
+
+            let mut tagged_cells = Vec::new();
+            let mut identity_columns = replicated_table_schema.identity_column_schemas().peekable();
+            let mut key_values = row.into_values().into_iter();
+            for (column_index, column_schema) in
+                replicated_table_schema.column_schemas().enumerate()
+            {
+                if identity_columns.peek().is_some_and(|identity_column| {
+                    identity_column.ordinal_position == column_schema.ordinal_position
+                }) {
+                    identity_columns.next();
+                    let value = key_values.next().expect("validated key image length");
+                    tagged_cells.push((column_index + 1, value));
+                }
+            }
+
+            if key_values.next().is_some() {
+                bail!(
+                    ErrorKind::InvalidState,
+                    "BigQuery delete key image has leftover values",
+                    format!(
+                        "Table '{}' key image contained more values than its replica identity",
+                        replicated_table_schema.name()
+                    )
+                );
+            }
+
+            tagged_cells.push((source_column_count + 1, BigQueryOperationType::Delete.into_cell()));
+            tagged_cells.push((source_column_count + 2, Cell::String(sequence_key)));
+
+            BigQueryTableRow::try_from_tagged_cells(tagged_cells)
+        }
     }
 }
 
