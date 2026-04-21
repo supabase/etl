@@ -154,8 +154,7 @@ impl From<crate::k8s::core::K8sCoreError> for PipelineError {
 }
 
 impl PipelineError {
-    pub fn to_message(&self) -> String {
-        #[allow(clippy::match_same_arms)]
+    fn to_message(&self) -> String {
         match self {
             // Do not expose internal database details in error messages.
             PipelineError::SourcesDb(SourcesDbError::Database(_))
@@ -163,7 +162,10 @@ impl PipelineError {
             | PipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | PipelineError::ReplicatorsDb(ReplicatorsDbError::Database(_))
             | PipelineError::ImagesDb(ImagesDbError::Database(_))
-            | PipelineError::Database(_) => "internal server error".to_string(),
+            | PipelineError::Database(_)
+            | PipelineError::Validation(
+                ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
+            ) => "internal server error".to_string(),
             // Do not expose validation error details as they may contain credential info.
             PipelineError::Validation(ValidationError::BigQuery(_)) => {
                 "BigQuery validation failed".to_string()
@@ -174,9 +176,6 @@ impl PipelineError {
             PipelineError::Validation(ValidationError::Database(_)) => {
                 "database validation failed".to_string()
             }
-            PipelineError::Validation(
-                ValidationError::TrustedRootCerts(_) | ValidationError::Environment(_),
-            ) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
