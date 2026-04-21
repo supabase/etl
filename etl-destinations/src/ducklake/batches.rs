@@ -838,7 +838,7 @@ fn delete_predicate_from_row<'a>(
         let quoted_column = quote_identifier(&column_schema.name).into_owned();
         let predicate = match value {
             Cell::Null => format!("{quoted_column} IS NULL"),
-            _ => format!("{quoted_column} = {}", cell_to_sql_literal_ref(&value)),
+            _ => format!("{quoted_column} = {}", cell_to_sql_literal_ref(value)),
         };
         predicates.push(predicate);
     }
@@ -1522,9 +1522,9 @@ fn batch_log_kind(batch: &PreparedDuckLakeTableBatch) -> &'static str {
         PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => {
             match prepared_mutations.as_slice() {
                 [PreparedTableMutation::Upsert(_)] => "insert",
-                [PreparedTableMutation::Delete { origin, .. }] => origin,
                 [PreparedTableMutation::Update { .. }] => "update",
-                [
+                [PreparedTableMutation::Delete { origin, .. }]
+                | [
                     PreparedTableMutation::Delete { origin, .. },
                     PreparedTableMutation::Upsert(_),
                 ] => origin,
@@ -1718,8 +1718,9 @@ mod tests {
                 assert_eq!(predicates, &vec!["id = 1".to_string()]);
                 assert_eq!(origin, &"replace");
             }
-            PreparedTableMutation::Upsert(_) => panic!("expected delete first"),
-            PreparedTableMutation::Update { .. } => panic!("expected delete first"),
+            PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
+                panic!("expected delete first")
+            }
         }
         match &prepared[1] {
             PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
@@ -1728,8 +1729,9 @@ mod tests {
             PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
                 panic!("expected appender payload")
             }
-            PreparedTableMutation::Delete { .. } => panic!("expected upsert second"),
-            PreparedTableMutation::Update { .. } => panic!("expected upsert second"),
+            PreparedTableMutation::Delete { .. } | PreparedTableMutation::Update { .. } => {
+                panic!("expected upsert second")
+            }
         }
     }
 
@@ -1757,8 +1759,9 @@ mod tests {
                 assert_eq!(predicates, &vec!["id = 1".to_string()]);
                 assert_eq!(origin, &"update");
             }
-            PreparedTableMutation::Upsert(_) => panic!("expected delete first"),
-            PreparedTableMutation::Update { .. } => panic!("expected delete first"),
+            PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
+                panic!("expected delete first")
+            }
         }
         match &prepared[1] {
             PreparedTableMutation::Upsert(PreparedRows::Appender(rows)) => {
@@ -1767,13 +1770,14 @@ mod tests {
             PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
                 panic!("expected appender payload")
             }
-            PreparedTableMutation::Delete { .. } => panic!("expected upsert second"),
-            PreparedTableMutation::Update { .. } => panic!("expected upsert second"),
+            PreparedTableMutation::Delete { .. } | PreparedTableMutation::Update { .. } => {
+                panic!("expected upsert second")
+            }
         }
     }
 
     #[test]
-    fn test_prepare_table_mutations_partial_update_emits_single_update() {
+    fn prepare_table_mutations_partial_update_emits_single_update() {
         let replicated_table_schema = make_streaming_schema();
         let prepared = prepare_table_mutations(
             &replicated_table_schema,
@@ -1794,8 +1798,9 @@ mod tests {
                 assert_eq!(assignments, &vec!["id = 1".to_string(), "name = 'after'".to_string()]);
                 assert_eq!(predicate, "id = 1");
             }
-            PreparedTableMutation::Delete { .. } => panic!("expected direct update"),
-            PreparedTableMutation::Upsert(_) => panic!("expected direct update"),
+            PreparedTableMutation::Delete { .. } | PreparedTableMutation::Upsert(_) => {
+                panic!("expected direct update")
+            }
         }
     }
 
@@ -1838,8 +1843,9 @@ mod tests {
                     PreparedTableMutation::Upsert(PreparedRows::SqlLiterals(_)) => {
                         panic!("expected appender payload")
                     }
-                    PreparedTableMutation::Delete { .. } => panic!("expected upsert"),
-                    PreparedTableMutation::Update { .. } => panic!("expected upsert"),
+                    PreparedTableMutation::Delete { .. } | PreparedTableMutation::Update { .. } => {
+                        panic!("expected upsert")
+                    }
                 }
             }
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
@@ -1936,8 +1942,9 @@ mod tests {
                         assert_eq!(origin, &"delete");
                         assert_eq!(predicates, &vec!["id = 1".to_string(), "id = 2".to_string()]);
                     }
-                    PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
-                    PreparedTableMutation::Update { .. } => panic!("expected delete batch"),
+                    PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
+                        panic!("expected delete batch")
+                    }
                 }
             }
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
@@ -2031,8 +2038,9 @@ mod tests {
                 PreparedTableMutation::Delete { predicates, .. } => {
                     assert_eq!(predicates.len(), CDC_MUTATION_BATCH_SIZE);
                 }
-                PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
-                PreparedTableMutation::Update { .. } => panic!("expected delete batch"),
+                PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
+                    panic!("expected delete batch")
+                }
             },
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
         }
@@ -2042,8 +2050,9 @@ mod tests {
                 PreparedTableMutation::Delete { predicates, .. } => {
                     assert_eq!(predicates.len(), 1);
                 }
-                PreparedTableMutation::Upsert(_) => panic!("expected delete batch"),
-                PreparedTableMutation::Update { .. } => panic!("expected delete batch"),
+                PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
+                    panic!("expected delete batch")
+                }
             },
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
         }

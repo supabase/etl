@@ -297,7 +297,10 @@ where
 
                         let table_id = insert.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
-                            (insert.replicated_table_schema.clone(), Vec::new())
+                            (
+                                insert.replicated_table_schema.as_replicated_table_schema().clone(),
+                                Vec::new(),
+                            )
                         });
                         entry.1.push(insert.table_row);
                     }
@@ -323,7 +326,10 @@ where
 
                         let table_id = update.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
-                            (update.replicated_table_schema.clone(), Vec::new())
+                            (
+                                update.replicated_table_schema.as_replicated_table_schema().clone(),
+                                Vec::new(),
+                            )
                         });
                         entry.1.push(table_row);
                     }
@@ -350,7 +356,10 @@ where
 
                         let table_id = delete.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
-                            (delete.replicated_table_schema.clone(), Vec::new())
+                            (
+                                delete.replicated_table_schema.as_replicated_table_schema().clone(),
+                                Vec::new(),
+                            )
                         });
                         entry.1.push(old_table_row);
                     }
