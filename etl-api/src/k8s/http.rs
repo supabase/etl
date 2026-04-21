@@ -1184,6 +1184,7 @@ fn get_restarted_at_annotation_value() -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::redundant_test_prefix)]
 mod tests {
     use etl_config::shared::{
         BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
@@ -1201,7 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn create_postgres_secret_json_fn() {
+    fn test_create_postgres_secret_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let secret_name = &create_postgres_secret_name(&prefix);
         let replicator_app_name = create_replicator_app_name(&prefix);
@@ -1219,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    fn create_bq_service_account_key_secret_json_fn() {
+    fn test_create_bq_service_account_key_secret_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let secret_name = &create_bq_secret_name(&prefix);
         let replicator_app_name = create_replicator_app_name(&prefix);
@@ -1237,7 +1238,7 @@ mod tests {
     }
 
     #[test]
-    fn create_iceberg_secret_json_fn() {
+    fn test_create_iceberg_secret_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let secret_name = &&create_iceberg_secret_name(&prefix);
         let replicator_app_name = create_replicator_app_name(&prefix);
@@ -1259,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn create_replicator_config_map_json_fn() {
+    fn test_create_replicator_config_map_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let replicator_config_map_name = create_replicator_config_map_name(&prefix);
         let replicator_app_name = create_replicator_app_name(&prefix);
@@ -1328,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn create_postgres_secret_env_var_json_fn() {
+    fn test_create_postgres_secret_env_var_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let postgres_secret_name = create_postgres_secret_name(&prefix);
 
@@ -1338,7 +1339,7 @@ mod tests {
     }
 
     #[test]
-    fn create_bq_secret_env_var_json_fn() {
+    fn test_create_bq_secret_env_var_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let bq_secret_name = create_bq_secret_name(&prefix);
 
@@ -1348,7 +1349,7 @@ mod tests {
     }
 
     #[test]
-    fn create_iceberg_catlog_token_env_var_json_fn() {
+    fn test_create_iceberg_catlog_token_env_var_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let iceberg_secret_name = create_iceberg_secret_name(&prefix);
 
@@ -1359,7 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn create_iceberg_s3_access_key_id_env_var_json_fn() {
+    fn test_create_iceberg_s3_access_key_id_env_var_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let iceberg_secret_name = create_iceberg_secret_name(&prefix);
 
@@ -1370,7 +1371,7 @@ mod tests {
     }
 
     #[test]
-    fn create_iceberg_s3_secret_access_key_env_var_json_fn() {
+    fn test_create_iceberg_s3_secret_access_key_env_var_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let iceberg_secret_name = create_iceberg_secret_name(&prefix);
 
@@ -1381,7 +1382,7 @@ mod tests {
     }
 
     #[test]
-    fn create_bq_container_environment_fn() {
+    fn test_create_bq_container_environment() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
@@ -1417,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn create_iceberg_container_environment_fn() {
+    fn test_create_iceberg_container_environment() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
@@ -1450,7 +1451,7 @@ mod tests {
     }
 
     #[test]
-    fn create_ducklake_container_environment() {
+    fn test_create_ducklake_container_environment() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
 
@@ -1483,7 +1484,7 @@ mod tests {
     }
 
     #[test]
-    fn create_node_selector() {
+    fn test_create_node_selector() {
         let node_selector = create_node_selector_json(&Environment::Dev);
         assert_json_snapshot!(node_selector);
 
@@ -1495,7 +1496,7 @@ mod tests {
     }
 
     #[test]
-    fn create_init_containers() {
+    fn test_create_init_containers() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
 
         let environment = Environment::Dev;
@@ -1515,7 +1516,7 @@ mod tests {
     }
 
     #[test]
-    fn create_volumes() {
+    fn test_create_volumes() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
 
         let environment = Environment::Dev;
@@ -1532,7 +1533,7 @@ mod tests {
     }
 
     #[test]
-    fn create_volume_mounts() {
+    fn test_create_volume_mounts() {
         let environment = Environment::Dev;
         let volume_mounts = create_volume_mounts_json(&environment);
         assert_json_snapshot!(volume_mounts);
@@ -1547,7 +1548,7 @@ mod tests {
     }
 
     #[test]
-    fn create_bq_replicator_stateful_set_json() {
+    fn test_create_bq_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
@@ -1650,7 +1651,7 @@ mod tests {
     }
 
     #[test]
-    fn create_iceberg_replicator_stateful_set_json() {
+    fn test_create_iceberg_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
@@ -1753,7 +1754,7 @@ mod tests {
     }
 
     #[test]
-    fn create_ducklake_replicator_stateful_set_json() {
+    fn test_create_ducklake_replicator_stateful_set_json() {
         let prefix = create_k8s_object_prefix(TENANT_ID, 42);
         let stateful_set_name = create_stateful_set_name(&prefix);
         let replicator_image = "ramsup/etl-replicator:2a41356af735f891de37d71c0e1a62864fe4630e";
