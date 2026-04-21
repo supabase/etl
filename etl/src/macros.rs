@@ -1,25 +1,26 @@
 //! Macros for ETL error handling.
 //!
-//! Provides convenience macros for creating and returning [`crate::error::EtlError`] instances with
-//! reduced boilerplate for common error handling patterns.
+//! Provides convenience macros for creating and returning
+//! [`crate::error::EtlError`] instances with reduced boilerplate for common
+//! error handling patterns.
 
 /// Creates an [`crate::error::EtlError`] from error kind and description.
 ///
-/// This macro provides a concise way to create [`crate::error::EtlError`] instances with
-/// static descriptions, optional dynamic detail (use `detail =` to move an owned [`String`]),
-/// and optional source errors.
+/// This macro provides a concise way to create [`crate::error::EtlError`]
+/// instances with static descriptions, optional dynamic detail (use `detail =`
+/// to move an owned [`String`]), and optional source errors.
 #[macro_export]
 macro_rules! etl_error {
     ($kind:expr, $desc:expr) => {
         $crate::error::EtlError::from(($kind, $desc))
     };
-    ($kind:expr, $desc:expr, source: $source:expr) => {
+    ($kind:expr, $desc:expr,source: $source:expr) => {
         $crate::error::EtlError::from(($kind, $desc)).with_source($source)
     };
     ($kind:expr, $desc:expr, $detail:expr) => {
         $crate::error::EtlError::from(($kind, $desc, $detail.to_string()))
     };
-    ($kind:expr, $desc:expr, $detail:expr, source: $source:expr) => {
+    ($kind:expr, $desc:expr, $detail:expr,source: $source:expr) => {
         $crate::error::EtlError::from(($kind, $desc, $detail.to_string())).with_source($source)
     };
 }

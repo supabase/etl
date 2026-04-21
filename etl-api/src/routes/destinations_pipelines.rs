@@ -1,3 +1,5 @@
+use std::ops::DerefMut;
+
 use actix_web::{
     HttpRequest, HttpResponse, Responder, ResponseError, delete,
     http::{StatusCode, header::ContentType},
@@ -6,26 +8,36 @@ use actix_web::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::ops::DerefMut;
 use thiserror::Error;
 use utoipa::ToSchema;
 
-use super::{ErrorMessage, TenantIdError, destinations::DestinationError, extract_tenant_id};
-use crate::config::ApiConfig;
-use crate::configs::destination::FullApiDestinationConfig;
-use crate::configs::encryption::EncryptionKey;
-use crate::configs::pipeline::FullApiPipelineConfig;
-use crate::db;
-use crate::db::destinations::{DestinationsDbError, destination_exists};
-use crate::db::destinations_pipelines::DestinationPipelinesDbError;
-use crate::db::images::ImagesDbError;
-use crate::db::pipelines::{
-    MAX_PIPELINES_PER_TENANT, PipelinesDbError, count_pipelines_for_tenant, read_pipeline,
+use super::{ErrorMessage, TenantIdError, extract_tenant_id};
+use crate::{
+    config::ApiConfig,
+    configs::{
+        destination::FullApiDestinationConfig, encryption::EncryptionKey,
+        pipeline::FullApiPipelineConfig,
+    },
+    db,
+    db::{
+        connect_to_source_database_from_api,
+        destinations::{DestinationsDbError, destination_exists},
+        destinations_pipelines::DestinationPipelinesDbError,
+        images::ImagesDbError,
+        pipelines::{
+            MAX_PIPELINES_PER_TENANT, PipelinesDbError, count_pipelines_for_tenant,
+            delete_pipeline_api_and_source_state, delete_pipeline_replication_slots, read_pipeline,
+            read_pipeline_for_deletion, read_pipelines_for_destination_for_deletion,
+        },
+        sources::SourcesDbError,
+    },
+    feature_flags::{FeatureFlagsClient, get_max_pipelines_per_tenant},
+    k8s::{
+        K8sClient, TrustedRootCertsCache, TrustedRootCertsError,
+        core::{K8sCoreError, is_replicator_active},
+    },
+    validation::ValidationError,
 };
-use crate::db::sources::SourcesDbError;
-use crate::feature_flags::get_max_pipelines_per_tenant;
-use crate::k8s::{TrustedRootCertsCache, TrustedRootCertsError};
-use crate::validation::ValidationError;
 
 #[derive(Debug, Error)]
 enum DestinationPipelineError {
@@ -46,9 +58,6 @@ enum DestinationPipelineError {
 
     #[error("The pipeline with id {0} is not connected to destination with id {1}")]
     PipelineDestinationMismatch(i64, i64),
-
-    #[error(transparent)]
-    Destination(#[from] DestinationError),
 
     #[error("A pipeline already exists for this source and destination combination")]
     DuplicatePipeline,
@@ -79,6 +88,12 @@ enum DestinationPipelineError {
 
     #[error(transparent)]
     Validation(#[from] ValidationError),
+
+    #[error(transparent)]
+    K8sCore(#[from] K8sCoreError),
+
+    #[error("The pipeline with id {0} is active. Stop it before deleting it.")]
+    ActivePipeline(i64),
 }
 
 impl From<DestinationPipelinesDbError> for DestinationPipelineError {
@@ -106,7 +121,8 @@ impl DestinationPipelineError {
             | DestinationPipelineError::SourcesDb(SourcesDbError::Database(_))
             | DestinationPipelineError::PipelinesDb(PipelinesDbError::Database(_))
             | DestinationPipelineError::Database(_)
-            | DestinationPipelineError::Validation(_) => "internal server error".to_string(),
+            | DestinationPipelineError::Validation(_)
+            | DestinationPipelineError::K8sCore(_) => "internal server error".to_string(),
             // Every other message is ok, as they do not divulge sensitive information.
             e => e.to_string(),
         }
@@ -116,7 +132,6 @@ impl DestinationPipelineError {
 impl ResponseError for DestinationPipelineError {
     fn status_code(&self) -> StatusCode {
         match self {
-            DestinationPipelineError::Destination(e) => e.status_code(),
             DestinationPipelineError::NoDefaultImageFound
             | DestinationPipelineError::DestinationPipelinesDb(_)
             | DestinationPipelineError::DestinationsDb(_)
@@ -124,6 +139,7 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::SourcesDb(_)
             | DestinationPipelineError::PipelinesDb(_)
             | DestinationPipelineError::Database(_)
+            | DestinationPipelineError::K8sCore(_)
             | DestinationPipelineError::TrustedRootCerts(_)
             | DestinationPipelineError::Validation(_) => StatusCode::INTERNAL_SERVER_ERROR,
             DestinationPipelineError::TenantId(_)
@@ -133,7 +149,8 @@ impl ResponseError for DestinationPipelineError {
             | DestinationPipelineError::PipelineDestinationMismatch(_, _) => {
                 StatusCode::BAD_REQUEST
             }
-            DestinationPipelineError::DuplicatePipeline => StatusCode::CONFLICT,
+            DestinationPipelineError::DuplicatePipeline
+            | DestinationPipelineError::ActivePipeline(_) => StatusCode::CONFLICT,
             DestinationPipelineError::PipelineLimitReached { .. } => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
@@ -141,14 +158,10 @@ impl ResponseError for DestinationPipelineError {
     }
 
     fn error_response(&self) -> HttpResponse {
-        let error_message = ErrorMessage {
-            error: self.to_message(),
-        };
+        let error_message = ErrorMessage { error: self.to_message() };
         let body =
             serde_json::to_string(&error_message).expect("failed to serialize error message");
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::json())
-            .body(body)
+        HttpResponse::build(self.status_code()).insert_header(ContentType::json()).body(body)
     }
 }
 
@@ -186,6 +199,16 @@ pub struct UpdateDestinationPipelineRequest {
     pub pipeline_config: FullApiPipelineConfig,
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DeleteDestinationPipelineResponse {
+    #[schema(example = 1)]
+    pub destination_id: i64,
+    #[schema(example = 2)]
+    pub pipeline_id: i64,
+    #[schema(example = true)]
+    pub destination_deleted: bool,
+}
+
 #[utoipa::path(
     summary = "Create destination and pipeline",
     description = "Creates a destination and a pipeline linked to the specified source.",
@@ -207,7 +230,7 @@ pub async fn create_destination_and_pipeline(
     pool: Data<PgPool>,
     destination_and_pipeline: Json<CreateDestinationPipelineRequest>,
     encryption_key: Data<EncryptionKey>,
-    feature_flags_client: Option<Data<configcat::Client>>,
+    feature_flags_client: Option<Data<FeatureFlagsClient>>,
 ) -> Result<impl Responder, DestinationPipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let destination_and_pipeline = destination_and_pipeline.into_inner();
@@ -222,9 +245,7 @@ pub async fn create_destination_and_pipeline(
         &encryption_key,
     )
     .await?
-    .ok_or(DestinationPipelineError::SourceNotFound(
-        destination_and_pipeline.source_id,
-    ))?;
+    .ok_or(DestinationPipelineError::SourceNotFound(destination_and_pipeline.source_id))?;
 
     let max_pipelines = get_max_pipelines_per_tenant(
         feature_flags_client.as_ref(),
@@ -234,9 +255,7 @@ pub async fn create_destination_and_pipeline(
     .await;
     let pipeline_count = count_pipelines_for_tenant(txn.deref_mut(), tenant_id).await?;
     if pipeline_count >= max_pipelines {
-        return Err(DestinationPipelineError::PipelineLimitReached {
-            limit: max_pipelines,
-        });
+        return Err(DestinationPipelineError::PipelineLimitReached { limit: max_pipelines });
     }
 
     let image = db::images::read_default_image(&**pool)
@@ -258,10 +277,7 @@ pub async fn create_destination_and_pipeline(
 
     txn.commit().await?;
 
-    let response = CreateDestinationPipelineResponse {
-        destination_id,
-        pipeline_id,
-    };
+    let response = CreateDestinationPipelineResponse { destination_id, pipeline_id };
 
     Ok(Json(response))
 }
@@ -305,14 +321,10 @@ pub async fn update_destination_and_pipeline(
         &encryption_key,
     )
     .await?
-    .ok_or(DestinationPipelineError::SourceNotFound(
-        destination_and_pipeline.source_id,
-    ))?;
+    .ok_or(DestinationPipelineError::SourceNotFound(destination_and_pipeline.source_id))?;
 
     if !destination_exists(txn.deref_mut(), tenant_id, destination_id).await? {
-        return Err(DestinationPipelineError::DestinationNotFound(
-            destination_id,
-        ));
+        return Err(DestinationPipelineError::DestinationNotFound(destination_id));
     }
 
     let pipeline = read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
@@ -360,7 +372,8 @@ pub async fn update_destination_and_pipeline(
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Destination and pipeline deleted successfully"),
+        (status = 200, description = "Pipeline deleted successfully, with destination deletion status included in the response body", body = DeleteDestinationPipelineResponse),
+        (status = 409, description = "Pipeline is active", body = ErrorMessage),
         (status = 404, description = "Pipeline or destination not found", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
@@ -373,15 +386,14 @@ pub async fn delete_destination_and_pipeline(
     pool: Data<PgPool>,
     api_config: Data<ApiConfig>,
     encryption_key: Data<EncryptionKey>,
+    k8s_client: Data<dyn K8sClient>,
     trusted_root_certs_cache: Data<TrustedRootCertsCache>,
     destination_and_pipeline_ids: Path<(i64, i64)>,
 ) -> Result<impl Responder, DestinationPipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let (destination_id, pipeline_id) = destination_and_pipeline_ids.into_inner();
 
-    let mut txn = pool.begin().await?;
-
-    let pipeline = read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+    let pipeline = read_pipeline_for_deletion(&**pool, tenant_id, pipeline_id)
         .await?
         .ok_or(DestinationPipelineError::PipelineNotFound(pipeline_id))?;
 
@@ -392,38 +404,52 @@ pub async fn delete_destination_and_pipeline(
         ));
     }
 
-    let destination = db::destinations::read_destination(
-        txn.deref_mut(),
-        tenant_id,
-        destination_id,
-        &encryption_key,
-    )
-    .await?
-    .ok_or(DestinationPipelineError::DestinationNotFound(
-        destination_id,
-    ))?;
+    if is_replicator_active(k8s_client.as_ref(), tenant_id, pipeline.replicator_id).await? {
+        return Err(DestinationPipelineError::ActivePipeline(pipeline.id));
+    }
 
-    let source = db::sources::read_source(
-        txn.deref_mut(),
+    let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
+    let source = db::sources::read_source_connection(
+        &**pool,
         tenant_id,
         pipeline.source_id,
         &encryption_key,
     )
     .await?
     .ok_or(DestinationPipelineError::SourceNotFound(pipeline.source_id))?;
-
-    let tls_config = trusted_root_certs_cache
-        .get_tls_config(api_config.source.tls_enabled)
-        .await?;
-    db::pipelines::delete_pipeline_cascading(
-        txn,
+    let source_pool =
+        connect_to_source_database_from_api(&source.config.into_connection_config(tls_config))
+            .await?;
+    let mut api_txn = pool.begin().await?;
+    let mut source_txn = source_pool.begin().await?;
+    delete_pipeline_api_and_source_state(
+        api_txn.deref_mut(),
+        source_txn.deref_mut(),
         tenant_id,
         &pipeline,
-        &source,
-        Some(&destination),
-        tls_config,
     )
     .await?;
+    let remaining_pipelines =
+        read_pipelines_for_destination_for_deletion(api_txn.deref_mut(), tenant_id, destination_id)
+            .await?;
+    let destination_deleted = if remaining_pipelines.is_empty() {
+        db::destinations::delete_destination(api_txn.deref_mut(), tenant_id, destination_id)
+            .await?
+            .ok_or(DestinationPipelineError::DestinationNotFound(destination_id))?;
+        true
+    } else {
+        false
+    };
+    // Commit the API transaction first. If the source transaction committed first
+    // and the API commit failed afterwards, the API database could still
+    // reference pipeline state that no longer exists in the source database.
+    api_txn.commit().await?;
+    source_txn.commit().await?;
+    delete_pipeline_replication_slots(&source_pool, pipeline.id).await?;
 
-    Ok(HttpResponse::Ok().finish())
+    Ok(Json(DeleteDestinationPipelineResponse {
+        destination_id,
+        pipeline_id: pipeline.id,
+        destination_deleted,
+    }))
 }

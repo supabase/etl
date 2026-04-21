@@ -1,30 +1,38 @@
-use etl_postgres::types::ColumnSchema;
-use etl_postgres::types::POSTGRES_EPOCH;
-use futures::{Stream, ready};
-use pin_project_lite::pin_project;
-use postgres_replication::LogicalReplicationStream;
-use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
-use std::fmt::{Display, Formatter};
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
-use tokio_postgres::CopyOutStream;
-use tokio_postgres::types::PgLsn;
-use tracing::debug;
-
-use crate::conversions::table_row::parse_table_row_from_postgres_copy_bytes;
-use crate::error::{ErrorKind, EtlResult};
-use crate::etl_error;
-use crate::metrics::{
-    ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, ETL_STATUS_UPDATES_SKIPPED_TOTAL,
-    ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, PIPELINE_ID_LABEL,
-    STATUS_UPDATE_TYPE_LABEL,
+use std::{
+    fmt::{Display, Formatter},
+    pin::Pin,
+    task::{Context, Poll},
+    time::{Duration, Instant},
 };
-use crate::types::{PipelineId, TableRow};
-use metrics::{counter, histogram};
 
-/// The amount of milliseconds between two consecutive status updates in case no forced update
-/// is requested.
+use etl_postgres::types::{ColumnSchema, POSTGRES_EPOCH};
+use futures::{Stream, ready};
+use metrics::{counter, histogram};
+use pin_project_lite::pin_project;
+use postgres_replication::{
+    LogicalReplicationStream,
+    protocol::{LogicalReplicationMessage, ReplicationMessage},
+};
+use tokio_postgres::{CopyOutStream, types::PgLsn};
+use tracing::debug;
+#[cfg(feature = "failpoints")]
+use tracing::warn;
+
+#[cfg(feature = "failpoints")]
+use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
+use crate::{
+    conversions::parse_table_row_from_postgres_copy_bytes,
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    metrics::{
+        ETL_BYTES_PROCESSED_TOTAL, ETL_ROW_SIZE_BYTES, ETL_STATUS_UPDATES_SKIPPED_TOTAL,
+        ETL_STATUS_UPDATES_TOTAL, EVENT_TYPE_LABEL, FORCED_LABEL, STATUS_UPDATE_TYPE_LABEL,
+    },
+    types::TableRow,
+};
+
+/// The amount of milliseconds between two consecutive status updates in case no
+/// forced update is requested.
 const STATUS_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 
 pin_project! {
@@ -34,38 +42,36 @@ pin_project! {
     /// using the provided column schemas. The conversion process handles both text and
     /// binary format data.
     #[must_use = "streams do nothing unless polled"]
-    pub struct TableCopyStream<'a> {
+    pub(crate) struct TableCopyStream<I> {
         #[pin]
         stream: CopyOutStream,
-        column_schemas: &'a [ColumnSchema],
-        pipeline_id: PipelineId,
+        column_schemas: I,
     }
 }
 
-impl<'a> TableCopyStream<'a> {
-    /// Creates a new [`TableCopyStream`] from a [`CopyOutStream`] and column schemas.
+impl<I> TableCopyStream<I> {
+    /// Creates a new [`TableCopyStream`] from a [`CopyOutStream`] and column
+    /// schemas.
     ///
-    /// The column schemas are used to convert the raw Postgres data into [`TableRow`]s.
-    pub fn wrap(
-        stream: CopyOutStream,
-        column_schemas: &'a [ColumnSchema],
-        pipeline_id: PipelineId,
-    ) -> Self {
-        Self {
-            stream,
-            column_schemas,
-            pipeline_id,
-        }
+    /// The column schemas are used to convert the raw Postgres data into
+    /// [`TableRow`]s.
+    pub(crate) fn wrap(stream: CopyOutStream, column_schemas: I) -> Self {
+        Self { stream, column_schemas }
     }
 }
 
-impl<'a> Stream for TableCopyStream<'a> {
+impl<'a, I> Stream for TableCopyStream<I>
+where
+    I: ExactSizeIterator<Item = &'a ColumnSchema> + Clone,
+{
     type Item = EtlResult<TableRow>;
 
-    /// Polls the stream for the next converted table row with comprehensive error handling.
+    /// Polls the stream for the next converted table row with comprehensive
+    /// error handling.
     ///
-    /// This method handles the complex process of converting raw Postgres COPY data into
-    /// structured [`TableRow`] objects, with detailed error reporting for various failure modes.
+    /// This method handles the complex process of converting raw Postgres COPY
+    /// data into structured [`TableRow`] objects, with detailed error
+    /// reporting for various failure modes.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
@@ -74,21 +80,15 @@ impl<'a> Stream for TableCopyStream<'a> {
             Some(Ok(row)) => {
                 let row_size_bytes = row.len() as u64;
 
-                counter!(
-                    ETL_BYTES_PROCESSED_TOTAL,
-                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
-                    EVENT_TYPE_LABEL => "copy"
-                )
-                .increment(row_size_bytes);
+                counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "copy")
+                    .increment(row_size_bytes);
 
-                histogram!(
-                    ETL_ROW_SIZE_BYTES,
-                    PIPELINE_ID_LABEL => this.pipeline_id.to_string(),
-                    EVENT_TYPE_LABEL => "copy"
-                )
-                .record(row_size_bytes as f64);
+                histogram!(ETL_ROW_SIZE_BYTES, EVENT_TYPE_LABEL => "copy")
+                    .record(row_size_bytes as f64);
 
-                match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas) {
+                // CONVERSION PHASE: Transform raw bytes into structured TableRow
+                // This is where most errors occur due to data format or type issues
+                match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.clone()) {
                     Ok(row) => Poll::Ready(Some(Ok(row))),
                     Err(err) => Poll::Ready(Some(Err(err))),
                 }
@@ -101,20 +101,25 @@ impl<'a> Stream for TableCopyStream<'a> {
     }
 }
 
-/// The status update type when sending a status update message back to Postgres.
+/// The status update type when sending a status update message back to
+/// Postgres.
 #[derive(Debug)]
-pub enum StatusUpdateType {
+pub(crate) enum StatusUpdateType {
     /// Represents an update in response to a keep alive from Postgres.
     KeepAlive,
-    /// Represents a periodic heartbeat sent while the apply loop is otherwise idle.
+    /// Represents a periodic heartbeat sent while the apply loop is otherwise
+    /// idle.
     PeriodicKeepAlive,
-    /// Represents an update before shutdown that requires acknowledgement from Postgres.
+    /// Represents an update before shutdown that requires acknowledgement from
+    /// Postgres.
     ShutdownFlush,
 }
 
 impl StatusUpdateType {
-    /// Returns `true` whether this status update type requires a reply from Postgres, `false` otherwise.
+    /// Returns `true` whether this status update type requires a reply from
+    /// Postgres, `false` otherwise.
     fn request_reply(&self) -> bool {
+        #[allow(clippy::match_same_arms)]
         match self {
             Self::KeepAlive => false,
             Self::PeriodicKeepAlive => true,
@@ -136,82 +141,86 @@ impl Display for StatusUpdateType {
 pin_project! {
     /// A stream that yields replication events from a Postgres logical replication stream and keeps
     /// track of last sent status updates.
-pub struct EventsStream {
+pub(crate) struct EventsStream {
         #[pin]
         stream: LogicalReplicationStream,
         last_update: Option<Instant>,
         last_write_lsn: Option<PgLsn>,
         last_flush_lsn: Option<PgLsn>,
-        pipeline_id: PipelineId,
     }
 }
 
 impl EventsStream {
     /// Creates a new [`EventsStream`] from a [`LogicalReplicationStream`].
-    pub fn wrap(stream: LogicalReplicationStream, pipeline_id: PipelineId) -> Self {
-        Self {
-            stream,
-            last_update: None,
-            last_write_lsn: None,
-            last_flush_lsn: None,
-            pipeline_id,
-        }
+    pub(crate) fn wrap(stream: LogicalReplicationStream) -> Self {
+        Self { stream, last_update: None, last_write_lsn: None, last_flush_lsn: None }
     }
 
     /// Sends a status update to the Postgres server.
     ///
-    /// This method implements a status update logic that balances Postgres's need for
-    /// progress information with network efficiency and system performance. It handles multiple
-    /// error scenarios and edge cases related to time synchronization and network communication.
-    pub async fn send_status_update(
+    /// This method implements a status update logic that balances Postgres's
+    /// need for progress information with network efficiency and system
+    /// performance. It handles multiple error scenarios and edge cases
+    /// related to time synchronization and network communication.
+    pub(crate) async fn send_status_update(
         self: Pin<&mut Self>,
         mut write_lsn: PgLsn,
         mut flush_lsn: PgLsn,
         force: bool,
         status_update_type: StatusUpdateType,
     ) -> EtlResult<()> {
-        let this = self.project();
-        let pipeline_id = *this.pipeline_id;
+        // If the failpoint is active, we do not send any status update. This is useful
+        // for testing the system when we want to check what happens when no
+        // status updates are sent.
+        #[cfg(feature = "failpoints")]
+        if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
+            warn!("not sending status update due to active failpoint");
 
-        // If the new write lsn is less than the last one, we can safely ignore it, since we only want
-        // to report monotonically increasing values.
+            return Ok(());
+        }
+
+        let this = self.project();
+        // If the new write lsn is less than the last one, we can safely ignore it,
+        // since we only want to report monotonically increasing values.
         if let Some(last_write_lsn) = this.last_write_lsn
             && write_lsn < *last_write_lsn
         {
             write_lsn = *last_write_lsn;
         }
 
-        // If the new flush lsn is less than the last one, we can safely ignore it, since we only want
-        // to report monotonically increasing values.
+        // If the new flush lsn is less than the last one, we can safely ignore it,
+        // since we only want to report monotonically increasing values.
         if let Some(last_flush_lsn) = this.last_flush_lsn
             && flush_lsn < *last_flush_lsn
         {
             flush_lsn = *last_flush_lsn;
         }
 
-        // This invariant is important since if `flush_lsn` becomes bigger, it means that there
-        // was a problem during replication.
+        // This invariant is important since if `flush_lsn` becomes bigger, it means
+        // that there was a problem during replication.
         debug_assert!(write_lsn >= flush_lsn);
 
-        // If we are not forced to send an update, we can willingly do so based on a set of conditions.
+        // If we are not forced to send an update, we can willingly do so based on a set
+        // of conditions.
         if !force
             && let (Some(last_update), Some(last_flush)) =
                 (this.last_update.as_mut(), this.last_flush_lsn.as_mut())
         {
-            // The reason for only checking `flush_lsn` and `apply_lsn` is that if we are not
-            // forced to send a status update to Postgres (when reply is requested), we want to just
-            // notify it in case we actually durably flushed and persisted events, which is signaled via
+            // The reason for only checking `flush_lsn` and `apply_lsn` is that if we are
+            // not forced to send a status update to Postgres (when reply is
+            // requested), we want to just notify it in case we actually durably
+            // flushed and persisted events, which is signaled via
             // the two aforementioned fields. Postgres mostly uses the 'write_lsn' field for
-            // tracking what was received by the replication client but not what the client actually
-            // safely stored.
+            // tracking what was received by the replication client but not what the client
+            // actually safely stored.
             //
-            // If we were to check `write_lsn` too, we would end up sending updates more frequently
-            // when they are not requested, simply because the `write_lsn` is updated for every
-            // incoming message in the apply loop.
+            // If we were to check `write_lsn` too, we would end up sending updates more
+            // frequently when they are not requested, simply because the
+            // `write_lsn` is updated for every incoming message in the apply
+            // loop.
             if flush_lsn == *last_flush && last_update.elapsed() < STATUS_UPDATE_INTERVAL {
                 counter!(
                     ETL_STATUS_UPDATES_SKIPPED_TOTAL,
-                    PIPELINE_ID_LABEL => pipeline_id.to_string(),
                     STATUS_UPDATE_TYPE_LABEL => status_update_type.to_string(),
                 )
                 .increment(1);
@@ -227,22 +236,19 @@ impl EventsStream {
             }
         }
 
-        // The client's system clock at the time of transmission, as microseconds since midnight
-        // on 2000-01-01.
+        // The client's system clock at the time of transmission, as microseconds since
+        // midnight on 2000-01-01.
         let ts = POSTGRES_EPOCH
             .elapsed()
             .map_err(|err| {
-                etl_error!(
-                    ErrorKind::InvalidState,
-                    "Invalid PostgreSQL epoch",
-                    err.to_string()
-                )
+                etl_error!(ErrorKind::InvalidState, "Invalid PostgreSQL epoch", err.to_string())
             })?
             .as_micros() as i64;
 
-        // We will send the `flush_lsn` as `apply_lsn` since in our case, we don't distinguish between
-        // them as Postgres does. The reason is that `apply_lsn` is used to mark when an LSN is both
-        // durable and visible, but from ETL's perspective we are fine with just it being durable, which
+        // We will send the `flush_lsn` as `apply_lsn` since in our case, we don't
+        // distinguish between them as Postgres does. The reason is that
+        // `apply_lsn` is used to mark when an LSN is both durable and visible,
+        // but from ETL's perspective we are fine with just it being durable, which
         // is marked via the `flush_lsn`.
         let request_reply: u8 = status_update_type.request_reply().into();
         this.stream
@@ -251,7 +257,6 @@ impl EventsStream {
 
         counter!(
             ETL_STATUS_UPDATES_TOTAL,
-            PIPELINE_ID_LABEL => pipeline_id.to_string(),
             FORCED_LABEL => force.to_string(),
             STATUS_UPDATE_TYPE_LABEL => status_update_type.to_string(),
         )

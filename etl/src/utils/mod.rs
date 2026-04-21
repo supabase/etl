@@ -1,1 +1,3 @@
-pub mod tokio;
+mod tokio;
+
+pub(crate) use tokio::MakeRustlsConnect;

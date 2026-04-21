@@ -1,31 +1,32 @@
-#![cfg(feature = "ducklake")]
-
 //! End-to-end integration tests for DuckLake using a real ETL [`Pipeline`].
 //!
 //! These tests use a local DuckDB-backed DuckLake catalog and verify the final
 //! table contents by querying DuckLake directly through DuckDB.
 
+use std::path::{Path, PathBuf};
+
 use duckdb::Connection;
-use etl::state::table::TableReplicationPhaseType;
-use etl::test_utils::database::spawn_source_database;
-use etl::test_utils::notifying_store::NotifyingStore;
-use etl::test_utils::pipeline::create_pipeline;
-use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
-use etl::types::{EventType, PipelineId};
+use etl::{
+    state::table::TableReplicationPhaseType,
+    test_utils::{
+        database::spawn_source_database,
+        notifying_store::NotifyingStore,
+        pipeline::create_pipeline,
+        test_destination_wrapper::TestDestinationWrapper,
+        test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
+    },
+    types::{EventType, PipelineId},
+};
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
 use rand::random;
-use std::path::{Path, PathBuf};
 use url::Url;
 
 use crate::support::ducklake::{ducklake_load_sql, open_verification_connection};
 
-mod support;
-
-/// Creates a persistent temp directory named after the test and prints its path.
-/// Returns the directory path kept on disk after the test completes.
+/// Creates a persistent temp directory named after the test and prints its
+/// path. Returns the directory path kept on disk after the test completes.
 fn make_test_dir(test_name: &str) -> PathBuf {
     let dir = tempfile::Builder::new()
         .prefix(&format!("etl_ducklake_{test_name}_"))
@@ -33,10 +34,7 @@ fn make_test_dir(test_name: &str) -> PathBuf {
         .expect("failed to create temp dir")
         .keep();
 
-    println!(
-        "[{test_name}] catalog : {}",
-        dir.join("catalog.ducklake").display()
-    );
+    println!("[{test_name}] catalog : {}", dir.join("catalog.ducklake").display());
     println!("[{test_name}] data    : {}", dir.join("data").display());
 
     dir
@@ -58,8 +56,7 @@ fn make_lake_urls(test_name: &str) -> (Url, Url) {
 fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     let conn = open_verification_connection();
     conn.execute_batch(&format!(
-        "{} \
-         ATTACH {} AS {} (DATA_PATH {});",
+        "{} ATTACH {} AS {} (DATA_PATH {});",
         ducklake_load_sql(),
         quote_literal(&format!("ducklake:{}", catalog.as_str())),
         quote_identifier("lake"),
@@ -70,7 +67,8 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     conn
 }
 
-/// Forces DuckLake to checkpoint catalog metadata before cross-connection verification.
+/// Forces DuckLake to checkpoint catalog metadata before cross-connection
+/// verification.
 ///
 /// These end-to-end tests shut the destination down and then attach a fresh
 /// DuckDB connection to verify the final lake state. Without an explicit
@@ -80,8 +78,7 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
 /// durable state visible to the verification connection deterministically.
 fn checkpoint_lake(catalog: &Url, data: &Url) {
     let conn = open_lake_conn(catalog, data);
-    conn.execute_batch("CHECKPOINT")
-        .expect("failed to checkpoint DuckLake catalog");
+    conn.execute_batch("CHECKPOINT").expect("failed to checkpoint DuckLake catalog");
 }
 
 fn query_user_rows(conn: &Connection, table_name: &str) -> Vec<(i64, String, i32)> {
@@ -210,10 +207,7 @@ async fn table_copy_and_streaming_with_restart() {
     );
     assert_eq!(
         query_order_rows(&conn, &orders_table_name),
-        vec![
-            (1, "description_1".to_string()),
-            (2, "description_2".to_string()),
-        ]
+        vec![(1, "description_1".to_string()), (2, "description_2".to_string()),]
     );
     drop(conn);
 
@@ -228,9 +222,7 @@ async fn table_copy_and_streaming_with_restart() {
 
     pipeline.start().await.unwrap();
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 4)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
 
     insert_mock_data(
         &mut database,
@@ -300,9 +292,7 @@ async fn table_insert_update_delete() {
     pipeline.start().await.unwrap();
     users_ready.notified().await;
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .insert_values(
@@ -319,10 +309,7 @@ async fn table_insert_update_delete() {
     checkpoint_lake(&catalog_url, &data_url);
 
     let conn = open_lake_conn(&catalog_url, &data_url);
-    assert_eq!(
-        query_user_rows(&conn, &users_table_name),
-        vec![(1, "user_1".to_string(), 1)]
-    );
+    assert_eq!(query_user_rows(&conn, &users_table_name), vec![(1, "user_1".to_string(), 1)]);
     drop(conn);
 
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -336,9 +323,7 @@ async fn table_insert_update_delete() {
 
     pipeline.start().await.unwrap();
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Update, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
 
     database
         .update_values(
@@ -355,10 +340,7 @@ async fn table_insert_update_delete() {
     checkpoint_lake(&catalog_url, &data_url);
 
     let conn = open_lake_conn(&catalog_url, &data_url);
-    assert_eq!(
-        query_user_rows(&conn, &users_table_name),
-        vec![(1, "user_10".to_string(), 10)]
-    );
+    assert_eq!(query_user_rows(&conn, &users_table_name), vec![(1, "user_10".to_string(), 10)]);
     drop(conn);
 
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -372,17 +354,10 @@ async fn table_insert_update_delete() {
 
     pipeline.start().await.unwrap();
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Delete, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
 
     database
-        .delete_values(
-            database_schema.users_schema().name.clone(),
-            &["id"],
-            &["1"],
-            "",
-        )
+        .delete_values(database_schema.users_schema().name.clone(), &["id"], &["1"], "")
         .await
         .unwrap();
 
@@ -439,9 +414,7 @@ async fn cdc_streaming_with_truncate() {
     users_ready.notified().await;
     orders_ready.notified().await;
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 4)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
 
     insert_mock_data(
         &mut database,
@@ -455,25 +428,15 @@ async fn cdc_streaming_with_truncate() {
     event_notify.notified().await;
     destination.clear_events().await;
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Truncate, 2)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Truncate, 2)]).await;
 
-    database
-        .truncate_table(database_schema.users_schema().name.clone())
-        .await
-        .unwrap();
-    database
-        .truncate_table(database_schema.orders_schema().name.clone())
-        .await
-        .unwrap();
+    database.truncate_table(database_schema.users_schema().name.clone()).await.unwrap();
+    database.truncate_table(database_schema.orders_schema().name.clone()).await.unwrap();
 
     event_notify.notified().await;
     destination.clear_events().await;
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 4)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
 
     insert_mock_data(
         &mut database,
@@ -497,9 +460,6 @@ async fn cdc_streaming_with_truncate() {
     );
     assert_eq!(
         query_order_rows(&conn, &orders_table_name),
-        vec![
-            (3, "description_3".to_string()),
-            (4, "description_4".to_string()),
-        ]
+        vec![(3, "description_3".to_string()), (4, "description_4".to_string()),]
     );
 }

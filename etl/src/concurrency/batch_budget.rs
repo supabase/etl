@@ -1,20 +1,26 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use metrics::gauge;
 use tracing::debug;
 
-use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::metrics::{ETL_IDEAL_BATCH_SIZE_BYTES, PIPELINE_ID_LABEL};
-use crate::types::PipelineId;
+use crate::{
+    concurrency::memory_monitor::MemoryMonitor, metrics::ETL_IDEAL_BATCH_SIZE_BYTES,
+    types::PipelineId,
+};
 
 /// Refresh interval for cached batch budget reads.
 const CACHED_BATCH_BUDGET_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Computes per-stream batch byte budgets from current memory and active stream load.
+/// Computes per-stream batch byte budgets from current memory and active stream
+/// load.
 #[derive(Debug, Clone)]
-pub struct BatchBudgetController {
+pub(crate) struct BatchBudgetController {
     pipeline_id: PipelineId,
     memory_monitor: MemoryMonitor,
     memory_budget_ratio: f64,
@@ -23,7 +29,7 @@ pub struct BatchBudgetController {
 
 impl BatchBudgetController {
     /// Creates a new [`BatchBudgetController`] instance.
-    pub fn new(
+    pub(crate) fn new(
         pipeline_id: PipelineId,
         memory_monitor: MemoryMonitor,
         memory_budget_ratio: f32,
@@ -36,19 +42,18 @@ impl BatchBudgetController {
         }
     }
 
-    /// Registers active stream load units and returns a guard that unregisters on drop.
-    pub fn register_stream_load(&self, units: usize) -> ActiveStreamsGuard {
+    /// Registers active stream load units and returns a guard that unregisters
+    /// on drop.
+    pub(crate) fn register_stream_load(&self, units: usize) -> ActiveStreamsGuard {
         let units = units.max(1);
         self.active_streams.fetch_add(units, Ordering::Relaxed);
 
-        ActiveStreamsGuard {
-            active_streams: self.active_streams.clone(),
-            units,
-        }
+        ActiveStreamsGuard { active_streams: self.active_streams.clone(), units }
     }
 
-    /// Returns a cached budget reader that refreshes from the controller every 100ms.
-    pub fn cached(&self) -> CachedBatchBudget {
+    /// Returns a cached budget reader that refreshes from the controller every
+    /// 100ms.
+    pub(crate) fn cached(&self) -> CachedBatchBudget {
         CachedBatchBudget::new(self.clone())
     }
 
@@ -57,10 +62,11 @@ impl BatchBudgetController {
     /// The budget is computed as:
     /// `(total_memory_bytes * target_ratio) / active_streams`.
     ///
-    /// This intentionally subdivides the configured memory percentage across concurrently active
-    /// streams, leaving headroom for other allocations in the process, such as destination batch
-    /// construction and serialization buffers.
-    pub fn ideal_batch_size_bytes(&self) -> usize {
+    /// This intentionally subdivides the configured memory percentage across
+    /// concurrently active streams, leaving headroom for other allocations
+    /// in the process, such as destination batch construction and
+    /// serialization buffers.
+    pub(crate) fn ideal_batch_size_bytes(&self) -> usize {
         let total_memory_bytes = self.memory_monitor.total_memory_bytes() as f64;
         let target_ratio = self.memory_budget_ratio;
         let target_bytes = (total_memory_bytes * target_ratio).max(1.0) as usize;
@@ -77,11 +83,7 @@ impl BatchBudgetController {
             "computed ideal batch budget size"
         );
 
-        gauge!(
-            ETL_IDEAL_BATCH_SIZE_BYTES,
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string()
-        )
-        .set(ideal_batch_size_bytes as f64);
+        gauge!(ETL_IDEAL_BATCH_SIZE_BYTES).set(ideal_batch_size_bytes as f64);
 
         ideal_batch_size_bytes
     }
@@ -89,18 +91,19 @@ impl BatchBudgetController {
 
 /// Cached view over [`BatchBudgetController`] ideal batch size calculations.
 ///
-/// This avoids querying atomics and recomputing budgets on every item while still adapting quickly
-/// to changing memory pressure and worker load.
+/// This avoids querying atomics and recomputing budgets on every item while
+/// still adapting quickly to changing memory pressure and worker load.
 #[derive(Debug, Clone)]
-pub struct CachedBatchBudget {
+pub(crate) struct CachedBatchBudget {
     controller: BatchBudgetController,
     last_checked_at: Option<Instant>,
     last_known_batch_size_bytes: usize,
 }
 
 impl CachedBatchBudget {
-    /// Creates a new cached budget initialized from the current controller value.
-    pub fn new(controller: BatchBudgetController) -> Self {
+    /// Creates a new cached budget initialized from the current controller
+    /// value.
+    pub(crate) fn new(controller: BatchBudgetController) -> Self {
         Self {
             last_known_batch_size_bytes: controller.ideal_batch_size_bytes(),
             controller,
@@ -108,8 +111,9 @@ impl CachedBatchBudget {
         }
     }
 
-    /// Returns the current ideal batch size in bytes, refreshing at most every 100ms.
-    pub fn current_batch_size_bytes(&mut self) -> usize {
+    /// Returns the current ideal batch size in bytes, refreshing at most every
+    /// 100ms.
+    pub(crate) fn current_batch_size_bytes(&mut self) -> usize {
         let now = Instant::now();
         let should_refresh = match self.last_checked_at {
             Some(last_checked_at) => {
@@ -129,7 +133,7 @@ impl CachedBatchBudget {
 
 /// RAII guard that decrements active stream load count on drop.
 #[derive(Debug)]
-pub struct ActiveStreamsGuard {
+pub(crate) struct ActiveStreamsGuard {
     active_streams: Arc<AtomicUsize>,
     units: usize,
 }

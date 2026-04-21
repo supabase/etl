@@ -1,25 +1,27 @@
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll};
-use std::time::Duration;
-use std::time::Instant;
+use std::{
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
 
 use etl_config::shared::MemoryBackpressureConfig;
 use futures::Stream;
 use metrics::{counter, gauge, histogram};
-use tokio::sync::watch;
-use tokio::time::MissedTickBehavior;
+use tokio::{sync::watch, time::MissedTickBehavior};
 use tokio_stream::wrappers::WatchStream;
-use tracing::{debug, info};
+use tracing::{info, trace};
 
-use crate::concurrency::shutdown::ShutdownRx;
-use crate::metrics::{
-    DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
-    ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL, PIPELINE_ID_LABEL,
+use crate::{
+    concurrency::shutdown::ShutdownRx,
+    metrics::{
+        DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
+        ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
+    },
 };
-use crate::types::PipelineId;
-
 /// Represents a memory snapshot.
 #[derive(Debug, Clone, Copy)]
 struct MemorySnapshot {
@@ -33,16 +35,8 @@ impl MemorySnapshot {
         system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
 
         match system.cgroup_limits() {
-            Some(cgroup) => MemorySnapshot {
-                used: cgroup.rss,
-                total: cgroup.total_memory,
-            },
-            None => MemorySnapshot {
-                used: system
-                    .total_memory()
-                    .saturating_sub(system.available_memory()),
-                total: system.total_memory(),
-            },
+            Some(cgroup) => MemorySnapshot { used: cgroup.rss, total: cgroup.total_memory },
+            None => MemorySnapshot { used: system.used_memory(), total: system.total_memory() },
         }
     }
 
@@ -74,17 +68,18 @@ struct BackpressureMonitorInner {
 
 /// Shared memory backpressure controller.
 ///
-/// This component owns a periodic task that samples memory usage and updates a boolean backpressure
-/// signal. Consumers can subscribe and pause polling when backpressure is active.
+/// This component owns a periodic task that samples memory usage and updates a
+/// boolean backpressure signal. Consumers can subscribe and pause polling when
+/// backpressure is active.
 #[derive(Debug, Clone)]
-pub struct MemoryMonitor {
+pub(crate) struct MemoryMonitor {
     inner: Arc<MemoryMonitorInner>,
 }
 
 impl MemoryMonitor {
-    /// Creates a new memory backpressure controller and starts the refresh task.
-    pub fn new(
-        pipeline_id: PipelineId,
+    /// Creates a new memory backpressure controller and starts the refresh
+    /// task.
+    pub(crate) fn new(
         mut shutdown_rx: ShutdownRx,
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
         memory_refresh_interval_ms: u64,
@@ -92,7 +87,8 @@ impl MemoryMonitor {
         // sysinfo docs suggest to use a single instance of `System` across the program.
         let mut system = sysinfo::System::new();
 
-        // Initialize from a real memory snapshot so startup state reflects current pressure.
+        // Initialize from a real memory snapshot so startup state reflects current
+        // pressure.
         let startup_snapshot = MemorySnapshot::from_system(&mut system);
         let backpressure = memory_backpressure_config.map(|config| {
             let startup_backpressure_active = compute_next_backpressure_active(
@@ -101,7 +97,7 @@ impl MemoryMonitor {
                 config.activate_threshold,
                 config.resume_threshold,
             );
-            emit_backpressure_active_metric(pipeline_id, startup_backpressure_active);
+            emit_backpressure_active_metric(startup_backpressure_active);
 
             BackpressureMonitorInner {
                 active_tx: watch::channel(startup_backpressure_active).0,
@@ -154,7 +150,7 @@ impl MemoryMonitor {
                                 backpressure.config.resume_threshold,
                             );
 
-                            debug!(
+                            trace!(
                                 used_memory_bytes = snapshot.used,
                                 total_memory_bytes = snapshot.total,
                                 used_percent,
@@ -164,36 +160,27 @@ impl MemoryMonitor {
                             );
 
                             if next_backpressure_active != currently_backpressure_active {
-                                debug!(
+                                trace!(
                                     backpressure_active = currently_backpressure_active,
                                     next_backpressure_active,
                                     used_percent,
                                     "memory monitor state changed"
                                 );
 
-                                emit_backpressure_active_metric(
-                                    pipeline_id,
-                                    next_backpressure_active,
-                                );
-                                emit_transition_metric(
-                                    pipeline_id,
-                                    next_backpressure_active,
-                                );
+                                emit_backpressure_active_metric(next_backpressure_active);
+                                emit_transition_metric(next_backpressure_active);
 
                                 if next_backpressure_active {
                                     activation_started_at = Some(Instant::now());
                                 } else if let Some(started_at) = activation_started_at.take() {
-                                    emit_activation_duration_metric(
-                                        pipeline_id,
-                                        started_at.elapsed(),
-                                    );
+                                    emit_activation_duration_metric(started_at.elapsed());
                                 }
                             }
 
                             currently_backpressure_active = next_backpressure_active;
                             this_clone.set_backpressure_active(next_backpressure_active);
                         } else {
-                            debug!(
+                            trace!(
                                 used_memory_bytes = snapshot.used,
                                 total_memory_bytes = snapshot.total,
                                 "memory monitor refreshed memory snapshot without backpressure"
@@ -208,38 +195,35 @@ impl MemoryMonitor {
     }
 
     /// Returns `true` when memory pressure currently activates backpressure.
-    pub fn is_backpressure_active(&self) -> bool {
+    pub(crate) fn is_backpressure_active(&self) -> bool {
         self.inner
             .backpressure
             .as_ref()
-            .map(|backpressure| *backpressure.active_tx.borrow())
-            .unwrap_or(false)
+            .is_some_and(|backpressure| *backpressure.active_tx.borrow())
     }
 
     /// Creates a new subscription for polling backpressure updates.
     ///
     /// Returns [`None`] when memory backpressure is not configured.
-    pub fn subscribe(&self) -> Option<MemoryMonitorSubscription> {
+    pub(crate) fn subscribe(&self) -> Option<MemoryMonitorSubscription> {
         let backpressure = self.inner.backpressure.as_ref()?;
 
-        // We snapshot the current state of the watch channel and create a stream out of it. The
-        // stream will return the new values from this point onward, independently of when it will be
-        // polled.
+        // We snapshot the current state of the watch channel and create a stream out of
+        // it. The stream will return the new values from this point onward,
+        // independently of when it will be polled.
         let rx = backpressure.active_tx.subscribe();
         let updates = WatchStream::from_changes(rx.clone());
 
-        Some(MemoryMonitorSubscription {
-            current_rx: rx,
-            updates,
-        })
+        Some(MemoryMonitorSubscription { current_rx: rx, updates })
     }
 
     /// Returns the shared atomic that stores total memory in bytes.
-    pub fn total_memory_bytes(&self) -> u64 {
+    pub(crate) fn total_memory_bytes(&self) -> u64 {
         self.inner.total_memory_bytes.load(Ordering::Relaxed)
     }
 
-    /// Updates the backpressure active state and notifies subscribers when it changes.
+    /// Updates the backpressure active state and notifies subscribers when it
+    /// changes.
     fn set_backpressure_active(&self, backpressure_active: bool) {
         let Some(backpressure) = self.inner.backpressure.as_ref() else {
             return;
@@ -257,7 +241,8 @@ impl MemoryMonitor {
     }
 }
 
-/// Computes the next backpressure active state given the current state and memory usage.
+/// Computes the next backpressure active state given the current state and
+/// memory usage.
 fn compute_next_backpressure_active(
     currently_backpressure_active: bool,
     used_percent: f32,
@@ -271,35 +256,27 @@ fn compute_next_backpressure_active(
     used_percent >= activate_threshold
 }
 
-fn emit_backpressure_active_metric(pipeline_id: PipelineId, backpressure_active: bool) {
-    gauge!(
-        ETL_MEMORY_BACKPRESSURE_ACTIVE,
-        PIPELINE_ID_LABEL => pipeline_id.to_string()
-    )
-    .set(if backpressure_active { 1.0 } else { 0.0 });
+fn emit_backpressure_active_metric(backpressure_active: bool) {
+    gauge!(ETL_MEMORY_BACKPRESSURE_ACTIVE).set(if backpressure_active { 1.0 } else { 0.0 });
 }
 
-fn emit_transition_metric(pipeline_id: PipelineId, backpressure_active: bool) {
+fn emit_transition_metric(backpressure_active: bool) {
     counter!(
         ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
-        PIPELINE_ID_LABEL => pipeline_id.to_string(),
         DIRECTION_LABEL => if backpressure_active { "activate" } else { "resume" }
     )
     .increment(1);
 }
 
-fn emit_activation_duration_metric(pipeline_id: PipelineId, duration: Duration) {
-    histogram!(
-        ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
-        PIPELINE_ID_LABEL => pipeline_id.to_string()
-    )
-    .record(duration.as_secs_f64());
+fn emit_activation_duration_metric(duration: Duration) {
+    histogram!(ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS).record(duration.as_secs_f64());
 }
 
 #[cfg(test)]
 impl MemoryMonitor {
-    /// Creates a new memory backpressure controller without spawning a refresh task.
-    pub fn new_for_test() -> Self {
+    /// Creates a new memory backpressure controller without spawning a refresh
+    /// task.
+    pub(crate) fn new_for_test() -> Self {
         Self {
             inner: Arc::new(MemoryMonitorInner {
                 backpressure: Some(BackpressureMonitorInner {
@@ -313,31 +290,29 @@ impl MemoryMonitor {
     }
 
     /// Updates the backpressure active state in tests.
-    pub fn set_backpressure_active_for_test(&self, backpressure_active: bool) {
+    pub(crate) fn set_backpressure_active_for_test(&self, backpressure_active: bool) {
         self.set_backpressure_active(backpressure_active);
     }
 
     /// Updates the total memory snapshot in bytes for tests.
-    pub fn set_total_memory_bytes_for_test(&self, total_memory_bytes: u64) {
-        self.inner
-            .total_memory_bytes
-            .store(total_memory_bytes, Ordering::Relaxed);
+    pub(crate) fn set_total_memory_bytes_for_test(&self, total_memory_bytes: u64) {
+        self.inner.total_memory_bytes.store(total_memory_bytes, Ordering::Relaxed);
     }
 }
 
 /// Subscription to memory backpressure updates.
 ///
-/// This type provides wake-safe polling semantics so streams can return `Pending` while memory is
-/// active without risking missed wakeups.
+/// This type provides wake-safe polling semantics so streams can return
+/// `Pending` while memory is active without risking missed wakeups.
 #[derive(Debug)]
-pub struct MemoryMonitorSubscription {
+pub(crate) struct MemoryMonitorSubscription {
     current_rx: watch::Receiver<bool>,
     updates: WatchStream<bool>,
 }
 
 impl MemoryMonitorSubscription {
     /// Returns the current backpressure active flag.
-    pub fn current_backpressure_active(&self) -> bool {
+    pub(crate) fn current_backpressure_active(&self) -> bool {
         *self.current_rx.borrow()
     }
 }
@@ -348,7 +323,8 @@ impl Stream for MemoryMonitorSubscription {
     /// Polls for a new backpressure update.
     ///
     /// Returns:
-    /// - `Poll::Ready(Some(backpressure_active))` when there is an unseen update.
+    /// - `Poll::Ready(Some(backpressure_active))` when there is an unseen
+    ///   update.
     /// - `Poll::Ready(None)` when the underlying signal channel is closed.
     /// - `Poll::Pending` when no update is available yet.
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -362,19 +338,13 @@ mod tests {
 
     #[test]
     fn memory_used_percent_handles_zero_total() {
-        let snapshot = MemorySnapshot {
-            used: 100,
-            total: 0,
-        };
+        let snapshot = MemorySnapshot { used: 100, total: 0 };
         assert_eq!(snapshot.used_percent(), 1.0);
     }
 
     #[test]
     fn memory_used_percent_half() {
-        let snapshot = MemorySnapshot {
-            used: 50,
-            total: 100,
-        };
+        let snapshot = MemorySnapshot { used: 50, total: 100 };
         assert_eq!(snapshot.used_percent(), 0.5);
     }
 
@@ -411,9 +381,7 @@ mod tests {
     #[tokio::test]
     async fn subscription_receives_backpressure_transitions() {
         let signal = MemoryMonitor::new_for_test();
-        let mut sub = signal
-            .subscribe()
-            .expect("backpressure subscription should exist in tests");
+        let mut sub = signal.subscribe().expect("backpressure subscription should exist in tests");
 
         signal.set_backpressure_active_for_test(true);
         let backpressure_active =

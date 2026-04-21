@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        select id, source_id, destination_id, replicator_id\n        from app.pipelines\n        where tenant_id = $1 and destination_id = $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "source_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "destination_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "replicator_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4e1df0e97f5871424e41ab350b4cf0aba97b72849516d015348b2821f5ba298a"
+}

@@ -19,7 +19,8 @@ pub struct SupabaseConfig {
     /// This API key is used to authenticate requests to the Supabase API.
     /// Required when `api_url` is provided.
     pub api_key: Option<SecretString>,
-    /// Optional ConfigCat SDK key for feature flag integration used at Supabase.
+    /// Optional ConfigCat SDK key for feature flag integration used at
+    /// Supabase.
     ///
     /// If provided, enables ConfigCat feature flag evaluation.
     /// If `None`, the replicator operates without feature flag support.
@@ -41,9 +42,6 @@ pub struct SupabaseConfigWithoutSecrets {
 
 impl From<SupabaseConfig> for SupabaseConfigWithoutSecrets {
     fn from(value: SupabaseConfig) -> Self {
-        SupabaseConfigWithoutSecrets {
-            project_ref: value.project_ref,
-            api_url: value.api_url,
-        }
+        SupabaseConfigWithoutSecrets { project_ref: value.project_ref, api_url: value.api_url }
     }
 }

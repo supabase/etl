@@ -1,15 +1,15 @@
-use etl_postgres::types::{TableId, TableSchema};
-use std::fmt;
-use std::mem::size_of;
+use std::{fmt, mem::size_of};
+
+use etl_postgres::types::{ReplicatedTableSchema, TableId};
 use tokio_postgres::types::PgLsn;
 
 use crate::types::{SizeHint, TableRow};
 
 /// Transaction begin event from Postgres logical replication.
 ///
-/// [`BeginEvent`] marks the start of a new transaction in the replication stream.
-/// It contains metadata about the transaction including LSN positions and timing
-/// information for proper sequencing and recovery.
+/// [`BeginEvent`] marks the start of a new transaction in the replication
+/// stream. It contains metadata about the transaction including LSN positions
+/// and timing information for proper sequencing and recovery.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeginEvent {
     /// LSN position where the transaction started.
@@ -33,9 +33,9 @@ impl BeginEvent {
 
 /// Transaction commit event from Postgres logical replication.
 ///
-/// [`CommitEvent`] marks the successful completion of a transaction in the replication
-/// stream. It provides final metadata about the transaction including timing and
-/// LSN positions for maintaining consistency and ordering.
+/// [`CommitEvent`] marks the successful completion of a transaction in the
+/// replication stream. It provides final metadata about the transaction
+/// including timing and LSN positions for maintaining consistency and ordering.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommitEvent {
     /// LSN position where the transaction started.
@@ -59,35 +59,11 @@ impl CommitEvent {
     }
 }
 
-/// Table schema definition event from Postgres logical replication.
-///
-/// [`RelationEvent`] provides schema information for tables involved in replication.
-/// It contains complete column definitions and metadata needed to interpret
-/// subsequent data modification events for the table.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RelationEvent {
-    /// LSN position where the event started.
-    pub start_lsn: PgLsn,
-    /// LSN position where the transaction of this event will commit.
-    pub commit_lsn: PgLsn,
-    /// Zero-based ordinal of this event within the transaction.
-    pub tx_ordinal: u64,
-    /// Complete table schema including columns and types.
-    pub table_schema: TableSchema,
-}
-
-impl RelationEvent {
-    /// Returns the sequence key for this event.
-    pub fn event_sequence_key(&self) -> EventSequenceKey {
-        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
-    }
-}
-
 /// Row insertion event from Postgres logical replication.
 ///
 /// [`InsertEvent`] represents a new row being added to a table. It contains
 /// the complete row data for insertion into the destination system.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct InsertEvent {
     /// LSN position where the event started.
@@ -96,8 +72,8 @@ pub struct InsertEvent {
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
-    /// ID of the table where the row was inserted.
-    pub table_id: TableId,
+    /// The replicated table schema for this event.
+    pub replicated_table_schema: ReplicatedTableSchema,
     /// Complete row data for the inserted row.
     pub table_row: TableRow,
 }
@@ -114,7 +90,7 @@ impl InsertEvent {
 /// [`UpdateEvent`] represents an existing row being modified. It contains
 /// both the new row data and optionally the old row data for comparison
 /// and conflict resolution in the destination system.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct UpdateEvent {
     /// LSN position where the event started.
@@ -123,8 +99,8 @@ pub struct UpdateEvent {
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
-    /// ID of the table where the row was updated.
-    pub table_id: TableId,
+    /// The replicated table schema for this event.
+    pub replicated_table_schema: ReplicatedTableSchema,
     /// New row data after the update.
     pub table_row: TableRow,
     /// Previous row data before the update.
@@ -145,8 +121,9 @@ impl UpdateEvent {
 /// Row deletion event from Postgres logical replication.
 ///
 /// [`DeleteEvent`] represents a row being removed from a table. It contains
-/// information about the deleted row for proper cleanup in the destination system.
-#[derive(Debug, PartialEq)]
+/// information about the deleted row for proper cleanup in the destination
+/// system.
+#[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct DeleteEvent {
     /// LSN position where the event started.
@@ -155,8 +132,8 @@ pub struct DeleteEvent {
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
-    /// ID of the table where the row was deleted.
-    pub table_id: TableId,
+    /// The replicated table schema for this event.
+    pub replicated_table_schema: ReplicatedTableSchema,
     /// Data from the deleted row.
     ///
     /// The boolean indicates whether the row contains only key columns (`true`)
@@ -174,10 +151,10 @@ impl DeleteEvent {
 
 /// Table truncation event from Postgres logical replication.
 ///
-/// [`TruncateEvent`] represents one or more tables being truncated (all rows deleted).
-/// This is a bulk operation that clears entire tables and may affect multiple tables
-/// in a single operation when using cascading truncates.
-#[derive(Debug, PartialEq)]
+/// [`TruncateEvent`] represents one or more tables being truncated (all rows
+/// deleted). This is a bulk operation that clears entire tables and may affect
+/// multiple tables in a single operation when using cascading truncates.
+#[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct TruncateEvent {
     /// LSN position where the event started.
@@ -188,8 +165,8 @@ pub struct TruncateEvent {
     pub tx_ordinal: u64,
     /// Truncate operation options from Postgres.
     pub options: i8,
-    /// List of table IDs that were truncated in this operation.
-    pub rel_ids: Vec<u32>,
+    /// List of schemas for tables that were truncated in this operation.
+    pub truncated_tables: Vec<ReplicatedTableSchema>,
 }
 
 impl TruncateEvent {
@@ -199,12 +176,40 @@ impl TruncateEvent {
     }
 }
 
+/// Relation (schema) event from Postgres logical replication.
+///
+/// [`RelationEvent`] represents a table schema notification in the replication
+/// stream. It is emitted when a RELATION message is received, containing the
+/// current replication mask for the table. This event notifies downstream
+/// consumers about which columns are being replicated for a table.
+#[derive(Debug)]
+#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
+pub struct RelationEvent {
+    /// LSN position where the event started.
+    pub start_lsn: PgLsn,
+    /// LSN position where the transaction of this event will commit.
+    pub commit_lsn: PgLsn,
+    /// Zero-based ordinal of this event within the transaction.
+    pub tx_ordinal: u64,
+    /// The replicated table schema containing the table schema and replication
+    /// mask.
+    pub replicated_table_schema: ReplicatedTableSchema,
+}
+
+impl RelationEvent {
+    /// Returns the sequence key for this event.
+    pub fn event_sequence_key(&self) -> EventSequenceKey {
+        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    }
+}
+
 /// Represents a single replication event from Postgres logical replication.
 ///
-/// [`Event`] encapsulates all possible events that can occur in a Postgres replication
-/// stream, including data modification events and transaction control events. Each event
-/// type corresponds to specific operations in the source database.
-#[derive(Debug, PartialEq)]
+/// [`Event`] encapsulates all possible events that can occur in a Postgres
+/// replication stream, including data modification events and transaction
+/// control events. Each event type corresponds to specific operations in the
+/// source database.
+#[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum Event {
     /// Transaction begin event marking the start of a new transaction.
@@ -217,10 +222,11 @@ pub enum Event {
     Update(UpdateEvent),
     /// Row deletion event with deleted row data.
     Delete(DeleteEvent),
-    /// Relation schema information event describing table structure.
-    Relation(RelationEvent),
     /// Table truncation event clearing all rows from tables.
     Truncate(TruncateEvent),
+    /// Relation (schema) event notifying about table schema and replication
+    /// mask.
+    Relation(RelationEvent),
     /// Unsupported event type that cannot be processed.
     Unsupported,
 }
@@ -235,12 +241,10 @@ pub struct EventSequenceKey {
 }
 
 impl EventSequenceKey {
-    /// Creates a new sequence key from commit LSN and transaction-local ordinal.
+    /// Creates a new sequence key from commit LSN and transaction-local
+    /// ordinal.
     pub fn new(commit_lsn: PgLsn, tx_ordinal: u64) -> Self {
-        Self {
-            commit_lsn,
-            tx_ordinal,
-        }
+        Self { commit_lsn, tx_ordinal }
     }
 }
 
@@ -267,11 +271,11 @@ impl Event {
     /// specific tables and will always return false.
     pub fn has_table_id(&self, table_id: &TableId) -> bool {
         match self {
-            Event::Insert(insert_event) => insert_event.table_id == *table_id,
-            Event::Update(update_event) => update_event.table_id == *table_id,
-            Event::Delete(delete_event) => delete_event.table_id == *table_id,
-            Event::Relation(relation_event) => relation_event.table_schema.id == *table_id,
-            Event::Truncate(event) => event.rel_ids.contains(&table_id.0),
+            Event::Insert(event) => event.replicated_table_schema.id() == *table_id,
+            Event::Update(event) => event.replicated_table_schema.id() == *table_id,
+            Event::Delete(event) => event.replicated_table_schema.id() == *table_id,
+            Event::Truncate(event) => event.truncated_tables.iter().any(|s| s.id() == *table_id),
+            Event::Relation(event) => event.replicated_table_schema.id() == *table_id,
             _ => false,
         }
     }
@@ -288,8 +292,7 @@ impl SizeHint for Event {
                     .old_table_row
                     .as_ref()
                     .map(|(_, row)| row.size_hint())
-                    .unwrap_or(0);
-
+                    .unwrap_or_default();
                 size_of::<UpdateEvent>() + event.table_row.size_hint() + old_row_size
             }
             Self::Delete(event) => {
@@ -297,14 +300,14 @@ impl SizeHint for Event {
                     .old_table_row
                     .as_ref()
                     .map(|(_, row)| row.size_hint())
-                    .unwrap_or(0);
-
+                    .unwrap_or_default();
                 size_of::<DeleteEvent>() + old_row_size
             }
-            Self::Relation(_) => size_of::<RelationEvent>(),
             Self::Truncate(event) => {
-                size_of::<TruncateEvent>() + event.rel_ids.len() * size_of::<u32>()
+                size_of::<TruncateEvent>()
+                    + event.truncated_tables.len() * size_of::<ReplicatedTableSchema>()
             }
+            Self::Relation(_) => size_of::<RelationEvent>(),
             Self::Unsupported => 0,
         }
     }
@@ -312,9 +315,9 @@ impl SizeHint for Event {
 
 /// Classification of Postgres replication event types.
 ///
-/// [`EventType`] provides a lightweight enumeration of possible replication events
-/// without carrying the associated data. This is useful for filtering, routing,
-/// and processing decisions based on event type alone.
+/// [`EventType`] provides a lightweight enumeration of possible replication
+/// events without carrying the associated data. This is useful for filtering,
+/// routing, and processing decisions based on event type alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EventType {
     /// Transaction begin marker.
@@ -358,8 +361,8 @@ impl From<&Event> for EventType {
             Event::Insert(_) => EventType::Insert,
             Event::Update(_) => EventType::Update,
             Event::Delete(_) => EventType::Delete,
-            Event::Relation(_) => EventType::Relation,
             Event::Truncate(_) => EventType::Truncate,
+            Event::Relation(_) => EventType::Relation,
             Event::Unsupported => EventType::Unsupported,
         }
     }

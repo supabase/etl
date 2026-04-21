@@ -1,25 +1,34 @@
-use clap::{Parser, Subcommand, ValueEnum};
-use etl::destination::Destination;
-use etl::destination::async_result::{
-    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+use std::{
+    error::Error,
+    sync::{
+        Arc, Once,
+        atomic::{AtomicU64, Ordering},
+    },
 };
-use etl::error::EtlResult;
-use etl::pipeline::Pipeline;
-use etl::state::table::TableReplicationPhaseType;
-use etl::test_utils::notifying_store::NotifyingStore;
-use etl::types::{Event, TableRow};
-use etl_config::Environment;
-use etl_config::shared::{
-    BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig, TableSyncCopyConfig,
-    TcpKeepaliveConfig, TlsConfig,
+
+use clap::{Parser, Subcommand, ValueEnum};
+use etl::{
+    destination::{
+        Destination,
+        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+    },
+    error::EtlResult,
+    pipeline::Pipeline,
+    state::table::TableReplicationPhaseType,
+    test_utils::notifying_store::NotifyingStore,
+    types::{Event, ReplicatedTableSchema, TableRow},
+};
+use etl_config::{
+    Environment,
+    shared::{
+        BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig,
+        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+    },
 };
 use etl_destinations::bigquery::BigQueryDestination;
 use etl_postgres::types::TableId;
 use etl_telemetry::tracing::init_tracing;
 use sqlx::postgres::PgPool;
-use std::error::Error;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Once};
 use tracing::{error, info};
 
 /// Ensures crypto provider is only initialized once.
@@ -38,12 +47,7 @@ fn install_crypto_provider() {
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Where to send log output
-    #[arg(
-        long = "log-target",
-        value_enum,
-        default_value = "terminal",
-        global = true
-    )]
+    #[arg(long = "log-target", value_enum, default_value = "terminal", global = true)]
     log_target: LogTarget,
     #[command(subcommand)]
     command: Commands,
@@ -123,7 +127,8 @@ enum Commands {
         /// BigQuery dataset ID (required when using BigQuery destination)
         #[arg(long)]
         bq_dataset_id: Option<String>,
-        /// BigQuery service account key file path (required when using BigQuery destination)
+        /// BigQuery service account key file path (required when using BigQuery
+        /// destination)
         #[arg(long)]
         bq_sa_key_file: Option<String>,
         /// BigQuery maximum staleness in minutes (optional)
@@ -266,7 +271,8 @@ async fn cleanup_replication_slots(
     let apply_slot = format!("supabase_etl_apply_{pipeline_id}");
     info!(slot_name = %apply_slot, "dropping apply replication slot");
     let drop_apply_sql = format!(
-        "select pg_drop_replication_slot('{apply_slot}') where exists (select 1 from pg_replication_slots where slot_name = '{apply_slot}')"
+        "select pg_drop_replication_slot('{apply_slot}') where exists (select 1 from \
+         pg_replication_slots where slot_name = '{apply_slot}')"
     );
     sqlx::query(&drop_apply_sql).execute(&pool).await.ok(); // Ignore errors if slot doesn't exist
 
@@ -275,7 +281,8 @@ async fn cleanup_replication_slots(
         let table_slot = format!("supabase_etl_table_sync_{pipeline_id}_{table_id}");
         info!(slot_name = %table_slot, "dropping table sync replication slot");
         let drop_table_sql = format!(
-            "select pg_drop_replication_slot('{table_slot}') where exists (select 1 from pg_replication_slots where slot_name = '{table_slot}')"
+            "select pg_drop_replication_slot('{table_slot}') where exists (select 1 from \
+             pg_replication_slots where slot_name = '{table_slot}')"
         );
         sqlx::query(&drop_table_sql).execute(&pool).await.ok(); // Ignore errors if slot doesn't exist
     }
@@ -311,11 +318,8 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         port: args.port,
         name: args.database,
         username: args.username,
-        password: args.password.map(|p| p.into()),
-        tls: TlsConfig {
-            trusted_root_certs: args.tls_certs,
-            enabled: args.tls_enabled,
-        },
+        password: args.password.map(Into::into),
+        tls: TlsConfig { trusted_root_certs: args.tls_certs, enabled: args.tls_enabled },
         keepalive: TcpKeepaliveConfig::default(),
     };
 
@@ -323,10 +327,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
         id: 1,
         publication_name: args.publication_name,
         pg_connection: pg_connection_config,
-        batch: BatchConfig {
-            max_fill_ms: args.batch_max_fill_ms,
-            memory_budget_ratio: 0.2,
-        },
+        batch: BatchConfig { max_fill_ms: args.batch_max_fill_ms, memory_budget_ratio: 0.2 },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: args.max_table_sync_workers,
@@ -341,9 +342,9 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
 
     // Create the appropriate destination based on the argument
     let destination = match args.destination {
-        DestinationType::Null => BenchDestination::Null(NullDestination {
-            row_count: Arc::new(AtomicU64::new(0)),
-        }),
+        DestinationType::Null => {
+            BenchDestination::Null(NullDestination { row_count: Arc::new(AtomicU64::new(0)) })
+        }
         DestinationType::BigQuery => {
             install_crypto_provider();
 
@@ -390,10 +391,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     info!("starting pipeline");
     pipeline.start().await?;
 
-    info!(
-        table_count = args.table_ids.len(),
-        "waiting for tables to complete copy phase"
-    );
+    info!(table_count = args.table_ids.len(), "waiting for tables to complete copy phase");
     for notification in table_copied_notifications {
         notification.inner().notified().await;
     }
@@ -421,11 +419,7 @@ async fn start_pipeline(args: RunArgs) -> Result<(), Box<dyn Error>> {
     // Validate row count if expected count was provided
     if let Some(expected) = args.expected_row_count {
         if let Some(actual) = destination.get_row_count() {
-            info!(
-                expected_rows = expected,
-                actual_rows = actual,
-                "validating row count"
-            );
+            info!(expected_rows = expected, actual_rows = actual, "validating row count");
 
             if actual == expected {
                 info!("Row count validation passed: {} rows replicated", actual);
@@ -474,29 +468,31 @@ impl Destination for BenchDestination {
 
     async fn truncate_table(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
         match self {
-            BenchDestination::Null(dest) => dest.truncate_table(table_id, async_result).await,
-            BenchDestination::BigQuery(dest) => dest.truncate_table(table_id, async_result).await,
+            BenchDestination::Null(dest) => {
+                dest.truncate_table(replicated_table_schema, async_result).await
+            }
+            BenchDestination::BigQuery(dest) => {
+                dest.truncate_table(replicated_table_schema, async_result).await
+            }
         }
     }
 
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
         match self {
             BenchDestination::Null(dest) => {
-                dest.write_table_rows(table_id, table_rows, async_result)
-                    .await
+                dest.write_table_rows(replicated_table_schema, table_rows, async_result).await
             }
             BenchDestination::BigQuery(dest) => {
-                dest.write_table_rows(table_id, table_rows, async_result)
-                    .await
+                dest.write_table_rows(replicated_table_schema, table_rows, async_result).await
             }
         }
     }
@@ -520,22 +516,20 @@ impl Destination for NullDestination {
 
     async fn truncate_table(
         &self,
-        _table_id: TableId,
+        _replicated_table_schema: &ReplicatedTableSchema,
         async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
         async_result.send(Ok(()));
-
         Ok(())
     }
 
     async fn write_table_rows(
         &self,
-        _table_id: TableId,
+        _replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        self.row_count
-            .fetch_add(table_rows.len() as u64, Ordering::Relaxed);
+        self.row_count.fetch_add(table_rows.len() as u64, Ordering::Relaxed);
         async_result.send(Ok(()));
 
         Ok(())

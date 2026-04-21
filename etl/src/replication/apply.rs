@@ -1,85 +1,106 @@
-//! Apply loop implementation for processing PostgreSQL logical replication events.
+//! Apply loop implementation for processing PostgreSQL logical replication
+//! events.
 //!
-//! This module provides the core apply loop that processes replication events from
-//! PostgreSQL and coordinates table synchronization. It uses a [`WorkerContext`] enum
-//! to enable different behavior based on the worker type (apply worker vs table sync
-//! worker) at various points in the replication cycle.
+//! This module provides the core apply loop that processes replication events
+//! from PostgreSQL and coordinates table synchronization. It uses a
+//! [`WorkerContext`] enum to enable different behavior based on the worker type
+//! (apply worker vs table sync worker) at various points in the replication
+//! cycle.
 
-use std::fmt::{Display, Formatter};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    fmt::{Display, Formatter},
+    future::Future,
+    pin::Pin,
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use etl_config::shared::PipelineConfig;
-use etl_postgres::replication::slots::EtlReplicationSlot;
-use etl_postgres::types::TableId;
+use etl_postgres::{
+    replication::slots::EtlReplicationSlot,
+    types::{ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema},
+};
 use futures::StreamExt;
 use metrics::{counter, histogram};
-use postgres_replication::protocol;
-use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
-use tokio::pin;
-use tokio::sync::{Semaphore, watch};
+use postgres_replication::{
+    protocol,
+    protocol::{LogicalReplicationMessage, ReplicationMessage},
+};
+use tokio::{
+    pin,
+    sync::{Semaphore, watch},
+};
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
 
-use crate::concurrency::batch_budget::{BatchBudgetController, CachedBatchBudget};
-use crate::concurrency::memory_monitor::MemoryMonitor;
-use crate::concurrency::shutdown::{ShutdownResult, ShutdownRx};
-use crate::concurrency::stream::BackpressureStream;
-use crate::conversions::event::{
-    parse_event_from_begin_message, parse_event_from_commit_message,
-    parse_event_from_delete_message, parse_event_from_insert_message,
-    parse_event_from_relation_message, parse_event_from_truncate_message,
-    parse_event_from_update_message,
+#[cfg(feature = "failpoints")]
+use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
+use crate::{
+    bail,
+    concurrency::{
+        BackpressureStream, BatchBudgetController, CachedBatchBudget, MemoryMonitor,
+        ShutdownResult, ShutdownRx, apply_worker_apply_stream_id,
+        table_sync_worker_apply_stream_id,
+    },
+    conversions::{
+        DDL_MESSAGE_PREFIX, SchemaChangeMessage, parse_event_from_begin_message,
+        parse_event_from_commit_message, parse_event_from_delete_message,
+        parse_event_from_insert_message, parse_event_from_truncate_message,
+        parse_event_from_update_message, parse_replicated_column_names,
+    },
+    destination::{
+        Destination,
+        async_result::{
+            ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
+            PendingWriteEventsResult, WriteEventsResult,
+        },
+    },
+    error::{ErrorKind, EtlError, EtlResult},
+    etl_error,
+    metrics::{
+        ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+        ETL_EVENTS_PROCESSED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL,
+        ETL_TRANSACTION_DURATION_SECONDS, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL,
+        WORKER_TYPE_LABEL,
+    },
+    replication::{
+        EventsStream, SharedTableCache, SharedTableState, StatusUpdateType,
+        client::{PgReplicationClient, PostgresConnectionUpdate},
+    },
+    state::table::{TableReplicationError, TableReplicationPhase, TableReplicationPhaseType},
+    store::{schema::SchemaStore, state::StateStore},
+    types::{Event, PipelineId, RelationEvent, SizeHint},
+    workers::{TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState},
 };
-use crate::destination::Destination;
-use crate::destination::async_result::{
-    ApplyLoopAsyncResultMetadata, CompletedWriteEventsResult, DispatchMetrics,
-    PendingWriteEventsResult, WriteEventsResult,
-};
-use crate::error::{ErrorKind, EtlError, EtlResult};
-use crate::metrics::{
-    ACTION_LABEL, DESTINATION_LABEL, ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-    ETL_EVENTS_PROCESSED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_TRANSACTION_DURATION_SECONDS,
-    ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, PIPELINE_ID_LABEL, WORKER_TYPE_LABEL,
-};
-use crate::replication::client::{PgReplicationClient, PostgresConnectionUpdate};
-use crate::replication::stream::{EventsStream, StatusUpdateType};
-use crate::state::table::{
-    RetryPolicy, TableReplicationError, TableReplicationPhase, TableReplicationPhaseType,
-};
-use crate::store::schema::SchemaStore;
-use crate::store::state::StateStore;
-use crate::types::{Event, PipelineId, SizeHint};
-use crate::workers::pool::TableSyncWorkerPool;
-use crate::workers::table_sync::{TableSyncWorker, TableSyncWorkerState};
-use crate::{bail, etl_error};
 
 /// Default keep alive value if it can't be fetched from Postgres.
 ///
-/// PostgreSQL defaults `wal_sender_timeout` to 60 seconds, so we will use the same.
+/// PostgreSQL defaults `wal_sender_timeout` to 60 seconds, so we will use the
+/// same.
 const DEFAULT_KEEP_ALIVE_DURATION: Duration = Duration::from_secs(60);
 /// Fraction of `wal_sender_timeout` used for the proactive keep alive deadline.
 ///
-/// PostgreSQL normally emits an idle keep alive around `wal_sender_timeout / 2`. We wait a bit
-/// longer than that, using `60%` of the full timeout, so normal server keep alives still win most
-/// of the time while the client still has room to send its own status update if that keep alive is
-/// delayed by network, scheduling, or local processing latency. This is intentionally a
-/// last-resort fallback: in normal operation, progress should still be driven by PostgreSQL's
-/// primary keep alive messages rather than by the client timeout path.
+/// PostgreSQL normally emits an idle keep alive around `wal_sender_timeout /
+/// 2`. We wait a bit longer than that, using `60%` of the full timeout, so
+/// normal server keep alives still win most of the time while the client still
+/// has room to send its own status update if that keep alive is delayed by
+/// network, scheduling, or local processing latency. This is intentionally a
+/// last-resort fallback: in normal operation, progress should still be driven
+/// by PostgreSQL's primary keep alive messages rather than by the client
+/// timeout path.
 const KEEP_ALIVE_DEADLINE_FRACTION: f64 = 0.6;
 /// Minimum client-side deadline for proactive keep alive retries.
 ///
-/// PostgreSQL exposes `wal_sender_timeout` in millisecond units and `0` disables it, so the
-/// smallest enabled value is effectively `1ms`. A raw `60%` deadline at that scale would make the
-/// apply loop spin sending forced keep alives, which is not operationally useful. We clamp to
-/// `100ms`.
+/// PostgreSQL exposes `wal_sender_timeout` in millisecond units and `0`
+/// disables it, so the smallest enabled value is effectively `1ms`. A raw `60%`
+/// deadline at that scale would make the apply loop spin sending forced keep
+/// alives, which is not operationally useful. We clamp to `100ms`.
 const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 
 /// Type of worker driving the apply loop.
 #[derive(Debug, Copy, Clone)]
-pub enum WorkerType {
+pub(crate) enum WorkerType {
     /// The main apply worker that coordinates table sync workers.
     Apply,
     /// A table sync worker that synchronizes a specific table.
@@ -91,18 +112,17 @@ pub enum WorkerType {
 
 impl WorkerType {
     /// Builds an [`EtlReplicationSlot`] for this worker type.
-    pub fn build_etl_replication_slot(&self, pipeline_id: u64) -> EtlReplicationSlot {
+    pub(crate) fn build_etl_replication_slot(&self, pipeline_id: u64) -> EtlReplicationSlot {
         match self {
             Self::Apply => EtlReplicationSlot::Apply { pipeline_id },
-            Self::TableSync { table_id } => EtlReplicationSlot::TableSync {
-                pipeline_id,
-                table_id: *table_id,
-            },
+            Self::TableSync { table_id } => {
+                EtlReplicationSlot::TableSync { pipeline_id, table_id: *table_id }
+            }
         }
     }
 
     /// Returns a low-cardinality worker type label for metrics and tags.
-    pub fn to_simple_string(&self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Apply => "apply",
             Self::TableSync { .. } => "table_sync",
@@ -124,7 +144,7 @@ impl Display for WorkerType {
 /// Indicates the reason why the apply loop terminated, enabling appropriate
 /// cleanup and error handling by the caller.
 #[derive(Debug, Copy, Clone)]
-pub enum ApplyLoopResult {
+pub(crate) enum ApplyLoopResult {
     /// The apply loop was paused and could be resumed in the future.
     Paused,
     /// The apply loop was completed and will never be invoked again.
@@ -160,23 +180,26 @@ impl ExitIntent {
 
 /// Represents the shutdown state of the apply loop.
 ///
-/// Tracks the progress of a graceful shutdown, ensuring that PostgreSQL acknowledges
-/// our flush position before we terminate to prevent data duplication on restart.
+/// Tracks the progress of a graceful shutdown, ensuring that PostgreSQL
+/// acknowledges our flush position before we terminate to prevent data
+/// duplication on restart.
 #[derive(Debug, Clone)]
-pub enum ShutdownState {
+pub(crate) enum ShutdownState {
     /// No shutdown requested, normal operation.
     NoShutdown,
-    /// Shutdown in progress, waiting for PostgreSQL to acknowledge our flush position.
-    /// The loop will only process keepalive messages until one arrives with `wal_end >= acked_flush_lsn`.
+    /// Shutdown in progress, waiting for PostgreSQL to acknowledge our flush
+    /// position. The loop will only process keepalive messages until one
+    /// arrives with `wal_end >= acked_flush_lsn`.
     WaitingForPrimaryKeepAlive {
-        /// The LSN we sent in the status update that PostgreSQL should acknowledge.
+        /// The LSN we sent in the status update that PostgreSQL should
+        /// acknowledge.
         acked_flush_lsn: PgLsn,
     },
 }
 
 impl ShutdownState {
     /// Returns `true` if a shutdown has been requested.
-    pub fn is_requested(&self) -> bool {
+    pub(crate) fn is_requested(&self) -> bool {
         !matches!(self, Self::NoShutdown)
     }
 }
@@ -186,25 +209,28 @@ impl ShutdownState {
 /// Contains all state and dependencies needed by the apply worker to coordinate
 /// with table sync workers and manage table lifecycle transitions.
 #[derive(Debug)]
-pub struct ApplyWorkerContext<S, D> {
+pub(crate) struct ApplyWorkerContext<S, D> {
     /// Unique identifier for the pipeline.
-    pub pipeline_id: PipelineId,
+    pub(crate) pipeline_id: PipelineId,
     /// Shared configuration for all coordinated operations.
-    pub config: Arc<PipelineConfig>,
+    pub(crate) config: Arc<PipelineConfig>,
     /// Pool of table sync workers that this worker coordinates.
-    pub pool: Arc<TableSyncWorkerPool>,
+    pub(crate) pool: Arc<TableSyncWorkerPool>,
     /// State store for tracking table replication progress.
-    pub store: S,
+    pub(crate) store: S,
     /// Destination where replicated data is written.
-    pub destination: D,
+    pub(crate) destination: D,
+    /// Shared per-table protocol state used to decode relation and row
+    /// messages.
+    pub(crate) shared_table_cache: SharedTableCache,
     /// Shutdown signal receiver for graceful termination.
-    pub shutdown_rx: ShutdownRx,
+    pub(crate) shutdown_rx: ShutdownRx,
     /// Semaphore controlling maximum concurrent table sync workers.
-    pub table_sync_worker_permits: Arc<Semaphore>,
+    pub(crate) table_sync_worker_permits: Arc<Semaphore>,
     /// Shared memory backpressure controller.
-    pub memory_monitor: MemoryMonitor,
+    pub(crate) memory_monitor: MemoryMonitor,
     /// Shared batch budget controller.
-    pub batch_budget: BatchBudgetController,
+    pub(crate) batch_budget: BatchBudgetController,
 }
 
 /// Resources for the table sync worker during the apply loop.
@@ -212,13 +238,13 @@ pub struct ApplyWorkerContext<S, D> {
 /// Contains state and dependencies needed by a table sync worker to track
 /// its synchronization progress and coordinate with the apply worker.
 #[derive(Debug)]
-pub struct TableSyncWorkerContext<S> {
+pub(crate) struct TableSyncWorkerContext<S> {
     /// Unique identifier for the table being synchronized.
-    pub table_id: TableId,
+    pub(crate) table_id: TableId,
     /// Thread-safe state management for this worker.
-    pub table_sync_worker_state: TableSyncWorkerState,
+    pub(crate) table_sync_worker_state: TableSyncWorkerState,
     /// State store for persisting replication progress.
-    pub state_store: S,
+    pub(crate) state_store: S,
 }
 
 /// Context for the worker driving the apply loop.
@@ -227,7 +253,7 @@ pub struct TableSyncWorkerContext<S> {
 /// worker-specific resources and enabling different behavior based on the
 /// worker type at various points in the replication cycle.
 #[derive(Debug)]
-pub enum WorkerContext<S, D> {
+pub(crate) enum WorkerContext<S, D> {
     /// Context for the apply worker.
     Apply(ApplyWorkerContext<S, D>),
     /// Context for a table sync worker.
@@ -236,12 +262,18 @@ pub enum WorkerContext<S, D> {
 
 impl<S, D> WorkerContext<S, D> {
     /// Returns the [`WorkerType`] for this context.
-    pub fn worker_type(&self) -> WorkerType {
+    pub(crate) fn worker_type(&self) -> WorkerType {
         match self {
             Self::Apply(_) => WorkerType::Apply,
-            Self::TableSync(ctx) => WorkerType::TableSync {
-                table_id: ctx.table_id,
-            },
+            Self::TableSync(ctx) => WorkerType::TableSync { table_id: ctx.table_id },
+        }
+    }
+
+    /// Builds the logical apply-stream id for this worker context.
+    pub(crate) fn apply_stream_id(&self) -> String {
+        match self {
+            Self::Apply(_) => apply_worker_apply_stream_id(),
+            Self::TableSync(ctx) => table_sync_worker_apply_stream_id(ctx.table_id),
         }
     }
 }
@@ -256,7 +288,8 @@ struct ReplicationProgress {
 }
 
 impl ReplicationProgress {
-    /// Updates the last received LSN to a higher value if the new LSN is greater.
+    /// Updates the last received LSN to a higher value if the new LSN is
+    /// greater.
     fn update_last_received_lsn(&mut self, new_lsn: PgLsn) {
         if new_lsn <= self.last_received_lsn {
             return;
@@ -284,18 +317,18 @@ impl ReplicationProgress {
 enum EndBatch {
     /// The batch should include the last processed event and end.
     Inclusive,
-    /// The batch should exclude the last processed event and end.
-    Exclusive,
 }
 
-/// Result returned from [`ApplyLoop::handle_replication_message`] and related functions.
+/// Result returned from [`ApplyLoop::handle_replication_message`] and related
+/// functions.
 #[derive(Debug, Default)]
 struct HandleMessageResult {
     /// The event converted from the replication message.
     event: Option<Event>,
     /// Set to a commit message's end_lsn value, [`None`] otherwise.
     end_lsn: Option<PgLsn>,
-    /// Set when a batch should be ended earlier than the normal batching parameters.
+    /// Set when a batch should be ended earlier than the normal batching
+    /// parameters.
     end_batch: Option<EndBatch>,
     /// Set when the table has encountered an error.
     table_replication_error: Option<TableReplicationError>,
@@ -309,30 +342,21 @@ impl HandleMessageResult {
 
     /// Creates a result that returns an event without affecting batch state.
     fn return_event(event: Event) -> Self {
-        Self {
-            event: Some(event),
-            ..Default::default()
-        }
-    }
-
-    /// Creates a result that excludes the current event and requests batch termination.
-    fn finish_batch_and_exclude_event(error: TableReplicationError) -> Self {
-        Self {
-            end_batch: Some(EndBatch::Exclusive),
-            table_replication_error: Some(error),
-            ..Default::default()
-        }
+        Self { event: Some(event), ..Default::default() }
     }
 }
 
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
-    /// The highest LSN received from the [`end_lsn`] field of a [`Commit`] message.
+    /// The highest LSN received from the [`end_lsn`] field of a [`Commit`]
+    /// message.
     last_commit_end_lsn: Option<PgLsn>,
-    /// The LSN of the commit WAL entry of the transaction that is currently being processed.
+    /// The LSN of the commit WAL entry of the transaction that is currently
+    /// being processed.
     remote_final_lsn: Option<PgLsn>,
-    /// The current replication progress tracking received and flushed LSN positions.
+    /// The current replication progress tracking received and flushed LSN
+    /// positions.
     replication_progress: ReplicationProgress,
     /// A batch of events to send to the destination.
     events_batch: Vec<Event>,
@@ -340,7 +364,8 @@ struct ApplyLoopState {
     events_batch_bytes: usize,
     /// Instant from when a transaction began.
     current_tx_begin_ts: Option<Instant>,
-    /// Number of events observed in the current transaction (excluding BEGIN/COMMIT).
+    /// Number of events observed in the current transaction (excluding
+    /// BEGIN/COMMIT).
     current_tx_events: u64,
     /// Next zero-based ordinal to assign to transaction-scoped events.
     next_tx_ordinal: u64,
@@ -352,16 +377,27 @@ struct ApplyLoopState {
     keep_alive_deadline: Instant,
     /// Destination write result waiting to be applied to replication progress.
     pending_flush_result: Option<PendingWriteEventsResult<()>>,
-    /// The strongest exit that this apply loop invocation should eventually return.
+    /// The strongest exit that this apply loop invocation should eventually
+    /// return.
     ///
-    /// Once set, the loop stops ingesting new replication messages and instead drains any
-    /// in-flight flushes and shutdown barriers before returning the final result.
+    /// Once set, the loop stops ingesting new replication messages and instead
+    /// drains any in-flight flushes and shutdown barriers before returning
+    /// the final result.
     exit_intent: Option<ExitIntent>,
-    /// Set to `true` when a flush was deferred because another flush result was still in flight.
+    /// Set to `true` when a flush was deferred because another flush result was
+    /// still in flight.
     ///
-    /// While this is set, the loop stops both deadline-driven flush attempts and new message intake
-    /// until the in-flight flush resolves and the queued batch can be retried.
+    /// While this is set, the loop stops both deadline-driven flush attempts
+    /// and new message intake until the in-flight flush resolves and the
+    /// queued batch can be retried.
     processing_paused: bool,
+    /// Fallback snapshot used before a table has established shared protocol
+    /// state.
+    ///
+    /// This is seeded from the worker start LSN so a first `RELATION` message
+    /// can always resolve the latest schema version whose snapshot is less
+    /// than or equal to the worker's start point.
+    bootstrap_snapshot_id: SnapshotId,
 }
 
 impl ApplyLoopState {
@@ -369,6 +405,7 @@ impl ApplyLoopState {
     fn new(
         replication_progress: ReplicationProgress,
         keep_alive_deadline_duration: Duration,
+        bootstrap_snapshot_id: SnapshotId,
     ) -> Self {
         Self {
             last_commit_end_lsn: None,
@@ -385,6 +422,7 @@ impl ApplyLoopState {
             pending_flush_result: None,
             exit_intent: None,
             processing_paused: false,
+            bootstrap_snapshot_id,
         }
     }
 
@@ -397,7 +435,8 @@ impl ApplyLoopState {
         self.events_batch.push(event);
     }
 
-    /// Takes the events batch for further processing. Replacing it with a new empty batch.
+    /// Takes the events batch for further processing. Replacing it with a new
+    /// empty batch.
     fn take_events_batch(&mut self) -> (Vec<Event>, usize) {
         let events_batch = std::mem::take(&mut self.events_batch);
         let events_batch_bytes = self.events_batch_bytes;
@@ -406,10 +445,17 @@ impl ApplyLoopState {
         (events_batch, events_batch_bytes)
     }
 
+    /// Returns the bootstrap snapshot used before a table has shared protocol
+    /// state.
+    fn bootstrap_snapshot_id(&self) -> SnapshotId {
+        self.bootstrap_snapshot_id
+    }
+
     /// Sets the batch flush deadline, if not already set.
     ///
-    /// The deadline stays armed until a flush is actually dispatched. If a flush attempt is deferred
-    /// because another flush is still in flight, the deadline is intentionally preserved.
+    /// The deadline stays armed until a flush is actually dispatched. If a
+    /// flush attempt is deferred because another flush is still in flight,
+    /// the deadline is intentionally preserved.
     fn set_flush_deadline_if_needed(&mut self, max_batch_fill_duration: Duration) {
         if self.flush_deadline.is_some() {
             return;
@@ -447,7 +493,8 @@ impl ApplyLoopState {
         }
     }
 
-    /// Returns the last received LSN that should be reported as written to the PostgreSQL server.
+    /// Returns the last received LSN that should be reported as written to the
+    /// PostgreSQL server.
     fn last_received_lsn(&self) -> PgLsn {
         self.replication_progress.last_received_lsn
     }
@@ -459,12 +506,13 @@ impl ApplyLoopState {
 
     /// Returns the effective flush LSN to report to PostgreSQL.
     ///
-    /// When idle, returns the last received LSN since no actual flushes occur. Otherwise,
-    /// returns the last flush LSN from completed transactions.
+    /// When idle, returns the last received LSN since no actual flushes occur.
+    /// Otherwise, returns the last flush LSN from completed transactions.
     ///
-    /// Note that when a new transaction starts, the last flush LSN will be used and it may appear
-    /// to move backward relative to the last received LSN reported earlier. This is fine because
-    /// the status update logic guarantees monotonically increasing LSNs.
+    /// Note that when a transaction is now started, the last flush lsn will be
+    /// used, and it might jump back compared to the last received lsn that
+    /// we sent before, however this is fine since the status update logic
+    /// guarantees monotonically increasing LSNs.
     fn effective_flush_lsn(&self) -> PgLsn {
         if self.is_idle() {
             self.replication_progress.last_received_lsn
@@ -473,7 +521,8 @@ impl ApplyLoopState {
         }
     }
 
-    /// Returns true if the apply loop is in the middle of processing a transaction.
+    /// Returns true if the apply loop is in the middle of processing a
+    /// transaction.
     fn handling_transaction(&self) -> bool {
         self.remote_final_lsn.is_some()
     }
@@ -491,7 +540,8 @@ impl ApplyLoopState {
             None => {
                 warn!(
                     current_tx_ordinal = self.next_tx_ordinal,
-                    "transaction-local ordinal overflow detected; subsequent events may reuse the same ordinal"
+                    "transaction-local ordinal overflow detected; subsequent events may reuse the \
+                     same ordinal"
                 );
 
                 self.next_tx_ordinal
@@ -501,17 +551,20 @@ impl ApplyLoopState {
         tx_ordinal
     }
 
-    /// Returns `true` if there is a pending batch of events waiting to be flushed.
+    /// Returns `true` if there is a pending batch of events waiting to be
+    /// flushed.
     fn has_pending_batch(&self) -> bool {
         !self.events_batch.is_empty()
     }
 
-    /// Returns `true` if there is a batch flush in flight whose result has not yet resolved.
+    /// Returns `true` if there is a batch flush in flight whose result has not
+    /// yet resolved.
     fn has_pending_flush_result(&self) -> bool {
         self.pending_flush_result.is_some()
     }
 
-    /// Returns `true` if any buffered or in-flight destination batch work is still unresolved.
+    /// Returns `true` if any buffered or in-flight destination batch work is
+    /// still unresolved.
     fn has_unresolved_batch_work(&self) -> bool {
         self.has_pending_batch() || self.has_pending_flush_result()
     }
@@ -528,12 +581,14 @@ impl ApplyLoopState {
         };
     }
 
-    /// Returns `true` when the apply loop may still accept new replication messages.
+    /// Returns `true` when the apply loop may still accept new replication
+    /// messages.
     fn can_process_messages(&self) -> bool {
         self.exit_intent.is_none() && !self.processing_paused
     }
 
-    /// Returns `true` when the batch deadline timer may still trigger a flush for buffered work.
+    /// Returns `true` when the batch deadline timer may still trigger a flush
+    /// for buffered work.
     fn can_wait_for_deadline(&self) -> bool {
         !self.processing_paused && self.has_pending_batch()
     }
@@ -543,7 +598,8 @@ impl ApplyLoopState {
         self.processing_paused = true;
     }
 
-    /// Resumes processing by clearing the existing pending flush result and enabling processing.
+    /// Resumes processing by clearing the existing pending flush result and
+    /// enabling processing.
     fn resume_processing(&mut self) -> bool {
         let prev_processing_paused = std::mem::replace(&mut self.processing_paused, false);
         self.pending_flush_result = None;
@@ -559,9 +615,9 @@ impl ApplyLoopState {
 
 /// Main apply loop implementation that processes replication events.
 ///
-/// [`ApplyLoop`] encapsulates the apply loop's immutable dependencies plus its mutable runtime
-/// state.
-pub struct ApplyLoop<S, D> {
+/// [`ApplyLoop`] encapsulates the apply loop's immutable dependencies plus its
+/// mutable runtime state.
+pub(crate) struct ApplyLoop<S, D> {
     /// Unique identifier for the pipeline.
     pipeline_id: PipelineId,
     /// Shared immutable configuration.
@@ -570,6 +626,9 @@ pub struct ApplyLoop<S, D> {
     schema_store: S,
     /// Destination where replicated data is written.
     destination: D,
+    /// Shared per-table protocol state used to decode relation and row
+    /// messages.
+    shared_table_cache: SharedTableCache,
     /// Shutdown signal receiver.
     shutdown_rx: ShutdownRx,
     /// Worker-specific dependencies and coordination hooks.
@@ -580,7 +639,8 @@ pub struct ApplyLoop<S, D> {
     cached_batch_budget: CachedBatchBudget,
     /// Maximum duration to wait before forcibly flushing a batch.
     max_batch_fill_duration: Duration,
-    /// Deadline duration used before proactively sending a periodic status update.
+    /// Deadline duration used before proactively sending a periodic status
+    /// update.
     keep_alive_deadline_duration: Duration,
     /// Mutable loop state.
     state: ApplyLoopState,
@@ -595,13 +655,14 @@ where
     ///
     /// This is the main entry point that creates the loop instance and runs it.
     #[expect(clippy::too_many_arguments)]
-    pub async fn start(
+    pub(crate) async fn start(
         pipeline_id: PipelineId,
         start_lsn: PgLsn,
         config: Arc<PipelineConfig>,
         replication_client: PgReplicationClient,
         schema_store: S,
         destination: D,
+        shared_table_cache: SharedTableCache,
         worker_context: WorkerContext<S, D>,
         shutdown_rx: ShutdownRx,
         memory_monitor: MemoryMonitor,
@@ -636,19 +697,23 @@ where
                 Self::compute_keep_alive_deadline_duration(DEFAULT_KEEP_ALIVE_DURATION)
             }
         };
+        let bootstrap_snapshot_id: SnapshotId = start_lsn.into();
 
-        let initial_progress = ReplicationProgress {
-            last_received_lsn: start_lsn,
-            last_flush_lsn: start_lsn,
-        };
+        let initial_progress =
+            ReplicationProgress { last_received_lsn: start_lsn, last_flush_lsn: start_lsn };
 
-        let state = ApplyLoopState::new(initial_progress, keep_alive_deadline_duration);
+        let state = ApplyLoopState::new(
+            initial_progress,
+            keep_alive_deadline_duration,
+            bootstrap_snapshot_id,
+        );
 
         let mut apply_loop = Self {
             pipeline_id,
             config: config.clone(),
             schema_store,
             destination,
+            shared_table_cache,
             shutdown_rx,
             worker_context,
             memory_monitor,
@@ -677,14 +742,25 @@ where
             .start_logical_replication(&self.config.publication_name, &slot_name, start_lsn)
             .await?;
 
-        let events_stream = EventsStream::wrap(logical_replication_stream, self.pipeline_id);
-        let events_stream =
-            BackpressureStream::wrap(events_stream, self.memory_monitor.subscribe());
+        let events_stream = EventsStream::wrap(logical_replication_stream);
+        let events_stream = BackpressureStream::wrap(
+            events_stream,
+            self.worker_context.apply_stream_id(),
+            self.memory_monitor.subscribe(),
+        );
         pin!(events_stream);
-
         let mut connection_updates_rx = replication_client.connection_updates_rx();
 
         loop {
+            #[cfg(feature = "failpoints")]
+            if matches!(self.state.shutdown_state, ShutdownState::WaitingForPrimaryKeepAlive { .. })
+                && etl_fail_point_active(SEND_STATUS_UPDATE_FP)
+            {
+                warn!("not waiting for primary keep alive on shutdown due to active failpoint");
+
+                return Ok(self.finish_shutdown());
+            }
+
             let result = match &self.state.shutdown_state {
                 ShutdownState::NoShutdown => {
                     self.run_active_iteration(
@@ -710,7 +786,8 @@ where
         }
     }
 
-    /// Runs one normal apply-loop iteration while the worker is still actively processing.
+    /// Runs one normal apply-loop iteration while the worker is still actively
+    /// processing.
     ///
     /// This keeps the priority order explicit:
     /// 1. Shutdown requests.
@@ -720,17 +797,21 @@ where
     /// 5. Incoming replication messages.
     /// 6. Periodic heartbeats once the computed keep alive deadline expires.
     ///
-    /// PostgreSQL normally sends keep alives at roughly half of `wal_sender_timeout`. We wait a
-    /// little longer than that before proactively emitting our own status update so that normal
-    /// PostgreSQL keep alives still drive the loop, but long stalls can still be recovered without
-    /// waiting for the full server timeout. This timeout branch is therefore a last-resort
-    /// mechanism, not the primary source of progress. It matters when the loop is healthy but
-    /// effectively stuck on in-flight work, such as waiting for an older batch to flush before a
-    /// queued batch can be dispatched, or when keep alives are temporarily not reaching the loop
-    /// because the stream is backpressured or the source is not sending them promptly.
+    /// PostgreSQL normally sends keep alives at roughly half of
+    /// `wal_sender_timeout`. We wait a little longer than that before
+    /// proactively emitting our own status update so that normal PostgreSQL
+    /// keep alives still drive the loop, but long stalls can still be recovered
+    /// without waiting for the full server timeout. This timeout branch is
+    /// therefore a last-resort mechanism, not the primary source of
+    /// progress. It matters when the loop is healthy but effectively stuck
+    /// on in-flight work, such as waiting for an older batch to flush before a
+    /// queued batch can be dispatched, or when keep alives are temporarily not
+    /// reaching the loop because the stream is backpressured or the source
+    /// is not sending them promptly.
     ///
     /// Each branch performs its work and then relies on
-    /// [`Self::try_finish_active_iteration`] to decide whether the loop may return yet.
+    /// [`Self::try_finish_active_iteration`] to decide whether the loop may
+    /// return yet.
     async fn run_active_iteration(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -796,28 +877,32 @@ where
             }
         }
 
-        // We try to process syncing tables when the system is idle to make sure the system advances
-        // synchronization state even when no data is being actively transferred. This is especially
-        // important to have the tables converge to `Ready` or `SyncDone` even if there is no traffic
-        // on that specific slot. In that case, the process is driven by keep alive messages which will
-        // advance the `last_received_lsn` and properly use that for the syncing LSN to establish progress.
+        // We try to process syncing tables when the system is idle to make sure the
+        // system advances synchronization state even when no data is being
+        // actively transferred. This is especially important to have the tables
+        // converge to `Ready` or `SyncDone` even if there is no traffic on that
+        // specific slot. In that case, the process is driven by keep alive messages
+        // which will advance the `last_received_lsn` and properly use that for
+        // the syncing LSN to establish progress.
         self.maybe_process_syncing_tables_when_idle().await?;
 
         Ok(self.try_finish_active_iteration())
     }
 
-    /// Runs one loop iteration while shutdown is waiting for PostgreSQL to acknowledge the
-    /// requested flush LSN.
+    /// Runs one loop iteration while shutdown is waiting for PostgreSQL to
+    /// acknowledge the requested flush LSN.
     ///
-    /// In this phase the loop no longer accepts new replication messages and it no longer waits
-    /// for pending destination flushes. Instead it only waits for:
+    /// In this phase the loop no longer accepts new replication messages and it
+    /// no longer waits for pending destination flushes. Instead it only
+    /// waits for:
     /// 1. PostgreSQL connection lifecycle updates.
-    /// 2. PostgreSQL keepalives that may acknowledge the shutdown status update with
-    ///    `wal_end >= acked_flush_lsn`.
+    /// 2. PostgreSQL keepalives that may acknowledge the shutdown status update
+    ///    with `wal_end >= acked_flush_lsn`.
     /// 3. Periodic heartbeats once the computed keep alive deadline expires.
     ///
-    /// Once the keepalive acknowledgement arrives, unresolved batch or flush work causes the loop
-    /// to conservatively return [`ApplyLoopResult::Paused`]. Only quiescent state may reuse the
+    /// Once the keepalive acknowledgement arrives, unresolved batch or flush
+    /// work causes the loop to conservatively return
+    /// [`ApplyLoopResult::Paused`]. Only quiescent state may reuse the
     /// stored exit intent.
     async fn run_shutdown_wait_iteration(
         &mut self,
@@ -868,14 +953,15 @@ where
         Ok(None)
     }
 
-    /// Returns the final loop result after PostgreSQL has acknowledged the shutdown status
-    /// update.
+    /// Returns the final loop result after PostgreSQL has acknowledged the
+    /// shutdown status update.
     ///
-    /// If batch construction or destination flush work is still unresolved, shutdown conservatively
-    /// pauses the loop so the next start can replay from the last confirmed durable position.
+    /// If batch construction or destination flush work is still unresolved,
+    /// shutdown conservatively pauses the loop so the next start can replay
+    /// from the last confirmed durable position.
     ///
-    /// If there is no exit result, which should not happen in case of shutdown, but it's not enforced
-    /// statically, we also default to pausing.
+    /// If there is no exit result, which should not happen in case of shutdown,
+    /// but it's not enforced statically, we also default to pausing.
     fn finish_shutdown(&self) -> ApplyLoopResult {
         if self.state.has_unresolved_batch_work() {
             return ApplyLoopResult::Paused;
@@ -884,7 +970,8 @@ where
         self.state.exit_result().unwrap_or(ApplyLoopResult::Paused)
     }
 
-    /// Returns the final loop result for the active phase if all exit barriers have been resolved.
+    /// Returns the final loop result for the active phase if all exit barriers
+    /// have been resolved.
     fn try_finish_active_iteration(&self) -> Option<ApplyLoopResult> {
         if self.state.shutdown_state.is_requested() || self.state.has_unresolved_batch_work() {
             return None;
@@ -895,9 +982,9 @@ where
 
     /// Processes one PostgreSQL connection lifecycle notification.
     ///
-    /// `changed()` only tells us that some update exists, so we must still read the latest value
-    /// with `borrow_and_update()` to consume it without missing races between notification and
-    /// observation.
+    /// `changed()` only tells us that some update exists, so we must still read
+    /// the latest value with `borrow_and_update()` to consume it without
+    /// missing races between notification and observation.
     fn handle_connection_update(
         changed: Result<(), watch::error::RecvError>,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
@@ -934,25 +1021,27 @@ where
 
     /// Waits until the keep alive deadline expires.
     async fn wait_for_keep_alive_deadline(deadline: Instant) {
-        tokio::time::sleep_until(deadline.into()).await
+        tokio::time::sleep_until(deadline.into()).await;
     }
 
     /// Computes the keep alive deadline from PostgreSQL's `wal_sender_timeout`.
     ///
-    /// PostgreSQL normally sends a keep alive after roughly half of this timeout. We therefore use
-    /// `60%` of the configured timeout to allow normal server keep alives to arrive first while
-    /// still leaving comfortable room for network and processing latency before the full timeout.
+    /// PostgreSQL normally sends a keep alive after roughly half of this
+    /// timeout. We therefore use `60%` of the configured timeout to allow
+    /// normal server keep alives to arrive first while still leaving
+    /// comfortable room for network and processing latency before the full
+    /// timeout.
     fn compute_keep_alive_deadline_duration(wal_sender_timeout: Duration) -> Duration {
         wal_sender_timeout
             .mul_f64(KEEP_ALIVE_DEADLINE_FRACTION)
             .max(MIN_KEEP_ALIVE_DEADLINE_DURATION)
     }
 
-    /// Processes a replication message while shutdown is waiting for PostgreSQL to acknowledge the
-    /// requested flush LSN.
+    /// Processes a replication message while shutdown is waiting for PostgreSQL
+    /// to acknowledge the requested flush LSN.
     ///
-    /// Returns `true` if the message is a keepalive with `wal_end >= acked_flush_lsn`,
-    /// `false` if still waiting for the right keepalive.
+    /// Returns `true` if the message is a keepalive with `wal_end >=
+    /// acked_flush_lsn`, `false` if still waiting for the right keepalive.
     async fn handle_shutdown_keepalive_wait_message(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -977,10 +1066,11 @@ where
             ReplicationMessage::PrimaryKeepAlive(keepalive) => {
                 let wal_end = PgLsn::from(keepalive.wal_end());
 
-                // `acked_flush_lsn` is the effective flush LSN included in the status update for
-                // shutdown. We only treat a keepalive as the shutdown acknowledgement once its
-                // `wal_end` has reached or passed that barrier, which guarantees the reply was
-                // produced after PostgreSQL observed at least that replication position.
+                // `acked_flush_lsn` is the effective flush LSN included in the status update
+                // for shutdown. We only treat a keepalive as the shutdown
+                // acknowledgement once its `wal_end` has reached or passed that
+                // barrier, which guarantees the reply was produced after
+                // PostgreSQL observed at least that replication position.
                 if wal_end >= acked_flush_lsn {
                     info!(
                         %worker_type,
@@ -989,14 +1079,14 @@ where
                         "received keep alive acknowledgement, safe to shutdown",
                     );
 
-                    self.state
-                        .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
+                    self.state.reset_keep_alive_deadline(self.keep_alive_deadline_duration);
 
                     return Ok(true);
                 }
 
-                // This shouldn't happen in practice because if we did process up to LSN `x` it means
-                // next keep alive messages from that must be at least `x`.
+                // This shouldn't happen in practice because if we did process up to LSN `x` it
+                // means next keep alive messages from that must be at least
+                // `x`.
                 debug!(
                     %worker_type,
                     %wal_end,
@@ -1012,8 +1102,7 @@ where
                 )
                 .await?;
 
-                self.state
-                    .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
+                self.state.reset_keep_alive_deadline(self.keep_alive_deadline_duration);
             }
             _ => {
                 // Ignore non-keepalive messages while waiting for shutdown acknowledgement.
@@ -1028,23 +1117,27 @@ where
         Ok(false)
     }
 
-    /// Handles a shutdown signal by transitioning to [`ShutdownState::WaitingForPrimaryKeepAlive`].
+    /// Handles a shutdown signal by transitioning to
+    /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
     ///
-    /// The shutdown procedure is intentionally quick and best-effort. We do not generally defer
-    /// shutdown to transaction or catch-up boundaries because the system is still at-least-once
-    /// and extra draining logic would add disproportionate complexity.
+    /// The shutdown procedure is intentionally quick and best-effort. We do not
+    /// generally defer shutdown to transaction or catch-up boundaries
+    /// because the system is still at-least-once and extra draining logic
+    /// would add disproportionate complexity.
     ///
-    /// Instead, the goal here is to report the best durable position already known by the loop.
+    /// Instead, the goal here is to report the best durable position already
+    /// known by the loop.
     ///
-    /// If a batch is still being built or a destination flush is still in flight, shutdown does
-    /// not try to resolve that work explicitly. After PostgreSQL acknowledges the status update,
-    /// the loop
-    /// returns [`ApplyLoopResult::Paused`] so the next start can replay from the last confirmed
-    /// durable position.
+    /// If a batch is still being built or a destination flush is still in
+    /// flight, shutdown does not try to resolve that work explicitly. After
+    /// PostgreSQL acknowledges the status update, the loop
+    /// returns [`ApplyLoopResult::Paused`] so the next start can replay from
+    /// the last confirmed durable position.
     ///
-    /// Note: the shutdown system is best-effort. Graceful shutdown may not complete if we are
-    /// blocked on non-interruptible code or if keepalive messages never arrive from the server.
-    /// It is the responsibility of the caller to forcefully kill the process if shutdown does
+    /// Note: the shutdown system is best-effort. Graceful shutdown may not
+    /// complete if we are blocked on non-interruptible code or if keepalive
+    /// messages never arrive from the server. It is the responsibility of
+    /// the caller to forcefully kill the process if shutdown does
     /// not complete within an acceptable timeframe.
     async fn handle_shutdown_signal(
         &mut self,
@@ -1063,8 +1156,9 @@ where
             return Ok(());
         }
 
-        // Shutdown always means this apply loop invocation will eventually return, even if a later
-        // quiescent state upgrades the final result from pause to complete.
+        // Shutdown always means this apply loop invocation will eventually return, even
+        // if a later quiescent state upgrades the final result from pause to
+        // complete.
         self.state.record_exit_intent(Some(ExitIntent::Pause));
 
         info!(
@@ -1072,15 +1166,15 @@ where
             "shutdown signal received, sending status update and waiting for acknowledgement",
         );
 
-        self.initiate_graceful_shutdown(events_stream.as_mut())
-            .await
+        self.initiate_graceful_shutdown(events_stream.as_mut()).await
     }
 
-    /// Initiates graceful shutdown by sending a status update and transitioning to
-    /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
+    /// Initiates graceful shutdown by sending a status update and transitioning
+    /// to [`ShutdownState::WaitingForPrimaryKeepAlive`].
     ///
-    /// The status update uses the best durable position currently known by the loop; it does not
-    /// try to advance shutdown to a transaction-specific target by doing additional draining work.
+    /// The status update uses the best durable position currently known by the
+    /// loop; it does not try to advance shutdown to a transaction-specific
+    /// target by doing additional draining work.
     async fn initiate_graceful_shutdown(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -1096,19 +1190,21 @@ where
         )
         .await?;
 
-        self.state.shutdown_state = ShutdownState::WaitingForPrimaryKeepAlive {
-            acked_flush_lsn: flush_lsn,
-        };
+        self.state.shutdown_state =
+            ShutdownState::WaitingForPrimaryKeepAlive { acked_flush_lsn: flush_lsn };
 
         Ok(())
     }
 
-    /// Sends a status update to PostgreSQL using the current write and flush positions.
+    /// Sends a status update to PostgreSQL using the current write and flush
+    /// positions.
     ///
-    /// Some callers intentionally resend the same effective flush LSN with `force = true`. Those
-    /// updates are about keeping the replication connection alive while the system is idle, not
-    /// about advertising newly acknowledged progress. Keepalive replies from the main replication
-    /// stream and the final shutdown acknowledgement path still use this same helper.
+    /// Some callers intentionally resend the same effective flush LSN with
+    /// `force = true`. Those updates are about keeping the replication
+    /// connection alive while the system is idle, not about advertising
+    /// newly acknowledged progress. Keepalive replies from the main replication
+    /// stream and the final shutdown acknowledgement path still use this same
+    /// helper.
     async fn send_status_update(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
@@ -1154,35 +1250,33 @@ where
 
         counter!(
             ETL_EVENTS_PROCESSED_TOTAL,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
             ACTION_LABEL => "table_streaming",
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             DESTINATION_LABEL => D::name(),
         )
         .increment(metadata.metrics.items_count as u64);
 
         histogram!(
             ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
             ACTION_LABEL => "table_streaming",
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
             DESTINATION_LABEL => D::name(),
         )
         .record(metadata.metrics.dispatched_at.elapsed().as_secs_f64());
 
         // We process the syncing tables with the last end lsn that the batch contains.
         //
-        // Note that it could be that there is no end lsn for a specific batch, which could happen
-        // if we process a huge transaction, and we don't reach the commit before flushing. In that
-        // case, we don't process syncing tables, meaning that progress it not tracked, since it's
-        // not going to do anything because we can only track progress at commit boundaries.
+        // Note that it could be that there is no end lsn for a specific batch, which
+        // could happen if we process a huge transaction, and we don't reach the
+        // commit before flushing. In that case, we don't process syncing
+        // tables, meaning that progress it not tracked, since it's not going to
+        // do anything because we can only track progress at commit boundaries.
         if let Some(commit_end_lsn) = metadata.commit_end_lsn {
-            self.process_syncing_tables_after_flush(commit_end_lsn)
-                .await?;
+            self.process_syncing_tables_after_flush(commit_end_lsn).await?;
         }
 
-        // If processing was paused, there must be a queued batch that still needs to be flushed now
-        // that the previous in-flight result has resolved.
+        // If processing was paused, there must be a queued batch that still needs to be
+        // flushed now that the previous in-flight result has resolved.
         if processing_paused {
             self.flush_batch("pending flush result received").await?;
         }
@@ -1199,8 +1293,8 @@ where
         maybe_message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<()> {
-        // If there is no message anymore, it means that the connection has been closed or had some
-        // issues, we must handle this case.
+        // If there is no message anymore, it means that the connection has been closed
+        // or had some issues, we must handle this case.
         let Some(message) = maybe_message else {
             return Err(self.build_stream_ended_error(replication_client));
         };
@@ -1208,8 +1302,7 @@ where
         // If the Postgres had an error, we want to raise it immediately.
         let message = message?;
 
-        self.handle_replication_message_and_flush(events_stream.as_mut(), message)
-            .await
+        self.handle_replication_message_and_flush(events_stream.as_mut(), message).await
     }
 
     /// Creates an error for when the replication stream ends unexpectedly.
@@ -1245,9 +1338,7 @@ where
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<()> {
-        let result = self
-            .handle_replication_message(events_stream.as_mut(), message)
-            .await?;
+        let result = self.handle_replication_message(events_stream.as_mut(), message).await?;
 
         let should_include_event = matches!(result.end_batch, None | Some(EndBatch::Inclusive));
         if let Some(event) = result.event
@@ -1259,13 +1350,13 @@ where
             // We update the last end lsn of the commit that we encountered, if any.
             self.state.update_last_commit_end_lsn(result.end_lsn);
 
-            // We start the batch timer for the flushing. This timer is needed to control force
-            // flushing of a batch if its size is not reached in time.
-            self.state
-                .set_flush_deadline_if_needed(self.max_batch_fill_duration);
+            // We start the batch timer for the flushing. This timer is needed to control
+            // force flushing of a batch if its size is not reached in time.
+            self.state.set_flush_deadline_if_needed(self.max_batch_fill_duration);
         }
 
-        // We check for the batch flushing conditions before deciding whether to flush or not.
+        // We check for the batch flushing conditions before deciding whether to flush
+        // or not.
         let batch_size_reached =
             self.state.events_batch_bytes >= self.cached_batch_budget.current_batch_size_bytes();
         let early_flush_requested = result.end_batch.is_some();
@@ -1290,8 +1381,9 @@ where
 
     /// Flushes the current batch of events to the destination.
     ///
-    /// If a flush is already in flight, this pauses the loop and leaves the current batch queued
-    /// until the pending flush result has been processed. The queued batch is then retried from
+    /// If a flush is already in flight, this pauses the loop and leaves the
+    /// current batch queued until the pending flush result has been
+    /// processed. The queued batch is then retried from
     /// [`Self::handle_flush_result`] when that in-flight flush resolves.
     async fn flush_batch(&mut self, reason: &str) -> EtlResult<()> {
         // If the batch is empty, we don't need to do anything.
@@ -1299,17 +1391,14 @@ where
             return Ok(());
         }
 
-        // A flush is already in flight. Pause processing until the result resolves, at which
-        // point the loop will resume and dispatch this batch.
+        // A flush is already in flight. Pause processing until the result resolves, at
+        // which point the loop will resume and dispatch this batch.
         if self.state.has_pending_flush_result() {
             self.state.pause_processing();
-
             return Ok(());
         }
 
-        // We replace the existing vector with a new one and reset the accumulated batch bytes size.
         let (events_batch, events_batch_bytes) = self.state.take_events_batch();
-
         let events_batch_size = events_batch.len();
         info!(
             worker_type = %self.worker_context.worker_type(),
@@ -1319,8 +1408,8 @@ where
             "flushing batch to destination",
         );
 
-        // Capture dispatch-time metrics; they are carried through the result channel and
-        // recorded once the destination acknowledges the batch.
+        // Capture dispatch-time metrics; they are carried through the result channel
+        // and recorded once the destination acknowledges the batch.
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: self.state.last_commit_end_lsn.take(),
             metrics: DispatchMetrics {
@@ -1329,20 +1418,19 @@ where
             },
         };
 
-        // Create the flush result channel: the sender is handed to the destination and the
-        // pending receiver is stored on the loop state until the destination signals completion.
+        // Create the flush result channel: the sender is handed to the destination and
+        // the pending receiver is stored on the loop state until the
+        // destination signals completion.
         let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
-        self.destination
-            .write_events(events_batch, flush_result)
-            .await?;
+        self.destination.write_events(events_batch, flush_result).await?;
         self.state.pending_flush_result = Some(pending_flush_result);
 
-        // We reset the deadline for the batch, since we are now flushing a new batch. The new deadline
-        // will start as soon as we process a new element.
+        // We reset the deadline for the batch, since we are now flushing a new batch.
+        // The new deadline will start as soon as we process a new element.
         //
-        // It's important to note that the deadline is removed only when the batch is flushed and not before
-        // this way, if a batch fails to flush due to inflight, it will be re-tried indefinitely until
-        // that finishes.
+        // It's important to note that the deadline is removed only when the batch is
+        // flushed and not before this way, if a batch fails to flush due to
+        // inflight, it will be re-tried indefinitely until that finishes.
         self.state.reset_flush_deadline();
 
         Ok(())
@@ -1356,22 +1444,17 @@ where
     ) -> EtlResult<HandleMessageResult> {
         counter!(
             ETL_REPLICATION_MESSAGES_TOTAL,
-            PIPELINE_ID_LABEL => self.pipeline_id.to_string(),
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().to_simple_string(),
+            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
         )
         .increment(1);
 
         match message {
             ReplicationMessage::XLogData(message) => {
                 let start_lsn = PgLsn::from(message.wal_start());
-                self.state
-                    .replication_progress
-                    .update_last_received_lsn(start_lsn);
+                self.state.replication_progress.update_last_received_lsn(start_lsn);
 
                 let end_lsn = PgLsn::from(message.wal_end());
-                self.state
-                    .replication_progress
-                    .update_last_received_lsn(end_lsn);
+                self.state.replication_progress.update_last_received_lsn(end_lsn);
 
                 debug!(
                     %start_lsn,
@@ -1379,14 +1462,11 @@ where
                     "handling logical replication data message",
                 );
 
-                self.handle_logical_replication_message(start_lsn, message.into_data())
-                    .await
+                self.handle_logical_replication_message(start_lsn, message.into_data()).await
             }
             ReplicationMessage::PrimaryKeepAlive(message) => {
                 let end_lsn = PgLsn::from(message.wal_end());
-                self.state
-                    .replication_progress
-                    .update_last_received_lsn(end_lsn);
+                self.state.replication_progress.update_last_received_lsn(end_lsn);
 
                 debug!(
                     wal_end = %end_lsn,
@@ -1404,8 +1484,7 @@ where
                 )
                 .await?;
 
-                self.state
-                    .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
+                self.state.reset_keep_alive_deadline(self.keep_alive_deadline_duration);
 
                 Ok(HandleMessageResult::no_event())
             }
@@ -1413,7 +1492,8 @@ where
         }
     }
 
-    /// Processes logical replication messages and converts them to typed events.
+    /// Processes logical replication messages and converts them to typed
+    /// events.
     async fn handle_logical_replication_message(
         &mut self,
         start_lsn: PgLsn,
@@ -1451,8 +1531,104 @@ where
                 debug!("received unsupported TYPE message");
                 Ok(HandleMessageResult::default())
             }
+            LogicalReplicationMessage::Message(message_body) => {
+                self.handle_message(start_lsn, message_body).await
+            }
             _ => Ok(HandleMessageResult::default()),
         }
+    }
+
+    /// Handles Postgres MESSAGE messages (pg_logical_emit_message).
+    ///
+    /// For `supabase_etl_ddl`, we persist the new table schema as soon as the
+    /// logical message is decoded and invalidate any cached replication mask
+    /// for that table before more changes in the same transaction are
+    /// processed.
+    ///
+    /// This ordering matches how `pgoutput` produces the stream:
+    /// - `pgoutput_message()` writes logical `Message` records directly and
+    ///   does not inject `Relation` metadata.
+    /// - `Relation` records are synthesized lazily by `maybe_send_schema()`
+    ///   only when `pgoutput_change()` is about to emit a DML change.
+    /// - relcache invalidation from the DDL resets `schema_sent`, so the first
+    ///   post-DDL DML for the relation gets a fresh `Relation` message just
+    ///   before the row event.
+    ///
+    /// In other words, the protocol variant this code relies on is:
+    /// `... -> ddl Message -> Relation(new schema) -> Insert/Update/Delete
+    /// ...`. Because the DDL message itself is not a DML event, we must
+    /// update the stored schema and drop the old mask here, so that the
+    /// very next `Relation` rebuilds the mask against the new schema
+    /// snapshot.
+    async fn handle_message(
+        &mut self,
+        start_lsn: PgLsn,
+        message: &protocol::MessageBody,
+    ) -> EtlResult<HandleMessageResult> {
+        // If the prefix is unknown, we don't want to process it.
+        let prefix = message.prefix()?;
+        if prefix != DDL_MESSAGE_PREFIX {
+            info!(
+                prefix = %prefix,
+                "received logical message with unknown prefix, discarding"
+            );
+
+            return Ok(HandleMessageResult::no_event());
+        }
+
+        // DDL messages must be transactional.
+        let Some(remote_final_lsn) = self.state.remote_final_lsn else {
+            bail!(
+                ErrorKind::InvalidState,
+                "Invalid transaction state",
+                "DDL schema change messages must be transactional (transactional=true). Received \
+                 a DDL message outside of a transaction boundary."
+            );
+        };
+
+        let content = message.content()?;
+        let schema_change_message = SchemaChangeMessage::from_str(content)?;
+
+        let table_id = schema_change_message.table_id();
+
+        // Exactly one worker owns protocol interpretation for a table at a time. If
+        // this worker is not the owner, it must skip the DDL so the owning
+        // worker is solely responsible for advancing the shared per-table
+        // protocol state.
+        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
+            return Ok(HandleMessageResult::no_event());
+        }
+
+        info!(
+            table_id = schema_change_message.oid,
+            table_name = %schema_change_message.relname,
+            schema_name = %schema_change_message.nspname,
+            event = %schema_change_message.command_tag,
+            columns = schema_change_message.columns.len(),
+            "received ddl schema change message"
+        );
+
+        // Build table schema from DDL message with start_lsn as the snapshot_id.
+        let snapshot_id: SnapshotId = start_lsn.into();
+        let table_schema = schema_change_message.into_table_schema(snapshot_id);
+
+        // Store the new schema version in the store.
+        self.schema_store.store_table_schema(table_schema).await?;
+
+        // The next post-DDL DML will cause pgoutput to synthesize a fresh `RELATION`
+        // message for this table. Record the new snapshot and clear any cached
+        // mask now so relation handling rebuilds it from the schema version we
+        // just stored rather than reusing pre-DDL state.
+        self.shared_table_cache.upsert(table_id, snapshot_id, None).await;
+
+        let table_id_u32: u32 = table_id.into();
+        info!(
+            table_id = table_id_u32,
+            %snapshot_id,
+            "stored new schema version from ddl message"
+        );
+
+        Ok(HandleMessageResult::no_event())
     }
 
     /// Handles Postgres BEGIN messages.
@@ -1503,23 +1679,11 @@ where
         if let Some(begin_ts) = self.state.current_tx_begin_ts.take() {
             let now = Instant::now();
             let duration_seconds = (now - begin_ts).as_secs_f64();
-            histogram!(
-                ETL_TRANSACTION_DURATION_SECONDS,
-                PIPELINE_ID_LABEL => self.pipeline_id.to_string()
-            )
-            .record(duration_seconds);
+            histogram!(ETL_TRANSACTION_DURATION_SECONDS).record(duration_seconds);
 
-            counter!(
-                ETL_TRANSACTIONS_TOTAL,
-                PIPELINE_ID_LABEL => self.pipeline_id.to_string()
-            )
-            .increment(1);
+            counter!(ETL_TRANSACTIONS_TOTAL).increment(1);
 
-            histogram!(
-                ETL_TRANSACTION_SIZE,
-                PIPELINE_ID_LABEL => self.pipeline_id.to_string()
-            )
-            .record((self.state.current_tx_events - 1) as f64);
+            histogram!(ETL_TRANSACTION_SIZE).record((self.state.current_tx_events - 1) as f64);
 
             self.state.current_tx_events = 0;
         }
@@ -1527,9 +1691,7 @@ where
         let end_lsn = PgLsn::from(message.end_lsn());
 
         // Process syncing tables after commit (worker-specific behavior).
-        let should_end_batch = self
-            .process_syncing_tables_after_commit_event(end_lsn)
-            .await?;
+        let should_end_batch = self.process_syncing_tables_after_commit_event(end_lsn).await?;
 
         let tx_ordinal = self.state.next_tx_ordinal();
         let event = parse_event_from_commit_message(start_lsn, commit_lsn, tx_ordinal, message);
@@ -1540,9 +1702,10 @@ where
             ..Default::default()
         };
 
-        // Any requested exit forces the current commit batch to end, including the commit event
-        // itself. For shutdown, this is mainly the catch-up wait path requesting a pause exit,
-        // which lets that case reuse the normal commit flush flow.
+        // Any requested exit forces the current commit batch to end, including the
+        // commit event itself. For shutdown, this is mainly the catch-up wait
+        // path requesting a pause exit, which lets that case reuse the normal
+        // commit flush flow.
         if should_end_batch {
             result.end_batch = Some(EndBatch::Inclusive);
         }
@@ -1551,6 +1714,9 @@ where
     }
 
     /// Handles Postgres RELATION messages.
+    ///
+    /// Builds a replication mask from the relation message and stores it for
+    /// use by DML handlers.
     async fn handle_relation_message(
         &mut self,
         start_lsn: PgLsn,
@@ -1567,46 +1733,51 @@ where
         let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
-        if !self
-            .should_apply_changes(table_id, remote_final_lsn)
-            .await?
-        {
+        // Exactly one worker owns protocol interpretation for a table at a time.
+        // Non-owning workers skip `RELATION` handling and rely on the owner to
+        // refresh shared table state.
+        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
 
-        let existing_table_schema = self
-            .schema_store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found in cache",
-                    format!("Table schema for table {} not found in cache", table_id)
-                )
-            })?;
+        let replicated_columns = parse_replicated_column_names(message)?;
 
-        let event =
-            parse_event_from_relation_message(start_lsn, remote_final_lsn, tx_ordinal, message)?;
+        info!(
+            table_id = %table_id,
+            replicated_columns = ?replicated_columns,
+            "received relation message, building replication mask"
+        );
 
-        if !existing_table_schema.partial_eq(&event.table_schema) {
-            let error = TableReplicationError::with_solution(
-                table_id,
-                format!("The schema for table {table_id} has changed during streaming"),
-                "ETL doesn't support schema changes at this point in time, rollback the schema"
-                    .into(),
-                RetryPolicy::ManualRetry,
-                etl_error!(
-                    ErrorKind::SourceSchemaError,
-                    "table schema changed during streaming",
-                    format!("table schema for table {table_id} changed during streaming")
-                ),
-            );
+        // Build the replication mask by validating that all replicated columns exist in
+        // the schema.
+        let shared_table_state = self.shared_table_cache.get(&table_id).await;
+        let used_bootstrap_snapshot = shared_table_state.is_none();
+        let table_snapshot_id = shared_table_state
+            .map_or_else(|| self.state.bootstrap_snapshot_id(), |state| state.snapshot_id);
+        let table_schema = get_table_schema(
+            &self.schema_store,
+            &table_id,
+            table_snapshot_id,
+            used_bootstrap_snapshot,
+        )
+        .await?;
+        let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
+        self.shared_table_cache
+            .upsert(table_id, table_schema.snapshot_id, Some(replication_mask.clone()))
+            .await;
 
-            return Ok(HandleMessageResult::finish_batch_and_exclude_event(error));
-        }
+        // Build the ReplicatedTableSchema and emit a Relation event.
+        let replicated_table_schema =
+            ReplicatedTableSchema::from_mask(table_schema, replication_mask);
 
-        Ok(HandleMessageResult::return_event(Event::Relation(event)))
+        let relation_event = RelationEvent {
+            start_lsn,
+            commit_lsn: remote_final_lsn,
+            tx_ordinal,
+            replicated_table_schema,
+        };
+
+        Ok(HandleMessageResult::return_event(Event::Relation(relation_event)))
     }
 
     /// Handles Postgres INSERT messages.
@@ -1623,24 +1794,27 @@ where
             );
         };
 
+        let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
-        if !self
-            .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
-            .await?
-        {
+        // Exactly one worker owns protocol interpretation for a table at a time, so
+        // non-owning workers skip row decoding and leave the shared table state
+        // untouched.
+        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
 
+        let replicated_table_schema =
+            get_replicated_table_schema(&table_id, &self.schema_store, &self.shared_table_cache)
+                .await?;
+
         let event = parse_event_from_insert_message(
-            &self.schema_store,
+            replicated_table_schema,
             start_lsn,
             remote_final_lsn,
             tx_ordinal,
             message,
-            self.pipeline_id,
-        )
-        .await?;
+        )?;
 
         Ok(HandleMessageResult::return_event(Event::Insert(event)))
     }
@@ -1659,24 +1833,27 @@ where
             );
         };
 
+        let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
-        if !self
-            .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
-            .await?
-        {
+        // Exactly one worker owns protocol interpretation for a table at a time, so
+        // non-owning workers skip row decoding and leave the shared table state
+        // untouched.
+        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
 
+        let replicated_table_schema =
+            get_replicated_table_schema(&table_id, &self.schema_store, &self.shared_table_cache)
+                .await?;
+
         let event = parse_event_from_update_message(
-            &self.schema_store,
+            replicated_table_schema,
             start_lsn,
             remote_final_lsn,
             tx_ordinal,
             message,
-            self.pipeline_id,
-        )
-        .await?;
+        )?;
 
         Ok(HandleMessageResult::return_event(Event::Update(event)))
     }
@@ -1695,24 +1872,27 @@ where
             );
         };
 
+        let table_id = TableId::new(message.rel_id());
         let tx_ordinal = self.state.next_tx_ordinal();
 
-        if !self
-            .should_apply_changes(TableId::new(message.rel_id()), remote_final_lsn)
-            .await?
-        {
+        // Exactly one worker owns protocol interpretation for a table at a time, so
+        // non-owning workers skip row decoding and leave the shared table state
+        // untouched.
+        if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
 
+        let replicated_table_schema =
+            get_replicated_table_schema(&table_id, &self.schema_store, &self.shared_table_cache)
+                .await?;
+
         let event = parse_event_from_delete_message(
-            &self.schema_store,
+            replicated_table_schema,
             start_lsn,
             remote_final_lsn,
             tx_ordinal,
             message,
-            self.pipeline_id,
-        )
-        .await?;
+        )?;
 
         Ok(HandleMessageResult::return_event(Event::Delete(event)))
     }
@@ -1730,20 +1910,28 @@ where
                 "Transaction must be active before processing TRUNCATE message"
             );
         };
-
         let tx_ordinal = self.state.next_tx_ordinal();
 
-        let mut rel_ids = Vec::with_capacity(message.rel_ids().len());
-        for &table_id in message.rel_ids().iter() {
-            let should_apply_truncate = self
-                .should_apply_changes(TableId::new(table_id), remote_final_lsn)
+        // Collect the replicated schemas for tables this worker currently owns.
+        let mut truncated_tables = Vec::with_capacity(message.rel_ids().len());
+        for &rel_id in message.rel_ids() {
+            let table_id = TableId::new(rel_id);
+
+            // Exactly one worker owns protocol interpretation for a table at a time, so
+            // non-owning workers skip truncation handling for that table as well.
+            if self.should_apply_changes(table_id, remote_final_lsn).await? {
+                let replicated_table_schema = get_replicated_table_schema(
+                    &table_id,
+                    &self.schema_store,
+                    &self.shared_table_cache,
+                )
                 .await?;
-            if should_apply_truncate {
-                rel_ids.push(table_id)
+                truncated_tables.push(replicated_table_schema);
             }
         }
 
-        if rel_ids.is_empty() {
+        // If nothing to apply, skip conversion entirely.
+        if truncated_tables.is_empty() {
             return Ok(HandleMessageResult::no_event());
         }
 
@@ -1752,15 +1940,19 @@ where
             remote_final_lsn,
             tx_ordinal,
             message,
-            rel_ids,
+            truncated_tables,
         );
 
         Ok(HandleMessageResult::return_event(Event::Truncate(event)))
     }
 
-    /// Determines whether changes should be applied for a given table.
+    /// Determines whether this worker currently owns protocol interpretation
+    /// for a table.
     ///
-    /// Dispatches to worker-specific implementation based on the worker context.
+    /// Exactly one worker owns DDL, `RELATION`, and DML handling for a table at
+    /// a time. When this returns `false`, the caller must skip the message
+    /// and leave the shared per-table protocol state untouched so the
+    /// owning worker remains the single writer for that table.
     async fn should_apply_changes(
         &self,
         table_id: TableId,
@@ -1778,7 +1970,8 @@ where
 
     /// Processes syncing tables after a commit message.
     ///
-    /// Dispatches to worker-specific implementation based on the worker context.
+    /// Dispatches to worker-specific implementation based on the worker
+    /// context.
     async fn process_syncing_tables_after_commit_event(&mut self, lsn: PgLsn) -> EtlResult<bool> {
         let exit_intent = match &mut self.worker_context {
             WorkerContext::Apply(ctx) => {
@@ -1797,17 +1990,17 @@ where
 
     /// Processes syncing tables after a batch has been flushed.
     ///
-    /// Dispatches to worker-specific implementation based on the worker context.
+    /// Dispatches to worker-specific implementation based on the worker
+    /// context.
     async fn process_syncing_tables_after_flush(
         &mut self,
         last_commit_end_lsn: PgLsn,
     ) -> EtlResult<()> {
-        // Update replication progress to notify PostgreSQL of durable flush. Only reports progress
-        // up to the last completed transaction, which may cause duplicates on restart for partial
-        // transactions. Destinations must handle at-least-once delivery semantics.
-        self.state
-            .replication_progress
-            .update_last_flush_lsn(last_commit_end_lsn);
+        // Update replication progress to notify PostgreSQL of durable flush. Only
+        // reports progress up to the last completed transaction, which may
+        // cause duplicates on restart for partial transactions. Destinations
+        // must handle at-least-once delivery semantics.
+        self.state.replication_progress.update_last_flush_lsn(last_commit_end_lsn);
 
         let current_lsn = self.state.replication_progress.last_flush_lsn;
         info!(
@@ -1832,12 +2025,14 @@ where
         Ok(())
     }
 
-    /// Processes syncing tables when the apply loop is idle.
+    /// Processes syncing tables outside a transaction.
     ///
-    /// Dispatches to worker-specific implementation based on the worker context.
+    /// Dispatches to worker-specific implementation based on the worker
+    /// context.
     ///
-    /// Once an exit has already been requested we intentionally skip this class of work so
-    /// draining stays focused on already-started flushes and shutdown barriers.
+    /// Once an exit has already been requested we intentionally skip this class
+    /// of work so draining stays focused on already-started flushes and
+    /// shutdown barriers.
     async fn maybe_process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
         if self.state.exit_intent.is_some() {
             return Ok(());
@@ -1848,7 +2043,8 @@ where
 
     /// Processes syncing tables when the apply loop is idle.
     ///
-    /// Dispatches to worker-specific implementation based on the worker context.
+    /// Dispatches to worker-specific implementation based on the worker
+    /// context.
     async fn process_syncing_tables_when_idle(&mut self) -> EtlResult<()> {
         if !self.state.is_idle() {
             debug!("skipping table sync processing because apply loop is not idle");
@@ -1862,7 +2058,7 @@ where
         debug!(
             worker_type = %self.worker_context.worker_type(),
             %current_lsn,
-            "processing syncing tables while idle"
+            "processing syncing tables outside transaction"
         );
 
         let exit_intent = match &mut self.worker_context {
@@ -1881,7 +2077,8 @@ where
 
     /// Marks a table as errored.
     ///
-    /// Dispatches to worker-specific implementation based on the worker context.
+    /// Dispatches to worker-specific implementation based on the worker
+    /// context.
     async fn mark_table_errored(
         &mut self,
         table_replication_error: TableReplicationError,
@@ -1901,18 +2098,17 @@ where
     }
 }
 
-/// Returns an iterator over tables that are still synchronizing.
-async fn get_syncing_tables<S>(
-    store: &S,
-) -> EtlResult<impl Iterator<Item = (TableId, TableReplicationPhase)> + use<S>>
+/// Returns tables that are still synchronizing.
+async fn get_syncing_tables<S>(store: &S) -> EtlResult<Vec<(TableId, TableReplicationPhase)>>
 where
     S: StateStore,
 {
-    Ok(store
-        .get_table_replication_states()
-        .await?
-        .into_iter()
-        .filter(|(_, state)| !state.as_type().is_done()))
+    let states = store.get_table_replication_states().await?;
+    Ok(states
+        .iter()
+        .filter(|(_, state)| !state.as_type().is_done())
+        .map(|(id, state)| (*id, state.clone()))
+        .collect())
 }
 
 /// Functions specific to the apply worker.
@@ -1921,8 +2117,9 @@ mod apply_worker {
 
     /// Determines whether changes should be applied for a given table.
     ///
-    /// If an active worker exists for the table, its state is checked while holding
-    /// the lock. Otherwise, the replication phase is read from the store.
+    /// If an active worker exists for the table, its state is checked while
+    /// holding the lock. Otherwise, the replication phase is read from the
+    /// store.
     pub(super) async fn should_apply_changes<S, D>(
         ctx: &ApplyWorkerContext<S, D>,
         table_id: TableId,
@@ -1946,14 +2143,12 @@ mod apply_worker {
 
         if let Some(active_worker_state) = active_worker_state {
             let inner = active_worker_state.lock().await;
-            return Ok(is_phase_ready_for_changes(
-                inner.replication_phase(),
-                remote_final_lsn,
-            ));
+            return Ok(is_phase_ready_for_changes(inner.replication_phase(), remote_final_lsn));
         }
 
-        // If we didn't find an active worker, we need to read the replication phase from the store. This
-        // could happen if the event is from a table that has to be synced, or it was synced.
+        // If we didn't find an active worker, we need to read the replication phase
+        // from the store. This could happen if the event is from a table that
+        // has to be synced, or it was synced.
         let Some(phase) = ctx.store.get_table_replication_state(table_id).await? else {
             return Ok(false);
         };
@@ -1963,8 +2158,8 @@ mod apply_worker {
 
     /// Processes syncing tables after commit.
     ///
-    /// Spawns new table sync workers and triggers catchup when encountering SyncWait.
-    /// Does NOT perform SyncDone → Ready transitions.
+    /// Spawns new table sync workers and triggers catchup when encountering
+    /// SyncWait. Does NOT perform SyncDone → Ready transitions.
     pub(super) async fn process_syncing_tables_after_commit_event<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         current_lsn: PgLsn,
@@ -2020,9 +2215,9 @@ mod apply_worker {
 
             match phase {
                 TableReplicationPhase::SyncWait { lsn: snapshot_lsn } => {
-                    // The catchup lsn is determined via max since it could be that the table sync worker
-                    // is started from a lsn which is far in the future compared to where the apply worker
-                    // is.
+                    // The catchup lsn is determined via max since it could be that the table sync
+                    // worker is started from a lsn which is far in the future
+                    // compared to where the apply worker is.
                     let catchup_lsn = snapshot_lsn.max(current_lsn);
 
                     info!(
@@ -2188,9 +2383,9 @@ mod apply_worker {
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
-        // If there is an active worker, we want to see if we can switch it to the ready state.
-        // If there isn't an active worker, we just try to see if we can switch the table to ready
-        // state or start a new worker for that table.
+        // If there is an active worker, we want to see if we can switch it to the ready
+        // state. If there isn't an active worker, we just try to see if we can
+        // switch the table to ready state or start a new worker for that table.
         if let Some(worker_state) = worker_state {
             let worker_state_guard = worker_state.lock().await;
             let phase = worker_state_guard.replication_phase();
@@ -2282,8 +2477,9 @@ mod apply_worker {
 
     /// Processes syncing tables outside transaction.
     ///
-    /// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, and spawns workers.
-    /// Only called when outside a transaction and the batch is empty.
+    /// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, and
+    /// spawns workers. Only called when outside a transaction and the batch
+    /// is empty.
     pub(super) async fn process_syncing_tables_when_idle<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         current_lsn: PgLsn,
@@ -2311,8 +2507,9 @@ mod apply_worker {
 
     /// Processes a single syncing table outside transaction.
     ///
-    /// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, and spawns workers.
-    /// Only called when outside a transaction and the batch is empty.
+    /// Handles `SyncWait → Catchup` and `SyncDone → Ready` transitions, and
+    /// spawns workers. Only called when outside a transaction and the batch
+    /// is empty.
     async fn process_single_syncing_table_when_idle<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
         table_id: TableId,
@@ -2325,10 +2522,10 @@ mod apply_worker {
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
-        // If there is an active worker, we want to see if we can start the catchup or if we can
-        // switch it to ready state.
-        // If there isn't an active worker, we just try to see if we can switch the table to ready
-        // state or start a new worker for that table.
+        // If there is an active worker, we want to see if we can start the catchup or
+        // if we can switch it to ready state.
+        // If there isn't an active worker, we just try to see if we can switch the
+        // table to ready state or start a new worker for that table.
         if let Some(worker_state) = worker_state {
             let mut worker_state_guard = worker_state.lock().await;
             let phase = worker_state_guard.replication_phase();
@@ -2343,9 +2540,9 @@ mod apply_worker {
 
             match phase {
                 TableReplicationPhase::SyncWait { lsn: snapshot_lsn } => {
-                    // The catchup lsn is determined via max since it could be that the table sync worker
-                    // is started from a lsn which is far in the future compared to where the apply worker
-                    // is.
+                    // The catchup lsn is determined via max since it could be that the table sync
+                    // worker is started from a lsn which is far in the future
+                    // compared to where the apply worker is.
                     let catchup_lsn = snapshot_lsn.max(current_lsn);
 
                     info!(
@@ -2515,7 +2712,6 @@ mod apply_worker {
 
         Ok(None)
     }
-
     /// Creates a new table sync worker for the specified table.
     fn build_table_sync_worker<S, D>(
         ctx: &ApplyWorkerContext<S, D>,
@@ -2534,6 +2730,7 @@ mod apply_worker {
             table_id,
             ctx.store.clone(),
             ctx.destination.clone(),
+            ctx.shared_table_cache.clone(),
             ctx.shutdown_rx.clone(),
             ctx.table_sync_worker_permits.clone(),
             ctx.memory_monitor.clone(),
@@ -2543,14 +2740,16 @@ mod apply_worker {
 
     /// Starts a table sync worker and adds it to the pool.
     ///
-    /// We optimistically start the worker without checking if another one already exists since
-    /// it's highly likely that if we didn't find the worker state during process syncing table, then
-    /// the worker doesn't exist. If it were to exist, the pool itself performs de-duplication in a
+    /// We optimistically start the worker without checking if another one
+    /// already exists since it's highly likely that if we didn't find the
+    /// worker state during process syncing table, then the worker doesn't
+    /// exist. If it were to exist, the pool itself performs de-duplication in a
     /// consistent way.
     ///
-    /// This helper function uses type erasure via [`Box::pin`] to enforce `Send` bounds
-    /// on the future. Without this, the compiler cannot verify that the recursive async
-    /// call chain (ApplyLoop -> TableSyncWorker -> ApplyLoop for catchup) satisfies `Send`.
+    /// This helper function uses type erasure via [`Box::pin`] to enforce
+    /// `Send` bounds on the future. Without this, the compiler cannot
+    /// verify that the recursive async call chain (ApplyLoop ->
+    /// TableSyncWorker -> ApplyLoop for catchup) satisfies `Send`.
     fn start_table_sync_worker<S, D>(
         pool: Arc<TableSyncWorkerPool>,
         worker: TableSyncWorker<S, D>,
@@ -2569,8 +2768,8 @@ mod table_sync_worker {
 
     /// Determines whether changes should be applied for a given table.
     ///
-    /// For table sync workers, changes are only applied if the table matches the worker's assigned
-    /// table.
+    /// For table sync workers, changes are only applied if the table matches
+    /// the worker's assigned table.
     pub(super) fn should_apply_changes<S>(
         ctx: &TableSyncWorkerContext<S>,
         table_id: TableId,
@@ -2587,11 +2786,10 @@ mod table_sync_worker {
         ctx: &TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
     ) -> EtlResult<Option<ExitIntent>> {
-        let worker_type = WorkerType::TableSync {
-            table_id: ctx.table_id,
-        };
+        let worker_type = WorkerType::TableSync { table_id: ctx.table_id };
 
-        // Check if catchup position reached, if so, signal end batch but don't update the state yet.
+        // Check if catchup position reached, if so, signal end batch but don't update
+        // the state yet.
         let inner = ctx.table_sync_worker_state.lock().await;
         if let TableReplicationPhase::Catchup { lsn: catchup_lsn } = inner.replication_phase() {
             if current_lsn >= catchup_lsn {
@@ -2647,7 +2845,8 @@ mod table_sync_worker {
 
     /// Attempts to complete catchup and transition to SyncDone.
     ///
-    /// If catchup position has been reached, transitions to SyncDone and returns Complete.
+    /// If catchup position has been reached, transitions to SyncDone and
+    /// returns Complete.
     async fn try_complete_catchup<S>(
         ctx: &mut TableSyncWorkerContext<S>,
         current_lsn: PgLsn,
@@ -2655,9 +2854,7 @@ mod table_sync_worker {
     where
         S: StateStore + Clone + Send + Sync + 'static,
     {
-        let worker_type = WorkerType::TableSync {
-            table_id: ctx.table_id,
-        };
+        let worker_type = WorkerType::TableSync { table_id: ctx.table_id };
         let mut inner = ctx.table_sync_worker_state.lock().await;
         let phase = inner.replication_phase();
 
@@ -2697,7 +2894,6 @@ mod table_sync_worker {
 
         Ok(None)
     }
-
     /// Marks a table as errored.
     ///
     /// Updates the state and returns Complete if the table matches this worker.
@@ -2713,10 +2909,103 @@ mod table_sync_worker {
         }
 
         let mut inner = ctx.table_sync_worker_state.lock().await;
-        inner
-            .set_and_store(table_replication_error.into(), &ctx.state_store)
-            .await?;
+        inner.set_and_store(table_replication_error.into(), &ctx.state_store).await?;
 
         Ok(Some(ExitIntent::Complete))
     }
+}
+
+/// Retrieves a table schema from the schema store by table ID and snapshot.
+///
+/// When `used_bootstrap_snapshot` is `false`, the returned schema must match
+/// the requested snapshot exactly. When it is `true`, the lookup is allowed to
+/// resolve to an older schema version because the first `RELATION` message may
+/// arrive before shared per-table protocol state has been established, but it
+/// must never resolve to a newer schema than requested.
+async fn get_table_schema<S>(
+    schema_store: &S,
+    table_id: &TableId,
+    snapshot_id: SnapshotId,
+    used_bootstrap_snapshot: bool,
+) -> EtlResult<Arc<TableSchema>>
+where
+    S: SchemaStore,
+{
+    let table_schema =
+        schema_store.get_table_schema(table_id, snapshot_id).await?.ok_or_else(|| {
+            etl_error!(
+                ErrorKind::MissingTableSchema,
+                "Table schema not found",
+                format!(
+                    "Table schema for table {} at snapshot {} not found",
+                    table_id, snapshot_id
+                )
+            )
+        })?;
+
+    if used_bootstrap_snapshot {
+        if table_schema.snapshot_id > snapshot_id {
+            bail!(
+                ErrorKind::InvalidState,
+                "Bootstrap table schema snapshot exceeded requested snapshot",
+                format!(
+                    "Bootstrap schema lookup for table {} resolved to snapshot {} which is newer \
+                     than requested snapshot {}",
+                    table_id, table_schema.snapshot_id, snapshot_id
+                )
+            );
+        }
+
+        if table_schema.snapshot_id != snapshot_id {
+            info!(
+                table_id = %table_id,
+                requested_snapshot_id = %snapshot_id,
+                resolved_snapshot_id = %table_schema.snapshot_id,
+                "schema lookup returned an older schema because the first relation message used the bootstrap snapshot"
+            );
+        }
+    } else if table_schema.snapshot_id != snapshot_id {
+        bail!(
+            ErrorKind::InvalidState,
+            "Table schema snapshot mismatch",
+            format!(
+                "Table schema for table {} resolved to snapshot {} when snapshot {} was required",
+                table_id, table_schema.snapshot_id, snapshot_id
+            )
+        );
+    }
+
+    Ok(table_schema)
+}
+
+/// Retrieves a [`ReplicatedTableSchema`] for the given table from the shared
+/// table state.
+///
+/// This function combines the table schema from the schema store with the
+/// shared per-table protocol state to create a [`ReplicatedTableSchema`].
+async fn get_replicated_table_schema<S>(
+    table_id: &TableId,
+    schema_store: &S,
+    shared_table_cache: &SharedTableCache,
+) -> EtlResult<ReplicatedTableSchema>
+where
+    S: SchemaStore + Clone + Send + 'static,
+{
+    let Some(SharedTableState { snapshot_id, replication_mask: Some(replication_mask) }) =
+        shared_table_cache.get(table_id).await
+    else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Missing shared table state",
+            format!(
+                "No shared table state with a replication mask found for table {}, this event \
+                 can't be processed",
+                table_id
+            )
+        );
+    };
+
+    let table_schema = get_table_schema(schema_store, table_id, snapshot_id, false).await?;
+
+    Ok(ReplicatedTableSchema::from_mask(table_schema, replication_mask))
 }

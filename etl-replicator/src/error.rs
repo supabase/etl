@@ -1,21 +1,17 @@
+use std::{backtrace::Backtrace, error::Error, fmt};
+
 use etl::error::EtlError;
-use std::backtrace::Backtrace;
-use std::error::Error;
-use std::fmt;
 
 /// Returns whether terminal output should include backtraces.
 fn should_render_backtrace() -> bool {
-    matches!(
-        std::env::var("RUST_BACKTRACE").as_deref(),
-        Ok("1") | Ok("full")
-    )
+    matches!(std::env::var("RUST_BACKTRACE").as_deref(), Ok("1" | "full"))
 }
 
 /// Result type for replicator operations.
-pub type ReplicatorResult<T> = Result<T, ReplicatorError>;
+pub(crate) type ReplicatorResult<T> = Result<T, ReplicatorError>;
 
 /// Captured backtrace wrapper to avoid thiserror's unstable feature detection.
-pub struct CapturedBacktrace(Backtrace);
+pub(crate) struct CapturedBacktrace(Backtrace);
 
 impl CapturedBacktrace {
     /// Captures a new backtrace for an error variant.
@@ -36,7 +32,7 @@ impl fmt::Debug for CapturedBacktrace {
 /// Wraps [`EtlError`] for pipeline errors and provides variants for
 /// infrastructure errors.
 #[derive(Debug)]
-pub enum ReplicatorError {
+pub(crate) enum ReplicatorError {
     /// Pipeline or ETL-related error.
     Etl(EtlError),
     /// Configuration error.
@@ -49,7 +45,7 @@ pub enum ReplicatorError {
 
 impl ReplicatorError {
     /// Returns a short category label for this error.
-    pub fn category(&self) -> &'static str {
+    fn category(&self) -> &'static str {
         match self {
             ReplicatorError::Etl(_) => "replicator error",
             ReplicatorError::Config(_, _) => "configuration error",
@@ -59,22 +55,22 @@ impl ReplicatorError {
     }
 
     /// Returns the backtrace for this error.
-    pub fn backtrace(&self) -> Option<&Backtrace> {
+    pub(crate) fn backtrace(&self) -> Option<&Backtrace> {
         match self {
             ReplicatorError::Etl(err) => err.backtrace(),
-            ReplicatorError::Config(_, cb) => Some(&cb.0),
-            ReplicatorError::Migration(_, cb) => Some(&cb.0),
-            ReplicatorError::Io(_, cb) => Some(&cb.0),
+            ReplicatorError::Config(_, cb)
+            | ReplicatorError::Migration(_, cb)
+            | ReplicatorError::Io(_, cb) => Some(&cb.0),
         }
     }
 
     /// Creates a configuration error from any boxed source.
-    pub fn config<E: Error + Send + Sync + 'static>(err: E) -> Self {
+    pub(crate) fn config<E: Error + Send + Sync + 'static>(err: E) -> Self {
         ReplicatorError::Config(Box::new(err), CapturedBacktrace::capture())
     }
 
     /// Returns a user-oriented report for terminal output.
-    pub fn render_report(&self) -> String {
+    pub(crate) fn render_report(&self) -> String {
         let mut out = String::new();
         out.push_str("replicator failed\n");
         out.push_str(&format!("category: {}\n", self.category()));

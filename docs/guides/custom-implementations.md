@@ -50,27 +50,27 @@ tracing-subscriber = "0.3"
 Create `src/custom_store.rs`. A store must implement three traits (see [Extension Points](../explanation/traits.md) for full details):
 
 - `SchemaStore` - Table schema storage and retrieval
-- `StateStore` - Replication progress and table mapping tracking
+- `StateStore` - Replication progress and destination metadata tracking
 - `CleanupStore` - Metadata cleanup when tables leave the publication
 
 ```rust
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
 use etl::error::EtlResult;
-use etl::state::table::TableReplicationPhase;
-use etl::store::cleanup::CleanupStore;
-use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
-use etl::types::{TableId, TableSchema};
+use etl::state::{
+    AppliedDestinationTableMetadata, DestinationTableMetadata, TableReplicationPhase,
+};
+use etl::store::{CleanupStore, SchemaStore, StateStore, TableReplicationStates};
+use etl::types::{SnapshotId, TableId, TableSchema};
 
 #[derive(Debug, Clone, Default)]
 struct TableEntry {
-    schema: Option<Arc<TableSchema>>,
+    schemas: HashMap<SnapshotId, Arc<TableSchema>>,
     state: Option<TableReplicationPhase>,
-    mapping: Option<String>,
+    destination_metadata: Option<DestinationTableMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,25 +88,45 @@ impl CustomStore {
 }
 
 impl SchemaStore for CustomStore {
-    async fn get_table_schema(&self, table_id: &TableId) -> EtlResult<Option<Arc<TableSchema>>> {
+    async fn get_table_schema(
+        &self,
+        table_id: &TableId,
+        snapshot_id: SnapshotId,
+    ) -> EtlResult<Option<Arc<TableSchema>>> {
         let tables = self.tables.lock().await;
-        Ok(tables.get(table_id).and_then(|e| e.schema.clone()))
+        Ok(tables.get(table_id).and_then(|entry| {
+            entry
+                .schemas
+                .iter()
+                .filter(|(sid, _)| **sid <= snapshot_id)
+                .max_by_key(|(sid, _)| *sid)
+                .map(|(_, schema)| Arc::clone(schema))
+        }))
     }
 
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         let tables = self.tables.lock().await;
-        Ok(tables.values().filter_map(|e| e.schema.clone()).collect())
+        Ok(tables
+            .values()
+            .flat_map(|entry| entry.schemas.values().cloned())
+            .collect())
     }
 
     async fn load_table_schemas(&self) -> EtlResult<usize> {
-        Ok(0) // In-memory store, nothing to load
+        Ok(0)
     }
 
-    async fn store_table_schema(&self, schema: TableSchema) -> EtlResult<()> {
+    async fn store_table_schema(&self, schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         let mut tables = self.tables.lock().await;
         let id = schema.id;
-        tables.entry(id).or_default().schema = Some(Arc::new(schema));
-        Ok(())
+        let snapshot_id = schema.snapshot_id;
+        let schema = Arc::new(schema);
+        tables
+            .entry(id)
+            .or_default()
+            .schemas
+            .insert(snapshot_id, Arc::clone(&schema));
+        Ok(schema)
     }
 }
 
@@ -121,26 +141,29 @@ impl StateStore for CustomStore {
 
     async fn get_table_replication_states(
         &self,
-    ) -> EtlResult<HashMap<TableId, TableReplicationPhase>> {
+    ) -> EtlResult<TableReplicationStates> {
         let tables = self.tables.lock().await;
-        Ok(tables
-            .iter()
-            .filter_map(|(id, e)| e.state.clone().map(|s| (*id, s)))
-            .collect())
+        Ok(Arc::new(
+            tables
+                .iter()
+                .filter_map(|(id, e)| e.state.clone().map(|s| (*id, s)))
+                .collect::<BTreeMap<_, _>>(),
+        ))
     }
 
     async fn load_table_replication_states(&self) -> EtlResult<usize> {
         Ok(0)
     }
 
-    async fn update_table_replication_state(
+    async fn update_table_replication_states(
         &self,
-        table_id: TableId,
-        state: TableReplicationPhase,
+        updates: Vec<(TableId, TableReplicationPhase)>,
     ) -> EtlResult<()> {
-        info!("table {} -> {:?}", table_id.0, state);
         let mut tables = self.tables.lock().await;
-        tables.entry(table_id).or_default().state = Some(state);
+        for (table_id, state) in updates {
+            info!("table {} -> {:?}", table_id.0, state);
+            tables.entry(table_id).or_default().state = Some(state);
+        }
         Ok(())
     }
 
@@ -151,30 +174,37 @@ impl StateStore for CustomStore {
         todo!("Implement rollback if needed")
     }
 
-    async fn get_table_mapping(&self, table_id: &TableId) -> EtlResult<Option<String>> {
-        let tables = self.tables.lock().await;
-        Ok(tables.get(table_id).and_then(|e| e.mapping.clone()))
-    }
-
-    async fn get_table_mappings(&self) -> EtlResult<HashMap<TableId, String>> {
+    async fn get_destination_table_metadata(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<DestinationTableMetadata>> {
         let tables = self.tables.lock().await;
         Ok(tables
-            .iter()
-            .filter_map(|(id, e)| e.mapping.clone().map(|m| (*id, m)))
-            .collect())
+            .get(&table_id)
+            .and_then(|e| e.destination_metadata.clone()))
     }
 
-    async fn load_table_mappings(&self) -> EtlResult<usize> {
+    async fn get_applied_destination_table_metadata(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<Option<AppliedDestinationTableMetadata>> {
+        self.get_destination_table_metadata(table_id)
+            .await?
+            .map(|metadata| metadata.into_applied())
+            .transpose()
+    }
+
+    async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
         Ok(0)
     }
 
-    async fn store_table_mapping(
+    async fn store_destination_table_metadata(
         &self,
         table_id: TableId,
-        mapping: String,
+        metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
         let mut tables = self.tables.lock().await;
-        tables.entry(table_id).or_default().mapping = Some(mapping);
+        tables.entry(table_id).or_default().destination_metadata = Some(metadata);
         Ok(())
     }
 }
@@ -195,8 +225,8 @@ impl CleanupStore for CustomStore {
 Create `src/http_destination.rs`. A destination implements the `Destination` trait with four required methods:
 
 - `name()` - Return an identifier for logging
-- `truncate_table()` - Clear table before bulk load (called even if table does not exist)
-- `write_table_rows()` - Receive rows during initial copy (may receive empty vec for table creation)
+- `truncate_table()` - Clear table before bulk load using the current replicated table schema
+- `write_table_rows()` - Receive rows during initial copy together with the current replicated table schema
 - `write_events()` - Receive streaming changes (batches may span multiple tables)
 
 There's also an optional `shutdown()` method with a default no-op implementation. Override it if your destination needs cleanup when the pipeline shuts down.
@@ -207,9 +237,11 @@ use serde_json::json;
 use std::time::Duration;
 use tracing::{info, warn};
 
-use etl::destination::Destination;
+use etl::destination::{
+    Destination, TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+};
 use etl::error::{ErrorKind, EtlResult};
-use etl::types::{Event, TableId, TableRow};
+use etl::types::{Event, ReplicatedTableSchema, TableRow};
 use etl::{bail, etl_error};
 
 #[derive(Debug, Clone)]
@@ -254,18 +286,21 @@ impl Destination for HttpDestination {
 
     async fn truncate_table(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
-        info!("truncating table {}", table_id.0);
-        let result = self.post(&format!("tables/{}/truncate", table_id.0), json!({})).await;
+        let table_name = replicated_table_schema.get_inner().name.to_string();
+        info!("truncating table {}", table_name);
+        let result = self
+            .post(&format!("tables/{table_name}/truncate"), json!({}))
+            .await;
         async_result.send(result);
         Ok(())
     }
 
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
@@ -273,16 +308,17 @@ impl Destination for HttpDestination {
             async_result.send(Ok(()));
             return Ok(());
         }
-        info!("writing {} rows to table {}", rows.len(), table_id.0);
+        let table_name = replicated_table_schema.get_inner().name.to_string();
+        info!("writing {} rows to table {}", rows.len(), table_name);
 
         let payload = json!({
-            "table_id": table_id.0,
+            "table_name": table_name,
             "rows": rows.iter().map(|r| {
-                json!({ "values": r.values.iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>() })
+                json!({ "values": r.values().iter().map(|v| format!("{:?}", v)).collect::<Vec<_>>() })
             }).collect::<Vec<_>>()
         });
 
-        let result = self.post(&format!("tables/{}/rows", table_id.0), payload).await;
+        let result = self.post("rows", payload).await;
         async_result.send(result);
         Ok(())
     }
@@ -301,13 +337,13 @@ impl Destination for HttpDestination {
         let payload = json!({
             "events": events.iter().map(|e| {
                 match e {
-                    Event::Insert(i) => json!({"type": "insert", "table": i.table_id.0}),
-                    Event::Update(u) => json!({"type": "update", "table": u.table_id.0}),
-                    Event::Delete(d) => json!({"type": "delete", "table": d.table_id.0}),
+                    Event::Insert(i) => json!({"type": "insert", "table": i.replicated_table_schema.get_inner().name.to_string()}),
+                    Event::Update(u) => json!({"type": "update", "table": u.replicated_table_schema.get_inner().name.to_string()}),
+                    Event::Delete(d) => json!({"type": "delete", "table": d.replicated_table_schema.get_inner().name.to_string()}),
                     Event::Begin(_) => json!({"type": "begin"}),
                     Event::Commit(_) => json!({"type": "commit"}),
-                    Event::Relation(r) => json!({"type": "relation", "table": r.table_schema.id.0}),
-                    Event::Truncate(t) => json!({"type": "truncate", "tables": t.rel_ids}),
+                    Event::Relation(r) => json!({"type": "relation", "table": r.replicated_table_schema.get_inner().name.to_string()}),
+                    Event::Truncate(t) => json!({"type": "truncate", "tables": t.truncated_tables.iter().map(|table| table.get_inner().name.to_string()).collect::<Vec<_>>() }),
                     Event::Unsupported => json!({"type": "unsupported"}),
                 }
             }).collect::<Vec<_>>()
@@ -331,7 +367,10 @@ mod custom_store;
 mod http_destination;
 
 use custom_store::CustomStore;
-use etl::config::{BatchConfig, PgConnectionConfig, PipelineConfig, TlsConfig};
+use etl::config::{
+    BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+    PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+};
 use etl::pipeline::Pipeline;
 use http_destination::HttpDestination;
 use std::error::Error;
@@ -356,15 +395,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 enabled: false,
                 trusted_root_certs: String::new(),
             },
-            keepalive: None,
+            keepalive: TcpKeepaliveConfig::default(),
         },
         batch: BatchConfig {
-            max_size: 1000,
             max_fill_ms: 5000,
+            memory_budget_ratio: 0.2,
         },
         table_error_retry_delay_ms: 10000,
         table_error_retry_max_attempts: 5,
         max_table_sync_workers: 4,
+        max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        memory_refresh_interval_ms: 100,
+        memory_backpressure: Some(MemoryBackpressureConfig::default()),
+        table_sync_copy: TableSyncCopyConfig::default(),
+        invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
     };
 
     println!("Starting pipeline...");

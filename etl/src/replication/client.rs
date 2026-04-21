@@ -1,39 +1,39 @@
-use crate::error::{ErrorKind, EtlResult};
-use crate::utils::tokio::MakeRustlsConnect;
-use crate::{bail, etl_error};
-use etl_config::shared::{ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig};
-use etl_postgres::replication::extract_server_version;
-use etl_postgres::types::convert_type_oid_to_type;
-use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
-use etl_postgres::version::POSTGRES_15;
-use etl_postgres::{below_version, requires_version};
+use std::{collections::HashSet, fmt, num::NonZeroI32, sync::Arc, time::Duration};
+
+use etl_postgres::{below_version, replication::extract_server_version, version::POSTGRES_15};
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::LogicalReplicationStream;
-use rustls::ClientConfig;
-use rustls::pki_types::{CertificateDer, pem::PemObject};
-use std::fmt;
-use std::num::NonZeroI32;
-use std::sync::Arc;
-use std::time::Duration;
+use rustls::{
+    ClientConfig,
+    pki_types::{CertificateDer, pem::PemObject},
+};
 use tokio::sync::watch;
-
-use tokio_postgres::error::SqlState;
-use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{
     Client, Config, Connection, CopyOutStream, NoTls, SimpleQueryMessage, SimpleQueryRow, Socket,
-    config::ReplicationMode, types::PgLsn,
+    config::ReplicationMode, error::SqlState, tls::MakeTlsConnect,
 };
 use tracing::{Instrument, error, info, warn};
 
+use crate::{
+    bail,
+    config::{ETL_REPLICATION_OPTIONS, IntoConnectOptions, PgConnectionConfig},
+    conversions::{ColumnSchemaMessage, IdentityMessage, build_table_schema},
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    types::{ColumnSchema, PgLsn, SnapshotId, TableId, TableName, TableSchema},
+    utils::MakeRustlsConnect,
+};
+
 /// Maximum time to wait for a replication slot deletion to complete.
 ///
-/// Slot deletion uses `WAIT`, which can block until the slot is no longer in use.
-/// This timeout ensures calls are bounded and cannot wait forever.
+/// Slot deletion uses `WAIT`, which can block until the slot is no longer in
+/// use. This timeout ensures calls are bounded and cannot wait forever.
 const DELETE_SLOT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default duration unit used when `pg_settings.unit` is empty.
 const PG_SETTINGS_DEFAULT_DURATION_UNIT: &str = "ms";
 
-/// Spawns a background task to monitor a Postgres connection until it terminates.
+/// Spawns a background task to monitor a Postgres connection until it
+/// terminates.
 fn spawn_postgres_connection<T>(
     connection: Connection<Socket, T::Stream>,
 ) -> watch::Receiver<PostgresConnectionUpdate>
@@ -41,8 +41,8 @@ where
     T: MakeTlsConnect<Socket>,
     T::Stream: Send + 'static,
 {
-    // We use this watch channel to send connection updates without relying on the errors/terminations
-    // propagated by the active connection consumers.
+    // We use this watch channel to send connection updates without relying on the
+    // errors/terminations propagated by the active connection consumers.
     let (updates_tx, updates_rx) = watch::channel(PostgresConnectionUpdate::Running);
 
     let span = tracing::Span::current();
@@ -63,8 +63,9 @@ where
     }
     .instrument(span);
 
-    // There is no need to track the connection task via the `JoinHandle` since the `Client`, which
-    // returned the connection, will automatically terminate the connection when dropped.
+    // There is no need to track the connection task via the `JoinHandle` since the
+    // `Client`, which returned the connection, will automatically terminate the
+    // connection when dropped.
     tokio::spawn(task);
 
     updates_rx
@@ -83,15 +84,8 @@ pub enum PostgresConnectionUpdate {
 
 impl PostgresConnectionUpdate {
     /// Creates an error update from an error message.
-    pub fn errored(error: impl Into<Arc<str>>) -> Self {
-        Self::Errored {
-            error: error.into(),
-        }
-    }
-
-    /// Returns `true` when this update indicates that the connection has been closed.
-    pub fn signals_connection_closed(&self) -> bool {
-        matches!(self, Self::Terminated | Self::Errored { .. })
+    pub(crate) fn errored(error: impl Into<Arc<str>>) -> Self {
+        Self::Errored { error: error.into() }
     }
 }
 
@@ -120,13 +114,15 @@ enum SnapshotAction {
 /// for logical replication.
 #[derive(Debug, Clone)]
 pub struct CreateSlotResult {
-    /// The LSN at which the slot was created, representing a consistent point in the WAL.
+    /// The LSN at which the slot was created, representing a consistent point
+    /// in the WAL.
     pub consistent_point: PgLsn,
 }
 
 /// Result returned when retrieving an existing replication slot.
 ///
-/// Contains the confirmed flush LSN indicating how far replication has progressed.
+/// Contains the confirmed flush LSN indicating how far replication has
+/// progressed.
 #[derive(Debug, Clone)]
 pub struct GetSlotResult {
     /// The LSN up to which changes have been confirmed as processed by ETL.
@@ -135,23 +131,25 @@ pub struct GetSlotResult {
 
 /// The current state of a replication slot.
 ///
-/// Represents whether a slot is valid and can be used for replication, or has been
-/// invalidated by PostgreSQL (e.g., due to exceeding `max_slot_wal_keep_size`).
+/// Represents whether a slot is valid and can be used for replication, or has
+/// been invalidated by PostgreSQL (e.g., due to exceeding
+/// `max_slot_wal_keep_size`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotState {
     /// The slot is valid and can be used for replication.
     Valid,
     /// The slot has been invalidated and cannot be used for replication.
     ///
-    /// This typically occurs when the slot falls too far behind the current WAL position
-    /// and PostgreSQL removes the required WAL segments.
+    /// This typically occurs when the slot falls too far behind the current WAL
+    /// position and PostgreSQL removes the required WAL segments.
     Invalidated,
 }
 
-/// Result type for operations that either get an existing slot or create a new one.
+/// Result type for operations that either get an existing slot or create a new
+/// one.
 ///
-/// This enum distinguishes between whether a slot was newly created or already existed,
-/// providing appropriate result data for each case.
+/// This enum distinguishes between whether a slot was newly created or already
+/// existed, providing appropriate result data for each case.
 #[derive(Debug, Clone)]
 pub enum GetOrCreateSlotResult {
     /// A new slot was created with the given consistent point.
@@ -161,8 +159,9 @@ pub enum GetOrCreateSlotResult {
 }
 
 impl GetOrCreateSlotResult {
-    /// Returns the lsn that should be used as starting LSN during events replication.
-    pub fn get_start_lsn(&self) -> PgLsn {
+    /// Returns the lsn that should be used as starting LSN during events
+    /// replication.
+    pub(crate) fn get_start_lsn(&self) -> PgLsn {
         match self {
             GetOrCreateSlotResult::CreateSlot(result) => result.consistent_point,
             GetOrCreateSlotResult::GetSlot(result) => result.confirmed_flush_lsn,
@@ -187,22 +186,13 @@ pub enum CtidPartition {
     OpenEnd { start_tid: String },
 }
 
-/// Result of building publication filter SQL components.
-#[derive(Debug)]
-struct PublicationFilter {
-    /// CTEs to include in the WITH clause (empty string if no publication filtering).
-    ctes: String,
-    /// Predicate to include in the WHERE clause (empty string if no publication filtering).
-    predicate: String,
-}
-
 /// A transaction that operates within the context of a replication slot.
 ///
-/// This type ensures that the parent connection remains active for the duration of any
-/// transaction spawned by that connection for a given slot.
+/// This type ensures that the parent connection remains active for the duration
+/// of any transaction spawned by that connection for a given slot.
 ///
-/// The `client` is the client that created the slot and must be active for the duration of
-/// the transaction for the snapshot of the slot to be consistent.
+/// The `client` is the client that created the slot and must be active for the
+/// duration of the transaction for the snapshot of the slot to be consistent.
 #[derive(Debug)]
 pub struct PgReplicationTransaction {
     client: PgReplicationClient,
@@ -211,8 +201,8 @@ pub struct PgReplicationTransaction {
 impl PgReplicationTransaction {
     /// Creates a new transaction within the context of a replication slot.
     ///
-    /// The transaction is started with a repeatable read isolation level and uses the
-    /// snapshot associated with the provided slot.
+    /// The transaction is started with a repeatable read isolation level and
+    /// uses the snapshot associated with the provided slot.
     async fn new(client: PgReplicationClient) -> EtlResult<Self> {
         client.begin_tx().await?;
 
@@ -220,17 +210,23 @@ impl PgReplicationTransaction {
     }
 
     /// Retrieves the schema information for the supplied table.
+    pub async fn get_table_schema(&self, table_id: TableId) -> EtlResult<TableSchema> {
+        self.client.get_table_schema(table_id).await
+    }
+
+    /// Retrieves the names of columns being replicated for a table in a
+    /// publication.
     ///
-    /// If a publication is specified, only columns included in that publication
-    /// will be returned.
-    pub async fn get_table_schema(
+    /// Returns a [`HashSet`] containing the names of columns from the given
+    /// [`TableSchema`] that are included in the specified publication for
+    /// the given [`TableId`].
+    pub async fn get_replicated_column_names(
         &self,
         table_id: TableId,
-        publication_name: Option<&str>,
-    ) -> EtlResult<TableSchema> {
-        self.client
-            .get_table_schema(table_id, publication_name)
-            .await
+        table_schema: &TableSchema,
+        publication_name: &str,
+    ) -> EtlResult<HashSet<String>> {
+        self.client.get_replicated_column_names(table_id, table_schema, publication_name).await
     }
 
     /// Creates a COPY stream for reading data from the specified table.
@@ -242,40 +238,40 @@ impl PgReplicationTransaction {
         column_schemas: &[ColumnSchema],
         publication_name: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
-        self.client
-            .get_table_copy_stream(table_id, column_schemas, publication_name)
-            .await
+        self.client.get_table_copy_stream(table_id, column_schemas, publication_name).await
     }
 
-    /// Exports the current transaction snapshot so child connections can share it.
+    /// Exports the current transaction snapshot so child connections can share
+    /// it.
     ///
-    /// Calls `pg_export_snapshot()` within the slot's `REPEATABLE READ` transaction.
+    /// Calls `pg_export_snapshot()` within the slot's `REPEATABLE READ`
+    /// transaction.
     pub async fn export_snapshot(&self) -> EtlResult<String> {
         self.client.export_snapshot().await
     }
 
     /// Computes balanced ctid partition ranges using page-based estimation.
     ///
-    /// Returns one [`CtidPartition`] per partition, or an empty vec if the table has no rows.
+    /// Returns one [`CtidPartition`] per partition, or an empty vec if the
+    /// table has no rows.
     pub async fn plan_ctid_partitions(
         &self,
         table_id: TableId,
         num_partitions: u16,
     ) -> EtlResult<Vec<CtidPartition>> {
-        self.client
-            .plan_ctid_partitions(table_id, num_partitions)
-            .await
+        self.client.plan_ctid_partitions(table_id, num_partitions).await
     }
 
-    /// Checks whether the given table is a partitioned parent (`relkind = 'p'`).
+    /// Checks whether the given table is a partitioned parent (`relkind =
+    /// 'p'`).
     pub async fn is_partitioned_table(&self, table_id: TableId) -> EtlResult<bool> {
         self.client.is_partitioned_table(table_id).await
     }
 
     /// Returns the OIDs of all leaf partitions for a partitioned table.
     ///
-    /// Walks `pg_inherits` recursively and returns only leaf nodes (`relkind = 'r'`).
-    /// For a non-partitioned table this returns an empty vec.
+    /// Walks `pg_inherits` recursively and returns only leaf nodes (`relkind =
+    /// 'r'`). For a non-partitioned table this returns an empty vec.
     pub async fn get_leaf_partitions(&self, table_id: TableId) -> EtlResult<Vec<TableId>> {
         self.client.get_leaf_partitions(table_id).await
     }
@@ -296,8 +292,8 @@ impl PgReplicationTransaction {
 /// Created via [`PgReplicationChildTransaction::new`], which begins a read-only
 /// repeatable-read transaction and sets it to the supplied snapshot. The child
 /// connection shares the same snapshot as the parent, ensuring consistent reads
-/// across parallel operations. Catalog queries performed through this transaction
-/// see the same database state as the parent connection.
+/// across parallel operations. Catalog queries performed through this
+/// transaction see the same database state as the parent connection.
 #[derive(Debug)]
 pub struct PgReplicationChildTransaction {
     client: ChildPgReplicationClient,
@@ -306,8 +302,9 @@ pub struct PgReplicationChildTransaction {
 impl PgReplicationChildTransaction {
     /// Creates a new child transaction pinned to the given exported snapshot.
     ///
-    /// Begins a read-only repeatable-read transaction and sets it to `snapshot_id`,
-    /// ensuring reads are consistent with the parent connection's slot snapshot.
+    /// Begins a read-only repeatable-read transaction and sets it to
+    /// `snapshot_id`, ensuring reads are consistent with the parent
+    /// connection's slot snapshot.
     pub async fn new(client: ChildPgReplicationClient, snapshot_id: &str) -> EtlResult<Self> {
         client.client.begin_tx().await?;
         client.client.set_tx_snapshot(snapshot_id).await?;
@@ -325,16 +322,13 @@ impl PgReplicationChildTransaction {
         column_schemas: &[ColumnSchema],
         publication_name: Option<&str>,
     ) -> EtlResult<CopyOutStream> {
-        self.client
-            .client
-            .get_table_copy_stream(table_id, column_schemas, publication_name)
-            .await
+        self.client.client.get_table_copy_stream(table_id, column_schemas, publication_name).await
     }
 
     /// Creates a COPY stream for a ctid partition range of the specified table.
     ///
-    /// Resolves the table name and row filter internally, then streams rows whose ctid
-    /// falls within the given partition bounds.
+    /// Resolves the table name and row filter internally, then streams rows
+    /// whose ctid falls within the given partition bounds.
     pub async fn get_table_copy_stream_with_ctid_partition(
         &self,
         table_id: TableId,
@@ -364,13 +358,16 @@ impl PgReplicationChildTransaction {
     }
 }
 
-/// A non-replication child connection that keeps the parent [`PgReplicationClient`] alive.
+/// A non-replication child connection that keeps the parent
+/// [`PgReplicationClient`] alive.
 ///
-/// Holding a clone of the parent ensures the main replication connection cannot be dropped
-/// while any child exists, providing a compile-time lifetime guarantee via the inner [`Arc`].
+/// Holding a clone of the parent ensures the main replication connection cannot
+/// be dropped while any child exists, providing a compile-time lifetime
+/// guarantee via the inner [`Arc`].
 #[derive(Debug)]
 pub struct ChildPgReplicationClient {
-    /// Clone of the parent kept solely to prevent the main connection from being dropped.
+    /// Clone of the parent kept solely to prevent the main connection from
+    /// being dropped.
     _parent: PgReplicationClient,
     /// The actual child connection used for queries.
     client: PgReplicationClient,
@@ -378,8 +375,8 @@ pub struct ChildPgReplicationClient {
 
 /// A client for interacting with Postgres's logical replication features.
 ///
-/// This client provides methods for creating replication slots, managing transactions,
-/// and streaming changes from the database.
+/// This client provides methods for creating replication slots, managing
+/// transactions, and streaming changes from the database.
 #[derive(Debug, Clone)]
 pub struct PgReplicationClient {
     client: Arc<Client>,
@@ -389,8 +386,8 @@ pub struct PgReplicationClient {
 }
 
 impl PgReplicationClient {
-    /// Establishes a connection to Postgres. The connection uses TLS if configured in the
-    /// supplied [`PgConnectionConfig`].
+    /// Establishes a connection to Postgres. The connection uses TLS if
+    /// configured in the supplied [`PgConnectionConfig`].
     ///
     /// The connection is configured for logical replication mode
     pub async fn connect(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
@@ -404,16 +401,14 @@ impl PgReplicationClient {
     ///
     /// The connection is configured for logical replication mode.
     async fn connect_no_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
-        let mut config: Config = pg_connection_config
-            .clone()
-            .with_db(Some(&ETL_REPLICATION_OPTIONS));
+        let mut config: Config =
+            pg_connection_config.clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
         config.replication_mode(ReplicationMode::Logical);
 
         let (client, connection) = config.connect(NoTls).await?;
 
-        let server_version = connection
-            .parameter("server_version")
-            .and_then(extract_server_version);
+        let server_version =
+            connection.parameter("server_version").and_then(extract_server_version);
 
         let connection_updates_rx = spawn_postgres_connection::<NoTls>(connection);
 
@@ -431,9 +426,8 @@ impl PgReplicationClient {
     ///
     /// The connection is configured for logical replication mode
     async fn connect_tls(pg_connection_config: PgConnectionConfig) -> EtlResult<Self> {
-        let mut config: Config = pg_connection_config
-            .clone()
-            .with_db(Some(&ETL_REPLICATION_OPTIONS));
+        let mut config: Config =
+            pg_connection_config.clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
         config.replication_mode(ReplicationMode::Logical);
 
         let mut root_store = rustls::RootCertStore::empty();
@@ -446,15 +440,13 @@ impl PgReplicationClient {
             }
         };
 
-        let tls_config = ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+        let tls_config =
+            ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
 
         let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
 
-        let server_version = connection
-            .parameter("server_version")
-            .and_then(extract_server_version);
+        let server_version =
+            connection.parameter("server_version").and_then(extract_server_version);
 
         let connection_updates_rx = spawn_postgres_connection::<MakeRustlsConnect>(connection);
 
@@ -470,11 +462,8 @@ impl PgReplicationClient {
 
     /// Creates a non-replication, non-TLS child connection.
     async fn connect_child_no_tls(&self) -> EtlResult<ChildPgReplicationClient> {
-        let config: Config = self
-            .pg_connection_config
-            .as_ref()
-            .clone()
-            .with_db(Some(&ETL_REPLICATION_OPTIONS));
+        let config: Config =
+            self.pg_connection_config.as_ref().clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
 
         let (client, connection) = config.connect(NoTls).await?;
         let connection_updates_rx = spawn_postgres_connection::<NoTls>(connection);
@@ -486,19 +475,13 @@ impl PgReplicationClient {
             connection_updates_rx,
         };
 
-        Ok(ChildPgReplicationClient {
-            _parent: self.clone(),
-            client,
-        })
+        Ok(ChildPgReplicationClient { _parent: self.clone(), client })
     }
 
     /// Creates a non-replication, TLS-encrypted child connection.
     async fn connect_child_tls(&self) -> EtlResult<ChildPgReplicationClient> {
-        let config: Config = self
-            .pg_connection_config
-            .as_ref()
-            .clone()
-            .with_db(Some(&ETL_REPLICATION_OPTIONS));
+        let config: Config =
+            self.pg_connection_config.as_ref().clone().with_db(Some(&ETL_REPLICATION_OPTIONS));
 
         let mut root_store = rustls::RootCertStore::empty();
         for cert in CertificateDer::pem_slice_iter(
@@ -508,9 +491,8 @@ impl PgReplicationClient {
             root_store.add(cert)?;
         }
 
-        let tls_config = ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+        let tls_config =
+            ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
 
         let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await?;
         let connection_updates_rx = spawn_postgres_connection::<MakeRustlsConnect>(connection);
@@ -522,17 +504,15 @@ impl PgReplicationClient {
             connection_updates_rx,
         };
 
-        Ok(ChildPgReplicationClient {
-            _parent: self.clone(),
-            client,
-        })
+        Ok(ChildPgReplicationClient { _parent: self.clone(), client })
     }
 
-    /// Creates a non-replication child connection that inherits this client's connection settings.
+    /// Creates a non-replication child connection that inherits this client's
+    /// connection settings.
     ///
-    /// The child does not set `ReplicationMode::Logical`, so it does not consume a
-    /// `max_wal_senders` slot. It holds a clone of the parent to ensure the main connection
-    /// stays alive while any child exists.
+    /// The child does not set `ReplicationMode::Logical`, so it does not
+    /// consume a `max_wal_senders` slot. It holds a clone of the parent to
+    /// ensure the main connection stays alive while any child exists.
     pub async fn fork_child(&self) -> EtlResult<ChildPgReplicationClient> {
         match self.pg_connection_config.tls.enabled {
             true => self.connect_child_tls().await,
@@ -546,16 +526,12 @@ impl PgReplicationClient {
     }
 
     /// Returns a receiver for background connection task updates.
-    pub fn connection_updates_rx(&self) -> watch::Receiver<PostgresConnectionUpdate> {
+    pub(crate) fn connection_updates_rx(&self) -> watch::Receiver<PostgresConnectionUpdate> {
         self.connection_updates_rx.clone()
     }
 
-    /// Executes a simple query on the underlying connection and returns all result messages.
-    pub async fn simple_query(&self, query: &str) -> EtlResult<Vec<SimpleQueryMessage>> {
-        Ok(self.client.simple_query(query).await?)
-    }
-
-    /// Returns the configured `wal_sender_timeout`, if PostgreSQL has it enabled.
+    /// Returns the configured `wal_sender_timeout`, if PostgreSQL has it
+    /// enabled.
     pub async fn get_wal_sender_timeout(&self) -> EtlResult<Option<Duration>> {
         let query = "select setting, unit from pg_settings where name = 'wal_sender_timeout';";
 
@@ -566,9 +542,7 @@ impl PgReplicationClient {
                     return Ok(None);
                 }
 
-                let unit = row
-                    .try_get("unit")?
-                    .unwrap_or(PG_SETTINGS_DEFAULT_DURATION_UNIT);
+                let unit = row.try_get("unit")?.unwrap_or(PG_SETTINGS_DEFAULT_DURATION_UNIT);
 
                 let duration = match unit {
                     "ms" => Duration::from_millis(setting),
@@ -599,41 +573,41 @@ impl PgReplicationClient {
         )
     }
 
-    /// Creates a new logical replication slot with the specified name and a transaction pinned
-    /// to the slot's snapshot.
+    /// Creates a new logical replication slot with the specified name and a
+    /// transaction pinned to the slot's snapshot.
     ///
-    /// A `REPEATABLE READ` transaction is begun first, then the slot is created with
-    /// `USE_SNAPSHOT` which pins the transaction to the slot's consistent snapshot. The
-    /// transaction must be kept open for the duration of any operations that depend on
-    /// this snapshot (e.g. schema fetches, table copies, or `pg_export_snapshot()` calls
+    /// A `REPEATABLE READ` transaction is begun first, then the slot is created
+    /// with `USE_SNAPSHOT` which pins the transaction to the slot's
+    /// consistent snapshot. The transaction must be kept open for the
+    /// duration of any operations that depend on this snapshot (e.g. schema
+    /// fetches, table copies, or `pg_export_snapshot()` calls
     /// for child connections).
     pub async fn create_slot_with_transaction(
         &self,
         slot_name: &str,
     ) -> EtlResult<(PgReplicationTransaction, CreateSlotResult)> {
-        // TODO: check if we want to consume the client and return it on commit to avoid any other
-        //  operations on a connection that has started a transaction.
+        // TODO: check if we want to consume the client and return it on commit to avoid
+        // any other  operations on a connection that has started a transaction.
 
         // USE_SNAPSHOT requires being inside a transaction.
         let transaction = PgReplicationTransaction::new(self.clone()).await?;
-        let slot = self
-            .create_slot_internal(slot_name, SnapshotAction::Use)
-            .await?;
+        let slot = self.create_slot_internal(slot_name, SnapshotAction::Use).await?;
 
         Ok((transaction, slot))
     }
 
-    /// Creates a new logical replication slot with the specified name and no snapshot.
+    /// Creates a new logical replication slot with the specified name and no
+    /// snapshot.
     pub async fn create_slot(&self, slot_name: &str) -> EtlResult<CreateSlotResult> {
-        self.create_slot_internal(slot_name, SnapshotAction::NoExport)
-            .await
+        self.create_slot_internal(slot_name, SnapshotAction::NoExport).await
     }
 
     /// Gets the state of a replication slot by name.
     ///
-    /// Queries the `pg_replication_slots` system catalog to determine if the slot exists
-    /// and whether it's valid or invalidated. A slot is considered invalidated when its
-    /// `wal_status` is 'lost', indicating that required WAL segments have been removed.
+    /// Queries the `pg_replication_slots` system catalog to determine if the
+    /// slot exists and whether it's valid or invalidated. A slot is
+    /// considered invalidated when its `wal_status` is 'lost', indicating
+    /// that required WAL segments have been removed.
     ///
     /// Returns an error if the slot doesn't exist.
     pub async fn get_slot_state(&self, slot_name: &str) -> EtlResult<SlotState> {
@@ -651,7 +625,7 @@ impl PgReplicationClient {
 
                 return match wal_status.as_deref() {
                     Some("lost") => Ok(SlotState::Invalidated),
-                    Some(_) => Ok(SlotState::Valid),
+                    Some(_) |
                     // If wal_status is NULL, assume the slot is valid
                     // (this can happen on very old PostgreSQL versions)
                     None => Ok(SlotState::Valid),
@@ -683,9 +657,7 @@ impl PgReplicationClient {
                     "confirmed_flush_lsn",
                     "pg_replication_slots",
                 )?;
-                let slot = GetSlotResult {
-                    confirmed_flush_lsn,
-                };
+                let slot = GetSlotResult { confirmed_flush_lsn };
 
                 return Ok(slot);
             }
@@ -698,12 +670,14 @@ impl PgReplicationClient {
         );
     }
 
-    /// Gets an existing replication slot or creates a new one if it doesn't exist.
+    /// Gets an existing replication slot or creates a new one if it doesn't
+    /// exist.
     ///
-    /// This method first attempts to get the slot by name. If the slot doesn't exist,
-    /// it creates a new one.
+    /// This method first attempts to get the slot by name. If the slot doesn't
+    /// exist, it creates a new one.
     ///
-    /// Returns an enum indicating whether the slot was created or already existed.
+    /// Returns an enum indicating whether the slot was created or already
+    /// existed.
     pub async fn get_or_create_slot(&self, slot_name: &str) -> EtlResult<GetOrCreateSlotResult> {
         match self.get_slot(slot_name).await {
             Ok(slot) => {
@@ -724,42 +698,41 @@ impl PgReplicationClient {
 
     /// Deletes a replication slot with the specified name.
     ///
-    /// Returns an error if the slot doesn't exist or if there are any issues with the deletion.
+    /// Returns an error if the slot doesn't exist or if there are any issues
+    /// with the deletion.
     pub async fn delete_slot(&self, slot_name: &str) -> EtlResult<()> {
         self.delete_slot_internal(slot_name, true).await
     }
 
     /// Deletes a replication slot with the specified name if it exists.
     ///
-    /// This method returns [`Ok(())`] when the slot is missing and propagates any other
-    /// error from [`PgReplicationClient::delete_slot`].
+    /// This method returns [`Ok(())`] when the slot is missing and propagates
+    /// any other error from [`PgReplicationClient::delete_slot`].
     pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
         self.delete_slot_internal(slot_name, false).await
     }
 
-    /// Deletes a replication slot, optionally failing when the slot does not exist.
+    /// Deletes a replication slot, optionally failing when the slot does not
+    /// exist.
     async fn delete_slot_internal(&self, slot_name: &str, fail_if_missing: bool) -> EtlResult<()> {
         info!(slot_name, "deleting replication slot");
 
-        // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
-        let query = format!(
-            r#"DROP_REPLICATION_SLOT {} WAIT;"#,
-            quote_identifier(slot_name)
-        );
+        // Do not convert the query or the options to lowercase, see comment in
+        // `create_slot_internal`.
+        let query = format!(r#"DROP_REPLICATION_SLOT {} WAIT;"#, quote_identifier(slot_name));
 
-        let delete_result =
-            match tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
-            {
-                Ok(result) => result,
-                Err(_) => bail!(
-                    ErrorKind::ReplicationSlotDeletionTimeout,
-                    "Replication slot deletion timed out",
-                    format!(
-                        "Timed out after {:?} while deleting replication slot '{}'",
-                        DELETE_SLOT_TIMEOUT, slot_name
-                    )
-                ),
-            };
+        let Ok(delete_result) =
+            tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
+        else {
+            bail!(
+                ErrorKind::ReplicationSlotDeletionTimeout,
+                "Replication slot deletion timed out",
+                format!(
+                    "Timed out after {:?} while deleting replication slot '{}'",
+                    DELETE_SLOT_TIMEOUT, slot_name
+                )
+            )
+        };
 
         match delete_result {
             Ok(_) => {
@@ -770,16 +743,14 @@ impl PgReplicationClient {
             Err(err) => {
                 if let Some(&SqlState::UNDEFINED_OBJECT) = err.code() {
                     if fail_if_missing {
-                        warn!(
-                            slot_name,
-                            "attempted to delete non-existent replication slot"
-                        );
+                        warn!(slot_name, "attempted to delete non-existent replication slot");
 
                         bail!(
                             ErrorKind::ReplicationSlotNotFound,
                             "Replication slot not found",
                             format!(
-                                "Replication slot '{}' not found in database while attempting its deletion",
+                                "Replication slot '{}' not found in database while attempting its \
+                                 deletion",
                                 slot_name
                             )
                         );
@@ -812,8 +783,9 @@ impl PgReplicationClient {
 
     /// Retrieves the `publish_via_partition_root` setting for a publication.
     ///
-    /// Returns `true` if the publication is configured to send replication messages using
-    /// the parent table OID, or `false` if it sends them using child partition OIDs.
+    /// Returns `true` if the publication is configured to send replication
+    /// messages using the parent table OID, or `false` if it sends them
+    /// using child partition OIDs.
     pub async fn get_publish_via_partition_root(&self, publication_name: &str) -> EtlResult<bool> {
         let query = format!(
             "select pubviaroot from pg_publication where pubname = {};",
@@ -842,14 +814,13 @@ impl PgReplicationClient {
 
     /// Returns the OIDs of all leaf partitions for a partitioned table.
     ///
-    /// Uses `pg_partition_tree()` (available since PostgreSQL 12) to efficiently walk the
-    /// partition hierarchy and return only leaf nodes. For a non-partitioned table this
-    /// returns an empty vec.
+    /// Uses `pg_partition_tree()` (available since PostgreSQL 12) to
+    /// efficiently walk the partition hierarchy and return only leaf nodes.
+    /// For a non-partitioned table this returns an empty vec.
     async fn get_leaf_partitions(&self, table_id: TableId) -> EtlResult<Vec<TableId>> {
         let query = format!(
-            "select relid::oid as oid from pg_partition_tree({table_id}::regclass) \
-             where isleaf and relid != {table_id}::regclass \
-             order by relid::oid;"
+            "select relid::oid as oid from pg_partition_tree({table_id}::regclass) where isleaf \
+             and relid != {table_id}::regclass order by relid::oid;"
         );
 
         let mut leaves = Vec::new();
@@ -867,16 +838,13 @@ impl PgReplicationClient {
     ///
     /// A partitioned table is one where `relkind = 'p'` in `pg_class`.
     /// Returns `true` if at least one table is partitioned, `false` otherwise.
-    pub async fn has_partitioned_tables(&self, table_ids: &[TableId]) -> EtlResult<bool> {
+    pub(crate) async fn has_partitioned_tables(&self, table_ids: &[TableId]) -> EtlResult<bool> {
         if table_ids.is_empty() {
             return Ok(false);
         }
 
-        let table_oids_list = table_ids
-            .iter()
-            .map(|id| id.0.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let table_oids_list =
+            table_ids.iter().map(|id| id.0.to_string()).collect::<Vec<_>>().join(", ");
 
         let query = format!(
             "select 1 from pg_class where oid in ({table_oids_list}) and relkind = 'p' limit 1;"
@@ -909,18 +877,130 @@ impl PgReplicationClient {
                 let name =
                     Self::get_row_value::<String>(&row, "tablename", "pg_publication_tables")?;
 
-                table_names.push(TableName { schema, name })
+                table_names.push(TableName { schema, name });
             }
         }
 
         Ok(table_names)
     }
 
+    /// Retrieves the names of columns being replicated for a table in a
+    /// publication.
+    ///
+    /// Returns a [`HashSet`] containing the names of columns that are included
+    /// in the publication for the specified table. If the PostgreSQL
+    /// version is below 15 (which doesn't support column filtering),
+    /// returns all column names from the table schema.
+    ///
+    /// For publications created with `FOR ALL TABLES` or `FOR TABLES IN
+    /// SCHEMA`, all columns are replicated since these publication types
+    /// don't support column filtering.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::ConfigError`] if the table is not included in the
+    /// publication. This prevents silently syncing tables that won't
+    /// receive CDC updates.
+    ///
+    /// This method should be called in the same transaction as
+    /// describe_table_schema to ensure consistency during initial table
+    /// sync.
+    async fn get_replicated_column_names(
+        &self,
+        table_id: TableId,
+        table_schema: &TableSchema,
+        publication_name: &str,
+    ) -> EtlResult<HashSet<String>> {
+        // Column filtering in publications was added in Postgres 15. For earlier
+        // versions, all columns are replicated.
+        if below_version!(self.server_version, POSTGRES_15) {
+            return Ok(table_schema
+                .column_schemas
+                .iter()
+                .map(|column_schema| column_schema.name.clone())
+                .collect());
+        }
+
+        // Query pg_publication_tables using unnest() to properly decode the attnames
+        // array. This correctly handles column names containing special
+        // characters (spaces, commas, quotes) that would break naive string
+        // parsing.
+        //
+        // The query returns two columns:
+        // - table_in_publication: true if the table is in the publication
+        // - column_name: the column name (NULL if attnames is NULL, meaning all
+        //   columns)
+        //
+        // When attnames is NULL (FOR ALL TABLES or FOR TABLES IN SCHEMA publications),
+        // all columns are replicated. When attnames has values, only those columns are
+        // replicated. If no rows are returned, the table is not in the publication.
+        let column_query = format!(
+            "select true as table_in_publication, u.column_name
+             from pg_publication_tables pt
+             left join lateral unnest(pt.attnames) as u(column_name) on true
+             join pg_namespace n on n.nspname = pt.schemaname
+             join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
+             where pt.pubname = {} and c.oid = {};",
+            quote_literal(publication_name),
+            table_id,
+        );
+
+        let rows = self.client.simple_query(&column_query).await?;
+        let mut column_names = HashSet::new();
+        let mut table_in_publication = false;
+
+        for row in rows {
+            if let SimpleQueryMessage::Row(row) = row {
+                // If we got any row, the table is in the publication.
+                table_in_publication = true;
+
+                if let Some(column_name) = row.try_get::<&str>("column_name")? {
+                    column_names.insert(column_name.to_string());
+                }
+            }
+        }
+
+        // If the table is not in the publication, error out. This prevents silently
+        // syncing tables that won't receive events, leaving the destination
+        // stale.
+        if !table_in_publication {
+            bail!(
+                ErrorKind::ConfigError,
+                "Table not in publication",
+                format!(
+                    "Table '{}' is not included in publication '{}'. The table must be added to \
+                     the publication to receive events.",
+                    table_schema.name, publication_name
+                )
+            );
+        }
+
+        // If column_names is empty but table is in publication, it means attnames was
+        // NULL, which indicates all columns are replicated (FOR ALL TABLES or
+        // FOR TABLES IN SCHEMA).
+        if column_names.is_empty() {
+            return Ok(table_schema
+                .column_schemas
+                .iter()
+                .map(|column_schema| column_schema.name.clone())
+                .collect());
+        }
+
+        Ok(column_names)
+    }
+
     /// Retrieves the OIDs of all tables included in a publication.
     ///
-    /// For partitioned tables with `publish_via_partition_root=true`, this returns only the parent
-    /// table OID. The query uses a recursive CTE to walk up the partition inheritance hierarchy
-    /// and identify root tables that have no parent themselves.
+    /// For partitioned tables with `publish_via_partition_root=true`, this
+    /// returns only the parent table OID. The query uses a recursive CTE to
+    /// walk up the partition inheritance hierarchy and identify root tables
+    /// that have no parent themselves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::ConfigError`] if the publication contains no
+    /// tables. This typically indicates a misconfigured publication that
+    /// won't replicate any data.
     pub async fn get_publication_table_ids(
         &self,
         publication_name: &str,
@@ -957,18 +1037,32 @@ impl PgReplicationClient {
             pub = quote_literal(publication_name)
         );
 
-        let mut roots = vec![];
-        for msg in self.client.simple_query(&query).await? {
-            if let SimpleQueryMessage::Row(row) = msg {
+        let mut root_tables = vec![];
+        for row in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = row {
                 let table_id = Self::get_row_value::<TableId>(&row, "oid", "pg_class")?;
-                roots.push(table_id);
+                root_tables.push(table_id);
             }
         }
 
-        Ok(roots)
+        if root_tables.is_empty() {
+            bail!(
+                ErrorKind::ConfigError,
+                "Publication has no tables",
+                format!(
+                    "Publication '{}' does not contain any tables. Ensure the publication is \
+                     configured with tables using FOR TABLE, FOR ALL TABLES, or FOR TABLES IN \
+                     SCHEMA.",
+                    publication_name
+                )
+            );
+        }
+
+        Ok(root_tables)
     }
 
-    /// Starts a logical replication stream from the specified publication and slot.
+    /// Starts a logical replication stream from the specified publication and
+    /// slot.
     ///
     /// The stream will begin reading changes from the provided `start_lsn`.
     pub async fn start_logical_replication(
@@ -979,9 +1073,10 @@ impl PgReplicationClient {
     ) -> EtlResult<LogicalReplicationStream> {
         info!(publication_name, slot_name, %start_lsn, "starting logical replication");
 
-        // Do not convert the query or the options to lowercase, see comment in `create_slot_internal`.
+        // Do not convert the query or the options to lowercase, see comment in
+        // `create_slot_internal`.
         let options = format!(
-            r#"("proto_version" '1', "publication_names" {})"#,
+            r#"("proto_version" '1', "publication_names" {}, "messages" 'true')"#,
             quote_literal(quote_identifier(publication_name).as_ref()),
         );
 
@@ -1000,12 +1095,11 @@ impl PgReplicationClient {
 
     /// Begins a new transaction with repeatable read isolation level.
     ///
-    /// The transaction doesn't make any assumptions about the snapshot in use, since this is a
-    /// concern of the statements issued within the transaction.
+    /// The transaction doesn't make any assumptions about the snapshot in use,
+    /// since this is a concern of the statements issued within the
+    /// transaction.
     async fn begin_tx(&self) -> EtlResult<()> {
-        self.client
-            .simple_query("begin read only isolation level repeatable read;")
-            .await?;
+        self.client.simple_query("begin read only isolation level repeatable read;").await?;
 
         Ok(())
     }
@@ -1013,10 +1107,7 @@ impl PgReplicationClient {
     /// Sets the snapshot id on the running transaction.
     async fn set_tx_snapshot(&self, snapshot_id: &str) -> EtlResult<()> {
         self.client
-            .simple_query(&format!(
-                "set transaction snapshot {};",
-                quote_literal(snapshot_id)
-            ))
+            .simple_query(&format!("set transaction snapshot {};", quote_literal(snapshot_id)))
             .await?;
 
         Ok(())
@@ -1031,7 +1122,8 @@ impl PgReplicationClient {
 
     /// Internal helper method to create a replication slot.
     ///
-    /// The `snapshot_action` controls how the slot's snapshot is handled during creation.
+    /// The `snapshot_action` controls how the slot's snapshot is handled during
+    /// creation.
     async fn create_slot_internal(
         &self,
         slot_name: &str,
@@ -1072,10 +1164,7 @@ impl PgReplicationClient {
                     bail!(
                         ErrorKind::ReplicationSlotAlreadyExists,
                         "Replication slot already exists",
-                        format!(
-                            "Replication slot '{}' already exists in database",
-                            slot_name
-                        )
+                        format!("Replication slot '{}' already exists in database", slot_name)
                     );
                 }
 
@@ -1083,29 +1172,25 @@ impl PgReplicationClient {
             }
         }
 
-        Err(etl_error!(
-            ErrorKind::ReplicationSlotNotCreated,
-            "Replication slot creation failed"
-        ))
+        Err(etl_error!(ErrorKind::ReplicationSlotNotCreated, "Replication slot creation failed"))
     }
 
-    /// Retrieves the schema for a single table.
+    /// Retrieves the full schema for a single table.
     ///
-    /// If a publication is specified, only columns included in that publication
-    /// will be returned.
-    async fn get_table_schema(
-        &self,
-        table_id: TableId,
-        publication_name: Option<&str>,
-    ) -> EtlResult<TableSchema> {
-        let table_name = self.get_table_name(table_id).await?;
-        let column_schemas = self.get_column_schemas(table_id, publication_name).await?;
+    /// This returns the source-native table schema independent of any
+    /// publication column filtering. Publication filtering is handled
+    /// separately via [`Self::get_replicated_column_names`] and represented
+    /// as a [`ReplicationMask`].
+    async fn get_table_schema(&self, table_id: TableId) -> EtlResult<TableSchema> {
+        let (table_name, columns, identity) = self.get_table_schema_snapshot(table_id).await?;
 
-        Ok(TableSchema {
-            name: table_name,
-            id: table_id,
-            column_schemas,
-        })
+        Ok(build_table_schema(
+            table_id,
+            table_name,
+            columns,
+            identity.primary_key_attnums,
+            SnapshotId::initial(),
+        ))
     }
 
     /// Loads the table name and schema information for a given table OID.
@@ -1125,10 +1210,7 @@ impl PgReplicationClient {
                     Self::get_row_value::<String>(&row, "schema_name", "pg_namespace")?;
                 let table_name = Self::get_row_value::<String>(&row, "table_name", "pg_class")?;
 
-                return Ok(TableName {
-                    schema: schema_name,
-                    name: table_name,
-                });
+                return Ok(TableName { schema: schema_name, name: table_name });
             }
         }
 
@@ -1139,149 +1221,11 @@ impl PgReplicationClient {
         );
     }
 
-    /// Builds SQL fragments for filtering columns based on publication settings.
+    /// Warns when the source table contains generated columns.
     ///
-    /// Returns CTEs and predicates that filter columns according to:
-    /// - Postgres 15+: Column-level filtering using `prattrs`
-    /// - Postgres 14 and earlier: Table-level filtering only
-    /// - No publication: No filtering (empty strings)
-    fn build_publication_filter_sql(
-        &self,
-        table_id: TableId,
-        publication_name: Option<&str>,
-    ) -> PublicationFilter {
-        let Some(publication_name) = publication_name else {
-            return PublicationFilter {
-                ctes: String::new(),
-                predicate: String::new(),
-            };
-        };
-
-        // Postgres 15+ supports column-level filtering via prattrs
-        if requires_version!(self.server_version, POSTGRES_15) {
-            return PublicationFilter {
-                ctes: format!(
-                    "pub_info as (
-                        select p.oid as puboid, p.puballtables, r.prattrs
-                        from pg_publication p
-                        left join pg_publication_rel r on r.prpubid = p.oid and r.prrelid = {table_id}
-                        where p.pubname = {publication}
-                    ),
-                    pub_attrs as (
-                        select unnest(prattrs) as attnum
-                        from pub_info
-                        where prattrs is not null
-                    ),
-                    pub_schema as (
-                        select 1 as exists_in_schema_pub
-                        from pub_info
-                        join pg_publication_namespace pn on pn.pnpubid = pub_info.puboid
-                        join pg_class c on c.relnamespace = pn.pnnspid
-                        where c.oid = {table_id}
-                    ),",
-                    publication = quote_literal(publication_name),
-                ),
-                predicate: "and (
-                        (select puballtables from pub_info) = true
-                        or (select count(*) from pub_schema) > 0
-                        or (
-                            case (select count(*) from pub_attrs)
-                                when 0 then true
-                                else (a.attnum in (select attnum from pub_attrs))
-                            end
-                        )
-                    )"
-                .to_string(),
-            };
-        }
-
-        // Postgres 14 and earlier: table-level filtering only
-        PublicationFilter {
-            ctes: format!(
-                "pub_info as (
-                    select p.puballtables
-                    from pg_publication p
-                    where p.pubname = {publication}
-                ),
-                pub_table as (
-                    select 1 as exists_in_pub
-                    from pg_publication_rel r
-                    join pg_publication p on r.prpubid = p.oid
-                    where p.pubname = {publication}
-                        and r.prrelid = {table_id}
-                ),",
-                publication = quote_literal(publication_name),
-            ),
-            predicate: "and ((select puballtables from pub_info) = true or (select count(*) from pub_table) > 0)".to_string(),
-        }
-    }
-
-    /// Retrieves schema information for all columns in a table.
-    ///
-    /// If a publication is specified, only columns included in that publication
-    /// will be returned. Generated columns are always excluded since they are not
-    /// supported in PostgreSQL logical replication.
-    async fn get_column_schemas(
-        &self,
-        table_id: TableId,
-        publication_name: Option<&str>,
-    ) -> EtlResult<Vec<ColumnSchema>> {
-        // Build publication filter CTEs and predicates based on Postgres version.
-        let publication_filter = self.build_publication_filter_sql(table_id, publication_name);
-
-        let column_info_query = format!(
-            r#"
-            with {publication_ctes}
-            -- Find the direct parent table (for child partitions)
-            direct_parent as (
-                select i.inhparent as parent_oid
-                from pg_inherits i
-                where i.inhrelid = {table_id}
-                limit 1
-            ),
-            -- Extract primary key column names from the parent table
-            parent_pk_cols as (
-                select array_agg(a.attname order by x.n) as pk_column_names
-                from pg_constraint con
-                join unnest(con.conkey) with ordinality as x(attnum, n) on true
-                join pg_attribute a on a.attrelid = con.conrelid and a.attnum = x.attnum
-                join direct_parent dp on con.conrelid = dp.parent_oid
-                where con.contype = 'p'
-                group by con.conname
-            )
-            select
-                a.attname,
-                a.atttypid,
-                a.atttypmod,
-                a.attnotnull,
-                case
-                    -- Check if column has a direct primary key index
-                    when coalesce(i.indisprimary, false) = true then true
-                    -- Check if column name matches parent's primary key (for partitions)
-                    when exists (
-                        select 1
-                        from parent_pk_cols pk
-                        where a.attname = any(pk.pk_column_names)
-                    ) then true
-                    else false
-                end as primary
-            from pg_attribute a
-            left join pg_index i
-                on a.attrelid = i.indrelid
-                and a.attnum = any(i.indkey)
-                and i.indisprimary = true
-            where a.attnum > 0::int2
-                and not a.attisdropped
-                and a.attgenerated = ''
-                and a.attrelid = {table_id}
-                {publication_predicate}
-            order by a.attnum
-            "#,
-            publication_ctes = publication_filter.ctes,
-            publication_predicate = publication_filter.predicate,
-        );
-
-        // Check for generated columns so we can warn if there are any.
+    /// PostgreSQL logical replication does not replicate generated columns, so
+    /// they are excluded from ETL schema snapshots.
+    async fn warn_if_generated_columns_exist(&self, table_id: TableId) -> EtlResult<()> {
         let generated_columns_check_query = format!(
             r#"select exists (
                 select 1
@@ -1293,62 +1237,133 @@ impl PgReplicationClient {
             ) as has_generated;"#
         );
 
-        for message in self
-            .client
-            .simple_query(&generated_columns_check_query)
-            .await?
-        {
+        for message in self.client.simple_query(&generated_columns_check_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let has_generated_columns =
                     Self::get_row_value::<String>(&row, "has_generated", "pg_attribute")? == "t";
                 if has_generated_columns {
                     warn!(
                         "Table {} contains generated columns that will NOT be replicated. \
-                         Generated columns are not supported in PostgreSQL logical replication and will \
-                         be excluded from the ETL schema. These columns will NOT appear in the destination.",
+                         Generated columns are not supported in PostgreSQL logical replication \
+                         and will be excluded from the ETL schema. These columns will NOT appear \
+                         in the destination.",
                         table_id
                     );
                 }
-                // Explicity break for clarity; this query returns a single SimpleQueryMessage::Row.
+
+                // Explicity break for clarity; this query returns a single
+                // SimpleQueryMessage::Row.
                 break;
             }
         }
 
-        let mut column_schemas = vec![];
-        // TODO: there's a lot of code using simple_query but only checking for SimpleQueryMessage::Row, a small optimization could be done here if we upgraded tokio-postgres to a newer version
-        // in order to use https://docs.rs/tokio-postgres/0.7.15/tokio_postgres/struct.Client.html#method.simple_query_raw to filter on SimpleQueryMessage::Row and avoid useless allocations
-        for message in self.client.simple_query(&column_info_query).await? {
+        Ok(())
+    }
+
+    /// Retrieves the raw schema snapshot used for bootstrap table loading.
+    ///
+    /// This uses the same `etl.describe_table_schema` and
+    /// `etl.describe_table_identity` helpers that power DDL messages so
+    /// initial table copy starts from the same schema representation that
+    /// later DDL updates produce.
+    ///
+    /// Generated columns are always excluded since they are not supported in
+    /// PostgreSQL logical replication.
+    async fn get_table_schema_snapshot(
+        &self,
+        table_id: TableId,
+    ) -> EtlResult<(TableName, Vec<ColumnSchemaMessage>, IdentityMessage)> {
+        self.warn_if_generated_columns_exist(table_id).await?;
+
+        let schema_snapshot_query = format!(
+            r#"
+            with table_info as (
+                select
+                    n.nspname as schema_name,
+                    c.relname as table_name
+                from pg_class c
+                join pg_namespace n on c.relnamespace = n.oid
+                where c.oid = {table_id}
+            ),
+            schema_snapshot as (
+                select coalesce(
+                    pg_catalog.jsonb_agg(
+                        pg_catalog.jsonb_build_object(
+                            'attname', s.attname,
+                            'attnum', s.attnum,
+                            'atttypid', s.atttypid::pg_catalog.int8,
+                            'atttypmod', s.atttypmod,
+                            'attnotnull', s.attnotnull
+                        )
+                        order by s.attnum
+                    ),
+                    '[]'::pg_catalog.jsonb
+                ) as columns
+                from etl.describe_table_schema({table_id}) s
+            )
+            select
+                ti.schema_name,
+                ti.table_name,
+                ss.columns::pg_catalog.text as columns,
+                etl.describe_table_identity({table_id})::pg_catalog.text as identity
+            from table_info ti
+            cross join schema_snapshot ss
+            "#,
+        );
+
+        // TODO: there's a lot of code using simple_query but only checking for
+        // SimpleQueryMessage::Row, a small optimization could be done here if we
+        // upgraded tokio-postgres to a newer version  in order to use https://docs.rs/tokio-postgres/0.7.15/tokio_postgres/struct.Client.html#method.simple_query_raw to filter on SimpleQueryMessage::Row and avoid useless allocations
+        for message in self.client.simple_query(&schema_snapshot_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
-                let name = Self::get_row_value::<String>(&row, "attname", "pg_attribute")?;
-                let type_oid = Self::get_row_value::<u32>(&row, "atttypid", "pg_attribute")?;
-                let modifier = Self::get_row_value::<i32>(&row, "atttypmod", "pg_attribute")?;
-                let nullable =
-                    Self::get_row_value::<String>(&row, "attnotnull", "pg_attribute")? == "f";
-                let primary = Self::get_row_value::<String>(&row, "primary", "pg_index")? == "t";
+                let schema_name =
+                    Self::get_row_value::<String>(&row, "schema_name", "pg_namespace")?;
+                let table_name = Self::get_row_value::<String>(&row, "table_name", "pg_class")?;
+                let columns_json = Self::get_row_value::<String>(&row, "columns", "etl")?;
+                let identity_json = Self::get_row_value::<String>(&row, "identity", "etl")?;
+                let columns: Vec<ColumnSchemaMessage> = serde_json::from_str(&columns_json)
+                    .map_err(|err| {
+                        etl_error!(
+                            ErrorKind::DeserializationError,
+                            "Invalid table schema snapshot",
+                            format!(
+                                "Failed to parse describe_table_schema payload for table {}: {}",
+                                table_id, err
+                            )
+                        )
+                    })?;
+                let identity: IdentityMessage =
+                    serde_json::from_str(&identity_json).map_err(|err| {
+                        etl_error!(
+                            ErrorKind::DeserializationError,
+                            "Invalid table identity snapshot",
+                            format!(
+                                "Failed to parse describe_table_identity payload for table {}: {}",
+                                table_id, err
+                            )
+                        )
+                    })?;
 
-                let typ = convert_type_oid_to_type(type_oid);
-
-                column_schemas.push(ColumnSchema {
-                    name,
-                    typ,
-                    modifier,
-                    nullable,
-                    primary,
-                })
+                return Ok((TableName::new(schema_name, table_name), columns, identity));
             }
         }
 
-        Ok(column_schemas)
+        bail!(
+            ErrorKind::SourceSchemaError,
+            "Table schema snapshot not found in source database",
+            format!("Table with ID {} not found in database", table_id)
+        )
     }
 
     /// Retrieves the publication row filter for a table.
     /// If no publication is specified, we will always return None
-    pub async fn get_row_filter(
+    async fn get_row_filter(
         &self,
         table_id: TableId,
         publication_name: Option<&str>,
     ) -> EtlResult<Option<String>> {
-        // Row filters on publications were added in Postgres 15. For any earlier versions we know that there is no row filter
+        // Row filters on publications were added in Postgres 15. For any earlier
+        // versions we know that there is no row filter
         if below_version!(self.server_version, POSTGRES_15) {
             return Ok(None);
         }
@@ -1358,8 +1373,9 @@ impl PgReplicationClient {
             return Ok(None);
         };
 
-        // This uses the same query as the `pg_publication_tables`, but with some minor tweaks (COALESCE, only return the rowfilter,
-        // filter on oid and pubname). All of these are available >= Postgres 15.
+        // This uses the same query as the `pg_publication_tables`, but with some minor
+        // tweaks (COALESCE, only return the rowfilter, filter on oid and
+        // pubname). All of these are available >= Postgres 15.
         let row_filter_query = format!(
             "select pt.rowfilter as row_filter
                 from pg_publication_tables pt
@@ -1387,7 +1403,8 @@ impl PgReplicationClient {
 
     /// Creates a COPY stream for reading data from a table using its OID.
     ///
-    /// The stream will include only the specified columns and use text format, and respect publication row filters (if a publication is specified)
+    /// The stream will include only the specified columns and use text format,
+    /// and respect publication row filters (if a publication is specified)
     pub async fn get_table_copy_stream(
         &self,
         table_id: TableId,
@@ -1426,8 +1443,8 @@ impl PgReplicationClient {
 
     /// Creates a COPY stream for a ctid partition range of the specified table.
     ///
-    /// Resolves the table name and row filter internally, then streams rows whose ctid
-    /// falls within the given partition bounds.
+    /// Resolves the table name and row filter internally, then streams rows
+    /// whose ctid falls within the given partition bounds.
     async fn get_table_copy_stream_with_ctid_partition(
         &self,
         table_id: TableId,
@@ -1456,9 +1473,11 @@ impl PgReplicationClient {
         Ok(stream)
     }
 
-    /// Builds a `COPY ... TO STDOUT` query that selects rows within a ctid range.
+    /// Builds a `COPY ... TO STDOUT` query that selects rows within a ctid
+    /// range.
     ///
-    /// The query applies an optional publication row filter in addition to the ctid bounds.
+    /// The query applies an optional publication row filter in addition to the
+    /// ctid bounds.
     fn build_ctid_copy_query(
         table_name: &TableName,
         column_list: &str,
@@ -1484,11 +1503,13 @@ impl PgReplicationClient {
 
         if let Some(row_filter) = row_filter {
             format!(
-                "copy (select {column_list} from {quoted_table_name} where {ctid_predicate} and ({row_filter})) to stdout with (format text);",
+                "copy (select {column_list} from {quoted_table_name} where {ctid_predicate} and \
+                 ({row_filter})) to stdout with (format text);",
             )
         } else {
             format!(
-                "copy (select {column_list} from {quoted_table_name} where {ctid_predicate}) to stdout with (format text);",
+                "copy (select {column_list} from {quoted_table_name} where {ctid_predicate}) to \
+                 stdout with (format text);",
             )
         }
     }
@@ -1498,10 +1519,7 @@ impl PgReplicationClient {
     /// Calls `pg_export_snapshot()` so that child connections can use
     /// `SET TRANSACTION SNAPSHOT` to read from the same consistent point.
     async fn export_snapshot(&self) -> EtlResult<String> {
-        let results = self
-            .client
-            .simple_query("select pg_export_snapshot();")
-            .await?;
+        let results = self.client.simple_query("select pg_export_snapshot();").await?;
 
         for msg in results {
             if let SimpleQueryMessage::Row(row) = msg {
@@ -1515,28 +1533,30 @@ impl PgReplicationClient {
             }
         }
 
-        Err(etl_error!(
-            ErrorKind::InvalidState,
-            "pg_export_snapshot returned no rows"
-        ))
+        Err(etl_error!(ErrorKind::InvalidState, "pg_export_snapshot returned no rows"))
     }
 
-    /// Computes balanced ctid partition ranges using relation-size-based blocks.
+    /// Computes balanced ctid partition ranges using relation-size-based
+    /// blocks.
     ///
-    /// Returns one [`CtidPartition`] per partition, or an empty vec if the table has no rows.
+    /// Returns one [`CtidPartition`] per partition, or an empty vec if the
+    /// table has no rows.
     ///
-    /// This method divides the table into roughly equal physical ranges based on block
-    /// numbers to avoid a full table scan and sort.
+    /// This method divides the table into roughly equal physical ranges based
+    /// on block numbers to avoid a full table scan and sort.
     /// The approach:
-    /// 1. Queries `pg_relation_size(table)` and divides by `current_setting('block_size')`
+    /// 1. Queries `pg_relation_size(table)` and divides by
+    ///    `current_setting('block_size')`
     /// 2. Divides blocks evenly across `num_partitions`
     /// 3. Generates half-open ctid ranges on block boundaries
     ///
-    /// The final partition uses an open upper bound to include all blocks at or above its
-    /// lower boundary, which keeps coverage correct when the table grows after size sampling.
+    /// The final partition uses an open upper bound to include all blocks at or
+    /// above its lower boundary, which keeps coverage correct when the
+    /// table grows after size sampling.
     ///
-    /// The size calculation is not snapshot based, which is why we have open intervals since we want
-    /// to be sure to be able to capture all tuples and not miss anything.
+    /// The size calculation is not snapshot based, which is why we have open
+    /// intervals since we want to be sure to be able to capture all tuples
+    /// and not miss anything.
     async fn plan_ctid_partitions(
         &self,
         table_id: TableId,
@@ -1549,11 +1569,11 @@ impl PgReplicationClient {
             ));
         }
 
-        // We query how many blocks the table has at this point in time. Note that this query doesn't
-        // use MVCC, so it's a real-time snapshot.
+        // We query how many blocks the table has at this point in time. Note that this
+        // query doesn't use MVCC, so it's a real-time snapshot.
         let size_query = format!(
-            "select \
-                 pg_relation_size({table_id}::regclass)::bigint / current_setting('block_size')::bigint as table_blocks"
+            "select pg_relation_size({table_id}::regclass)::bigint / \
+             current_setting('block_size')::bigint as table_blocks"
         );
         let size_results = self.client.simple_query(&size_query).await?;
         let table_blocks: i64 = size_results
@@ -1579,28 +1599,23 @@ impl PgReplicationClient {
 
         let requested_partitions = i64::from(num_partitions);
         let effective_partitions = requested_partitions.min(table_blocks);
-        // We perform ceil-division with the classic formula to avoid having undersized partitions.
+        // We perform ceil-division with the classic formula to avoid having undersized
+        // partitions.
         let blocks_per_partition = (table_blocks + effective_partitions - 1) / effective_partitions;
 
         let mut partitions = Vec::with_capacity(effective_partitions as usize);
         for i in 0..effective_partitions {
             let start_block = i * blocks_per_partition;
-            // We use the next block as exclusive delimiter for the query to avoid possible issues
-            // in the way we determine boundaries.
+            // We use the next block as exclusive delimiter for the query to avoid possible
+            // issues in the way we determine boundaries.
             let end_block_exclusive = ((i + 1) * blocks_per_partition).min(table_blocks);
 
             let partition = if effective_partitions == 1 {
-                CtidPartition::OpenEnd {
-                    start_tid: "(0,1)".to_string(),
-                }
+                CtidPartition::OpenEnd { start_tid: "(0,1)".to_string() }
             } else if i == 0 {
-                CtidPartition::OpenStart {
-                    end_tid: format!("({end_block_exclusive},1)"),
-                }
+                CtidPartition::OpenStart { end_tid: format!("({end_block_exclusive},1)") }
             } else if i == effective_partitions - 1 {
-                CtidPartition::OpenEnd {
-                    start_tid: format!("({start_block},1)"),
-                }
+                CtidPartition::OpenEnd { start_tid: format!("({start_block},1)") }
             } else {
                 CtidPartition::Closed {
                     start_tid: format!("({start_block},1)"),
@@ -1616,7 +1631,8 @@ impl PgReplicationClient {
 
     /// Helper function to extract a value from a SimpleQueryMessage::Row
     ///
-    /// Returns an error if the column is not found or if the value cannot be parsed to the target type.
+    /// Returns an error if the column is not found or if the value cannot be
+    /// parsed to the target type.
     fn get_row_value<T: std::str::FromStr>(
         row: &SimpleQueryRow,
         column_name: &str,
@@ -1628,10 +1644,7 @@ impl PgReplicationClient {
         let value = row.try_get(column_name)?.ok_or(etl_error!(
             ErrorKind::SourceSchemaError,
             "Column not found in source table",
-            format!(
-                "Column '{}' not found in table '{}'",
-                column_name, table_name
-            )
+            format!("Column '{}' not found in table '{}'", column_name, table_name)
         ))?;
 
         value.parse().map_err(|e: T::Err| {
@@ -1649,8 +1662,9 @@ impl PgReplicationClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{CtidPartition, PgReplicationClient};
     use etl_postgres::types::TableName;
+
+    use super::{CtidPartition, PgReplicationClient};
 
     #[test]
     fn build_ctid_copy_query_quotes_mixed_case_table_names() {
@@ -1658,9 +1672,7 @@ mod tests {
             &TableName::new("public".to_string(), "User".to_string()),
             "\"id\", \"email\"",
             None,
-            &CtidPartition::OpenEnd {
-                start_tid: "(0,1)".to_string(),
-            },
+            &CtidPartition::OpenEnd { start_tid: "(0,1)".to_string() },
         );
 
         assert!(query.contains("from public.\"User\""));
@@ -1673,9 +1685,7 @@ mod tests {
             &TableName::new("public".to_string(), "CommentReadStatus".to_string()),
             "\"id\"",
             Some("\"tenantId\" is not null"),
-            &CtidPartition::OpenStart {
-                end_tid: "(10,1)".to_string(),
-            },
+            &CtidPartition::OpenStart { end_tid: "(10,1)".to_string() },
         );
 
         assert!(query.contains("from public.\"CommentReadStatus\""));

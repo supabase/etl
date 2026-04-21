@@ -55,7 +55,7 @@ RUN apt-get update && \
 COPY .cargo/config.toml /app/.cargo/config.toml
 
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld" cargo chef cook --release --recipe-path recipe.json
 
 # Build application with optimizations.
 # The release profile in Cargo.toml handles: thin LTO, strip, opt-level=3.
@@ -65,7 +65,7 @@ COPY . .
 RUN sed -i '/"xtask"/d' Cargo.toml && rm -rf xtask
 RUN FEATURES=""; \
     if [ "$ENABLE_EGRESS" = "true" ]; then FEATURES="--features egress"; fi && \
-    RUSTFLAGS="-C panic=abort" cargo build --release -p etl-replicator $FEATURES && \
+    RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld" cargo build --release -p etl-replicator $FEATURES && \
     strip target/release/etl-replicator
 
 # Runtime stage with distroless for security.

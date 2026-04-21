@@ -1,7 +1,8 @@
 //! Egress metric logging for destination implementations.
 //!
-//! Provides functions for logging billing-related egress metrics with a consistent schema.
-//! All egress logs include `egress_metric = true` for filtering in log aggregators.
+//! Provides functions for logging billing-related egress metrics with a
+//! consistent schema. All egress logs include `egress_metric = true` for
+//! filtering in log aggregators.
 
 use etl::egress_info;
 
@@ -25,9 +26,11 @@ pub const PROCESSING_TYPE_STREAMING: &str = "streaming";
 /// - `destination_type`: the destination name (e.g., `"bigquery"`, `"iceberg"`)
 /// - `processing_type`: `"table_copy"` or `"streaming"`
 /// - `bytes_sent`: number of bytes sent to the destination
-/// - `bytes_received`: number of bytes received from the destination (0 if not applicable)
+/// - `bytes_received`: number of bytes received from the destination (0 if not
+///   applicable)
 ///
-/// Additionally, `project` and `pipeline_id` are auto-injected by the tracing writer.
+/// Additionally, `project` and `pipeline_id` are auto-injected by the tracing
+/// writer.
 pub fn log_processed_bytes(
     destination_type: &'static str,
     processing_type: &'static str,

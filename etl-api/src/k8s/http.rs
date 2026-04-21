@@ -1,6 +1,3 @@
-use crate::configs::log::LogLevel;
-use crate::k8s::{DestinationType, PodStatus, ReplicatorConfigMapFile};
-use crate::k8s::{K8sClient, K8sError, PodPhase};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Utc;
@@ -16,6 +13,12 @@ use kube::{
 use serde_json::json;
 use tracing::debug;
 
+use crate::{
+    config::K8sConfig,
+    configs::log::LogLevel,
+    k8s::{DestinationType, K8sClient, K8sError, PodPhase, PodStatus, ReplicatorConfigMapFile},
+};
+
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
 /// Name of the service account key in the BigQuery secret and its reference.
@@ -29,7 +32,8 @@ const ICEBERG_CATALOG_TOKEN_KEY_NAME: &str = "catalog-token";
 const ICEBERG_S3_ACCESS_KEY_ID_KEY_NAME: &str = "s3-access-key-id";
 /// Name of s3 acess key id in the iceberg secret and its reference.
 const ICEBERG_S3_SECRET_ACCESS_KEY_KEY_NAME: &str = "s3-secret-access-key";
-/// Secret name suffix for ducklake secrets (includes s3 access key id and s3 secret access key).
+/// Secret name suffix for ducklake secrets (includes s3 access key id and s3
+/// secret access key).
 const DUCKLAKE_SECRET_NAME_SUFFIX: &str = "ducklake";
 /// Name of s3 access key id in the ducklake secret and its reference.
 const DUCKLAKE_S3_ACCESS_KEY_ID_KEY_NAME: &str = "s3-access-key-id";
@@ -74,25 +78,22 @@ pub const TRUSTED_ROOT_CERT_KEY_NAME: &str = "trusted_root_certs";
 /// Label used to identify replicator pods.
 const REPLICATOR_APP_LABEL: &str = "etl-replicator-app";
 
-/// Replicator memory request tuned for `c8gn.4xlarge` instances in prod.
-const REPLICATOR_MEMORY_REQUEST_PROD: i32 = 2000;
-/// Replicator CPU request tuned for `c8gn.4xlarge` instances in prod.
-const REPLICATOR_CPU_REQUEST_PROD: i32 = 500;
-
-/// Replicator memory request tuned for `c8gn.medium` instances in staging.
-const REPLICATOR_MEMORY_REQUEST_STAGING: i32 = 250;
-/// Replicator CPU request tuned for `c8gn.medium` instances in staging.
-const REPLICATOR_CPU_REQUEST_STAGING: i32 = 125;
-
-/// Vector memory request tuned for staging environments.
-const VECTOR_MEMORY_REQUEST_STAGING: i32 = 192;
-/// Vector CPU request tuned for staging environments.
-const VECTOR_CPU_REQUEST_STAGING: i32 = 75;
-
-/// Vector memory request tuned for production environments.
-const VECTOR_MEMORY_REQUEST_PROD: i32 = 256;
-/// Vector CPU request tuned for production environments.
-const VECTOR_CPU_REQUEST_PROD: i32 = 100;
+/// Default replicator memory request in prod, in Mi.
+const REPLICATOR_MEMORY_REQUEST_PROD_DEFAULT: i32 = 500;
+/// Default replicator CPU request in prod, in millicores.
+const REPLICATOR_CPU_REQUEST_PROD_DEFAULT: i32 = 500;
+/// Default replicator memory request outside prod, in Mi.
+const REPLICATOR_MEMORY_REQUEST_NON_PROD_DEFAULT: i32 = 250;
+/// Default replicator CPU request outside prod, in millicores.
+const REPLICATOR_CPU_REQUEST_NON_PROD_DEFAULT: i32 = 125;
+/// Default Vector memory request in prod, in Mi.
+const VECTOR_MEMORY_REQUEST_PROD_DEFAULT: i32 = 256;
+/// Default Vector CPU request in prod, in millicores.
+const VECTOR_CPU_REQUEST_PROD_DEFAULT: i32 = 100;
+/// Default Vector memory request outside prod, in Mi.
+const VECTOR_MEMORY_REQUEST_NON_PROD_DEFAULT: i32 = 192;
+/// Default Vector CPU request outside prod, in millicores.
+const VECTOR_CPU_REQUEST_NON_PROD_DEFAULT: i32 = 75;
 
 /// Memory limit multiplier (request × 1.2 = limit).
 ///
@@ -116,24 +117,51 @@ struct ReplicatorResourceConfig {
 }
 
 impl ReplicatorResourceConfig {
-    /// Loads the runtime limits for the current environment.
-    ///
-    /// Limits are computed from requests using multipliers:
-    /// - Memory: request × 1.2 = limit
-    /// - CPU: request × 2.0 = limit
+    /// Builds runtime limits using default config-backed sizing for the
+    /// environment.
+    #[cfg(test)]
     fn load(environment: &Environment) -> Result<Self, K8sError> {
-        let (replicator_memory_request, replicator_cpu_request) = match environment {
-            Environment::Prod => (REPLICATOR_MEMORY_REQUEST_PROD, REPLICATOR_CPU_REQUEST_PROD),
+        Self::load_with_overrides(environment, &K8sConfig::default())
+    }
+
+    /// Builds runtime limits from environment defaults with optional config
+    /// overrides.
+    fn load_with_overrides(
+        environment: &Environment,
+        k8s_config: &K8sConfig,
+    ) -> Result<Self, K8sError> {
+        let (default_replicator_memory_request, default_replicator_cpu_request) = match environment
+        {
+            Environment::Prod => {
+                (REPLICATOR_MEMORY_REQUEST_PROD_DEFAULT, REPLICATOR_CPU_REQUEST_PROD_DEFAULT)
+            }
             _ => (
-                REPLICATOR_MEMORY_REQUEST_STAGING,
-                REPLICATOR_CPU_REQUEST_STAGING,
+                REPLICATOR_MEMORY_REQUEST_NON_PROD_DEFAULT,
+                REPLICATOR_CPU_REQUEST_NON_PROD_DEFAULT,
             ),
         };
-
-        let (vector_memory_request, vector_cpu_request) = match environment {
-            Environment::Prod => (VECTOR_MEMORY_REQUEST_PROD, VECTOR_CPU_REQUEST_PROD),
-            _ => (VECTOR_MEMORY_REQUEST_STAGING, VECTOR_CPU_REQUEST_STAGING),
+        let (default_vector_memory_request, default_vector_cpu_request) = match environment {
+            Environment::Prod => {
+                (VECTOR_MEMORY_REQUEST_PROD_DEFAULT, VECTOR_CPU_REQUEST_PROD_DEFAULT)
+            }
+            _ => (VECTOR_MEMORY_REQUEST_NON_PROD_DEFAULT, VECTOR_CPU_REQUEST_NON_PROD_DEFAULT),
         };
+        let replicator_memory_request = k8s_config
+            .replicator_resources
+            .replicator_memory_request_mib
+            .unwrap_or(default_replicator_memory_request);
+        let replicator_cpu_request = k8s_config
+            .replicator_resources
+            .replicator_cpu_request_millicores
+            .unwrap_or(default_replicator_cpu_request);
+        let vector_memory_request = k8s_config
+            .replicator_resources
+            .vector_memory_request_mib
+            .unwrap_or(default_vector_memory_request);
+        let vector_cpu_request = k8s_config
+            .replicator_resources
+            .vector_cpu_request_millicores
+            .unwrap_or(default_vector_cpu_request);
 
         let replicator_memory_limit =
             ((replicator_memory_request as f32) * MEMORY_LIMIT_MULTIPLIER).round() as i32;
@@ -166,6 +194,7 @@ pub struct HttpK8sClient {
     config_maps_api: Api<ConfigMap>,
     stateful_sets_api: Api<StatefulSet>,
     pods_api: Api<Pod>,
+    k8s_config: K8sConfig,
 }
 
 impl HttpK8sClient {
@@ -173,23 +202,18 @@ impl HttpK8sClient {
     ///
     /// Prefers in-cluster configuration and falls back to the local kubeconfig
     /// when running outside the cluster.
-    pub fn new(client: Client) -> Result<HttpK8sClient, K8sError> {
+    pub fn new(client: Client, k8s_config: K8sConfig) -> Result<HttpK8sClient, K8sError> {
         let secrets_api: Api<Secret> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let config_maps_api: Api<ConfigMap> = Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let stateful_sets_api: Api<StatefulSet> =
             Api::namespaced(client.clone(), DATA_PLANE_NAMESPACE);
         let pods_api: Api<Pod> = Api::namespaced(client, DATA_PLANE_NAMESPACE);
 
-        Ok(HttpK8sClient {
-            secrets_api,
-            config_maps_api,
-            stateful_sets_api,
-            pods_api,
-        })
+        Ok(HttpK8sClient { secrets_api, config_maps_api, stateful_sets_api, pods_api, k8s_config })
     }
 
-    /// Helper function to handle delete operations that should ignore 404 errors
-    /// but propagate other errors.
+    /// Helper function to handle delete operations that should ignore 404
+    /// errors but propagate other errors.
     fn handle_delete_with_404_ignore<T>(
         delete_result: Result<T, kube::Error>,
     ) -> Result<(), K8sError> {
@@ -200,19 +224,14 @@ impl HttpK8sClient {
         }
     }
 
-    /// Returns true if the replicator container in the pod has terminated with error code
+    /// Returns true if the replicator container in the pod has terminated with
+    /// error code
     fn has_replicator_container_error(pod: &Pod, replicator_container_name: &str) -> bool {
         // Find the replicator container status
         let container_status = pod.status.as_ref().and_then(|status| {
-            status
-                .container_statuses
-                .as_ref()
-                .and_then(|container_statuses| {
-                    container_statuses
-                        .iter()
-                        .find(|cs| cs.name == replicator_container_name)
-                        .cloned()
-                })
+            status.container_statuses.as_ref().and_then(|container_statuses| {
+                container_statuses.iter().find(|cs| cs.name == replicator_container_name).cloned()
+            })
         });
 
         let Some(container_status) = container_status else {
@@ -228,10 +247,12 @@ impl HttpK8sClient {
             return terminated.exit_code != 0;
         }
 
-        // Waiting state, we want to distinguish normal waiting reasons from abnormal ones.
+        // Waiting state, we want to distinguish normal waiting reasons from abnormal
+        // ones.
         if let Some(waiting) = &state.waiting
             && let Some(reason) = &waiting.reason
         {
+            #[allow(clippy::match_same_arms)]
             match reason.as_str() {
                 // Crash/restart errors
                 "CrashLoopBackOff" => return true,
@@ -275,13 +296,12 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(postgres_secret_json)?;
 
-        // We are forcing the update since we are the field manager that should own the fields. If
-        // there is an override (likely during an incident or SREs intervention), we want to override
-        // their changes. The API database is the source of truth for credentials.
+        // We are forcing the update since we are the field manager that should own the
+        // fields. If there is an override (likely during an incident or SREs
+        // intervention), we want to override their changes. The API database is
+        // the source of truth for credentials.
         let pp = PatchParams::apply(&postgres_secret_name).force();
-        self.secrets_api
-            .patch(&postgres_secret_name, &pp, &Patch::Apply(secret))
-            .await?;
+        self.secrets_api.patch(&postgres_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
     }
@@ -303,13 +323,12 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(bq_secret_json)?;
 
-        // We are forcing the update since we are the field manager that should own the fields. If
-        // there is an override (likely during an incident or SREs intervention), we want to override
-        // their changes. The API database is the source of truth for credentials.
+        // We are forcing the update since we are the field manager that should own the
+        // fields. If there is an override (likely during an incident or SREs
+        // intervention), we want to override their changes. The API database is
+        // the source of truth for credentials.
         let pp = PatchParams::apply(&bq_secret_name).force();
-        self.secrets_api
-            .patch(&bq_secret_name, &pp, &Patch::Apply(secret))
-            .await?;
+        self.secrets_api.patch(&bq_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
     }
@@ -338,13 +357,12 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(iceberg_secret_json)?;
 
-        // We are forcing the update since we are the field manager that should own the fields. If
-        // there is an override (likely during an incident or SREs intervention), we want to override
-        // their changes. The API database is the source of truth for credentials.
+        // We are forcing the update since we are the field manager that should own the
+        // fields. If there is an override (likely during an incident or SREs
+        // intervention), we want to override their changes. The API database is
+        // the source of truth for credentials.
         let pp = PatchParams::apply(&iceberg_secret_name).force();
-        self.secrets_api
-            .patch(&iceberg_secret_name, &pp, &Patch::Apply(secret))
-            .await?;
+        self.secrets_api.patch(&iceberg_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
     }
@@ -371,9 +389,7 @@ impl K8sClient for HttpK8sClient {
         let secret: Secret = serde_json::from_value(ducklake_secret_json)?;
 
         let pp = PatchParams::apply(&ducklake_secret_name).force();
-        self.secrets_api
-            .patch(&ducklake_secret_name, &pp, &Patch::Apply(secret))
-            .await?;
+        self.secrets_api.patch(&ducklake_secret_name, &pp, &Patch::Apply(secret)).await?;
 
         Ok(())
     }
@@ -454,9 +470,10 @@ impl K8sClient for HttpK8sClient {
         );
         let config_map: ConfigMap = serde_json::from_value(config_map_json)?;
 
-        // We are forcing the update since we are the field manager that should own the fields. If
-        // there is an override (likely during an incident or SREs intervention), we want to override
-        // their changes. The API database is the source of truth for configuration.
+        // We are forcing the update since we are the field manager that should own the
+        // fields. If there is an override (likely during an incident or SREs
+        // intervention), we want to override their changes. The API database is
+        // the source of truth for configuration.
         let pp = PatchParams::apply(&replicator_config_map_name).force();
         self.config_maps_api
             .patch(&replicator_config_map_name, &pp, &Patch::Apply(config_map))
@@ -471,9 +488,7 @@ impl K8sClient for HttpK8sClient {
         let replicator_config_map_name = create_replicator_config_map_name(prefix);
         let dp = DeleteParams::default();
         Self::handle_delete_with_404_ignore(
-            self.config_maps_api
-                .delete(&replicator_config_map_name, &dp)
-                .await,
+            self.config_maps_api.delete(&replicator_config_map_name, &dp).await,
         )?;
 
         Ok(())
@@ -489,7 +504,7 @@ impl K8sClient for HttpK8sClient {
     ) -> Result<(), K8sError> {
         debug!("patching stateful set");
 
-        let config = ReplicatorResourceConfig::load(&environment)?;
+        let config = ReplicatorResourceConfig::load_with_overrides(&environment, &self.k8s_config)?;
 
         let stateful_set_name = create_stateful_set_name(prefix);
 
@@ -520,13 +535,11 @@ impl K8sClient for HttpK8sClient {
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
 
-        // We are forcing the update since we are the field manager that should own the fields. If
-        // there is an override (likely during an incident or SREs intervention), we want to override
-        // their changes.
+        // We are forcing the update since we are the field manager that should own the
+        // fields. If there is an override (likely during an incident or SREs
+        // intervention), we want to override their changes.
         let pp = PatchParams::apply(&stateful_set_name).force();
-        self.stateful_sets_api
-            .patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set))
-            .await?;
+        self.stateful_sets_api.patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set)).await?;
 
         Ok(())
     }
@@ -563,19 +576,13 @@ impl K8sClient for HttpK8sClient {
             return Ok(PodStatus::Stopping);
         }
 
-        let phase = pod
-            .status
-            .map(|status| {
-                let phase: PodPhase = status
-                    .phase
-                    .map(|phase| {
-                        let phase: PodPhase = phase.as_str().into();
-                        phase
-                    })
-                    .unwrap_or(PodPhase::Unknown);
+        let phase = pod.status.map_or(PodPhase::Unknown, |status| {
+            let phase: PodPhase = status.phase.map_or(PodPhase::Unknown, |phase| {
+                let phase: PodPhase = phase.as_str().into();
                 phase
-            })
-            .unwrap_or(PodPhase::Unknown);
+            });
+            phase
+        });
 
         Ok(match phase {
             PodPhase::Pending => PodStatus::Starting,
@@ -1171,21 +1178,22 @@ fn create_replicator_stateful_set_json(
 
 fn get_restarted_at_annotation_value() -> String {
     let now = Utc::now();
-    // We use nanoseconds to decrease the likelihood of generating the same annotation in sequence,
-    // which would not result in a restart.
+    // We use nanoseconds to decrease the likelihood of generating the same
+    // annotation in sequence, which would not result in a restart.
     now.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }
 
 #[cfg(test)]
+#[allow(clippy::redundant_test_prefix)]
 mod tests {
-    use super::*;
-
     use etl_config::shared::{
         BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
         TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     };
     use insta::assert_json_snapshot;
+
+    use super::*;
 
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
 
@@ -1278,10 +1286,7 @@ mod tests {
                     tls: TlsConfig::disabled(),
                     keepalive: TcpKeepaliveConfig::default(),
                 },
-                batch: BatchConfig {
-                    max_fill_ms: 1_000,
-                    memory_budget_ratio: 0.2,
-                },
+                batch: BatchConfig { max_fill_ms: 1_000, memory_budget_ratio: 0.2 },
                 table_error_retry_delay_ms: 500,
                 table_error_retry_max_attempts: 3,
                 max_table_sync_workers: 4,

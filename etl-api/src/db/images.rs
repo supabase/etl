@@ -67,11 +67,7 @@ where
     .fetch_optional(executor)
     .await?;
 
-    Ok(record.map(|r| Image {
-        id: r.id,
-        name: r.name,
-        is_default: r.is_default,
-    }))
+    Ok(record.map(|r| Image { id: r.id, name: r.name, is_default: r.is_default }))
 }
 
 pub async fn read_image<'c, E>(executor: E, image_id: i64) -> Result<Option<Image>, ImagesDbError>
@@ -89,11 +85,7 @@ where
     .fetch_optional(executor)
     .await?;
 
-    Ok(record.map(|r| Image {
-        id: r.id,
-        name: r.name,
-        is_default: r.is_default,
-    }))
+    Ok(record.map(|r| Image { id: r.id, name: r.name, is_default: r.is_default }))
 }
 
 pub async fn update_image(
@@ -152,12 +144,9 @@ pub async fn delete_image(pool: &PgPool, image_id: i64) -> Result<Option<i64>, I
     .fetch_optional(&mut *txn)
     .await?;
 
-    let image = match image {
-        Some(img) => img,
-        None => {
-            // Image doesn't exist, return None
-            return Ok(None);
-        }
+    let Some(image) = image else {
+        // Image doesn't exist, return None
+        return Ok(None);
     };
 
     // Prevent deletion if it's a default image
@@ -197,11 +186,7 @@ where
 
     Ok(record
         .drain(..)
-        .map(|r| Image {
-            id: r.id,
-            name: r.name,
-            is_default: r.is_default,
-        })
+        .map(|r| Image { id: r.id, name: r.name, is_default: r.is_default })
         .collect())
 }
 
@@ -224,9 +209,5 @@ where
     .fetch_optional(executor)
     .await?;
 
-    Ok(record.map(|r| Image {
-        id: r.id,
-        name: r.name,
-        is_default: r.is_default,
-    }))
+    Ok(record.map(|r| Image { id: r.id, name: r.name, is_default: r.is_default }))
 }

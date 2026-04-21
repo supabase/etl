@@ -5,10 +5,7 @@ use etl_api::routes::images::{
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 
-use crate::support::mocks::create_image_with_name;
-use crate::support::test_app::spawn_test_app;
-
-mod support;
+use crate::support::{mocks::create_image_with_name, test_app::spawn_test_app};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn image_can_be_created() {
@@ -17,18 +14,13 @@ async fn image_can_be_created() {
     let app = spawn_test_app().await;
 
     // Act
-    let image = CreateImageRequest {
-        name: "some/image".to_string(),
-        is_default: true,
-    };
+    let image = CreateImageRequest { name: "some/image".to_string(), is_default: true };
     let response = app.create_image(&image).await;
 
     // Assert
     assert!(response.status().is_success());
-    let response: CreateImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateImageResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, 1);
 }
 
@@ -40,15 +32,10 @@ async fn an_existing_image_can_be_read() {
 
     let name = "some/image".to_string();
     let is_default = true;
-    let image = CreateImageRequest {
-        name: name.clone(),
-        is_default,
-    };
+    let image = CreateImageRequest { name: name.clone(), is_default };
     let response = app.create_image(&image).await;
-    let response: CreateImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateImageResponse =
+        response.json().await.expect("failed to deserialize response");
     let image_id = response.id;
 
     // Act
@@ -56,10 +43,8 @@ async fn an_existing_image_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: ReadImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadImageResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, image_id);
     assert_eq!(response.name, name);
     assert_eq!(response.is_default, is_default);
@@ -86,33 +71,23 @@ async fn an_existing_image_can_be_updated() {
 
     let name = "some/image".to_string();
     let is_default = true;
-    let image = CreateImageRequest {
-        name: name.clone(),
-        is_default,
-    };
+    let image = CreateImageRequest { name: name.clone(), is_default };
     let response = app.create_image(&image).await;
-    let response: CreateImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateImageResponse =
+        response.json().await.expect("failed to deserialize response");
     let image_id = response.id;
 
     // Act
     let name = "some/image".to_string();
     let is_default = true;
-    let updated_image = UpdateImageRequest {
-        name: name.clone(),
-        is_default,
-    };
+    let updated_image = UpdateImageRequest { name: name.clone(), is_default };
     let response = app.update_image(image_id, &updated_image).await;
 
     // Assert
     assert!(response.status().is_success());
     let response = app.read_image(image_id).await;
-    let response: ReadImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadImageResponse =
+        response.json().await.expect("failed to deserialize response");
     assert_eq!(response.id, image_id);
     assert_eq!(response.name, name);
     assert_eq!(response.is_default, is_default);
@@ -127,10 +102,7 @@ async fn non_existing_image_cannot_be_updated() {
     // Act
     let name = "some/image".to_string();
     let is_default = true;
-    let updated_image = UpdateImageRequest {
-        name: name.clone(),
-        is_default,
-    };
+    let updated_image = UpdateImageRequest { name: name.clone(), is_default };
     let response = app.update_image(42, &updated_image).await;
 
     // Assert
@@ -145,15 +117,10 @@ async fn an_existing_image_can_be_deleted() {
 
     let name = "some/image".to_string();
     let is_default = false;
-    let image = CreateImageRequest {
-        name: name.clone(),
-        is_default,
-    };
+    let image = CreateImageRequest { name: name.clone(), is_default };
     let response = app.create_image(&image).await;
-    let response: CreateImageResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: CreateImageResponse =
+        response.json().await.expect("failed to deserialize response");
     let image_id = response.id;
 
     // Act
@@ -191,10 +158,8 @@ async fn all_images_can_be_read() {
 
     // Assert
     assert!(response.status().is_success());
-    let response: ReadImagesResponse = response
-        .json()
-        .await
-        .expect("failed to deserialize response");
+    let response: ReadImagesResponse =
+        response.json().await.expect("failed to deserialize response");
     for image in response.images {
         if image.id == image1_id {
             assert_eq!(image.name, "some/image");
@@ -213,20 +178,14 @@ async fn creating_default_image_switches_previous_default() {
     let app = spawn_test_app().await;
 
     // Create first default image
-    let image1 = CreateImageRequest {
-        name: "image1".to_string(),
-        is_default: true,
-    };
+    let image1 = CreateImageRequest { name: "image1".to_string(), is_default: true };
     let response = app.create_image(&image1).await;
     assert!(response.status().is_success());
     let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
     let image1_id = response.id;
 
     // Act - Create second default image
-    let image2 = CreateImageRequest {
-        name: "image2".to_string(),
-        is_default: true,
-    };
+    let image2 = CreateImageRequest { name: "image2".to_string(), is_default: true };
     let response = app.create_image(&image2).await;
     assert!(response.status().is_success());
     let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
@@ -248,10 +207,7 @@ async fn cannot_delete_default_image() {
     // Arrange
     let app = spawn_test_app().await;
 
-    let image = CreateImageRequest {
-        name: "default-image".to_string(),
-        is_default: true,
-    };
+    let image = CreateImageRequest { name: "default-image".to_string(), is_default: true };
     let response = app.create_image(&image).await;
     let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
     let image_id = response.id;
@@ -274,28 +230,20 @@ async fn can_delete_non_default_image_after_switching_default() {
     let app = spawn_test_app().await;
 
     // Create first default image
-    let image1 = CreateImageRequest {
-        name: "default-image-1".to_string(),
-        is_default: true,
-    };
+    let image1 = CreateImageRequest { name: "default-image-1".to_string(), is_default: true };
     let response = app.create_image(&image1).await;
     let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
     let image1_id = response.id;
 
     // Create second non-default image
-    let image2 = CreateImageRequest {
-        name: "non-default-image".to_string(),
-        is_default: false,
-    };
+    let image2 = CreateImageRequest { name: "non-default-image".to_string(), is_default: false };
     let response = app.create_image(&image2).await;
     let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
     let image2_id = response.id;
 
-    // Make the second image default (this should succeed and make the first one non-default)
-    let update = UpdateImageRequest {
-        name: "non-default-image".to_string(),
-        is_default: true,
-    };
+    // Make the second image default (this should succeed and make the first one
+    // non-default)
+    let update = UpdateImageRequest { name: "non-default-image".to_string(), is_default: true };
     let response = app.update_image(image2_id, &update).await;
     assert!(response.status().is_success());
 
@@ -319,19 +267,14 @@ async fn can_update_default_image_to_non_default() {
     // Arrange
     let app = spawn_test_app().await;
 
-    let image = CreateImageRequest {
-        name: "default-image".to_string(),
-        is_default: true,
-    };
+    let image = CreateImageRequest { name: "default-image".to_string(), is_default: true };
     let response = app.create_image(&image).await;
     let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
     let image_id = response.id;
 
     // Act - Update the image to non-default
-    let update = UpdateImageRequest {
-        name: "default-image-updated".to_string(),
-        is_default: false,
-    };
+    let update =
+        UpdateImageRequest { name: "default-image-updated".to_string(), is_default: false };
     let response = app.update_image(image_id, &update).await;
 
     // Assert - Should succeed
@@ -351,18 +294,13 @@ async fn can_delete_non_default_image() {
     let app = spawn_test_app().await;
 
     // Create a default image first
-    let default_image = CreateImageRequest {
-        name: "default-image".to_string(),
-        is_default: true,
-    };
+    let default_image = CreateImageRequest { name: "default-image".to_string(), is_default: true };
     let response = app.create_image(&default_image).await;
     assert!(response.status().is_success());
 
     // Create a non-default image
-    let non_default_image = CreateImageRequest {
-        name: "non-default-image".to_string(),
-        is_default: false,
-    };
+    let non_default_image =
+        CreateImageRequest { name: "non-default-image".to_string(), is_default: false };
     let response = app.create_image(&non_default_image).await;
     let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
     let non_default_id = response.id;
