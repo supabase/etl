@@ -185,25 +185,25 @@ where
                 Event::Insert(event) => {
                     table_schemas.insert(
                         event.replicated_table_schema.id(),
-                        event.replicated_table_schema.clone(),
+                        event.replicated_table_schema.as_replicated_table_schema().clone(),
                     );
                 }
                 Event::Update(event) => {
                     table_schemas.insert(
                         event.replicated_table_schema.id(),
-                        event.replicated_table_schema.clone(),
+                        event.replicated_table_schema.as_replicated_table_schema().clone(),
                     );
                 }
                 Event::Delete(event) => {
                     table_schemas.insert(
                         event.replicated_table_schema.id(),
-                        event.replicated_table_schema.clone(),
+                        event.replicated_table_schema.as_replicated_table_schema().clone(),
                     );
                 }
                 Event::Relation(event) => {
                     table_schemas.insert(
                         event.replicated_table_schema.id(),
-                        event.replicated_table_schema.clone(),
+                        event.replicated_table_schema.as_replicated_table_schema().clone(),
                     );
                 }
                 Event::Truncate(event) => {

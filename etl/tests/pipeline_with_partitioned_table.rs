@@ -106,7 +106,7 @@ async fn partitioned_table_copy_replicates_existing_data() {
     assert!(partition_key_column.primary_key());
 
     let table_rows = destination.get_table_rows().await;
-    let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
+    let total_rows: usize = table_rows.values().map(Vec::len).sum();
     assert_eq!(total_rows, 3);
 
     let table_states = state_store.get_table_replication_states().await;
@@ -263,9 +263,9 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
     let events_before = destination.get_events().await;
     let grouped_before = group_events_by_type_and_table_id(&events_before);
     let delete_count_before =
-        grouped_before.get(&(EventType::Delete, parent_table_id)).map(|v| v.len()).unwrap_or(0);
+        grouped_before.get(&(EventType::Delete, parent_table_id)).map_or(0, Vec::len);
     let truncate_count_before =
-        grouped_before.get(&(EventType::Truncate, parent_table_id)).map(|v| v.len()).unwrap_or(0);
+        grouped_before.get(&(EventType::Truncate, parent_table_id)).map_or(0, Vec::len);
 
     // Detach and drop one child partition (DDL should not generate DML events).
     let partition_p1_name = format!("{}_{}", table_name.name, "p1");
@@ -300,9 +300,9 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
     let events_after = destination.get_events().await;
     let grouped_after = group_events_by_type_and_table_id(&events_after);
     let delete_count_after =
-        grouped_after.get(&(EventType::Delete, parent_table_id)).map(|v| v.len()).unwrap_or(0);
+        grouped_after.get(&(EventType::Delete, parent_table_id)).map_or(0, Vec::len);
     let truncate_count_after =
-        grouped_after.get(&(EventType::Truncate, parent_table_id)).map(|v| v.len()).unwrap_or(0);
+        grouped_after.get(&(EventType::Truncate, parent_table_id)).map_or(0, Vec::len);
 
     assert_eq!(delete_count_after, delete_count_before);
     assert_eq!(truncate_count_after, truncate_count_before);
@@ -371,7 +371,7 @@ async fn parent_table_truncate_does_emit_truncate_event() {
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
     let truncate_count =
-        grouped_events.get(&(EventType::Truncate, parent_table_id)).map(|v| v.len()).unwrap_or(0);
+        grouped_events.get(&(EventType::Truncate, parent_table_id)).map_or(0, Vec::len);
 
     assert_eq!(truncate_count, 1);
 }
@@ -448,7 +448,7 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
     let truncate_count =
-        grouped_events.get(&(EventType::Truncate, parent_table_id)).map(|v| v.len()).unwrap_or(0);
+        grouped_events.get(&(EventType::Truncate, parent_table_id)).map_or(0, Vec::len);
 
     assert_eq!(truncate_count, 0);
 }
@@ -508,7 +508,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     // Verify initial sync copied both rows.
     let table_rows = destination.get_table_rows().await;
     assert_eq!(table_rows.len(), 1);
-    let parent_rows: usize = table_rows.get(&parent_table_id).map(|rows| rows.len()).unwrap_or(0);
+    let parent_rows: usize = table_rows.get(&parent_table_id).map_or(0, Vec::len);
     assert_eq!(parent_rows, 2);
 
     // Detach partition p1 from parent.
@@ -793,9 +793,9 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
 
     // Verify the data from the detached partition was copied.
     let table_rows = destination.get_table_rows().await;
-    let parent_rows: usize = table_rows.get(&parent_table_id).map(|rows| rows.len()).unwrap_or(0);
+    let parent_rows: usize = table_rows.get(&parent_table_id).map_or(0, Vec::len);
     assert_eq!(parent_rows, 2);
-    let detached_rows: usize = table_rows.get(&p1_table_id).map(|rows| rows.len()).unwrap_or(0);
+    let detached_rows: usize = table_rows.get(&p1_table_id).map_or(0, Vec::len);
     assert_eq!(detached_rows, 2);
 }
 
@@ -1044,9 +1044,9 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
 
     // Verify the data from the detached partition was copied.
     let table_rows = destination.get_table_rows().await;
-    let parent_rows: usize = table_rows.get(&parent_table_id).map(|rows| rows.len()).unwrap_or(0);
+    let parent_rows: usize = table_rows.get(&parent_table_id).map_or(0, Vec::len);
     assert_eq!(parent_rows, 2);
-    let detached_rows: usize = table_rows.get(&p1_table_id).map(|rows| rows.len()).unwrap_or(0);
+    let detached_rows: usize = table_rows.get(&p1_table_id).map_or(0, Vec::len);
     assert_eq!(detached_rows, 2);
 }
 
@@ -1273,7 +1273,7 @@ async fn nested_partitioned_table_copy_and_cdc() {
 
     // Verify initial COPY replicated all 6 rows (one per leaf partition).
     let table_rows = destination.get_table_rows().await;
-    let total_rows: usize = table_rows.values().map(|rows| rows.len()).sum();
+    let total_rows: usize = table_rows.values().map(Vec::len).sum();
     assert_eq!(total_rows, 6);
 
     // Verify only the parent table is tracked (not intermediate or leaf

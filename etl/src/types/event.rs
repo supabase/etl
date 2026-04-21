@@ -1,6 +1,6 @@
 use std::{fmt, mem::size_of};
 
-use etl_postgres::types::{ReplicatedTableSchema, TableId};
+use etl_postgres::types::{ReplicatedTableSchema, StreamingReplicatedTableSchema, TableId};
 use tokio_postgres::types::PgLsn;
 
 use crate::types::{OldTableRow, SizeHint, TableRow, UpdatedTableRow};
@@ -72,8 +72,8 @@ pub struct InsertEvent {
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
-    /// The replicated table schema for this event.
-    pub replicated_table_schema: ReplicatedTableSchema,
+    /// The streaming table schema for this event.
+    pub replicated_table_schema: StreamingReplicatedTableSchema,
     /// Complete row data for the inserted row.
     pub table_row: TableRow,
 }
@@ -102,8 +102,8 @@ pub struct UpdateEvent {
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
-    /// The replicated table schema for this event.
-    pub replicated_table_schema: ReplicatedTableSchema,
+    /// The streaming table schema for this event.
+    pub replicated_table_schema: StreamingReplicatedTableSchema,
     /// New row data after the update.
     pub updated_table_row: UpdatedTableRow,
     /// Previous row data before the update, when PostgreSQL emitted one.
@@ -132,8 +132,8 @@ pub struct DeleteEvent {
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
-    /// The replicated table schema for this event.
-    pub replicated_table_schema: ReplicatedTableSchema,
+    /// The streaming table schema for this event.
+    pub replicated_table_schema: StreamingReplicatedTableSchema,
     /// Data from the deleted row.
     pub old_table_row: Option<OldTableRow>,
 }
@@ -187,9 +187,9 @@ pub struct RelationEvent {
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
-    /// The replicated table schema containing the table schema and replication
-    /// mask.
-    pub replicated_table_schema: ReplicatedTableSchema,
+    /// The streaming table schema containing the table schema, replication
+    /// mask, and identity mask.
+    pub replicated_table_schema: StreamingReplicatedTableSchema,
 }
 
 impl RelationEvent {

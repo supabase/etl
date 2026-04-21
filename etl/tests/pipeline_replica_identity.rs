@@ -13,21 +13,67 @@ use etl::{
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
-use pg_escape::quote_literal;
+use pg_escape::{quote_identifier, quote_literal};
 use rand::{Rng, distr::Alphanumeric, random};
 
 const LARGE_TEXT_SIZE_BYTES: usize = 8192;
 const INITIAL_ID: i64 = 1;
 const INITIAL_NAME: &str = "alice";
 const INITIAL_SURNAME: &str = "smith";
-const UPDATED_NAME: &str = "alicia";
+const INITIAL_CITY: &str = "rome";
+const UPDATED_CITY: &str = "vienna";
+const UPDATED_NAME_IDENTITY: &str = "alicia";
 const UPDATED_SURNAME_IDENTITY: &str = "smithers";
 
 #[derive(Clone, Copy)]
 enum ReplicaIdentityMode {
     Default,
     Full,
+    UsingIndex,
     Nothing,
+}
+
+impl ReplicaIdentityMode {
+    fn identity_update_sql(self, table_name: &str, final_large_text: &str) -> String {
+        match self {
+            Self::UsingIndex => format!(
+                "update {table_name} set name = {}, large_text = {} where id = {} and surname = {}",
+                quote_literal(UPDATED_NAME_IDENTITY),
+                quote_literal(final_large_text),
+                INITIAL_ID,
+                quote_literal(INITIAL_SURNAME),
+            ),
+            _ => format!(
+                "update {table_name} set surname = {}, large_text = {} where id = {} and surname \
+                 = {}",
+                quote_literal(UPDATED_SURNAME_IDENTITY),
+                quote_literal(final_large_text),
+                INITIAL_ID,
+                quote_literal(INITIAL_SURNAME),
+            ),
+        }
+    }
+
+    fn delete_sql(self, table_name: &str) -> String {
+        match self {
+            Self::UsingIndex => format!(
+                "delete from {table_name} where id = {} and name = {} and surname = {}",
+                INITIAL_ID,
+                quote_literal(UPDATED_NAME_IDENTITY),
+                quote_literal(INITIAL_SURNAME),
+            ),
+            Self::Nothing => format!(
+                "delete from {table_name} where id = {} and surname = {}",
+                INITIAL_ID,
+                quote_literal(INITIAL_SURNAME),
+            ),
+            _ => format!(
+                "delete from {table_name} where id = {} and surname = {}",
+                INITIAL_ID,
+                quote_literal(UPDATED_SURNAME_IDENTITY),
+            ),
+        }
+    }
 }
 
 struct ReplicaIdentityScenarioResult {
@@ -74,8 +120,22 @@ fn find_delete_event(events: &[Event]) -> &etl::types::DeleteEvent {
         .expect("expected delete event")
 }
 
-fn composite_key_row_in_table_order(second_value: &str) -> TableRow {
-    TableRow::new(vec![Cell::I64(INITIAL_ID), Cell::String(second_value.to_string())])
+fn full_row(name: &str, surname: &str, city: &str, large_text: &str) -> TableRow {
+    TableRow::new(vec![
+        Cell::I64(INITIAL_ID),
+        Cell::String(name.to_string()),
+        Cell::String(surname.to_string()),
+        Cell::String(city.to_string()),
+        Cell::String(large_text.to_string()),
+    ])
+}
+
+fn default_identity_row(surname: &str) -> TableRow {
+    TableRow::new(vec![Cell::I64(INITIAL_ID), Cell::String(surname.to_string())])
+}
+
+fn using_index_identity_row(name: &str, surname: &str) -> TableRow {
+    TableRow::new(vec![Cell::String(name.to_string()), Cell::String(surname.to_string())])
 }
 
 async fn run_replica_identity_scenario(
@@ -93,6 +153,7 @@ async fn run_replica_identity_scenario(
                 ("id", "bigint not null"),
                 ("name", "text not null"),
                 ("surname", "text not null"),
+                ("city", "text not null"),
                 ("large_text", "text not null"),
             ],
         )
@@ -118,25 +179,46 @@ async fn run_replica_identity_scenario(
         .await
         .unwrap();
 
-    match replica_identity {
-        ReplicaIdentityMode::Default => {}
-        ReplicaIdentityMode::Full => {
-            database
-                .alter_table(
-                    table_name.clone(),
-                    &[TableModification::ReplicaIdentity { value: "full" }],
-                )
-                .await
-                .unwrap();
-        }
-        ReplicaIdentityMode::Nothing => {
-            database
-                .alter_table(
-                    table_name.clone(),
-                    &[TableModification::ReplicaIdentity { value: "nothing" }],
-                )
-                .await
-                .unwrap();
+    if matches!(replica_identity, ReplicaIdentityMode::UsingIndex) {
+        let index_name = format!("{}_replica_identity_idx", table_name.name);
+        database
+            .run_sql(&format!(
+                "create unique index {} on {} (surname, name)",
+                quote_identifier(&index_name),
+                table_name.as_quoted_identifier(),
+            ))
+            .await
+            .unwrap();
+        database
+            .run_sql(&format!(
+                "alter table {} replica identity using index {}",
+                table_name.as_quoted_identifier(),
+                quote_identifier(&index_name),
+            ))
+            .await
+            .unwrap();
+    } else {
+        match replica_identity {
+            ReplicaIdentityMode::Default => {}
+            ReplicaIdentityMode::Full => {
+                database
+                    .alter_table(
+                        table_name.clone(),
+                        &[TableModification::ReplicaIdentity { value: "full" }],
+                    )
+                    .await
+                    .unwrap();
+            }
+            ReplicaIdentityMode::Nothing => {
+                database
+                    .alter_table(
+                        table_name.clone(),
+                        &[TableModification::ReplicaIdentity { value: "nothing" }],
+                    )
+                    .await
+                    .unwrap();
+            }
+            ReplicaIdentityMode::UsingIndex => unreachable!(),
         }
     }
 
@@ -172,8 +254,8 @@ async fn run_replica_identity_scenario(
     database
         .insert_values(
             table_name.clone(),
-            &["id", "name", "surname", "large_text"],
-            &[&INITIAL_ID, &INITIAL_NAME, &INITIAL_SURNAME, &initial_large_text],
+            &["id", "name", "surname", "city", "large_text"],
+            &[&INITIAL_ID, &INITIAL_NAME, &INITIAL_SURNAME, &INITIAL_CITY, &initial_large_text],
         )
         .await
         .unwrap();
@@ -182,9 +264,9 @@ async fn run_replica_identity_scenario(
     let mut update_count = 0;
 
     let non_identity_update_sql = format!(
-        "update {} set name = {} where id = {} and surname = {}",
+        "update {} set city = {} where id = {} and surname = {}",
         table_name.as_quoted_identifier(),
-        quote_literal(UPDATED_NAME),
+        quote_literal(UPDATED_CITY),
         INITIAL_ID,
         quote_literal(INITIAL_SURNAME),
     );
@@ -211,32 +293,21 @@ async fn run_replica_identity_scenario(
         update_count += 1;
     }
 
-    let identity_update_sql = format!(
-        "update {} set surname = {}, large_text = {} where id = {} and surname = {}",
-        table_name.as_quoted_identifier(),
-        quote_literal(UPDATED_SURNAME_IDENTITY),
-        quote_literal(&final_large_text),
-        INITIAL_ID,
-        quote_literal(INITIAL_SURNAME),
-    );
     let identity_update_notify =
         destination.wait_for_events_count(vec![(EventType::Update, update_count + 1)]).await;
-    let identity_update = database.run_sql(&identity_update_sql).await;
+    let identity_update = database
+        .run_sql(
+            &replica_identity
+                .identity_update_sql(&table_name.as_quoted_identifier(), &final_large_text),
+        )
+        .await;
     if identity_update.is_ok() {
         identity_update_notify.notified().await;
     }
 
-    let delete_sql = format!(
-        "delete from {} where id = {} and surname = {}",
-        table_name.as_quoted_identifier(),
-        INITIAL_ID,
-        quote_literal(match replica_identity {
-            ReplicaIdentityMode::Nothing => INITIAL_SURNAME,
-            _ => UPDATED_SURNAME_IDENTITY,
-        }),
-    );
     let delete_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
-    let delete = database.run_sql(&delete_sql).await;
+    let delete =
+        database.run_sql(&replica_identity.delete_sql(&table_name.as_quoted_identifier())).await;
     if delete.is_ok() {
         delete_notify.notified().await;
     }
@@ -269,27 +340,22 @@ async fn default_replica_identity_with_composite_primary_key_handles_partial_and
 
     assert!(matches!(
         &events[0],
-        Event::Insert(insert)
-            if insert.table_row
-                == TableRow::new(vec![
-                    Cell::I64(INITIAL_ID),
-                    Cell::String(INITIAL_NAME.to_string()),
-                    Cell::String(INITIAL_SURNAME.to_string()),
-                    Cell::String(result.initial_large_text.clone()),
-                ])
+        Event::Insert(insert) if insert.table_row
+            == full_row(INITIAL_NAME, INITIAL_SURNAME, INITIAL_CITY, &result.initial_large_text)
     ));
 
     let non_identity_update = find_update_event(&events, 0);
     assert_eq!(
         non_identity_update.updated_table_row,
         UpdatedTableRow::Partial(PartialTableRow::new(
-            4,
+            5,
             TableRow::new(vec![
                 Cell::I64(INITIAL_ID),
-                Cell::String(UPDATED_NAME.to_string()),
+                Cell::String(INITIAL_NAME.to_string()),
                 Cell::String(INITIAL_SURNAME.to_string()),
+                Cell::String(UPDATED_CITY.to_string()),
             ]),
-            vec![3],
+            vec![4],
         ))
     );
     assert_eq!(non_identity_update.old_table_row, None);
@@ -297,34 +363,34 @@ async fn default_replica_identity_with_composite_primary_key_handles_partial_and
     let toast_update = find_update_event(&events, 1);
     assert_eq!(
         toast_update.updated_table_row,
-        UpdatedTableRow::Full(TableRow::new(vec![
-            Cell::I64(INITIAL_ID),
-            Cell::String(UPDATED_NAME.to_string()),
-            Cell::String(INITIAL_SURNAME.to_string()),
-            Cell::String(result.updated_large_text.clone()),
-        ]))
+        UpdatedTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.updated_large_text,
+        ))
     );
     assert_eq!(toast_update.old_table_row, None);
 
     let identity_update = find_update_event(&events, 2);
     assert_eq!(
         identity_update.updated_table_row,
-        UpdatedTableRow::Full(TableRow::new(vec![
-            Cell::I64(INITIAL_ID),
-            Cell::String(UPDATED_NAME.to_string()),
-            Cell::String(UPDATED_SURNAME_IDENTITY.to_string()),
-            Cell::String(result.final_large_text.clone()),
-        ]))
+        UpdatedTableRow::Full(full_row(
+            INITIAL_NAME,
+            UPDATED_SURNAME_IDENTITY,
+            UPDATED_CITY,
+            &result.final_large_text,
+        ))
     );
     assert_eq!(
         identity_update.old_table_row,
-        Some(OldTableRow::Key(composite_key_row_in_table_order(INITIAL_SURNAME)))
+        Some(OldTableRow::Key(default_identity_row(INITIAL_SURNAME)))
     );
 
     let delete = find_delete_event(&events);
     assert_eq!(
         delete.old_table_row,
-        Some(OldTableRow::Key(composite_key_row_in_table_order(UPDATED_SURNAME_IDENTITY)))
+        Some(OldTableRow::Key(default_identity_row(UPDATED_SURNAME_IDENTITY)))
     );
 }
 
@@ -343,54 +409,116 @@ async fn full_replica_identity_with_composite_primary_key_preserves_full_old_row
     let non_identity_update = find_update_event(&events, 0);
     assert_eq!(
         non_identity_update.updated_table_row,
-        UpdatedTableRow::Full(TableRow::new(vec![
-            Cell::I64(INITIAL_ID),
-            Cell::String(UPDATED_NAME.to_string()),
-            Cell::String(INITIAL_SURNAME.to_string()),
-            Cell::String(result.initial_large_text.clone()),
-        ]))
+        UpdatedTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.initial_large_text,
+        ))
     );
     assert_eq!(
         non_identity_update.old_table_row,
-        Some(OldTableRow::Full(TableRow::new(vec![
-            Cell::I64(INITIAL_ID),
-            Cell::String(INITIAL_NAME.to_string()),
-            Cell::String(INITIAL_SURNAME.to_string()),
-            Cell::String(result.initial_large_text.clone()),
-        ])))
+        Some(OldTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            INITIAL_CITY,
+            &result.initial_large_text,
+        )))
     );
 
     let toast_update = find_update_event(&events, 1);
     assert_eq!(
         toast_update.old_table_row,
-        Some(OldTableRow::Full(TableRow::new(vec![
-            Cell::I64(INITIAL_ID),
-            Cell::String(UPDATED_NAME.to_string()),
-            Cell::String(INITIAL_SURNAME.to_string()),
-            Cell::String(result.initial_large_text.clone()),
-        ])))
+        Some(OldTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.initial_large_text,
+        )))
     );
 
     let identity_update = find_update_event(&events, 2);
     assert_eq!(
         identity_update.old_table_row,
-        Some(OldTableRow::Full(TableRow::new(vec![
-            Cell::I64(INITIAL_ID),
-            Cell::String(UPDATED_NAME.to_string()),
-            Cell::String(INITIAL_SURNAME.to_string()),
-            Cell::String(result.updated_large_text.clone()),
-        ])))
+        Some(OldTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.updated_large_text,
+        )))
     );
 
     let delete = find_delete_event(&events);
     assert_eq!(
         delete.old_table_row,
-        Some(OldTableRow::Full(TableRow::new(vec![
-            Cell::I64(INITIAL_ID),
-            Cell::String(UPDATED_NAME.to_string()),
-            Cell::String(UPDATED_SURNAME_IDENTITY.to_string()),
-            Cell::String(result.final_large_text.clone()),
-        ])))
+        Some(OldTableRow::Full(full_row(
+            INITIAL_NAME,
+            UPDATED_SURNAME_IDENTITY,
+            UPDATED_CITY,
+            &result.final_large_text,
+        )))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn using_index_replica_identity_keeps_key_rows_in_table_order() {
+    let result = run_replica_identity_scenario(ReplicaIdentityMode::UsingIndex).await;
+
+    assert!(result.non_identity_update.is_ok());
+    assert!(result.toast_update.is_ok());
+    assert!(result.identity_update.is_ok());
+    assert!(result.delete.is_ok());
+
+    let events = data_events(result.events);
+    assert_eq!(events.len(), 5);
+
+    let non_identity_update = find_update_event(&events, 0);
+    assert_eq!(
+        non_identity_update.updated_table_row,
+        UpdatedTableRow::Partial(PartialTableRow::new(
+            5,
+            TableRow::new(vec![
+                Cell::I64(INITIAL_ID),
+                Cell::String(INITIAL_NAME.to_string()),
+                Cell::String(INITIAL_SURNAME.to_string()),
+                Cell::String(UPDATED_CITY.to_string()),
+            ]),
+            vec![4],
+        ))
+    );
+    assert_eq!(non_identity_update.old_table_row, None);
+
+    let toast_update = find_update_event(&events, 1);
+    assert_eq!(
+        toast_update.updated_table_row,
+        UpdatedTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.updated_large_text,
+        ))
+    );
+    assert_eq!(toast_update.old_table_row, None);
+
+    let identity_update = find_update_event(&events, 2);
+    assert_eq!(
+        identity_update.updated_table_row,
+        UpdatedTableRow::Full(full_row(
+            UPDATED_NAME_IDENTITY,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.final_large_text,
+        ))
+    );
+    assert_eq!(
+        identity_update.old_table_row,
+        Some(OldTableRow::Key(using_index_identity_row(INITIAL_NAME, INITIAL_SURNAME,)))
+    );
+
+    let delete = find_delete_event(&events);
+    assert_eq!(
+        delete.old_table_row,
+        Some(OldTableRow::Key(using_index_identity_row(UPDATED_NAME_IDENTITY, INITIAL_SURNAME,)))
     );
 }
 

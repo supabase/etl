@@ -18,8 +18,8 @@ use etl::{
     state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Cell, Event, OldTableRow, PipelineId, ReplicatedTableSchema, SchemaDiff, TableId,
-        TableName, TableRow, UpdatedTableRow,
+        Cell, Event, OldTableRow, PipelineId, ReplicatedTableSchema, SchemaDiff,
+        StreamingReplicatedTableSchema, TableId, TableName, TableRow, UpdatedTableRow,
     },
 };
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
@@ -810,7 +810,10 @@ where
 
                         let table_id = insert.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
-                            (insert.replicated_table_schema.clone(), Vec::new())
+                            (
+                                insert.replicated_table_schema.as_replicated_table_schema().clone(),
+                                Vec::new(),
+                            )
                         });
                         entry.1.push(BigQueryTableRow::try_from(insert.table_row)?);
                     }
@@ -835,7 +838,10 @@ where
                         table_row.values_mut().push(Cell::String(sequence_key));
 
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
-                            (update.replicated_table_schema.clone(), Vec::new())
+                            (
+                                update.replicated_table_schema.as_replicated_table_schema().clone(),
+                                Vec::new(),
+                            )
                         });
                         entry.1.push(BigQueryTableRow::try_from(table_row)?);
                     }
@@ -848,7 +854,10 @@ where
 
                         let table_id = delete.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
-                            (delete.replicated_table_schema.clone(), Vec::new())
+                            (
+                                delete.replicated_table_schema.as_replicated_table_schema().clone(),
+                                Vec::new(),
+                            )
                         });
                         entry.1.push(bigquery_delete_row(
                             &delete.replicated_table_schema,
@@ -1122,7 +1131,7 @@ where
 /// Builds a CDC delete row for BigQuery from either a full old row image or a
 /// replica-identity key image.
 fn bigquery_delete_row(
-    replicated_table_schema: &ReplicatedTableSchema,
+    replicated_table_schema: &StreamingReplicatedTableSchema,
     old_table_row: OldTableRow,
     sequence_key: String,
 ) -> EtlResult<BigQueryTableRow> {

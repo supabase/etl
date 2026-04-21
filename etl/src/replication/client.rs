@@ -878,7 +878,7 @@ impl PgReplicationClient {
                 let name =
                     Self::get_row_value::<String>(&row, "tablename", "pg_publication_tables")?;
 
-                table_names.push(TableName { schema, name })
+                table_names.push(TableName { schema, name });
             }
         }
 

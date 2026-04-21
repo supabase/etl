@@ -5,8 +5,8 @@ use std::{
 };
 
 use etl_postgres::types::{
-    ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
-    convert_type_oid_to_type,
+    ColumnSchema, ReplicatedTableSchema, SnapshotId, StreamingReplicatedTableSchema, TableId,
+    TableName, TableSchema, convert_type_oid_to_type,
 };
 use metrics::{counter, histogram};
 use postgres_replication::protocol;
@@ -237,7 +237,7 @@ pub(crate) fn parse_replicated_column_names(
     let column_names = relation_body
         .columns()
         .iter()
-        .map(|column| column.name().map(|name| name.to_string()))
+        .map(|column| column.name().map(std::string::ToString::to_string))
         .collect::<Result<HashSet<String>, _>>()?;
 
     Ok(column_names)
@@ -245,19 +245,27 @@ pub(crate) fn parse_replicated_column_names(
 
 /// Returns the set of relation-message key column names.
 ///
-/// PostgreSQL exposes replica-identity membership on each [`RelationBody`]
-/// column via the low bit of the column flags. The returned set is therefore
-/// suitable for membership checks, but it intentionally does not preserve any
-/// key ordering information.
+/// PostgreSQL exposes replica-identity mode on the relation itself and
+/// key-column membership on each [`RelationBody`] column. For
+/// `REPLICA IDENTITY FULL`, every replicated column belongs to the old-row
+/// identity. Otherwise the low bit of the column flags marks identity
+/// membership.
 pub(crate) fn parse_replica_identity_column_names(
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<HashSet<String>> {
-    let column_names = relation_body
-        .columns()
-        .iter()
-        .filter(|column| column.flags() & 1 == 1)
-        .map(|column| column.name().map(|name| name.to_string()))
-        .collect::<Result<HashSet<String>, _>>()?;
+    let column_names = match relation_body.replica_identity() {
+        protocol::ReplicaIdentity::Full => relation_body
+            .columns()
+            .iter()
+            .map(|column| column.name().map(std::string::ToString::to_string))
+            .collect::<Result<HashSet<String>, _>>()?,
+        _ => relation_body
+            .columns()
+            .iter()
+            .filter(|column| column.flags() & 1 == 1)
+            .map(|column| column.name().map(std::string::ToString::to_string))
+            .collect::<Result<HashSet<String>, _>>()?,
+    };
 
     Ok(column_names)
 }
@@ -268,7 +276,7 @@ pub(crate) fn parse_replica_identity_column_names(
 /// and constructs an insert event with the new row data ready for ETL
 /// processing.
 pub(crate) fn parse_event_from_insert_message(
-    replicated_table_schema: ReplicatedTableSchema,
+    replicated_table_schema: StreamingReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
@@ -288,15 +296,22 @@ pub(crate) fn parse_event_from_insert_message(
 
 /// Converts a Postgres update message into an [`UpdateEvent`].
 ///
-/// This function processes an update operation from the replication stream.
+/// Update events have two distinct row images with different semantics.
 ///
-/// Old row data may be either a full row image or a key-only row image,
-/// depending on the table's `REPLICA IDENTITY` setting. The new row image is
-/// decoded as [`UpdatedTableRow::Full`] when every column value is known, or
+/// The old row image may be either [`OldTableRow::Full`] or
+/// [`OldTableRow::Key`], depending on the table's `REPLICA IDENTITY` setting
+/// and on whether PostgreSQL needed to send an old-side image at all. The new
+/// row image is always decoded from the update's new tuple and becomes
+/// [`UpdatedTableRow::Full`] when every column value is known, or
 /// [`UpdatedTableRow::Partial`] when PostgreSQL emits `UnchangedToast` fields
-/// that cannot be reconstructed from a full old row image.
+/// that cannot be reconstructed from the available old-row image.
+///
+/// The shared key-row decoder only normalizes PostgreSQL's key-image tuple into
+/// a dense row containing replica-identity columns in replicated table order.
+/// The update-specific semantics live here: the old row is auxiliary data that
+/// is consulted only to resolve missing new-row values.
 pub(crate) fn parse_event_from_update_message(
-    replicated_table_schema: ReplicatedTableSchema,
+    replicated_table_schema: StreamingReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
@@ -304,8 +319,8 @@ pub(crate) fn parse_event_from_update_message(
 ) -> EtlResult<UpdateEvent> {
     // PostgreSQL can attach either a full old tuple (`old_tuple`) or only the
     // replica-identity columns (`key_tuple`) to an update. We preserve that
-    // shape in `OldTableRow`, but only a full old row can help us resolve
-    // `UnchangedToast` fields in the new tuple below.
+    // shape in `OldTableRow`. The new tuple is decoded separately below, where
+    // the old row acts only as a source for resolving `UnchangedToast`.
     let is_key = update_body.old_tuple().is_none();
     let old_tuple = update_body.old_tuple().or(update_body.key_tuple());
 
@@ -329,12 +344,12 @@ pub(crate) fn parse_event_from_update_message(
         None => None,
     };
 
-    // Old-row shape matters for `UnchangedToast` resolution:
-    // - full rows can recover any unchanged column by index
+    // Old-row shape matters only for `UnchangedToast` resolution:
+    // - full rows can recover any unchanged column by index.
     // - key rows can recover only unchanged key columns, consuming key values in
-    //   table order as we walk the schema below
+    //   replicated table order as we walk the schema below.
     let table_row = convert_update_tuple_to_updated_table_row(
-        replicated_table_schema.column_schemas(),
+        &replicated_table_schema,
         new_tuple_data,
         old_table_row.as_ref(),
     )?;
@@ -353,19 +368,22 @@ pub(crate) fn parse_event_from_update_message(
 
 /// Converts a Postgres delete message into a [`DeleteEvent`].
 ///
-/// This function processes a delete operation from the replication stream,
-/// extracting the old row data that was deleted. The old row data may be
-/// either the complete row or just the key columns, depending on the table's
-/// `REPLICA IDENTITY` setting in Postgres.
+/// Delete events carry only an old row image.
+///
+/// That old image may be either [`OldTableRow::Full`] or [`OldTableRow::Key`],
+/// depending on the table's `REPLICA IDENTITY` setting. Unlike updates, delete
+/// handling does not need any additional reconstruction step for a new row, so
+/// this function simply preserves PostgreSQL's old-row semantics after
+/// normalizing any key tuple into a dense key row in replicated table order.
 pub(crate) fn parse_event_from_delete_message(
-    replicated_table_schema: ReplicatedTableSchema,
+    replicated_table_schema: StreamingReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
     delete_body: &protocol::DeleteBody,
 ) -> EtlResult<DeleteEvent> {
-    // We try to extract the old tuple by either taking the entire old tuple or the
-    // key of the old tuple.
+    // Delete messages carry only an old-side image. PostgreSQL may send either
+    // the full old row or only the replica-identity columns.
     let is_key = delete_body.old_tuple().is_none();
     let old_tuple = delete_body.old_tuple().or(delete_body.key_tuple());
 
@@ -456,19 +474,24 @@ fn convert_tuple_to_row<'a>(
 ///
 /// `old_table_row` preserves PostgreSQL's original old-row shape.
 ///
+/// This function is update-specific: it decodes the new tuple and optionally
+/// consults the old row to resolve `UnchangedToast` fields.
+///
 /// Full rows can resolve any `UnchangedToast` field by column index. Key rows
 /// can resolve only unchanged key columns, consuming key values in replicated
-/// table-column order as the decoder walks the schema.
+/// table-column order as the decoder walks the schema. This means the shared
+/// key-row decoding logic stays generic, while the update-only meaning of that
+/// old row stays localized here.
 ///
 /// When PostgreSQL emits `UnchangedToast` for a column that cannot be resolved
 /// from the available old-row image, the column position is marked missing and
 /// the result becomes [`UpdatedTableRow::Partial`].
-fn convert_update_tuple_to_updated_table_row<'a>(
-    column_schemas: impl ExactSizeIterator<Item = &'a ColumnSchema>,
+fn convert_update_tuple_to_updated_table_row(
+    replicated_table_schema: &StreamingReplicatedTableSchema,
     tuple_data: &[protocol::TupleData],
     old_table_row: Option<&OldTableRow>,
 ) -> EtlResult<UpdatedTableRow> {
-    let column_count = column_schemas.len();
+    let column_count = replicated_table_schema.column_schemas().len();
     if tuple_data.len() != column_count {
         bail!(
             ErrorKind::ConversionError,
@@ -484,11 +507,20 @@ fn convert_update_tuple_to_updated_table_row<'a>(
     let mut missing_column_indexes = Vec::new();
     let mut partial_row = false;
 
-    for (index, (column_schema, tuple_data)) in column_schemas.zip(tuple_data.iter()).enumerate() {
+    let mut identity_columns = replicated_table_schema.identity_column_schemas().peekable();
+    for (index, (column_schema, tuple_data)) in
+        replicated_table_schema.column_schemas().zip(tuple_data.iter()).enumerate()
+    {
         // We try to resolve the old row so that we can use its values to avoid
         // submitting a partial table row due to unchanged toast values in the
         // tuple data.
-        let old_value = old_row_resolver.value_for_column(column_schema)?;
+        let is_identity = identity_columns.peek().is_some_and(|identity_column| {
+            identity_column.ordinal_position == column_schema.ordinal_position
+        });
+        let old_value = old_row_resolver.value_for_column(is_identity)?;
+        if is_identity {
+            let _ = identity_columns.next().expect("peeked identity column");
+        }
         match convert_tuple_data_to_cell(index, column_schema, tuple_data, old_value)? {
             ConvertedTupleCell::Present(value) if partial_row => {
                 present_values.push(value);
@@ -528,8 +560,12 @@ fn convert_update_tuple_to_updated_table_row<'a>(
 
 /// Resolves old-row values while decoding an update new tuple.
 ///
-/// Key-row resolution consumes values in table order as the decoder walks the
-/// replicated schema.
+/// This resolver exists only for update decoding.
+///
+/// Delete events can forward the old row as-is, but update decoding may need to
+/// consult the old row to resolve `UnchangedToast` fields in the new tuple.
+/// Key-row resolution consumes values in replicated table order as the decoder
+/// walks the schema.
 #[derive(Debug)]
 enum OldRowResolver<'a> {
     None,
@@ -539,6 +575,9 @@ enum OldRowResolver<'a> {
 
 impl<'a> OldRowResolver<'a> {
     /// Creates a resolver for the provided old row image.
+    ///
+    /// Full rows must match the replicated schema width. Key rows are kept
+    /// dense and are validated incrementally as key columns are consumed.
     fn new(old_table_row: Option<&'a OldTableRow>, column_count: usize) -> EtlResult<Self> {
         match old_table_row {
             Some(OldTableRow::Full(row)) => {
@@ -565,7 +604,10 @@ impl<'a> OldRowResolver<'a> {
 
     /// Returns the old value aligned with the next schema column when
     /// available.
-    fn value_for_column(&mut self, column_schema: &ColumnSchema) -> EtlResult<Option<&'a Cell>> {
+    ///
+    /// For full rows this advances one value per schema column. For key rows
+    /// this advances only when the current schema column belongs to the key.
+    fn value_for_column(&mut self, is_identity_column: bool) -> EtlResult<Option<&'a Cell>> {
         match self {
             Self::None => Ok(None),
             Self::Full { values, next_column_index } => {
@@ -585,7 +627,7 @@ impl<'a> OldRowResolver<'a> {
                 Ok(Some(value))
             }
             Self::Key { values, next_key_index } => {
-                if !column_schema.primary_key() {
+                if !is_identity_column {
                     return Ok(None);
                 }
 
@@ -635,6 +677,13 @@ impl<'a> OldRowResolver<'a> {
 /// Converts a key-image tuple into a dense row containing only
 /// replica-identity columns in replicated table-column order.
 ///
+/// This function is shared by update and delete parsing because the decoding
+/// rule for a PostgreSQL key image is the same in both cases. The semantic
+/// difference between update and delete lives above this boundary:
+/// - updates use the decoded key row only as an old-side helper for new-row
+///   reconstruction.
+/// - deletes forward the decoded key row as the entire old-side payload.
+///
 /// PostgreSQL may encode a key image either as:
 /// - a dense tuple containing only replica-identity values, or
 /// - a tuple aligned to the full replicated schema.
@@ -643,7 +692,7 @@ impl<'a> OldRowResolver<'a> {
 /// replicated table-column order so downstream destinations do not need to
 /// reason about PostgreSQL's on-the-wire tuple shape.
 fn convert_key_tuple_to_row(
-    replicated_table_schema: &ReplicatedTableSchema,
+    replicated_table_schema: &StreamingReplicatedTableSchema,
     tuple_data: &[protocol::TupleData],
 ) -> EtlResult<TableRow> {
     let identity_column_schemas: Vec<_> =
@@ -799,10 +848,36 @@ mod tests {
     use crate::{
         error::ErrorKind,
         types::{
-            Cell, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableId, TableName,
-            TableRow, TableSchema, UpdatedTableRow,
+            Cell, OldTableRow, PartialTableRow, ReplicatedTableSchema,
+            StreamingReplicatedTableSchema, TableId, TableName, TableRow, TableSchema,
+            UpdatedTableRow,
         },
     };
+
+    fn streaming_schema(columns: Vec<ColumnSchema>) -> StreamingReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(42),
+            TableName::new("public".to_string(), "test".to_string()),
+            columns,
+        ));
+
+        let replicated_table_schema = ReplicatedTableSchema::all(Arc::clone(&table_schema));
+        let identity_mask = replicated_table_schema
+            .replication_mask()
+            .as_slice()
+            .iter()
+            .zip(table_schema.column_schemas.iter())
+            .map(|(&replicated, column_schema)| {
+                u8::from(replicated == 1 && column_schema.primary_key())
+            })
+            .collect();
+
+        StreamingReplicatedTableSchema::from_masks(
+            table_schema,
+            replicated_table_schema.replication_mask().clone(),
+            etl_postgres::types::IdentityMask::from_bytes(identity_mask),
+        )
+    }
 
     #[test]
     fn convert_tuple_to_row_rejects_missing_non_nullable_columns_for_full_rows() {
@@ -820,14 +895,14 @@ mod tests {
 
     #[test]
     fn convert_update_tuple_to_new_table_row_returns_partial_when_toast_cannot_be_recovered() {
-        let column_schemas = [
+        let replicated_table_schema = streaming_schema(vec![
             ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
             ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 2, None, false),
-        ];
+        ]);
         let tuple_data = [TupleData::Text(b"1".to_vec().into()), TupleData::UnchangedToast];
 
         let row =
-            convert_update_tuple_to_updated_table_row(column_schemas.iter(), &tuple_data, None)
+            convert_update_tuple_to_updated_table_row(&replicated_table_schema, &tuple_data, None)
                 .unwrap();
 
         assert_eq!(
@@ -842,16 +917,16 @@ mod tests {
 
     #[test]
     fn convert_update_tuple_to_new_table_row_reuses_old_value_when_available() {
-        let column_schemas = [
+        let replicated_table_schema = streaming_schema(vec![
             ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
             ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 2, None, false),
-        ];
+        ]);
         let tuple_data = [TupleData::Text(b"1".to_vec().into()), TupleData::UnchangedToast];
         let original_old_row = TableRow::new(vec![Cell::I64(1), Cell::String("toast".to_string())]);
         let old_table_row = OldTableRow::Full(original_old_row.clone());
 
         let row = convert_update_tuple_to_updated_table_row(
-            column_schemas.iter(),
+            &replicated_table_schema,
             &tuple_data,
             Some(&old_table_row),
         )
@@ -869,16 +944,16 @@ mod tests {
 
     #[test]
     fn convert_update_tuple_to_new_table_row_reuses_key_value_when_column_is_in_key() {
-        let column_schemas = [
+        let replicated_table_schema = streaming_schema(vec![
             ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
             ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 2, Some(2), false),
-        ];
+        ]);
         let tuple_data = [TupleData::Text(b"2".to_vec().into()), TupleData::UnchangedToast];
         let old_table_row =
             OldTableRow::Key(TableRow::new(vec![Cell::I64(1), Cell::String("toast".to_string())]));
 
         let row = convert_update_tuple_to_updated_table_row(
-            column_schemas.iter(),
+            &replicated_table_schema,
             &tuple_data,
             Some(&old_table_row),
         )
@@ -905,7 +980,11 @@ mod tests {
                 ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 4, None, false),
             ],
         ));
-        let replicated_table_schema = ReplicatedTableSchema::all(table_schema);
+        let replicated_table_schema = StreamingReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicatedTableSchema::all(Arc::clone(&table_schema)).replication_mask().clone(),
+            etl_postgres::types::IdentityMask::from_bytes(vec![1, 0, 1, 0]),
+        );
         let tuple_data = [
             TupleData::Text(b"1".to_vec().into()),
             TupleData::Text(b"alice".to_vec().into()),

@@ -292,7 +292,7 @@ where
                     },
                 )?;
             shared_table_cache
-                .upsert(table_id, table_schema.snapshot_id, Some(replication_mask.clone()))
+                .upsert(table_id, table_schema.snapshot_id, Some(replication_mask.clone()), None)
                 .await;
 
             // Create the replicated table schema with the replication mask.

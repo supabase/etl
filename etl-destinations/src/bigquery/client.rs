@@ -1183,9 +1183,10 @@ impl BigQueryClient {
 
     /// Creates a primary key clause for table creation.
     ///
-    /// Generates a primary key constraint clause from columns marked as primary
-    /// key, sorted by their ordinal position to ensure correct composite
-    /// key ordering.
+    /// Table copy and persisted destination metadata only carry the replicated
+    /// schema, so table creation continues to use the source primary key here.
+    /// Streaming-only replica-identity metadata is handled separately when CDC
+    /// rows are encoded.
     fn add_primary_key_clause(
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<Option<String>> {

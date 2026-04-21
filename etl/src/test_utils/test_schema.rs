@@ -371,8 +371,10 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
             }
 
             // Compare table IDs of truncated tables
-            let left_ids: Vec<_> = left.truncated_tables.iter().map(|s| s.id()).collect();
-            let right_ids: Vec<_> = right.truncated_tables.iter().map(|s| s.id()).collect();
+            let left_ids: Vec<_> =
+                left.truncated_tables.iter().map(ReplicatedTableSchema::id).collect();
+            let right_ids: Vec<_> =
+                right.truncated_tables.iter().map(ReplicatedTableSchema::id).collect();
             left_ids == right_ids
         }
         (Event::Relation(left), Event::Relation(right)) => {
@@ -402,7 +404,7 @@ pub fn build_expected_users_inserts(
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
             tx_ordinal: 0,
-            replicated_table_schema: replicated_table_schema.clone(),
+            replicated_table_schema: replicated_table_schema.clone().into(),
             table_row: TableRow::new(vec![
                 Cell::I64(starting_id),
                 Cell::String(name.to_owned()),
@@ -431,7 +433,7 @@ pub fn build_expected_orders_inserts(
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
             tx_ordinal: 0,
-            replicated_table_schema: replicated_table_schema.clone(),
+            replicated_table_schema: replicated_table_schema.clone().into(),
             table_row: TableRow::new(vec![Cell::I64(starting_id), Cell::String(name.to_owned())]),
         }));
 

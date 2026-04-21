@@ -100,7 +100,7 @@ pub fn set_global_project_ref(project_ref: &str) {
 ///
 /// Returns `None` if no project reference has been set.
 pub fn get_global_project_ref() -> Option<&'static str> {
-    PROJECT_REF.get().map(|s| s.as_str())
+    PROJECT_REF.get().map(String::as_str)
 }
 
 /// Sets the global pipeline id for all tracing events.
@@ -404,7 +404,7 @@ fn panic_hook(panic_info: &PanicHookInfo) {
         "unknown panic payload"
     };
 
-    let location = panic_info.location().map(|location| location.to_string());
+    let location = panic_info.location().map(ToString::to_string);
 
     tracing::error!(
         panic.payload = payload,

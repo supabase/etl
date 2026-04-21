@@ -20,7 +20,7 @@ where
     E: PgExecutor<'c>,
 {
     // Perform a single query checking all required relations via unnest
-    let table_names: Vec<String> = ETL_TABLE_NAMES.iter().map(|s| s.to_string()).collect();
+    let table_names: Vec<String> = ETL_TABLE_NAMES.iter().map(ToString::to_string).collect();
     let present: bool = sqlx::query_scalar(
         r#"
         select coalesce(bool_and(to_regclass(t) is not null), false)

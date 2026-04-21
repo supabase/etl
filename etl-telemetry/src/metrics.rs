@@ -1,4 +1,7 @@
-use std::{sync::Mutex, time::Duration};
+use std::{
+    sync::{Mutex, PoisonError},
+    time::Duration,
+};
 
 use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
 use tracing::trace;
@@ -43,7 +46,7 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
         .lock()
         // We still get the poisoned lock since we assume that a poisoned lock doesn't
         // invalidate the handle contents.
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(PoisonError::into_inner);
 
     if let Some(handle) = &*prometheus_handle {
         return Ok(handle.clone());

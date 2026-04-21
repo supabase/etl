@@ -150,8 +150,8 @@ where
         }
     }
 
-    let base_file_source = config::File::from(base_file.clone());
-    let environment_file_source = config::File::from(environment_file.clone());
+    let base_file_source = config::File::from(base_file);
+    let environment_file_source = config::File::from(environment_file);
 
     let builder = config::Config::builder()
         .add_source(base_file_source)

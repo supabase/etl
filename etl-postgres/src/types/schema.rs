@@ -323,7 +323,7 @@ impl TableSchema {
     /// This method checks if any column in the table is marked as part of the
     /// primary key.
     pub fn has_primary_keys(&self) -> bool {
-        self.column_schemas.iter().any(|cs| cs.primary_key())
+        self.column_schemas.iter().any(ColumnSchema::primary_key)
     }
 }
 
@@ -484,6 +484,13 @@ impl ReplicationMask {
     }
 }
 
+/// A bitmask indicating which replicated columns belong to the replica
+/// identity.
+///
+/// This reuses the same representation as [`ReplicationMask`]. The semantic
+/// difference is only in how callers interpret the `1` bits.
+pub type IdentityMask = ReplicationMask;
+
 /// An iterator wrapper that provides an exact size even when the inner iterator
 /// doesn't know its length.
 ///
@@ -539,8 +546,6 @@ pub struct ReplicatedTableSchema {
     replication_mask: ReplicationMask,
     /// Cached number of replicated columns.
     replicated_column_count: usize,
-    /// Cached number of replica-identity columns among replicated columns.
-    identity_column_count: usize,
 }
 
 impl ReplicatedTableSchema {
@@ -553,18 +558,8 @@ impl ReplicatedTableSchema {
             "mask length must match column count"
         );
 
-        let mut identity_column_count = 0;
-        for (column_schema, &replicated) in
-            table_schema.column_schemas.iter().zip(replication_mask.as_slice().iter())
-        {
-            if replicated == 1 && column_schema.primary_key() {
-                identity_column_count += 1;
-            }
-        }
-
         Self {
             replicated_column_count: replication_mask.replicated_count(),
-            identity_column_count,
             table_schema,
             replication_mask,
         }
@@ -621,27 +616,6 @@ impl ReplicatedTableSchema {
         SizedIterator::new(inner, self.replicated_column_count)
     }
 
-    /// Returns an iterator over only the column schemas that are part of the
-    /// replica identity, preserving replicated table-column order.
-    pub fn identity_column_schemas(
-        &self,
-    ) -> impl ExactSizeIterator<Item = &ColumnSchema> + Clone + '_ {
-        let inner = self
-            .table_schema
-            .column_schemas
-            .iter()
-            .zip(self.replication_mask.as_slice().iter())
-            .filter_map(|(column_schema, &replicated)| {
-                if replicated == 1 && column_schema.primary_key() {
-                    Some(column_schema)
-                } else {
-                    None
-                }
-            });
-
-        SizedIterator::new(inner, self.identity_column_count)
-    }
-
     /// Computes the diff between this schema (old) and another schema (new).
     ///
     /// Only consider replicated columns. Uses ordinal positions to track
@@ -686,6 +660,119 @@ impl ReplicatedTableSchema {
         columns_to_add.sort_by_key(|c| c.ordinal_position);
 
         SchemaDiff { columns_to_add, columns_to_remove, columns_to_rename }
+    }
+}
+
+/// A streaming schema view that carries both publication filtering and
+/// replica-identity membership.
+///
+/// This type is used only for streaming relation and row events. Initial table
+/// copy continues to use [`ReplicatedTableSchema`] because copy and bootstrap
+/// logic do not need replica-identity metadata.
+#[derive(Debug, Clone)]
+pub struct StreamingReplicatedTableSchema {
+    replicated_table_schema: ReplicatedTableSchema,
+    identity_mask: IdentityMask,
+    identity_column_count: usize,
+}
+
+impl StreamingReplicatedTableSchema {
+    /// Creates a [`StreamingReplicatedTableSchema`] from a schema, a
+    /// replication mask, and an identity mask.
+    ///
+    /// Both masks are expressed in full table-schema width. The identity mask
+    /// must therefore align with the same column order as the replication mask.
+    pub fn from_masks(
+        table_schema: Arc<TableSchema>,
+        replication_mask: ReplicationMask,
+        identity_mask: IdentityMask,
+    ) -> Self {
+        debug_assert_eq!(
+            table_schema.column_schemas.len(),
+            identity_mask.len(),
+            "identity mask length must match column count"
+        );
+
+        let replicated_table_schema =
+            ReplicatedTableSchema::from_mask(table_schema, replication_mask.clone());
+        let mut identity_column_count = 0;
+        for (&replicated, &identity) in
+            replication_mask.as_slice().iter().zip(identity_mask.as_slice().iter())
+        {
+            debug_assert!(
+                identity == 0 || replicated == 1,
+                "identity mask must be a subset of the replication mask"
+            );
+
+            if replicated == 1 && identity == 1 {
+                identity_column_count += 1;
+            }
+        }
+
+        Self { replicated_table_schema, identity_mask, identity_column_count }
+    }
+
+    /// Returns the replica-identity mask.
+    pub fn identity_mask(&self) -> &IdentityMask {
+        &self.identity_mask
+    }
+
+    /// Returns the replicated-schema view without streaming-only identity
+    /// metadata.
+    pub fn as_replicated_table_schema(&self) -> &ReplicatedTableSchema {
+        &self.replicated_table_schema
+    }
+
+    /// Returns an iterator over only the column schemas that are part of the
+    /// replica identity, preserving replicated table-column order.
+    pub fn identity_column_schemas(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &ColumnSchema> + Clone + '_ {
+        let inner =
+            self.replicated_table_schema
+                .inner()
+                .column_schemas
+                .iter()
+                .zip(
+                    self.replicated_table_schema
+                        .replication_mask()
+                        .as_slice()
+                        .iter()
+                        .zip(self.identity_mask.as_slice().iter()),
+                )
+                .filter_map(|(column_schema, (&replicated, &identity))| {
+                    if replicated == 1 && identity == 1 { Some(column_schema) } else { None }
+                });
+
+        SizedIterator::new(inner, self.identity_column_count)
+    }
+}
+
+impl std::ops::Deref for StreamingReplicatedTableSchema {
+    type Target = ReplicatedTableSchema;
+
+    fn deref(&self) -> &Self::Target {
+        &self.replicated_table_schema
+    }
+}
+
+impl From<ReplicatedTableSchema> for StreamingReplicatedTableSchema {
+    fn from(replicated_table_schema: ReplicatedTableSchema) -> Self {
+        let identity_mask = IdentityMask::from_bytes(
+            replicated_table_schema
+                .inner()
+                .column_schemas
+                .iter()
+                .zip(replicated_table_schema.replication_mask().as_slice().iter())
+                .map(|(column_schema, &replicated)| {
+                    u8::from(replicated == 1 && column_schema.primary_key())
+                })
+                .collect(),
+        );
+
+        let identity_column_count = identity_mask.replicated_count();
+
+        Self { replicated_table_schema, identity_mask, identity_column_count }
     }
 }
 
