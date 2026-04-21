@@ -822,7 +822,8 @@ where
             biased;
 
             // PRIORITY 1: Handle shutdown signals.
-            // Shutdown stops new intake first and then lets the loop drain or wait as needed.
+            // Once shutdown is requested, the loop stops new intake and
+            // switches into the graceful shutdown loop.
             _ = self.shutdown_rx.changed() => {
                 self.handle_shutdown_signal(events_stream.as_mut()).await?;
             }
@@ -893,12 +894,13 @@ where
     /// acknowledge the requested flush LSN.
     ///
     /// In this phase the loop no longer accepts new replication messages and it
-    /// no longer waits for pending destination flushes. Instead it only
-    /// waits for:
+    /// prioritizes any in-flight destination flush result before it waits for:
     /// 1. PostgreSQL connection lifecycle updates.
-    /// 2. PostgreSQL keepalives that may acknowledge the shutdown status update
+    /// 2. Any pending destination flush result that may advance durable
+    ///    progress during shutdown.
+    /// 3. PostgreSQL keepalives that may acknowledge the shutdown status update
     ///    with `wal_end >= acked_flush_lsn`.
-    /// 3. Periodic heartbeats once the computed keep alive deadline expires.
+    /// 4. Periodic heartbeats once the computed keep alive deadline expires.
     ///
     /// Once the keepalive acknowledgement arrives, unresolved batch or flush
     /// work causes the loop to conservatively return
@@ -919,7 +921,18 @@ where
                 Self::handle_connection_update(changed, connection_updates_rx)?;
             }
 
-            // PRIORITY 2: Wait for the keepalive that acknowledges the shutdown flush LSN.
+            // PRIORITY 2: If destination work was already in flight when shutdown started,
+            // consume that result before continuing the shutdown wait.
+            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
+                info!(
+                    worker_type = %self.worker_context.worker_type(),
+                    "graceful shutdown received in-flight destination flush result",
+                );
+
+                self.handle_flush_result(apply_result).await?;
+            }
+
+            // PRIORITY 3: Wait for the keepalive that acknowledges the shutdown flush LSN.
             // Once this barrier is reached, shutdown may finish.
             message = events_stream.next() => {
                 if self
@@ -930,7 +943,7 @@ where
                 }
             }
 
-            // PRIORITY 3: Resend a heartbeat once the computed keep alive deadline expires while
+            // PRIORITY 4: Resend a heartbeat once the computed keep alive deadline expires while
             // shutdown is waiting for the primary keep alive acknowledgement barrier. This is a
             // last-resort safeguard for cases where PostgreSQL keep alives stop reaching the loop,
             // for example because the source has gone quiet, the stream is backpressured, or the
@@ -1120,19 +1133,10 @@ where
     /// Handles a shutdown signal by transitioning to
     /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
     ///
-    /// The shutdown procedure is intentionally quick and best-effort. We do not
-    /// generally defer shutdown to transaction or catch-up boundaries
-    /// because the system is still at-least-once and extra draining logic
-    /// would add disproportionate complexity.
-    ///
-    /// Instead, the goal here is to report the best durable position already
-    /// known by the loop.
-    ///
-    /// If a batch is still being built or a destination flush is still in
-    /// flight, shutdown does not try to resolve that work explicitly. After
-    /// PostgreSQL acknowledges the status update, the loop
-    /// returns [`ApplyLoopResult::Paused`] so the next start can replay from
-    /// the last confirmed durable position.
+    /// Shutdown stops new message intake immediately and sends the best flush
+    /// position currently known. If an in-flight destination flush resolves
+    /// afterward, the graceful shutdown loop may refresh this acknowledgement
+    /// target before completing.
     ///
     /// Note: the shutdown system is best-effort. Graceful shutdown may not
     /// complete if we are blocked on non-interruptible code or if keepalive
@@ -1163,7 +1167,10 @@ where
 
         info!(
             %worker_type,
-            "shutdown signal received, sending status update and waiting for acknowledgement",
+            pending_flush_result = self.state.has_pending_flush_result(),
+            pending_batch = self.state.has_pending_batch(),
+            processing_paused = self.state.processing_paused,
+            "shutdown signal received, stopping new intake and entering graceful shutdown wait",
         );
 
         self.initiate_graceful_shutdown(events_stream.as_mut()).await
@@ -1173,15 +1180,23 @@ where
     /// to [`ShutdownState::WaitingForPrimaryKeepAlive`].
     ///
     /// The status update uses the best durable position currently known by the
-    /// loop; it does not try to advance shutdown to a transaction-specific
-    /// target by doing additional draining work.
+    /// loop.
     async fn initiate_graceful_shutdown(
         &mut self,
         mut events_stream: Pin<&mut BackpressureStream<EventsStream>>,
     ) -> EtlResult<()> {
+        let worker_type = self.worker_context.worker_type();
+
         // Use effective flush LSN to report last received LSN when idle, since
         // last flush LSN only advances during actual flushes.
         let flush_lsn = self.state.effective_flush_lsn();
+
+        info!(
+            %worker_type,
+            %flush_lsn,
+            "sending shutdown status update and waiting for primary keep alive acknowledgement",
+        );
+
         self.send_status_update(
             events_stream.as_mut(),
             flush_lsn,
@@ -1247,6 +1262,16 @@ where
 
         // If there was an error in the flushing, we return it immediately.
         result?;
+
+        let metadata = metadata.ok_or_else(|| {
+            etl_error!(
+                ErrorKind::DestinationError,
+                "Destination flush completed without metadata",
+                "The apply loop received a completed destination flush result without the \
+                 dispatch metadata it attaches when creating the async result. This indicates the \
+                 async result was constructed or forwarded incorrectly."
+            )
+        })?;
 
         counter!(
             ETL_EVENTS_PROCESSED_TOTAL,
