@@ -5,7 +5,7 @@ use std::{
 };
 
 use etl_postgres::types::{
-    ColumnSchema, ReplicatedTableSchema, SnapshotId, StreamingReplicatedTableSchema, TableId,
+    ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
     TableName, TableSchema, convert_type_oid_to_type,
 };
 use metrics::{counter, histogram};
@@ -102,6 +102,66 @@ pub(crate) struct IdentityMessage {
     /// The primary key columns in key order, expressed as `pg_attribute.attnum`
     /// values.
     pub(crate) primary_key_attnums: Vec<i32>,
+    /// The replica-identity mode from `pg_class.relreplident`.
+    pub(crate) relreplident: String,
+    /// The replica-identity index columns in key order, expressed as
+    /// `pg_attribute.attnum` values.
+    pub(crate) replica_identity_index_attnums: Vec<i32>,
+}
+
+impl IdentityMessage {
+    /// Builds the runtime identity mask for a replicated table schema.
+    ///
+    /// The returned mask is expressed in full table-schema width so it can be
+    /// combined with the replication mask held by [`ReplicatedTableSchema`].
+    ///
+    /// `REPLICA IDENTITY FULL` uses the replicated columns themselves as the
+    /// row identity. `DEFAULT` uses the primary key, `USING INDEX` uses the
+    /// configured replica-identity index, and `NOTHING` produces an empty
+    /// identity mask.
+    pub(crate) fn build_identity_mask(
+        &self,
+        table_schema: &TableSchema,
+        replication_mask: &ReplicationMask,
+    ) -> EtlResult<IdentityMask> {
+        match self.relreplident.as_str() {
+            "f" => Ok(IdentityMask::from_bytes(replication_mask.as_slice().to_vec())),
+            "d" => {
+                Ok(Self::build_identity_mask_from_attnums(table_schema, &self.primary_key_attnums))
+            }
+            "i" => Ok(Self::build_identity_mask_from_attnums(
+                table_schema,
+                &self.replica_identity_index_attnums,
+            )),
+            "n" => Ok(IdentityMask::from_bytes(vec![0; table_schema.column_schemas.len()])),
+            relreplident => {
+                bail!(
+                    ErrorKind::ConversionError,
+                    "Invalid replica identity metadata",
+                    format!(
+                        "Unsupported replica identity mode '{}' for table '{}'",
+                        relreplident, table_schema.name
+                    )
+                );
+            }
+        }
+    }
+
+    /// Builds an identity mask from ordered attribute numbers.
+    fn build_identity_mask_from_attnums(
+        table_schema: &TableSchema,
+        attnums: &[i32],
+    ) -> IdentityMask {
+        let attnums: HashSet<i32> = attnums.iter().copied().collect();
+
+        IdentityMask::from_bytes(
+            table_schema
+                .column_schemas
+                .iter()
+                .map(|column_schema| u8::from(attnums.contains(&column_schema.ordinal_position)))
+                .collect(),
+        )
+    }
 }
 
 /// The column schema shape emitted by Postgres.
@@ -276,7 +336,7 @@ pub(crate) fn parse_replica_identity_column_names(
 /// and constructs an insert event with the new row data ready for ETL
 /// processing.
 pub(crate) fn parse_event_from_insert_message(
-    replicated_table_schema: StreamingReplicatedTableSchema,
+    replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
@@ -311,7 +371,7 @@ pub(crate) fn parse_event_from_insert_message(
 /// The update-specific semantics live here: the old row is auxiliary data that
 /// is consulted only to resolve missing new-row values.
 pub(crate) fn parse_event_from_update_message(
-    replicated_table_schema: StreamingReplicatedTableSchema,
+    replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
@@ -333,7 +393,7 @@ pub(crate) fn parse_event_from_update_message(
     counter!(ETL_BYTES_PROCESSED_TOTAL, EVENT_TYPE_LABEL => "update").increment(total_bytes);
 
     let old_table_row = match old_tuple {
-        Some(identity) if is_key => Some(OldTableRow::Key(convert_key_tuple_to_row(
+        Some(identity) if is_key => Some(OldTableRow::Key(normalize_key_tuple_to_row(
             &replicated_table_schema,
             identity.tuple_data(),
         )?)),
@@ -376,7 +436,7 @@ pub(crate) fn parse_event_from_update_message(
 /// this function simply preserves PostgreSQL's old-row semantics after
 /// normalizing any key tuple into a dense key row in replicated table order.
 pub(crate) fn parse_event_from_delete_message(
-    replicated_table_schema: StreamingReplicatedTableSchema,
+    replicated_table_schema: ReplicatedTableSchema,
     start_lsn: PgLsn,
     commit_lsn: PgLsn,
     tx_ordinal: u64,
@@ -396,7 +456,7 @@ pub(crate) fn parse_event_from_delete_message(
     }
 
     let old_table_row = match old_tuple {
-        Some(identity) if is_key => Some(OldTableRow::Key(convert_key_tuple_to_row(
+        Some(identity) if is_key => Some(OldTableRow::Key(normalize_key_tuple_to_row(
             &replicated_table_schema,
             identity.tuple_data(),
         )?)),
@@ -487,7 +547,7 @@ fn convert_tuple_to_row<'a>(
 /// from the available old-row image, the column position is marked missing and
 /// the result becomes [`UpdatedTableRow::Partial`].
 fn convert_update_tuple_to_updated_table_row(
-    replicated_table_schema: &StreamingReplicatedTableSchema,
+    replicated_table_schema: &ReplicatedTableSchema,
     tuple_data: &[protocol::TupleData],
     old_table_row: Option<&OldTableRow>,
 ) -> EtlResult<UpdatedTableRow> {
@@ -674,7 +734,74 @@ impl<'a> OldRowResolver<'a> {
     }
 }
 
-/// Converts a key-image tuple into a dense row containing only
+/// Converts a dense key-image tuple into a dense row containing only
+/// replica-identity columns in replicated table-column order.
+fn convert_dense_key_tuple_to_row(
+    identity_column_schemas: &[&ColumnSchema],
+    tuple_data: &[protocol::TupleData],
+) -> EtlResult<TableRow> {
+    let mut values = Vec::with_capacity(identity_column_schemas.len());
+
+    for (i, (column_schema, tuple_data)) in
+        identity_column_schemas.iter().zip(tuple_data.iter()).enumerate()
+    {
+        let ConvertedTupleCell::Present(value) =
+            convert_tuple_data_to_cell(i, column_schema, tuple_data, None)?
+        else {
+            bail!(
+                ErrorKind::ConversionError,
+                "Replica-identity tuple missing source value",
+                format!(
+                    "Replica-identity column '{}' did not carry a concrete value",
+                    column_schema.name
+                )
+            );
+        };
+        values.push(value);
+    }
+
+    Ok(TableRow::new(values))
+}
+
+/// Converts a full-width key-image tuple into a dense row containing only
+/// replica-identity columns in replicated table-column order.
+fn convert_full_width_key_tuple_to_row(
+    identity_column_schemas: &[&ColumnSchema],
+    replicated_column_schemas: &[&ColumnSchema],
+    tuple_data: &[protocol::TupleData],
+) -> EtlResult<TableRow> {
+    let mut values = Vec::with_capacity(identity_column_schemas.len());
+    let mut identity_columns = identity_column_schemas.iter().peekable();
+
+    for (i, (column_schema, tuple_data)) in
+        replicated_column_schemas.iter().zip(tuple_data.iter()).enumerate()
+    {
+        if !identity_columns.peek().is_some_and(|identity_column| {
+            identity_column.ordinal_position == column_schema.ordinal_position
+        }) {
+            continue;
+        }
+
+        let identity_column = identity_columns.next().expect("peeked identity column");
+        let ConvertedTupleCell::Present(value) =
+            convert_tuple_data_to_cell(i, identity_column, tuple_data, None)?
+        else {
+            bail!(
+                ErrorKind::ConversionError,
+                "Replica-identity tuple missing source value",
+                format!(
+                    "Replica-identity column '{}' did not carry a concrete value",
+                    identity_column.name
+                )
+            );
+        };
+        values.push(value);
+    }
+
+    Ok(TableRow::new(values))
+}
+
+/// Normalizes a key-image tuple into a dense row containing only
 /// replica-identity columns in replicated table-column order.
 ///
 /// This function is shared by update and delete parsing because the decoding
@@ -688,11 +815,11 @@ impl<'a> OldRowResolver<'a> {
 /// - a dense tuple containing only replica-identity values, or
 /// - a tuple aligned to the full replicated schema.
 ///
-/// In both cases this function normalizes the result to a dense key row in
-/// replicated table-column order so downstream destinations do not need to
-/// reason about PostgreSQL's on-the-wire tuple shape.
-fn convert_key_tuple_to_row(
-    replicated_table_schema: &StreamingReplicatedTableSchema,
+/// In both cases this function normalizes the result to the internal dense
+/// key-row shape so downstream code does not need to reason about the wire
+/// layout it came from.
+fn normalize_key_tuple_to_row(
+    replicated_table_schema: &ReplicatedTableSchema,
     tuple_data: &[protocol::TupleData],
 ) -> EtlResult<TableRow> {
     let identity_column_schemas: Vec<_> =
@@ -709,54 +836,15 @@ fn convert_key_tuple_to_row(
         );
     }
 
-    let mut values = Vec::with_capacity(identity_column_count);
     match tuple_data.len() {
         len if len == identity_column_count => {
-            for (i, (column_schema, tuple_data)) in
-                identity_column_schemas.iter().zip(tuple_data.iter()).enumerate()
-            {
-                let ConvertedTupleCell::Present(value) =
-                    convert_tuple_data_to_cell(i, column_schema, tuple_data, None)?
-                else {
-                    bail!(
-                        ErrorKind::ConversionError,
-                        "Replica-identity tuple missing source value",
-                        format!(
-                            "Replica-identity column '{}' did not carry a concrete value",
-                            column_schema.name
-                        )
-                    );
-                };
-                values.push(value);
-            }
+            convert_dense_key_tuple_to_row(&identity_column_schemas, tuple_data)
         }
-        len if len == replicated_column_count => {
-            let mut identity_columns = identity_column_schemas.iter().peekable();
-            for (i, (column_schema, tuple_data)) in
-                replicated_column_schemas.iter().zip(tuple_data.iter()).enumerate()
-            {
-                if !identity_columns.peek().is_some_and(|identity_column| {
-                    identity_column.ordinal_position == column_schema.ordinal_position
-                }) {
-                    continue;
-                }
-
-                let identity_column = identity_columns.next().expect("peeked identity column");
-                let ConvertedTupleCell::Present(value) =
-                    convert_tuple_data_to_cell(i, identity_column, tuple_data, None)?
-                else {
-                    bail!(
-                        ErrorKind::ConversionError,
-                        "Replica-identity tuple missing source value",
-                        format!(
-                            "Replica-identity column '{}' did not carry a concrete value",
-                            identity_column.name
-                        )
-                    );
-                };
-                values.push(value);
-            }
-        }
+        len if len == replicated_column_count => convert_full_width_key_tuple_to_row(
+            &identity_column_schemas,
+            &replicated_column_schemas,
+            tuple_data,
+        ),
         _ => {
             bail!(
                 ErrorKind::ConversionError,
@@ -770,8 +858,6 @@ fn convert_key_tuple_to_row(
             );
         }
     }
-
-    Ok(TableRow::new(values))
 }
 
 /// Result of decoding a single tuple field.
@@ -838,45 +924,86 @@ fn convert_tuple_data_to_cell(
 mod tests {
     use std::sync::Arc;
 
-    use etl_postgres::types::ColumnSchema;
+    use etl_postgres::types::{ColumnSchema, IdentityType, ReplicationMask};
     use postgres_replication::protocol::TupleData;
     use tokio_postgres::types::Type;
 
     use super::{
-        convert_key_tuple_to_row, convert_tuple_to_row, convert_update_tuple_to_updated_table_row,
+        IdentityMessage, convert_tuple_to_row, convert_update_tuple_to_updated_table_row,
+        normalize_key_tuple_to_row,
     };
     use crate::{
         error::ErrorKind,
         types::{
-            Cell, OldTableRow, PartialTableRow, ReplicatedTableSchema,
-            StreamingReplicatedTableSchema, TableId, TableName, TableRow, TableSchema,
-            UpdatedTableRow,
+            Cell, OldTableRow, PartialTableRow, ReplicatedTableSchema, TableId, TableName,
+            TableRow, TableSchema, UpdatedTableRow,
         },
     };
 
-    fn streaming_schema(columns: Vec<ColumnSchema>) -> StreamingReplicatedTableSchema {
+    fn event_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(42),
             TableName::new("public".to_string(), "test".to_string()),
             columns,
         ));
 
-        let replicated_table_schema = ReplicatedTableSchema::all(Arc::clone(&table_schema));
-        let identity_mask = replicated_table_schema
-            .replication_mask()
-            .as_slice()
-            .iter()
-            .zip(table_schema.column_schemas.iter())
-            .map(|(&replicated, column_schema)| {
-                u8::from(replicated == 1 && column_schema.primary_key())
-            })
-            .collect();
+        ReplicatedTableSchema::all(Arc::clone(&table_schema))
+    }
 
-        StreamingReplicatedTableSchema::from_masks(
-            table_schema,
-            replicated_table_schema.replication_mask().clone(),
-            etl_postgres::types::IdentityMask::from_bytes(identity_mask),
+    #[test]
+    fn build_identity_classifies_using_index_with_primary_key_columns_as_primary_key() {
+        let table_schema = TableSchema::new(
+            TableId::new(42),
+            TableName::new("public".to_string(), "test".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_string(), Type::TEXT, -1, 2, None, false),
+            ],
+        );
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity = IdentityMessage {
+            primary_key_attnums: vec![1],
+            relreplident: "i".to_string(),
+            replica_identity_index_attnums: vec![1],
+        };
+
+        let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask).unwrap();
+        let identity_type = ReplicatedTableSchema::from_masks(
+            Arc::new(table_schema),
+            replication_mask,
+            identity_mask,
         )
+        .identity_type();
+
+        assert_eq!(identity_type, IdentityType::PrimaryKey);
+    }
+
+    #[test]
+    fn build_identity_classifies_using_index_with_distinct_columns_as_alternative_key() {
+        let table_schema = TableSchema::new(
+            TableId::new(42),
+            TableName::new("public".to_string(), "test".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
+                ColumnSchema::new("email".to_string(), Type::TEXT, -1, 2, None, false),
+            ],
+        );
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity = IdentityMessage {
+            primary_key_attnums: vec![1],
+            relreplident: "i".to_string(),
+            replica_identity_index_attnums: vec![2],
+        };
+
+        let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask).unwrap();
+        let identity_type = ReplicatedTableSchema::from_masks(
+            Arc::new(table_schema),
+            replication_mask,
+            identity_mask,
+        )
+        .identity_type();
+
+        assert_eq!(identity_type, IdentityType::AlternativeKey);
     }
 
     #[test]
@@ -895,7 +1022,7 @@ mod tests {
 
     #[test]
     fn convert_update_tuple_to_new_table_row_returns_partial_when_toast_cannot_be_recovered() {
-        let replicated_table_schema = streaming_schema(vec![
+        let replicated_table_schema = event_schema(vec![
             ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
             ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 2, None, false),
         ]);
@@ -917,7 +1044,7 @@ mod tests {
 
     #[test]
     fn convert_update_tuple_to_new_table_row_reuses_old_value_when_available() {
-        let replicated_table_schema = streaming_schema(vec![
+        let replicated_table_schema = event_schema(vec![
             ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
             ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 2, None, false),
         ]);
@@ -944,7 +1071,7 @@ mod tests {
 
     #[test]
     fn convert_update_tuple_to_new_table_row_reuses_key_value_when_column_is_in_key() {
-        let replicated_table_schema = streaming_schema(vec![
+        let replicated_table_schema = event_schema(vec![
             ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(1), false),
             ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 2, Some(2), false),
         ]);
@@ -969,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn convert_key_tuple_to_row_accepts_full_width_tuple_and_filters_identity_columns() {
+    fn normalize_key_tuple_to_row_accepts_full_width_tuple_and_filters_identity_columns() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
             TableName::new("public".to_string(), "users".to_string()),
@@ -980,7 +1107,7 @@ mod tests {
                 ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 4, None, false),
             ],
         ));
-        let replicated_table_schema = StreamingReplicatedTableSchema::from_masks(
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
             Arc::clone(&table_schema),
             ReplicatedTableSchema::all(Arc::clone(&table_schema)).replication_mask().clone(),
             etl_postgres::types::IdentityMask::from_bytes(vec![1, 0, 1, 0]),
@@ -992,7 +1119,32 @@ mod tests {
             TupleData::Text(b"toast".to_vec().into()),
         ];
 
-        let row = convert_key_tuple_to_row(&replicated_table_schema, &tuple_data).unwrap();
+        let row = normalize_key_tuple_to_row(&replicated_table_schema, &tuple_data).unwrap();
+
+        assert_eq!(row, TableRow::new(vec![Cell::I64(1), Cell::String("smith".to_string())]));
+    }
+
+    #[test]
+    fn normalize_key_tuple_to_row_accepts_dense_key_tuple() {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_string(), "users".to_string()),
+            vec![
+                ColumnSchema::new("id".to_string(), Type::INT8, -1, 1, Some(2), false),
+                ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, false),
+                ColumnSchema::new("surname".to_string(), Type::TEXT, -1, 3, Some(1), false),
+                ColumnSchema::new("payload".to_string(), Type::TEXT, -1, 4, None, false),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicatedTableSchema::all(Arc::clone(&table_schema)).replication_mask().clone(),
+            etl_postgres::types::IdentityMask::from_bytes(vec![1, 0, 1, 0]),
+        );
+        let tuple_data =
+            [TupleData::Text(b"1".to_vec().into()), TupleData::Text(b"smith".to_vec().into())];
+
+        let row = normalize_key_tuple_to_row(&replicated_table_schema, &tuple_data).unwrap();
 
         assert_eq!(row, TableRow::new(vec![Cell::I64(1), Cell::String("smith".to_string())]));
     }

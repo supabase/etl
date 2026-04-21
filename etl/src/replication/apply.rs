@@ -20,8 +20,7 @@ use etl_config::shared::PipelineConfig;
 use etl_postgres::{
     replication::slots::EtlReplicationSlot,
     types::{
-        IdentityMask, ReplicationMask, SnapshotId, StreamingReplicatedTableSchema, TableId,
-        TableSchema,
+        IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
     },
 };
 use futures::StreamExt;
@@ -69,7 +68,7 @@ use crate::{
         WORKER_TYPE_LABEL,
     },
     replication::{
-        EventsStream, SharedTableCache, SharedTableState, StatusUpdateType,
+        EventsStream, SharedTableCache, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
     },
     state::table::{TableReplicationError, TableReplicationPhase, TableReplicationPhaseType},
@@ -1638,7 +1637,7 @@ where
         // message for this table. Record the new snapshot and clear any cached
         // mask now so relation handling rebuilds it from the schema version we
         // just stored rather than reusing pre-DDL state.
-        self.shared_table_cache.upsert(table_id, snapshot_id, None, None).await;
+        self.shared_table_cache.note_waiting_for_relation(table_id, snapshot_id).await;
 
         let table_id_u32: u32 = table_id.into();
         info!(
@@ -1772,7 +1771,7 @@ where
         let shared_table_state = self.shared_table_cache.get(&table_id).await;
         let used_bootstrap_snapshot = shared_table_state.is_none();
         let table_snapshot_id = shared_table_state
-            .map_or_else(|| self.state.bootstrap_snapshot_id(), |state| state.snapshot_id);
+            .map_or_else(|| self.state.bootstrap_snapshot_id(), |state| state.snapshot_id());
         let table_schema = get_table_schema(
             &self.schema_store,
             &table_id,
@@ -1784,21 +1783,12 @@ where
         let identity_columns = parse_replica_identity_column_names(message)?;
         let identity_mask = IdentityMask::try_build(&table_schema, &identity_columns)?;
 
-        self.shared_table_cache
-            .upsert(
-                table_id,
-                table_schema.snapshot_id,
-                Some(replication_mask.clone()),
-                Some(identity_mask.clone()),
-            )
-            .await;
+        let replicated_table_schema =
+            ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
 
-        // Build the streaming schema and emit a Relation event.
-        let replicated_table_schema = StreamingReplicatedTableSchema::from_masks(
-            table_schema,
-            replication_mask,
-            identity_mask,
-        );
+        self.shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
+
+        // Build the event schema and emit a Relation event.
 
         let relation_event = RelationEvent {
             start_lsn,
@@ -1835,8 +1825,7 @@ where
         }
 
         let replicated_table_schema =
-            get_replicated_table_schema(&table_id, &self.schema_store, &self.shared_table_cache)
-                .await?;
+            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
 
         let event = parse_event_from_insert_message(
             replicated_table_schema,
@@ -1874,8 +1863,7 @@ where
         }
 
         let replicated_table_schema =
-            get_replicated_table_schema(&table_id, &self.schema_store, &self.shared_table_cache)
-                .await?;
+            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
 
         let event = parse_event_from_update_message(
             replicated_table_schema,
@@ -1913,8 +1901,7 @@ where
         }
 
         let replicated_table_schema =
-            get_replicated_table_schema(&table_id, &self.schema_store, &self.shared_table_cache)
-                .await?;
+            get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
 
         let event = parse_event_from_delete_message(
             replicated_table_schema,
@@ -1950,13 +1937,9 @@ where
             // Exactly one worker owns protocol interpretation for a table at a time, so
             // non-owning workers skip truncation handling for that table as well.
             if self.should_apply_changes(table_id, remote_final_lsn).await? {
-                let replicated_table_schema = get_replicated_table_schema(
-                    &table_id,
-                    &self.schema_store,
-                    &self.shared_table_cache,
-                )
-                .await?;
-                truncated_tables.push(replicated_table_schema.as_replicated_table_schema().clone());
+                let replicated_table_schema =
+                    get_replicated_table_schema(&table_id, &self.shared_table_cache).await?;
+                truncated_tables.push(replicated_table_schema.clone());
             }
         }
 
@@ -3008,38 +2991,39 @@ where
     Ok(table_schema)
 }
 
-/// Retrieves a [`StreamingReplicatedTableSchema`] for the given table from the
-/// shared table state.
+/// Retrieves a [`ReplicatedTableSchema`] for the given table from the shared
+/// table state.
 ///
-/// This function combines the table schema from the schema store with the
-/// shared per-table protocol state to create a
-/// [`StreamingReplicatedTableSchema`].
-async fn get_replicated_table_schema<S>(
+/// Relation handling and table copy both materialize the same runtime schema
+/// shape into the shared cache, so row-event decoding can read that exact
+/// schema directly without reconstructing masks on demand.
+async fn get_replicated_table_schema(
     table_id: &TableId,
-    schema_store: &S,
     shared_table_cache: &SharedTableCache,
-) -> EtlResult<StreamingReplicatedTableSchema>
-where
-    S: SchemaStore + Clone + Send + 'static,
-{
-    let Some(SharedTableState {
-        snapshot_id,
-        replication_mask: Some(replication_mask),
-        identity_mask: Some(identity_mask),
-    }) = shared_table_cache.get(table_id).await
-    else {
+) -> EtlResult<ReplicatedTableSchema> {
+    let Some(shared_table_state) = shared_table_cache.get(table_id).await else {
         bail!(
             ErrorKind::InvalidState,
             "Missing shared table state",
             format!(
-                "No shared table state with replication and identity masks found for table {}, \
-                 this event can't be processed",
+                "No shared replicated table schema found for table {}, this event can't be \
+                 processed",
                 table_id
             )
         );
     };
 
-    let table_schema = get_table_schema(schema_store, table_id, snapshot_id, false).await?;
+    let Some(replicated_table_schema) = shared_table_state.replicated_table_schema().cloned()
+    else {
+        bail!(
+            ErrorKind::InvalidState,
+            "Waiting for relation state cannot decode row event",
+            format!(
+                "Table {} is waiting for a relation refresh before row events can be decoded",
+                table_id
+            )
+        );
+    };
 
-    Ok(StreamingReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask))
+    Ok(replicated_table_schema)
 }

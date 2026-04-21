@@ -1182,24 +1182,19 @@ impl BigQueryClient {
 
     /// Creates a primary key clause for table creation.
     ///
-    /// Table copy and persisted destination metadata only carry the replicated
-    /// schema, so table creation continues to use the source primary key here.
-    /// Streaming-only replica-identity metadata is handled separately when CDC
-    /// rows are encoded.
+    /// BigQuery tables are keyed by the source primary key, which is distinct
+    /// from PostgreSQL replica-identity metadata when `REPLICA IDENTITY FULL`
+    /// is in use.
     fn add_primary_key_clause(
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<Option<String>> {
-        let mut primary_key_columns: Vec<_> =
-            replicated_table_schema.column_schemas().filter(|s| s.primary_key()).collect();
+        let primary_key_columns: Vec<_> =
+            replicated_table_schema.primary_key_column_schemas().collect();
 
         // If no primary key columns are marked, return early.
         if primary_key_columns.is_empty() {
             return Ok(None);
         }
-
-        // Sort by primary_key_ordinal_position to ensure correct composite key
-        // ordering.
-        primary_key_columns.sort_by_key(|c| c.primary_key_ordinal_position);
 
         let primary_key_columns: Vec<String> = primary_key_columns
             .into_iter()
@@ -1390,7 +1385,7 @@ impl fmt::Debug for BigQueryClient {
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
-    use etl::types::{ReplicationMask, TableId, TableName, TableSchema};
+    use etl::types::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema};
     use gcp_bigquery_client::google::cloud::bigquery::storage::v1::{
         AppendRowsResponse, append_rows_response,
     };
@@ -1442,6 +1437,23 @@ mod tests {
         let replication_mask = ReplicationMask::build_or_all(&table_schema, &column_names);
 
         ReplicatedTableSchema::from_mask(table_schema, replication_mask)
+    }
+
+    /// Creates a [`ReplicatedTableSchema`] from test columns with all columns
+    /// replicated and an explicit runtime identity.
+    fn test_replicated_schema_with_identity(
+        columns: Vec<ColumnSchema>,
+        identity_mask: IdentityMask,
+    ) -> ReplicatedTableSchema {
+        let column_names: HashSet<String> = columns.iter().map(|c| c.name.clone()).collect();
+        let table_schema = Arc::new(TableSchema::new(
+            TableId(1),
+            TableName::new("public".to_string(), "test_table".to_string()),
+            columns,
+        ));
+        let replication_mask = ReplicationMask::build_or_all(&table_schema, &column_names);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
     #[test]
@@ -1528,9 +1540,10 @@ mod tests {
             .expect("composite pk clause");
         assert_eq!(composite_pk_clause, ", primary key (`tenant_id`,`id`) not enforced");
 
-        // Composite primary key with reversed column order but correct ordinal
-        // positions. The primary key clause should still be ordered by ordinal
-        // position.
+        // Runtime identity columns preserve replicated table-column order even
+        // when the source key metadata uses a different composite-key order.
+        // BigQuery should declare the same identity columns in that table
+        // order so sparse CDC deletes and upserts match the streamed schema.
         let columns_with_reversed_pk = vec![
             test_column("id", Type::INT4, 1, false, Some(2)),
             test_column("tenant_id", Type::INT4, 2, false, Some(1)),
@@ -1540,7 +1553,21 @@ mod tests {
         let reversed_pk_clause = BigQueryClient::add_primary_key_clause(&schema_with_reversed_pk)
             .unwrap()
             .expect("reversed pk clause");
-        assert_eq!(reversed_pk_clause, ", primary key (`tenant_id`,`id`) not enforced");
+        assert_eq!(reversed_pk_clause, ", primary key (`id`,`tenant_id`) not enforced");
+
+        let columns_with_full_identity = vec![
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
+        ];
+        let schema_with_full_identity = test_replicated_schema_with_identity(
+            columns_with_full_identity,
+            IdentityMask::from_bytes(vec![1, 1]),
+        );
+        let full_identity_pk_clause =
+            BigQueryClient::add_primary_key_clause(&schema_with_full_identity)
+                .unwrap()
+                .expect("full identity pk clause");
+        assert_eq!(full_identity_pk_clause, ", primary key (`id`) not enforced");
 
         let columns_no_pk = vec![
             test_column("name", Type::TEXT, 1, true, None),

@@ -15,8 +15,8 @@ use etl::{
     state::destination_metadata::DestinationTableMetadata,
     store::{schema::SchemaStore, state::StateStore},
     types::{
-        Event, OldTableRow, PartialTableRow, ReplicatedTableSchema, SizeHint,
-        StreamingReplicatedTableSchema, TableId, TableName, TableRow, UpdatedTableRow,
+        Event, OldTableRow, PartialTableRow, ReplicatedTableSchema, SizeHint, TableId, TableName,
+        TableRow, UpdatedTableRow,
     },
 };
 use metrics::{gauge, histogram};
@@ -172,7 +172,7 @@ where
     /// Builds a key-only row from a partial update row when PostgreSQL omits
     /// the old key image because the replica identity did not change.
     fn key_row_from_updated_partial_row(
-        replicated_table_schema: &StreamingReplicatedTableSchema,
+        replicated_table_schema: &ReplicatedTableSchema,
         partial_row: &PartialTableRow,
     ) -> EtlResult<TableRow> {
         let column_schemas: Vec<_> = replicated_table_schema.column_schemas().collect();
@@ -528,8 +528,7 @@ where
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
-            let mut table_schemas: HashMap<TableId, StreamingReplicatedTableSchema> =
-                HashMap::new();
+            let mut table_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
             let mut table_id_to_mutations: HashMap<TableId, Vec<TrackedTableMutation>> =
                 HashMap::new();
             let mut table_id_to_stats: HashMap<TableId, TableWriteActivity> = HashMap::new();

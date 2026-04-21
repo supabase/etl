@@ -402,7 +402,7 @@ pub fn build_expected_users_inserts(
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
             tx_ordinal: 0,
-            replicated_table_schema: replicated_table_schema.clone().into(),
+            replicated_table_schema: replicated_table_schema.clone(),
             table_row: TableRow::new(vec![
                 Cell::I64(starting_id),
                 Cell::String(name.to_owned()),
@@ -431,7 +431,7 @@ pub fn build_expected_orders_inserts(
             start_lsn: PgLsn::from(0),
             commit_lsn: PgLsn::from(0),
             tx_ordinal: 0,
-            replicated_table_schema: replicated_table_schema.clone().into(),
+            replicated_table_schema: replicated_table_schema.clone(),
             table_row: TableRow::new(vec![Cell::I64(starting_id), Cell::String(name.to_owned())]),
         }));
 

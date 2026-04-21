@@ -3,9 +3,8 @@ mod time;
 mod utils;
 
 pub use schema::{
-    ColumnRename, ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SchemaDiff,
-    SchemaError, SizedIterator, SnapshotId, StreamingReplicatedTableSchema, TableId, TableName,
-    TableSchema,
+    ColumnRename, ColumnSchema, IdentityMask, IdentityType, ReplicatedTableSchema, ReplicationMask,
+    SchemaDiff, SchemaError, SizedIterator, SnapshotId, TableId, TableName, TableSchema,
 };
 pub use time::{
     DATE_FORMAT, POSTGRES_EPOCH, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM,

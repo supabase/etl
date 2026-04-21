@@ -37,8 +37,8 @@ use etl::{
     error::ErrorKind,
     store::{both::memory::MemoryStore, schema::SchemaStore},
     types::{
-        Cell, ColumnSchema, Event, OldTableRow, ReplicatedTableSchema,
-        StreamingReplicatedTableSchema, TableId, TableName, TableRow, TableSchema, Type as PgType,
+        Cell, ColumnSchema, Event, OldTableRow, ReplicatedTableSchema, TableId, TableName,
+        TableRow, TableSchema, Type as PgType,
     },
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
@@ -112,16 +112,9 @@ fn make_rich_schema(table_id: u32) -> TableSchema {
     )
 }
 
-/// Creates both the copy-oriented and streaming-oriented schema views for a
-/// test table.
-fn make_schema_views(
-    table_schema: TableSchema,
-) -> (ReplicatedTableSchema, StreamingReplicatedTableSchema) {
-    let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(table_schema));
-    let streaming_replicated_table_schema =
-        StreamingReplicatedTableSchema::from(replicated_table_schema.clone());
-
-    (replicated_table_schema, streaming_replicated_table_schema)
+/// Creates the replicated schema view for a test table.
+fn make_replicated_schema(table_schema: TableSchema) -> ReplicatedTableSchema {
+    ReplicatedTableSchema::all(Arc::new(table_schema))
 }
 
 /// Opens a verification connection to the same DuckLake catalog and returns it.
@@ -734,7 +727,7 @@ async fn write_events() {
     let data_url = path_to_file_url(&data);
 
     let schema = make_schema(4, "public", "products");
-    let (_replicated_schema, streaming_replicated_schema) = make_schema_views(schema.clone());
+    let replicated_schema = make_replicated_schema(schema.clone());
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -752,14 +745,14 @@ async fn write_events() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                replicated_table_schema: streaming_replicated_schema.clone(),
+                replicated_table_schema: replicated_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                replicated_table_schema: streaming_replicated_schema.clone(),
+                replicated_table_schema: replicated_schema.clone(),
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("Gadget".to_string()),
@@ -770,14 +763,14 @@ async fn write_events() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
-                replicated_table_schema: streaming_replicated_schema.clone(),
+                replicated_table_schema: replicated_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_string())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 3,
-                replicated_table_schema: streaming_replicated_schema,
+                replicated_table_schema: replicated_schema,
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(2),
                     Cell::String("Spare".to_string()),
@@ -819,7 +812,7 @@ async fn write_events_small_batch_stays_inlined_after_return() {
     let data_url = path_to_file_url(&data);
 
     let schema = make_schema(17, "public", "cdc_flush");
-    let (_replicated_schema, streaming_replicated_schema) = make_schema_views(schema.clone());
+    let replicated_schema = make_replicated_schema(schema.clone());
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -836,7 +829,7 @@ async fn write_events_small_batch_stays_inlined_after_return() {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 0,
-            replicated_table_schema: streaming_replicated_schema,
+            replicated_table_schema: replicated_schema,
             table_row: TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())]),
         })])
         .await
@@ -866,7 +859,7 @@ async fn write_events_with_old_row_update() {
     let data_url = path_to_file_url(&data);
 
     let schema = make_schema(8, "public", "inventory");
-    let (_replicated_schema, streaming_replicated_schema) = make_schema_views(schema.clone());
+    let replicated_schema = make_replicated_schema(schema.clone());
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -884,14 +877,14 @@ async fn write_events_with_old_row_update() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                replicated_table_schema: streaming_replicated_schema.clone(),
+                replicated_table_schema: replicated_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                replicated_table_schema: streaming_replicated_schema,
+                replicated_table_schema: replicated_schema,
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("Gadget".to_string()),
@@ -938,7 +931,7 @@ async fn write_events_replay_is_idempotent() {
     let data_url = path_to_file_url(&data);
 
     let schema = make_schema(9, "public", "orders");
-    let (_replicated_schema, streaming_replicated_schema) = make_schema_views(schema.clone());
+    let replicated_schema = make_replicated_schema(schema.clone());
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -955,14 +948,14 @@ async fn write_events_replay_is_idempotent() {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 0,
-            replicated_table_schema: streaming_replicated_schema.clone(),
+            replicated_table_schema: replicated_schema.clone(),
             table_row: TableRow::new(vec![Cell::I32(1), Cell::String("draft".to_string())]),
         }),
         Event::Update(UpdateEvent {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 1,
-            replicated_table_schema: streaming_replicated_schema.clone(),
+            replicated_table_schema: replicated_schema.clone(),
             updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                 Cell::I32(1),
                 Cell::String("paid".to_string()),
@@ -976,14 +969,14 @@ async fn write_events_replay_is_idempotent() {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 2,
-            replicated_table_schema: streaming_replicated_schema.clone(),
+            replicated_table_schema: replicated_schema.clone(),
             table_row: TableRow::new(vec![Cell::I32(2), Cell::String("temp".to_string())]),
         }),
         Event::Delete(DeleteEvent {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 3,
-            replicated_table_schema: streaming_replicated_schema,
+            replicated_table_schema: replicated_schema,
             old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                 Cell::I32(2),
                 Cell::String("temp".to_string()),
@@ -1028,7 +1021,7 @@ async fn applied_batches_table_uses_data_inlining() {
     let data_url = path_to_file_url(&data);
 
     let schema = make_schema(13, "public", "audit");
-    let (_replicated_schema, streaming_replicated_schema) = make_schema_views(schema.clone());
+    let replicated_schema = make_replicated_schema(schema.clone());
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -1045,7 +1038,7 @@ async fn applied_batches_table_uses_data_inlining() {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 0,
-            replicated_table_schema: streaming_replicated_schema,
+            replicated_table_schema: replicated_schema,
             table_row: TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())]),
         })])
         .await
@@ -1133,8 +1126,8 @@ async fn shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
 
     let schema_a = make_schema(35, "public", "shutdown_cdc_alpha");
     let schema_b = make_schema(36, "public", "shutdown_cdc_beta");
-    let (_replicated_schema_a, streaming_replicated_schema_a) = make_schema_views(schema_a.clone());
-    let (_replicated_schema_b, streaming_replicated_schema_b) = make_schema_views(schema_b.clone());
+    let replicated_schema_a = make_replicated_schema(schema_a.clone());
+    let replicated_schema_b = make_replicated_schema(schema_b.clone());
     let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
     let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
 
@@ -1154,14 +1147,14 @@ async fn shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                replicated_table_schema: streaming_replicated_schema_a,
+                replicated_table_schema: replicated_schema_a,
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("alpha".to_string())]),
             }),
             Event::Insert(InsertEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                replicated_table_schema: streaming_replicated_schema_b,
+                replicated_table_schema: replicated_schema_b,
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("beta".to_string())]),
             }),
         ])
@@ -1234,8 +1227,8 @@ async fn write_events_mixed_multi_table_batches() {
 
     let schema_a = make_schema(10, "public", "alpha_events");
     let schema_b = make_schema(11, "public", "beta_events");
-    let (_replicated_schema_a, streaming_replicated_schema_a) = make_schema_views(schema_a.clone());
-    let (_replicated_schema_b, streaming_replicated_schema_b) = make_schema_views(schema_b.clone());
+    let replicated_schema_a = make_replicated_schema(schema_a.clone());
+    let replicated_schema_b = make_replicated_schema(schema_b.clone());
     let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
     let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
 
@@ -1255,21 +1248,21 @@ async fn write_events_mixed_multi_table_batches() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                replicated_table_schema: streaming_replicated_schema_a.clone(),
+                replicated_table_schema: replicated_schema_a.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("a-one".to_string())]),
             }),
             Event::Insert(InsertEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                replicated_table_schema: streaming_replicated_schema_b.clone(),
+                replicated_table_schema: replicated_schema_b.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("b-one".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
-                replicated_table_schema: streaming_replicated_schema_a,
+                replicated_table_schema: replicated_schema_a,
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("a-one-updated".to_string()),
@@ -1283,14 +1276,14 @@ async fn write_events_mixed_multi_table_batches() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 3,
-                replicated_table_schema: streaming_replicated_schema_b.clone(),
+                replicated_table_schema: replicated_schema_b.clone(),
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("b-two".to_string())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 4,
-                replicated_table_schema: streaming_replicated_schema_b,
+                replicated_table_schema: replicated_schema_b,
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("b-one".to_string()),
@@ -1361,7 +1354,7 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
     let data_url = path_to_file_url(&data);
 
     let schema = make_schema(12, "public", "payments");
-    let (_replicated_schema, streaming_replicated_schema) = make_schema_views(schema.clone());
+    let replicated_schema = make_replicated_schema(schema.clone());
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -1381,14 +1374,14 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                replicated_table_schema: streaming_replicated_schema.clone(),
+                replicated_table_schema: replicated_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                replicated_table_schema: streaming_replicated_schema.clone(),
+                replicated_table_schema: replicated_schema.clone(),
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("posted".to_string()),
@@ -1402,14 +1395,14 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
-                replicated_table_schema: streaming_replicated_schema.clone(),
+                replicated_table_schema: replicated_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_string())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 3,
-                replicated_table_schema: streaming_replicated_schema,
+                replicated_table_schema: replicated_schema,
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(2),
                     Cell::String("tmp".to_string()),

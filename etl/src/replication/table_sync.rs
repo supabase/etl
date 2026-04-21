@@ -255,7 +255,8 @@ where
             //   schema of incoming
             //  data.
             info!(%table_id, "fetching table schema");
-            let table_schema = transaction.get_table_schema(table_id).await?;
+            let (table_schema, identity) =
+                transaction.get_table_schema_with_identity(table_id).await?;
 
             if !table_schema.has_primary_keys() {
                 bail!(
@@ -291,13 +292,14 @@ where
                         )
                     },
                 )?;
-            shared_table_cache
-                .upsert(table_id, table_schema.snapshot_id, Some(replication_mask.clone()), None)
-                .await;
+            let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask)?;
 
-            // Create the replicated table schema with the replication mask.
+            // Create the replicated table schema with the exact runtime identity
+            // metadata so catchup and apply can continue decoding row events
+            // without waiting for a fresh relation message after restarts.
             let replicated_table_schema =
-                ReplicatedTableSchema::from_mask(table_schema, replication_mask);
+                ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+            shared_table_cache.note_ready(table_id, replicated_table_schema.clone()).await;
 
             let mut total_table_copy_rows = 0;
             let mut total_table_copy_duration_secs = 0.0;
