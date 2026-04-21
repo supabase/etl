@@ -240,6 +240,7 @@ pub mod pipelines {
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             invalidated_slot_behavior: None,
+            replicator_resources: None,
             log_level: Some(LogLevel::Info),
         }
     }
@@ -257,6 +258,7 @@ pub mod pipelines {
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: Some(TableSyncCopyConfig::IncludeAllTables),
             invalidated_slot_behavior: None,
+            replicator_resources: None,
             log_level: Some(LogLevel::Info),
         }
     }

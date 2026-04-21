@@ -10,7 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use etl_api::{
-    configs::log::LogLevel,
+    configs::{log::LogLevel, pipeline::ReplicatorResourcesConfig},
     k8s::{
         DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile,
         http::{TRUSTED_ROOT_CERT_CONFIG_MAP_NAME, TRUSTED_ROOT_CERT_KEY_NAME},
@@ -24,6 +24,7 @@ use tokio::sync::RwLock;
 pub struct MockK8sState {
     pod_status: Arc<RwLock<PodStatus>>,
     create_calls: Arc<AtomicUsize>,
+    last_replicator_resources: Arc<RwLock<Option<ReplicatorResourcesConfig>>>,
 }
 
 impl Default for MockK8sState {
@@ -31,6 +32,7 @@ impl Default for MockK8sState {
         Self {
             pod_status: Arc::new(RwLock::new(PodStatus::Started)),
             create_calls: Arc::new(AtomicUsize::new(0)),
+            last_replicator_resources: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -42,6 +44,10 @@ impl MockK8sState {
 
     pub fn create_calls(&self) -> usize {
         self.create_calls.load(Ordering::Relaxed)
+    }
+
+    pub async fn last_replicator_resources(&self) -> Option<ReplicatorResourcesConfig> {
+        self.last_replicator_resources.read().await.clone()
     }
 }
 
@@ -56,6 +62,13 @@ impl MockK8sClient {
 
     fn record_create_call(&self) {
         self.state.create_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    async fn set_last_replicator_resources(
+        &self,
+        replicator_resources: Option<&ReplicatorResourcesConfig>,
+    ) {
+        *self.state.last_replicator_resources.write().await = replicator_resources.cloned();
     }
 }
 
@@ -151,9 +164,11 @@ impl K8sClient for MockK8sClient {
         _prefix: &str,
         _replicator_image: &str,
         _environment: Environment,
+        replicator_resources: Option<&ReplicatorResourcesConfig>,
         _destination_type: DestinationType,
         _log_level: LogLevel,
     ) -> Result<(), K8sError> {
+        self.set_last_replicator_resources(replicator_resources).await;
         self.record_create_call();
         Ok(())
     }

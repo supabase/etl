@@ -219,6 +219,7 @@ mod tests {
             _prefix: &str,
             _replicator_image: &str,
             _environment: Environment,
+            _replicator_resources: Option<&crate::configs::pipeline::ReplicatorResourcesConfig>,
             _destination_type: DestinationType,
             _log_level: LogLevel,
         ) -> Result<(), K8sError> {
