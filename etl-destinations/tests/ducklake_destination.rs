@@ -21,15 +21,25 @@
 //! "
 //! ```
 
+#[cfg(feature = "test-utils")]
+use std::sync::LazyLock;
+use std::{
+    f64::consts::PI,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
 use chrono::NaiveDate;
 use duckdb::Connection;
-use etl::destination::Destination;
-use etl::error::ErrorKind;
-use etl::store::both::memory::MemoryStore;
-use etl::store::schema::SchemaStore;
-use etl::types::{
-    Cell, ColumnSchema, Event, PgLsn, ReplicatedTableSchema, TableId, TableName, TableRow,
-    TableSchema, Type as PgType,
+use etl::{
+    destination::Destination,
+    error::ErrorKind,
+    store::{both::memory::MemoryStore, schema::SchemaStore},
+    types::{
+        Cell, ColumnSchema, Event, PgLsn, ReplicatedTableSchema, TableId, TableName, TableRow,
+        TableSchema, Type as PgType,
+    },
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
 #[cfg(feature = "test-utils")]
@@ -39,22 +49,17 @@ use etl_destinations::ducklake::{
     reset_ducklake_test_hooks,
 };
 use pg_escape::{quote_identifier, quote_literal};
-use std::f64::consts::PI;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-#[cfg(feature = "test-utils")]
-use std::sync::LazyLock;
-use std::time::Duration;
 #[cfg(feature = "test-utils")]
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use url::Url;
 
 use crate::support::ducklake::{ducklake_load_sql, open_verification_connection};
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// ── helpers
+// ───────────────────────────────────────────────────────────────────
 
-/// Creates a persistent temp directory named after the test and prints its path.
-/// Returns the directory path (kept on disk after the test completes).
+/// Creates a persistent temp directory named after the test and prints its
+/// path. Returns the directory path (kept on disk after the test completes).
 fn make_test_dir(test_name: &str) -> PathBuf {
     let dir = tempfile::Builder::new()
         .prefix(&format!("etl_ducklake_{test_name}_"))
@@ -62,10 +67,7 @@ fn make_test_dir(test_name: &str) -> PathBuf {
         .expect("failed to create temp dir")
         .keep(); // `into_path` prevents auto-cleanup on drop
 
-    println!(
-        "[{test_name}] catalog : {}",
-        dir.join("catalog.ducklake").display()
-    );
+    println!("[{test_name}] catalog : {}", dir.join("catalog.ducklake").display());
     println!("[{test_name}] data    : {}", dir.join("data").display());
     dir
 }
@@ -119,8 +121,7 @@ fn make_replicated_table_schema(schema: &TableSchema) -> ReplicatedTableSchema {
 fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     let conn = open_verification_connection();
     conn.execute_batch(&format!(
-        "{} \
-         ATTACH {} AS {} (DATA_PATH {});",
+        "{} ATTACH {} AS {} (DATA_PATH {});",
         ducklake_load_sql(),
         quote_literal(&format!("ducklake:{}", catalog.as_str())),
         quote_identifier("lake"),
@@ -133,8 +134,8 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
 fn lake_table_exists(conn: &Connection, table_name: &str) -> bool {
     conn.query_row(
         &format!(
-            "SELECT COUNT(*) FROM information_schema.tables \
-             WHERE table_catalog = {} AND table_schema = {} AND table_name = {}",
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_catalog = {} AND \
+             table_schema = {} AND table_name = {}",
             quote_literal("lake"),
             quote_literal("main"),
             quote_literal(table_name)
@@ -154,10 +155,7 @@ async fn open_lake_conn_when_tables_visible(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let conn = open_lake_conn(catalog, data);
-        if table_names
-            .iter()
-            .all(|table_name| lake_table_exists(&conn, table_name))
-        {
+        if table_names.iter().all(|table_name| lake_table_exists(&conn, table_name)) {
             return conn;
         }
 
@@ -229,10 +227,9 @@ fn read_streaming_progress(conn: &Connection, table_name: &str) -> Option<(u64, 
 fn count_table_files(data: &Path, table_name: &str) -> usize {
     let table_dir = data.join("main").join(table_name);
     match std::fs::read_dir(&table_dir) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path().is_file())
-            .count(),
+        Ok(entries) => {
+            entries.filter_map(Result::ok).filter(|entry| entry.path().is_file()).count()
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
         Err(error) => panic!("table file count query failed: {error}"),
     }
@@ -241,8 +238,8 @@ fn count_table_files(data: &Path, table_name: &str) -> usize {
 fn flush_inlined_rows(conn: &Connection, table_name: &str) -> i64 {
     conn.query_row(
         &format!(
-            "SELECT COALESCE(SUM(rows_flushed), 0) \
-             FROM ducklake_flush_inlined_data({}, table_name => {})",
+            "SELECT COALESCE(SUM(rows_flushed), 0) FROM ducklake_flush_inlined_data({}, \
+             table_name => {})",
             quote_literal("lake"),
             quote_literal(table_name),
         ),
@@ -262,32 +259,30 @@ where
             return;
         }
 
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "condition not met within {timeout:?}"
-        );
+        assert!(tokio::time::Instant::now() < deadline, "condition not met within {timeout:?}");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-/// Forces DuckLake to checkpoint catalog metadata before cross-connection verification.
+/// Forces DuckLake to checkpoint catalog metadata before cross-connection
+/// verification.
 ///
 /// Some tests shut the destination down and then open a brand-new DuckDB
 /// connection to verify the resulting lake state. Without an explicit
 /// checkpoint here, that fresh connection can temporarily observe stale catalog
 /// metadata even after shutdown has finished, which makes the assertions flaky.
-/// Running `CHECKPOINT` makes the final durable state visible deterministically.
+/// Running `CHECKPOINT` makes the final durable state visible
+/// deterministically.
 fn checkpoint_lake(catalog: &Url, data: &Url) {
     let conn = open_lake_conn(catalog, data);
-    conn.execute_batch("CHECKPOINT")
-        .expect("failed to checkpoint DuckLake catalog");
+    conn.execute_batch("CHECKPOINT").expect("failed to checkpoint DuckLake catalog");
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-/// `write_table_rows` inserts rows that can be queried back through the DuckLake
-/// catalog using a separate DuckDB connection.
+/// `write_table_rows` inserts rows that can be queried back through the
+/// DuckLake catalog using a separate DuckDB connection.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_table_rows_basic() {
     let dir = make_test_dir("write_table_rows_basic");
@@ -383,10 +378,7 @@ async fn write_table_rows_small_batch_stays_inlined_after_return() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("first".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())])],
         )
         .await
         .unwrap();
@@ -467,10 +459,7 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("first".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())])],
         )
         .await
         .unwrap();
@@ -479,10 +468,7 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(2),
-                Cell::String("second".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())])],
         )
         .await
         .unwrap();
@@ -492,7 +478,8 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
     assert_eq!(count_rows(&conn, &table_name), 2);
 }
 
-/// A failed write attempt should discard the pooled DuckDB connection and replace it.
+/// A failed write attempt should discard the pooled DuckDB connection and
+/// replace it.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
@@ -534,10 +521,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("first".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())])],
         )
         .await
         .unwrap();
@@ -546,10 +530,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(2),
-                Cell::String("second".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())])],
         )
         .await
         .unwrap();
@@ -616,7 +597,8 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     reset_ducklake_test_hooks();
 }
 
-/// Concurrent same-table copy batches should serialize cleanly and remain exact.
+/// Concurrent same-table copy batches should serialize cleanly and remain
+/// exact.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_same_table_copy_batches_complete() {
     let dir = make_test_dir("concurrent_same_table_copy_batches_complete");
@@ -656,10 +638,7 @@ async fn concurrent_same_table_copy_batches_complete() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(-1),
-                Cell::String("seed".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(-1), Cell::String("seed".to_string())])],
         )
         .await
         .unwrap();
@@ -736,11 +715,7 @@ async fn write_table_rows_empty_creates_table() {
         .expect("empty write failed");
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(
-        count_rows(&conn, &table_name),
-        0,
-        "table should exist but be empty"
-    );
+    assert_eq!(count_rows(&conn, &table_name), 0, "table should exist but be empty");
 }
 
 /// `truncate_table` deletes all rows while leaving the table schema intact.
@@ -785,24 +760,17 @@ async fn truncate_clears_rows() {
         .await
         .unwrap();
 
-    destination
-        .truncate_table(&replicated_table_schema)
-        .await
-        .expect("truncate failed");
+    destination.truncate_table(&replicated_table_schema).await.expect("truncate failed");
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(
-        count_rows(&conn, &table_name),
-        0,
-        "table should be empty after truncate"
-    );
+    assert_eq!(count_rows(&conn, &table_name), 0, "table should be empty after truncate");
 
     // Confirm the schema is still intact.
     let col_count: i64 = conn
         .query_row(
             &format!(
-                "SELECT COUNT(*) FROM information_schema.columns \
-                 WHERE table_catalog = {} AND table_schema = {} AND table_name = {}",
+                "SELECT COUNT(*) FROM information_schema.columns WHERE table_catalog = {} AND \
+                 table_schema = {} AND table_name = {}",
                 quote_literal("lake"),
                 quote_literal("main"),
                 quote_literal(&table_name),
@@ -811,10 +779,7 @@ async fn truncate_clears_rows() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(
-        col_count, 2,
-        "table should still have 2 columns after truncate"
-    );
+    assert_eq!(col_count, 2, "table should still have 2 columns after truncate");
 }
 
 /// Truncation should clear copy markers so the same rows can be copied again.
@@ -854,10 +819,7 @@ async fn truncate_clears_copy_markers_for_recopy() {
         TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())]),
     ];
 
-    destination
-        .write_table_rows(&replicated_table_schema, rows.clone())
-        .await
-        .unwrap();
+    destination.write_table_rows(&replicated_table_schema, rows.clone()).await.unwrap();
     destination.truncate_table(&replicated_table_schema).await.unwrap();
     destination.write_table_rows(&replicated_table_schema, rows).await.unwrap();
 
@@ -866,7 +828,8 @@ async fn truncate_clears_copy_markers_for_recopy() {
     assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
 }
 
-/// `write_events` applies inserts, updates, and deletes to the current table state.
+/// `write_events` applies inserts, updates, and deletes to the current table
+/// state.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
@@ -1091,7 +1054,8 @@ async fn write_events_with_old_row_update() {
     assert_eq!(name, "Gadget");
 }
 
-/// Replaying the same CDC batch should be a no-op after the progress row is committed.
+/// Replaying the same CDC batch should be a no-op after the progress row is
+/// committed.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_replay_is_idempotent() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
@@ -1265,7 +1229,8 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
     assert_eq!(name, "posted");
 }
 
-/// Restart replays should drop already-applied events before rebatching larger overlaps.
+/// Restart replays should drop already-applied events before rebatching larger
+/// overlaps.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
     use etl::types::InsertEvent;
@@ -1378,7 +1343,8 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
     assert_eq!(names[15], "name-16");
 }
 
-/// A mixed mutation batch should reuse one temp staging table for multiple upserts.
+/// A mixed mutation batch should reuse one temp staging table for multiple
+/// upserts.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_reuses_one_staging_table_per_atomic_batch() {
@@ -1460,21 +1426,17 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
             quote_identifier(&table_name)
         ))
         .unwrap()
-        .query_map([], |row| {
-            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?))
-        })
+        .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert_eq!(
-        rows,
-        vec![(1, "after".to_string()), (2, "tail".to_string())]
-    );
+    assert_eq!(rows, vec![(1, "after".to_string()), (2, "tail".to_string())]);
 
     reset_ducklake_test_hooks();
 }
 
-/// Marker-table rows should stay in the DuckLake catalog instead of creating Parquet files.
+/// Marker-table rows should stay in the DuckLake catalog instead of creating
+/// Parquet files.
 #[tokio::test(flavor = "multi_thread")]
 async fn applied_batches_table_uses_data_inlining() {
     let dir = make_test_dir("applied_batches_table_uses_data_inlining");
@@ -1509,10 +1471,7 @@ async fn applied_batches_table_uses_data_inlining() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("created".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())])],
         )
         .await
         .unwrap();
@@ -1558,10 +1517,7 @@ async fn shutdown_flushes_inlined_copy_rows() {
     destination
         .write_table_rows(
             &replicated_table_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("pending copy row".to_string()),
-            ])],
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("pending copy row".to_string())])],
         )
         .await
         .unwrap();
@@ -1577,10 +1533,8 @@ async fn shutdown_flushes_inlined_copy_rows() {
 
     destination.shutdown().await.unwrap();
 
-    wait_for_condition(Duration::from_secs(10), || {
-        count_table_files(&data, &table_name) >= 1
-    })
-    .await;
+    wait_for_condition(Duration::from_secs(10), || count_table_files(&data, &table_name) >= 1)
+        .await;
 
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
@@ -1708,7 +1662,8 @@ async fn shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
     );
 }
 
-/// Mixed table batches remain correct when multiple tables are written in one flush.
+/// Mixed table batches remain correct when multiple tables are written in one
+/// flush.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_mixed_multi_table_batches() {
     use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
@@ -1843,7 +1798,8 @@ async fn write_events_mixed_multi_table_batches() {
     assert_eq!(name_b, "b-two");
 }
 
-/// A post-commit retry should replay a truncate batch without resurrecting pre-truncate rows.
+/// A post-commit retry should replay a truncate batch without resurrecting
+/// pre-truncate rows.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
@@ -1941,7 +1897,8 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
     reset_ducklake_test_hooks();
 }
 
-/// A post-commit retry should detect the streaming progress row and avoid double-applying rows.
+/// A post-commit retry should detect the streaming progress row and avoid
+/// double-applying rows.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_retry_after_post_commit_failure_is_idempotent() {
@@ -2168,8 +2125,7 @@ async fn type_mapping_round_trip() {
     let row: (i32, String, f64, bool, String) = conn
         .query_row(
             &format!(
-                "SELECT id, label, score, active, CAST(birthday AS VARCHAR) \
-                 FROM {}.{}",
+                "SELECT id, label, score, active, CAST(birthday AS VARCHAR) FROM {}.{}",
                 quote_identifier("lake"),
                 quote_identifier(&table_name)
             ),

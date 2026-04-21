@@ -1,10 +1,11 @@
 use std::time::Duration;
 
-use etl::error::{ErrorKind, EtlResult};
-use etl::etl_error;
+use etl::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+};
 use pg_escape::{quote_identifier, quote_literal};
-use sqlx::PgPool;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use url::Url;
 
 /// Pending inline insert-data bytes sampled from the Postgres DuckLake catalog.
@@ -41,10 +42,7 @@ impl DuckLakePendingInlineSizeSampler {
                 )
             })?;
 
-        Ok(Some(Self {
-            metadata_schema,
-            pool,
-        }))
+        Ok(Some(Self { metadata_schema, pool }))
     }
 
     /// Samples pending inline insert-data bytes for one DuckLake table.
@@ -53,25 +51,23 @@ impl DuckLakePendingInlineSizeSampler {
         table_name: &str,
     ) -> EtlResult<DuckLakePendingInlineDataSizes> {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
-        let inlined_data_bytes: i64 = sqlx::query_scalar(&sql)
-            .bind(table_name)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|source| {
-                etl_error!(
-                    ErrorKind::DestinationQueryFailed,
-                    "DuckLake inline-size sampler query failed",
-                    source: source
-                )
-            })?;
+        let inlined_data_bytes: i64 =
+            sqlx::query_scalar(&sql).bind(table_name).fetch_one(&self.pool).await.map_err(
+                |source| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake inline-size sampler query failed",
+                        source: source
+                    )
+                },
+            )?;
 
-        Ok(DuckLakePendingInlineDataSizes {
-            inlined_data_bytes: inlined_data_bytes.max(0) as u64,
-        })
+        Ok(DuckLakePendingInlineDataSizes { inlined_data_bytes: inlined_data_bytes.max(0) as u64 })
     }
 }
 
-/// Returns the PostgreSQL query that measures one table's inline insert-data size.
+/// Returns the PostgreSQL query that measures one table's inline insert-data
+/// size.
 fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
     let metadata_schema_literal = quote_literal(metadata_schema);
     let metadata_schema = quote_identifier(metadata_schema);

@@ -1,49 +1,62 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
+    time::Duration,
+};
 
-use etl::error::{ErrorKind, EtlError, EtlResult};
-use etl::etl_error;
+use etl::{
+    error::{ErrorKind, EtlError, EtlResult},
+    etl_error,
+};
 use metrics::{counter, gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::quote_literal;
-use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, watch};
-use tokio::task::JoinHandle;
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::{
+    sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, watch},
+    task::JoinHandle,
+    time::{Instant, MissedTickBehavior},
+};
 use tracing::{debug, info, warn};
 
-use crate::ducklake::client::{
-    DuckDbBlockingOperationKind, DuckLakeConnectionManager, LazyDuckLakePool,
-    format_query_error_detail, run_duckdb_blocking,
+use crate::ducklake::{
+    DuckLakeTableName, LAKE_CATALOG,
+    client::{
+        DuckDbBlockingOperationKind, DuckLakeConnectionManager, LazyDuckLakePool,
+        format_query_error_detail, run_duckdb_blocking,
+    },
+    config::maintenance_target_file_size_sql,
+    inline_size::{DuckLakePendingInlineDataSizes, DuckLakePendingInlineSizeSampler},
+    metrics::{
+        DuckLakeTableStorageMetrics, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
+        ETL_DUCKLAKE_INLINE_FLUSH_ROWS, ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
+        ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS, ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL,
+        ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL, MAINTENANCE_OPERATION_LABEL,
+        MAINTENANCE_OUTCOME_LABEL, MAINTENANCE_REASON_LABEL, MAINTENANCE_TASK_LABEL, RESULT_LABEL,
+        SMALL_FILE_SIZE_BYTES,
+    },
 };
-use crate::ducklake::config::maintenance_target_file_size_sql;
-use crate::ducklake::inline_size::{
-    DuckLakePendingInlineDataSizes, DuckLakePendingInlineSizeSampler,
-};
-use crate::ducklake::metrics::{
-    DuckLakeTableStorageMetrics, ETL_DUCKLAKE_INLINE_FLUSH_DURATION_SECONDS,
-    ETL_DUCKLAKE_INLINE_FLUSH_ROWS, ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS,
-    ETL_DUCKLAKE_MAINTENANCE_IN_PROGRESS, ETL_DUCKLAKE_MAINTENANCE_SKIPPED_TOTAL,
-    ETL_DUCKLAKE_MAINTENANCE_STARTED_TOTAL, MAINTENANCE_OPERATION_LABEL, MAINTENANCE_OUTCOME_LABEL,
-    MAINTENANCE_REASON_LABEL, MAINTENANCE_TASK_LABEL, RESULT_LABEL, SMALL_FILE_SIZE_BYTES,
-};
-use crate::ducklake::{DuckLakeTableName, LAKE_CATALOG};
 
 /// Dedicated pool size for background DuckLake maintenance work.
 const MAINTENANCE_POOL_SIZE: u32 = 1;
 /// Poll interval for checking per-table inline flush thresholds.
 const MAINTENANCE_FLUSH_POLL_INTERVAL: Duration = Duration::from_secs(30);
-/// Pending inline insert-data bytes threshold that triggers a background inline flush.
+/// Pending inline insert-data bytes threshold that triggers a background inline
+/// flush.
 const MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD: u64 = 10_000_000;
 /// Estimated ratio from raw row payload to compressed parquet bytes.
 const PARQUET_COMPRESSION_RATIO_ESTIMATE: u64 = 4;
-/// Fallback estimated pending bytes threshold when inline-size sampling is unavailable.
+/// Fallback estimated pending bytes threshold when inline-size sampling is
+/// unavailable.
 const MAINTENANCE_PENDING_BYTES_THRESHOLD: u64 =
     SMALL_FILE_SIZE_BYTES as u64 * PARQUET_COMPRESSION_RATIO_ESTIMATE;
-/// Optional pending inserted-rows threshold that triggers a background inline flush.
+/// Optional pending inserted-rows threshold that triggers a background inline
+/// flush.
 const MAINTENANCE_PENDING_ROWS_THRESHOLD: Option<u64> = None;
-/// Minimum idle window before targeted table maintenance runs, to not have maintenances ran too frequently.
+/// Minimum idle window before targeted table maintenance runs, to not have
+/// maintenances ran too frequently.
 const MAINTENANCE_TABLE_COMPACTION_IDLE_THRESHOLD: Duration = Duration::from_secs(90);
 /// Minimum delay between targeted maintenance runs for the same table.
 const MAINTENANCE_TABLE_COMPACTION_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -276,9 +289,8 @@ impl TableMaintenanceState {
     /// Aggregates one write notification into the existing table state.
     fn record_write_activity(&mut self, notification: &TableWriteActivity, now: Instant) {
         self.pending_bytes = self.pending_bytes.saturating_add(notification.approx_bytes);
-        self.pending_inserted_rows = self
-            .pending_inserted_rows
-            .saturating_add(notification.inserted_rows);
+        self.pending_inserted_rows =
+            self.pending_inserted_rows.saturating_add(notification.inserted_rows);
         self.dirty_since_compaction = true;
         self.last_write_at = Some(now);
     }
@@ -304,14 +316,16 @@ impl TableMaintenanceState {
         self.pending_bytes > 0 || self.pending_inserted_rows > 0
     }
 
-    /// Returns whether the current dirty period still needs an inline-size sample.
+    /// Returns whether the current dirty period still needs an inline-size
+    /// sample.
     fn needs_pending_inline_data_sizes_sample(&self) -> bool {
         self.dirty_since_compaction
             && self.last_write_at.is_some()
             && self.current_pending_inline_data_sizes().is_none()
     }
 
-    /// Returns the latest inline insert-data sample covering the current dirty period.
+    /// Returns the latest inline insert-data sample covering the current dirty
+    /// period.
     fn current_pending_inline_data_sizes(&self) -> Option<DuckLakePendingInlineDataSizes> {
         let sizes = self.latest_pending_inline_data_sizes?;
         let sampled_at = self.latest_pending_inline_data_sampled_at?;
@@ -396,10 +410,7 @@ impl TableMaintenanceState {
         };
 
         if enough_idle && enough_gap {
-            Some(targeted_maintenance_plan(
-                metrics,
-                TargetedMaintenanceScope::Idle,
-            ))
+            Some(targeted_maintenance_plan(metrics, TargetedMaintenanceScope::Idle))
         } else {
             None
         }
@@ -517,11 +528,7 @@ impl DuckLakeMaintenanceInProgressGuard {
     ) -> Self {
         record_ducklake_maintenance_started(task, operation, reason);
         increment_ducklake_maintenance_in_progress(task, operation, reason);
-        Self {
-            task,
-            operation,
-            reason,
-        }
+        Self { task, operation, reason }
     }
 }
 
@@ -565,7 +572,8 @@ fn record_ducklake_maintenance_skipped(
     .increment(1);
 }
 
-/// Records all selected targeted-maintenance operations as skipped because the table is busy.
+/// Records all selected targeted-maintenance operations as skipped because the
+/// table is busy.
 fn record_skipped_targeted_maintenance(plan: TargetedMaintenancePlan) {
     if let Some(reason) = plan.rewrite_reason {
         record_ducklake_maintenance_skipped(
@@ -584,7 +592,8 @@ fn record_skipped_targeted_maintenance(plan: TargetedMaintenancePlan) {
     }
 }
 
-/// Returns the targeted-maintenance cycle outcome from successful per-operation outcomes.
+/// Returns the targeted-maintenance cycle outcome from successful per-operation
+/// outcomes.
 fn targeted_maintenance_outcome(
     rewrite_outcome: Option<MaintenanceOutcome>,
     merge_outcome: Option<MaintenanceOutcome>,
@@ -601,14 +610,16 @@ fn targeted_maintenance_outcome(
     }
 }
 
-/// Returns whether this maintenance failure matches a known DuckLake compaction bug.
+/// Returns whether this maintenance failure matches a known DuckLake compaction
+/// bug.
 fn is_known_ducklake_compaction_single_output_file_error(error: &EtlError) -> bool {
     error.detail().is_some_and(|detail| {
         detail.contains("INTERNAL Error: DuckLakeCompaction - expected a single output file")
     })
 }
 
-/// Returns the failing maintenance operation and reason for one known compaction bug.
+/// Returns the failing maintenance operation and reason for one known
+/// compaction bug.
 fn known_ducklake_compaction_error_context(
     plan: TargetedMaintenancePlan,
     error: &EtlError,
@@ -618,23 +629,23 @@ fn known_ducklake_compaction_error_context(
     }
 
     match error.description() {
-        Some("DuckLake rewrite data files failed") => plan
-            .rewrite_reason
-            .map(|reason| (MaintenanceOperation::RewriteDataFiles, reason)),
-        Some("DuckLake merge adjacent files failed") => plan
-            .merge_reason
-            .map(|reason| (MaintenanceOperation::MergeAdjacentFiles, reason)),
+        Some("DuckLake rewrite data files failed") => {
+            plan.rewrite_reason.map(|reason| (MaintenanceOperation::RewriteDataFiles, reason))
+        }
+        Some("DuckLake merge adjacent files failed") => {
+            plan.merge_reason.map(|reason| (MaintenanceOperation::MergeAdjacentFiles, reason))
+        }
         _ => None,
     }
 }
 
 /// Logs and suppresses one known DuckLake compaction internal error.
 ///
-/// Connection recycling is handled generically in [`run_duckdb_blocking`], which
-/// marks any failing DuckDB connection as broken before it returns the error to
-/// this layer. This helper stays intentionally narrow: it only decides which
-/// maintenance-only failures are safe to downgrade after the pool has already
-/// recycled the invalidated connection.
+/// Connection recycling is handled generically in [`run_duckdb_blocking`],
+/// which marks any failing DuckDB connection as broken before it returns the
+/// error to this layer. This helper stays intentionally narrow: it only decides
+/// which maintenance-only failures are safe to downgrade after the pool has
+/// already recycled the invalidated connection.
 fn suppress_known_ducklake_compaction_error(
     table_name: &str,
     plan: TargetedMaintenancePlan,
@@ -709,9 +720,7 @@ pub(super) async fn send_maintenance_notification(
     notification_tx: &mpsc::Sender<TableMaintenanceNotification>,
     notification: TableMaintenanceNotification,
 ) {
-    if let Err(error) = notification_tx
-        .send_timeout(notification, NOTIFICATION_SEND_TIMEOUT)
-        .await
+    if let Err(error) = notification_tx.send_timeout(notification, NOTIFICATION_SEND_TIMEOUT).await
     {
         match error {
             mpsc::error::SendTimeoutError::Timeout(notification) => {
@@ -730,7 +739,8 @@ pub(super) async fn send_maintenance_notification(
     }
 }
 
-/// Tries to enqueue one maintenance notification without awaiting channel capacity.
+/// Tries to enqueue one maintenance notification without awaiting channel
+/// capacity.
 fn try_send_maintenance_notification(
     notification_tx: &mpsc::Sender<TableMaintenanceNotification>,
     notification: TableMaintenanceNotification,
@@ -1004,26 +1014,23 @@ async fn run_ducklake_maintenance_worker(
     }
 }
 
-/// Returns the table-local semaphore shared by writes and background maintenance.
+/// Returns the table-local semaphore shared by writes and background
+/// maintenance.
 pub(super) fn table_write_slot(
     table_write_slots: &Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     table_name: &str,
 ) -> Arc<Semaphore> {
     let mut slots = table_write_slots.lock();
-    slots
-        .entry(table_name.to_string())
-        .or_insert_with(|| Arc::new(Semaphore::new(1)))
-        .clone()
+    slots.entry(table_name.to_string()).or_insert_with(|| Arc::new(Semaphore::new(1))).clone()
 }
 
-/// Tries to acquire the table-local semaphore without blocking the maintenance worker.
+/// Tries to acquire the table-local semaphore without blocking the maintenance
+/// worker.
 fn try_acquire_table_write_slot(
     table_write_slots: &Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     table_name: &str,
 ) -> Option<OwnedSemaphorePermit> {
-    table_write_slot(table_write_slots, table_name)
-        .try_acquire_owned()
-        .ok()
+    table_write_slot(table_write_slots, table_name).try_acquire_owned().ok()
 }
 
 /// Runs targeted rewrite and merge maintenance for one table.
@@ -1213,7 +1220,8 @@ pub(super) async fn maybe_run_requested_checkpoint(
     .await
 }
 
-/// Materializes one table's pending inlined rows and records the maintenance outcome.
+/// Materializes one table's pending inlined rows and records the maintenance
+/// outcome.
 fn flush_table_inlined_data_in_background_blocking(
     conn: &duckdb::Connection,
     table_name: &str,
@@ -1402,10 +1410,7 @@ fn run_requested_merge_adjacent_files_blocking(
         outcome,
         merge_started.elapsed().as_secs_f64(),
     );
-    info!(
-        merged_files,
-        "ducklake scheduled merge_adjacent_files completed"
-    );
+    info!(merged_files, "ducklake scheduled merge_adjacent_files completed");
     Ok(outcome)
 }
 
@@ -1429,10 +1434,7 @@ fn run_background_checkpoint_blocking(
             MaintenanceOutcome::Failed,
             checkpoint_started.elapsed().as_secs_f64(),
         );
-        return Err(etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake checkpoint failed"
-        ));
+        return Err(etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake checkpoint failed"));
     }
 
     conn.execute_batch("CHECKPOINT").map_err(|error| {
@@ -1482,16 +1484,14 @@ fn rewrite_table_data_files(conn: &duckdb::Connection, table_name: &str) -> EtlR
         ));
     }
 
-    let files_created: i64 = conn
-        .query_row(&sql, [], |row| row.get(0))
-        .map_err(|error| {
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake rewrite data files failed",
-                format_query_error_detail(&sql, &error),
-                source: error
-            )
-        })?;
+    let files_created: i64 = conn.query_row(&sql, [], |row| row.get(0)).map_err(|error| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake rewrite data files failed",
+            format_query_error_detail(&sql, &error),
+            source: error
+        )
+    })?;
 
     Ok(files_created.max(0) as u64)
 }
@@ -1501,7 +1501,8 @@ fn configure_tier_zero_merge_sql(maintenance_target_file_size: &str) -> String {
     maintenance_target_file_size_sql(Some(maintenance_target_file_size))
 }
 
-/// Builds the tier-0 merge query for either one table or all auto-compacted tables.
+/// Builds the tier-0 merge query for either one table or all auto-compacted
+/// tables.
 fn merge_adjacent_files_tier_zero_sql(table_name: Option<&str>) -> String {
     match table_name {
         Some(table_name) => format!(
@@ -1537,16 +1538,14 @@ fn merge_adjacent_files_tier_zero(
     })?;
 
     let sql = merge_adjacent_files_tier_zero_sql(table_name);
-    let files_created: i64 = conn
-        .query_row(&sql, [], |row| row.get(0))
-        .map_err(|error| {
-            etl_error!(
-                ErrorKind::DestinationQueryFailed,
-                "DuckLake merge adjacent files failed",
-                format_query_error_detail(&sql, &error),
-                source: error
-            )
-        })?;
+    let files_created: i64 = conn.query_row(&sql, [], |row| row.get(0)).map_err(|error| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake merge adjacent files failed",
+            format_query_error_detail(&sql, &error),
+            source: error
+        )
+    })?;
 
     Ok(files_created.max(0) as u64)
 }
@@ -1570,17 +1569,18 @@ fn merge_adjacent_table_files(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use std::sync::{Arc, LazyLock};
 
     use etl_telemetry::metrics::init_metrics_handle;
 
-    use crate::ducklake::client::{
-        DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
-        run_duckdb_blocking,
+    use super::*;
+    use crate::ducklake::{
+        client::{
+            DuckDbBlockingOperationKind, DuckLakeConnectionManager, build_warm_ducklake_pool,
+            run_duckdb_blocking,
+        },
+        metrics::register_metrics,
     };
-    use crate::ducklake::metrics::register_metrics;
 
     static CHECKPOINT_TEST_GUARD: LazyLock<Arc<Semaphore>> =
         LazyLock::new(|| Arc::new(Semaphore::new(1)));
@@ -1607,9 +1607,8 @@ mod tests {
         rendered
             .lines()
             .find_map(|line| {
-                if line.starts_with(&format!(
-                    "{ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS}_count"
-                )) && line.contains(&task_label)
+                if line.starts_with(&format!("{ETL_DUCKLAKE_MAINTENANCE_DURATION_SECONDS}_count"))
+                    && line.contains(&task_label)
                     && line.contains(&operation_label)
                     && line.contains(&reason_label)
                     && line.contains(&outcome_label)
@@ -1701,22 +1700,14 @@ mod tests {
     }
 
     fn write_activity(approx_bytes: u64, inserted_rows: u64) -> TableWriteActivity {
-        TableWriteActivity {
-            table_name: "public_users".to_string(),
-            approx_bytes,
-            inserted_rows,
-        }
+        TableWriteActivity { table_name: "public_users".to_string(), approx_bytes, inserted_rows }
     }
 
     fn table_metrics_sample(
         sampled_at: Instant,
         metrics: DuckLakeTableStorageMetrics,
     ) -> TableMetricsSample {
-        TableMetricsSample {
-            table_name: "public_users".to_string(),
-            sampled_at,
-            metrics,
-        }
+        TableMetricsSample { table_name: "public_users".to_string(), sampled_at, metrics }
     }
 
     fn storage_metrics(
@@ -1893,18 +1884,12 @@ mod tests {
             flush_applied_after > flush_applied_before,
             "flush applied duration count did not increase"
         );
-        assert!(
-            flush_noop_after > flush_noop_before,
-            "flush noop duration count did not increase"
-        );
+        assert!(flush_noop_after > flush_noop_before, "flush noop duration count did not increase");
         assert!(
             rewrite_applied_after > rewrite_applied_before,
             "rewrite applied duration count did not increase"
         );
-        assert!(
-            merge_noop_after > merge_noop_before,
-            "merge noop duration count did not increase"
-        );
+        assert!(merge_noop_after > merge_noop_before, "merge noop duration count did not increase");
         assert!(
             checkpoint_failed_after > checkpoint_failed_before,
             "checkpoint failed duration count did not increase"
@@ -1968,10 +1953,7 @@ mod tests {
             MaintenanceReason::EmergencyMergeMetricsThreshold,
         );
 
-        assert!(
-            started_during > started_before,
-            "maintenance started counter did not increase"
-        );
+        assert!(started_during > started_before, "maintenance started counter did not increase");
         assert!(
             in_progress_during > in_progress_before,
             "maintenance in-progress gauge did not increase"
@@ -2053,10 +2035,7 @@ mod tests {
             MaintenanceOutcome::SkippedBusy,
         );
 
-        assert!(
-            rewrite_after > rewrite_before,
-            "rewrite skipped counter did not increase"
-        );
+        assert!(rewrite_after > rewrite_before, "rewrite skipped counter did not increase");
         assert!(
             (merge_after - merge_before).abs() < f64::EPSILON,
             "merge skipped counter should stay unchanged when merge was not selected"
@@ -2158,9 +2137,8 @@ mod tests {
         let metrics = storage_metrics(10, 20_000_000, 6, 1000, 4, 1024, 25);
         let mut state = TableMaintenanceState::default();
         state.record_metrics_sample(table_metrics_sample(now, metrics.clone()));
-        let (recorded_metrics, sampled_at) = state
-            .current_storage_metrics()
-            .expect("metrics sample should be visible");
+        let (recorded_metrics, sampled_at) =
+            state.current_storage_metrics().expect("metrics sample should be visible");
 
         assert_eq!(sampled_at, now);
         assert_eq!(recorded_metrics.small_data_files, metrics.small_data_files);
@@ -2410,10 +2388,7 @@ mod tests {
             MaintenanceOutcome::Failed,
         );
 
-        assert!(
-            failed_after > failed_before,
-            "flush failed duration count did not increase"
-        );
+        assert!(failed_after > failed_before, "flush failed duration count did not increase");
     }
 
     #[tokio::test]
@@ -2533,14 +2508,13 @@ mod tests {
             std::sync::Arc::clone(&blocking_slots),
             DuckDbBlockingOperationKind::Maintenance,
             |conn| {
-                conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
-                    .map_err(|source| {
-                        etl_error!(
-                            ErrorKind::DestinationQueryFailed,
-                            "DuckLake connection recycling verification query failed",
-                            source: source
-                        )
-                    })
+                conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0)).map_err(|source| {
+                    etl_error!(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake connection recycling verification query failed",
+                        source: source
+                    )
+                })
             },
         )
         .await
@@ -2600,18 +2574,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        worker
-            .shutdown_tx
-            .send(())
-            .expect("maintenance worker shutdown channel should stay open");
-        let handle = worker
-            .handle
-            .lock()
-            .take()
-            .expect("maintenance worker handle should exist");
-        handle
-            .await
-            .expect("maintenance worker should shut down cleanly");
+        worker.shutdown_tx.send(()).expect("maintenance worker shutdown channel should stay open");
+        let handle = worker.handle.lock().take().expect("maintenance worker handle should exist");
+        handle.await.expect("maintenance worker should shut down cleanly");
     }
 
     #[cfg(feature = "test-utils")]
@@ -2661,10 +2626,7 @@ mod tests {
             MaintenanceReason::CheckpointInterval,
         );
 
-        assert!(
-            skipped_after > skipped_before,
-            "checkpoint skip count did not increase"
-        );
+        assert!(skipped_after > skipped_before, "checkpoint skip count did not increase");
         assert!(
             checkpoint_requested.load(AtomicOrdering::Acquire),
             "checkpoint request should stay pending for the next safe point"
@@ -2695,10 +2657,8 @@ mod tests {
         let mutation_guard = Arc::clone(&checkpoint_gate).read_owned().await;
         let inline_flush_requested = Arc::new(AtomicBool::new(true));
         let pending_inline_flush_requests = PendingInlineFlushRequests::default();
-        pending_inline_flush_requests.request(
-            "public_users".to_string(),
-            MaintenanceReason::PendingBytesThreshold,
-        );
+        pending_inline_flush_requests
+            .request("public_users".to_string(), MaintenanceReason::PendingBytesThreshold);
 
         let rendered_before = handle.render();
         let skipped_before = maintenance_skipped_counter_value(
@@ -2727,19 +2687,13 @@ mod tests {
             MaintenanceReason::PendingBytesThreshold,
         );
 
-        assert!(
-            skipped_after > skipped_before,
-            "inline flush skip count did not increase"
-        );
+        assert!(skipped_after > skipped_before, "inline flush skip count did not increase");
         assert!(
             inline_flush_requested.load(AtomicOrdering::Acquire),
             "inline flush request should stay pending for the next safe point"
         );
         assert_eq!(
-            pending_inline_flush_requests
-                .requests
-                .lock()
-                .get("public_users"),
+            pending_inline_flush_requests.requests.lock().get("public_users"),
             Some(&MaintenanceReason::PendingBytesThreshold),
             "inline flush request should stay queued for the next safe point"
         );
@@ -2797,10 +2751,7 @@ mod tests {
             MaintenanceReason::MergeInterval,
         );
 
-        assert!(
-            skipped_after > skipped_before,
-            "merge skip count did not increase"
-        );
+        assert!(skipped_after > skipped_before, "merge skip count did not increase");
         assert!(!merge_ran, "merge should report that it did not run");
         assert!(
             merge_requested.load(AtomicOrdering::Acquire),
@@ -2881,14 +2832,8 @@ mod tests {
             MaintenanceOutcome::Failed,
         );
 
-        assert!(
-            result.is_err(),
-            "checkpoint should fail when the test hook is armed"
-        );
-        assert!(
-            failed_after > failed_before,
-            "checkpoint failed duration count did not increase"
-        );
+        assert!(result.is_err(), "checkpoint should fail when the test hook is armed");
+        assert!(failed_after > failed_before, "checkpoint failed duration count did not increase");
 
         FAIL_CHECKPOINT_ONCE_FOR_TESTS.store(false, AtomicOrdering::Relaxed);
     }
@@ -2934,13 +2879,7 @@ mod tests {
             MaintenanceOutcome::SkippedBusy,
         );
 
-        assert!(
-            skipped_after > skipped_before,
-            "flush skipped counter did not increase"
-        );
-        assert_eq!(
-            duration_after, duration_before,
-            "flush skip should not emit a duration sample"
-        );
+        assert!(skipped_after > skipped_before, "flush skipped counter did not increase");
+        assert_eq!(duration_after, duration_before, "flush skip should not emit a duration sample");
     }
 }

@@ -742,7 +742,8 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
         loop {
             let row = client
                 .query_one(
-                    "select confirmed_flush_lsn, active_pid from pg_replication_slots where slot_name = $1",
+                    "select confirmed_flush_lsn, active_pid from pg_replication_slots where \
+                     slot_name = $1",
                     &[&apply_slot_name],
                 )
                 .await

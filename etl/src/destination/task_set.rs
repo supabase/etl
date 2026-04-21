@@ -70,8 +70,8 @@ impl DestinationTaskSet {
 
     /// Waits for all remaining tasks to finish without aborting them.
     ///
-    /// This is useful for destinations that want shutdown to complete already-accepted work before
-    /// cleaning up related resources.
+    /// This is useful for destinations that want shutdown to complete
+    /// already-accepted work before cleaning up related resources.
     pub async fn drain(&self) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
