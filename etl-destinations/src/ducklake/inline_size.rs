@@ -107,7 +107,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pending_inline_data_bytes_query_qualifies_metadata_tables() {
+    fn pending_inline_data_bytes_query_qualifies_metadata_tables() {
         let sql = pending_inline_data_bytes_query("duck'lake");
 
         assert!(sql.contains("ducklake_table"));

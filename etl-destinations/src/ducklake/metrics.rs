@@ -609,9 +609,7 @@ pub(super) fn query_catalog_maintenance_metrics_blocking(
 }
 
 fn epoch_age_seconds(now_epoch_ms: i64, oldest_epoch_ms: Option<i64>) -> i64 {
-    oldest_epoch_ms
-        .map(|epoch_ms| now_epoch_ms.saturating_sub(epoch_ms) / 1_000)
-        .unwrap_or(0)
+    oldest_epoch_ms.map_or(0, |epoch_ms| now_epoch_ms.saturating_sub(epoch_ms) / 1_000)
 }
 
 /// Resolves the schema name that DuckLake uses inside its hidden metadata catalog.
@@ -680,7 +678,7 @@ mod tests {
 
     #[cfg(feature = "test-utils")]
     #[tokio::test]
-    async fn test_spawn_ducklake_metrics_sampler_initializes_pool_lazily() {
+    async fn spawn_ducklake_metrics_sampler_initializes_pool_lazily() {
         let open_count = Arc::new(AtomicUsize::new(0));
         let (maintenance_notification_tx, _maintenance_notification_rx) = mpsc::channel(1);
         let sampler = spawn_ducklake_metrics_sampler(

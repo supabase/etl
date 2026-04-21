@@ -698,9 +698,8 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     let pipeline_id: PipelineId = random();
-    let apply_slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id)
-        .try_into()
-        .unwrap();
+    let apply_slot_name: String =
+        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -720,9 +719,7 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
     pipeline.start().await.unwrap();
     users_ready.notified().await;
 
-    let first_insert_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let first_insert_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
     insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
     first_insert_notify.notified().await;
 
@@ -731,7 +728,9 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
         .await
         .into_iter()
         .find_map(|event| match event {
-            Event::Insert(insert) if insert.table_id == database_schema.users_schema().id => {
+            Event::Insert(insert)
+                if insert.replicated_table_schema.id() == database_schema.users_schema().id =>
+            {
                 Some(insert)
             }
             _ => None,
@@ -763,10 +762,7 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
     .await
     .expect("timed out waiting for confirmed_flush_lsn to advance after flush");
 
-    client
-        .query_one("select pg_terminate_backend($1)", &[&terminated_pid])
-        .await
-        .unwrap();
+    client.query_one("select pg_terminate_backend($1)", &[&terminated_pid]).await.unwrap();
 
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -791,12 +787,10 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
     .await
     .expect("timed out waiting for apply worker to reconnect after source connection loss");
 
-    let second_insert_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 2)])
-        .await;
-    let duplicate_insert_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 3)])
-        .await;
+    let second_insert_notify =
+        destination.wait_for_events_count(vec![(EventType::Insert, 2)]).await;
+    let duplicate_insert_notify =
+        destination.wait_for_events_count(vec![(EventType::Insert, 3)]).await;
 
     insert_users_data(&mut database, &database_schema.users_schema().name, 2..=2).await;
     second_insert_notify.notified().await;
@@ -812,10 +806,8 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
 
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
-    let users_inserts = grouped
-        .get(&(EventType::Insert, database_schema.users_schema().id))
-        .cloned()
-        .unwrap();
+    let users_inserts =
+        grouped.get(&(EventType::Insert, database_schema.users_schema().id)).cloned().unwrap();
     assert_eq!(users_inserts.len(), 2);
 }
 

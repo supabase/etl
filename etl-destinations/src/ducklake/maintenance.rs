@@ -1740,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn test_configure_tier_zero_merge_sql_sets_configured_target_file_size() {
+    fn configure_tier_zero_merge_sql_sets_configured_target_file_size() {
         assert_eq!(
             configure_tier_zero_merge_sql("5MB"),
             maintenance_target_file_size_sql(Some("5MB"))
@@ -1748,7 +1748,7 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_adjacent_files_tier_zero_sql_targets_all_tables_below_1mib() {
+    fn merge_adjacent_files_tier_zero_sql_targets_all_tables_below_1mib() {
         assert_eq!(
             merge_adjacent_files_tier_zero_sql(None),
             format!(
@@ -1761,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_adjacent_files_tier_zero_sql_targets_one_table_below_1mib() {
+    fn merge_adjacent_files_tier_zero_sql_targets_one_table_below_1mib() {
         assert_eq!(
             merge_adjacent_files_tier_zero_sql(Some("public_users")),
             format!(
@@ -1775,7 +1775,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_maintenance_duration_histogram_counts_are_exported_with_labels() {
+    async fn maintenance_duration_histogram_counts_are_exported_with_labels() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
 
@@ -1912,7 +1912,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_maintenance_started_counter_and_in_progress_gauge_are_exported_with_labels() {
+    async fn maintenance_started_counter_and_in_progress_gauge_are_exported_with_labels() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
 
@@ -1987,7 +1987,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_targeted_maintenance_busy_emits_skip_counter_only_for_selected_operations() {
+    async fn targeted_maintenance_busy_emits_skip_counter_only_for_selected_operations() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
         let plan = TargetedMaintenancePlan {
@@ -2072,7 +2072,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_prefers_pending_bytes_flush_reason() {
+    fn table_maintenance_state_prefers_pending_bytes_flush_reason() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(&write_activity(MAINTENANCE_PENDING_BYTES_THRESHOLD, 1), now);
@@ -2084,7 +2084,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_uses_sampled_inline_data_bytes_flush_reason() {
+    fn table_maintenance_state_uses_sampled_inline_data_bytes_flush_reason() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(&write_activity(1, 1), now);
@@ -2102,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_prefers_sampled_inline_data_over_estimated_bytes() {
+    fn table_maintenance_state_prefers_sampled_inline_data_over_estimated_bytes() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(&write_activity(MAINTENANCE_PENDING_BYTES_THRESHOLD, 1), now);
@@ -2117,7 +2117,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_disables_pending_inserted_rows_flush_reason_by_default() {
+    fn table_maintenance_state_disables_pending_inserted_rows_flush_reason_by_default() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(
@@ -2129,7 +2129,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_uses_pending_inserted_rows_flush_reason_when_enabled() {
+    fn table_maintenance_state_uses_pending_inserted_rows_flush_reason_when_enabled() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(
@@ -2144,7 +2144,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_does_not_use_idle_flush_reason() {
+    fn table_maintenance_state_does_not_use_idle_flush_reason() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(&write_activity(128, 1), now);
@@ -2153,7 +2153,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_records_metrics_samples() {
+    fn table_maintenance_state_records_metrics_samples() {
         let now = Instant::now();
         let metrics = storage_metrics(10, 20_000_000, 6, 1000, 4, 1024, 25);
         let mut state = TableMaintenanceState::default();
@@ -2167,7 +2167,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_waits_for_fresh_sample_after_write() {
+    fn table_maintenance_state_waits_for_fresh_sample_after_write() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         let stale_metrics = storage_metrics(8, 16_000_000, 6, 1000, 0, 0, 0);
@@ -2186,7 +2186,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_selects_idle_merge_from_small_file_ratio() {
+    fn table_maintenance_state_selects_idle_merge_from_small_file_ratio() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(&write_activity(1024, 1), now);
@@ -2208,7 +2208,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_does_not_select_merge_when_ratio_is_half() {
+    fn table_maintenance_state_does_not_select_merge_when_ratio_is_half() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(&write_activity(1024, 1), now);
@@ -2227,7 +2227,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_does_not_select_merge_when_average_size_is_healthy() {
+    fn table_maintenance_state_does_not_select_merge_when_average_size_is_healthy() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(&write_activity(1024, 1), now);
@@ -2246,7 +2246,7 @@ mod tests {
     }
 
     #[test]
-    fn test_targeted_maintenance_plan_does_not_select_merge_with_one_small_file() {
+    fn targeted_maintenance_plan_does_not_select_merge_with_one_small_file() {
         let metrics = storage_metrics(1, 2_343_233, 1, 1000, 0, 0, 0);
 
         assert_eq!(
@@ -2260,7 +2260,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_selects_idle_rewrite_from_delete_pressure() {
+    fn table_maintenance_state_selects_idle_rewrite_from_delete_pressure() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(&write_activity(1024, 1), now);
@@ -2282,7 +2282,7 @@ mod tests {
     }
 
     #[test]
-    fn test_targeted_maintenance_plan_does_not_select_emergency_rewrite_from_ratio_alone() {
+    fn targeted_maintenance_plan_does_not_select_emergency_rewrite_from_ratio_alone() {
         let metrics = storage_metrics(10, 80_000_000, 0, 1000, 1, 65_101, 936);
 
         assert_eq!(
@@ -2292,7 +2292,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_maintenance_state_selects_emergency_rewrite_from_delete_pressure() {
+    fn table_maintenance_state_selects_emergency_rewrite_from_delete_pressure() {
         let now = Instant::now();
         let mut state = TableMaintenanceState::default();
         state.record_write_activity(&write_activity(1024, 1), now);
@@ -2314,7 +2314,7 @@ mod tests {
     }
 
     #[test]
-    fn test_targeted_maintenance_plan_selects_emergency_merge_when_table_is_fragmented() {
+    fn targeted_maintenance_plan_selects_emergency_merge_when_table_is_fragmented() {
         let metrics = storage_metrics(10, 20_000_000, 6, 1000, 0, 0, 0);
 
         assert_eq!(
@@ -2327,7 +2327,7 @@ mod tests {
     }
 
     #[test]
-    fn test_targeted_maintenance_plan_does_not_select_work_for_sample_shaped_metrics() {
+    fn targeted_maintenance_plan_does_not_select_work_for_sample_shaped_metrics() {
         let metrics = storage_metrics(1, 2_343_233, 1, 1000, 1, 65_101, 936);
 
         assert_eq!(
@@ -2337,19 +2337,19 @@ mod tests {
     }
 
     #[test]
-    fn test_maintenance_outcome_from_rows_flushed_marks_applied_and_noop() {
+    fn maintenance_outcome_from_rows_flushed_marks_applied_and_noop() {
         assert_eq!(MaintenanceOutcome::from(0), MaintenanceOutcome::Noop);
         assert_eq!(MaintenanceOutcome::from(3), MaintenanceOutcome::Applied);
     }
 
     #[test]
-    fn test_maintenance_outcome_from_files_created_marks_applied_and_noop() {
+    fn maintenance_outcome_from_files_created_marks_applied_and_noop() {
         assert_eq!(MaintenanceOutcome::from(0), MaintenanceOutcome::Noop);
         assert_eq!(MaintenanceOutcome::from(2), MaintenanceOutcome::Applied);
     }
 
     #[test]
-    fn test_targeted_maintenance_outcome_is_applied_when_any_operation_applies() {
+    fn targeted_maintenance_outcome_is_applied_when_any_operation_applies() {
         assert_eq!(
             targeted_maintenance_outcome(
                 Some(MaintenanceOutcome::Noop),
@@ -2374,7 +2374,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_flush_failure_records_failed_metric() {
+    async fn flush_failure_records_failed_metric() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
         let conn = duckdb::Connection::open_in_memory().expect("failed to open in-memory duckdb");
@@ -2417,7 +2417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rewrite_failure_records_duration_and_prevents_merge_duration() {
+    async fn rewrite_failure_records_duration_and_prevents_merge_duration() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
         let conn = duckdb::Connection::open_in_memory().expect("failed to open in-memory duckdb");
@@ -2483,7 +2483,7 @@ mod tests {
 
     #[cfg(feature = "test-utils")]
     #[tokio::test]
-    async fn test_known_rewrite_single_output_file_error_is_suppressed_and_recycles_connection() {
+    async fn known_rewrite_single_output_file_error_is_suppressed_and_recycles_connection() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
         let open_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2569,7 +2569,7 @@ mod tests {
 
     #[cfg(feature = "test-utils")]
     #[tokio::test]
-    async fn test_spawn_ducklake_maintenance_worker_warms_pool_in_background() {
+    async fn spawn_ducklake_maintenance_worker_warms_pool_in_background() {
         let open_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let worker = spawn_ducklake_maintenance_worker(
             DuckLakeConnectionManager {
@@ -2586,6 +2586,7 @@ mod tests {
             std::sync::Arc::new(AtomicBool::new(false)),
             std::sync::Arc::new(AtomicBool::new(false)),
             std::sync::Arc::new(AtomicBool::new(false)),
+            std::sync::Arc::<str>::from("10MB"),
             None,
         )
         .expect("failed to spawn maintenance worker");
@@ -2615,7 +2616,7 @@ mod tests {
 
     #[cfg(feature = "test-utils")]
     #[tokio::test]
-    async fn test_requested_checkpoint_stays_pending_when_mutation_guard_is_active() {
+    async fn requested_checkpoint_stays_pending_when_mutation_guard_is_active() {
         let pool = Arc::new(
             build_warm_ducklake_pool(
                 DuckLakeConnectionManager {
@@ -2674,7 +2675,7 @@ mod tests {
 
     #[cfg(feature = "test-utils")]
     #[tokio::test]
-    async fn test_requested_inline_flush_stays_pending_when_mutation_guard_is_active() {
+    async fn requested_inline_flush_stays_pending_when_mutation_guard_is_active() {
         let pool = Arc::new(
             build_warm_ducklake_pool(
                 DuckLakeConnectionManager {
@@ -2748,7 +2749,7 @@ mod tests {
 
     #[cfg(feature = "test-utils")]
     #[tokio::test]
-    async fn test_requested_merge_stays_pending_when_mutation_guard_is_active() {
+    async fn requested_merge_stays_pending_when_mutation_guard_is_active() {
         let pool = Arc::new(
             build_warm_ducklake_pool(
                 DuckLakeConnectionManager {
@@ -2814,7 +2815,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_checkpoint_success_records_applied_duration() {
+    async fn checkpoint_success_records_applied_duration() {
         let _checkpoint_test_guard = acquire_checkpoint_test_guard().await;
         FAIL_CHECKPOINT_ONCE_FOR_TESTS.store(false, AtomicOrdering::Relaxed);
 
@@ -2850,7 +2851,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_checkpoint_failure_records_failed_duration() {
+    async fn checkpoint_failure_records_failed_duration() {
         let _checkpoint_test_guard = acquire_checkpoint_test_guard().await;
         FAIL_CHECKPOINT_ONCE_FOR_TESTS.store(false, AtomicOrdering::Relaxed);
 
@@ -2893,7 +2894,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_flush_busy_emits_skip_counter_only() {
+    async fn flush_busy_emits_skip_counter_only() {
         let handle = init_metrics_handle().expect("failed to initialize prometheus handle");
         register_metrics();
 

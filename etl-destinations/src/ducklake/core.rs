@@ -1165,7 +1165,7 @@ mod tests {
     use duckdb::{Config, Connection};
     use etl::store::both::memory::MemoryStore;
     use etl::store::schema::SchemaStore;
-    use etl::types::{ColumnSchema, Type as PgType};
+    use etl::types::{ColumnSchema, TableSchema, Type as PgType};
     use pg_escape::{quote_identifier, quote_literal};
     use std::path::{Path, PathBuf};
     use std::time::Instant;
@@ -1182,8 +1182,8 @@ mod tests {
             TableId::new(table_id),
             TableName::new(schema.to_string(), table.to_string()),
             vec![
-                ColumnSchema::new("id".to_string(), PgType::INT4, -1, false, true),
-                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, true, false),
+                ColumnSchema::new("id".to_string(), PgType::INT4, -1, 1, Some(1), false),
+                ColumnSchema::new("name".to_string(), PgType::TEXT, -1, 2, None, true),
             ],
         )
     }
@@ -1306,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_name_escaping() {
+    fn table_name_escaping() {
         assert_eq!(
             table_name_to_ducklake_table_name(&TableName {
                 schema: "public".to_string(),
@@ -1326,7 +1326,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_create_table_conflict_matches_ducklake_commit_conflict() {
+    fn is_create_table_conflict_matches_ducklake_commit_conflict() {
         let error = duckdb::Error::DuckDBFailure(
             duckdb::ffi::Error::new(1),
             Some(
@@ -1339,12 +1339,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_table_storage_metrics_reads_ducklake_metadata() {
+    async fn query_table_storage_metrics_reads_ducklake_metadata() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
         let data = path_to_file_url(&dir.path().join("data"));
         let store = MemoryStore::new();
         let schema = make_schema(1, "public", "users");
+        let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
         let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
         store
@@ -1367,7 +1368,7 @@ mod tests {
 
         destination
             .write_table_rows(
-                schema.id,
+                &replicated_table_schema,
                 vec![
                     TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
                     TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
@@ -1400,12 +1401,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_catalog_maintenance_metrics_reports_active_data_files_total() {
+    async fn query_catalog_maintenance_metrics_reports_active_data_files_total() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
         let data = path_to_file_url(&dir.path().join("data"));
         let store = MemoryStore::new();
         let schema = make_schema(1, "public", "users");
+        let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
         let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
         store
@@ -1428,7 +1430,7 @@ mod tests {
 
         destination
             .write_table_rows(
-                schema.id,
+                &replicated_table_schema,
                 vec![
                     TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]),
                     TableRow::new(vec![Cell::I32(2), Cell::String("bob".to_string())]),
@@ -1458,12 +1460,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_catalog_maintenance_metrics_reads_ducklake_metadata() {
+    async fn query_catalog_maintenance_metrics_reads_ducklake_metadata() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
         let data = path_to_file_url(&dir.path().join("data"));
         let store = MemoryStore::new();
         let schema = make_schema(1, "public", "users");
+        let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
         let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
         store
@@ -1486,7 +1489,7 @@ mod tests {
 
         destination
             .write_table_rows(
-                schema.id,
+                &replicated_table_schema,
                 vec![TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("alice".to_string()),
@@ -1495,7 +1498,7 @@ mod tests {
             .await
             .expect("failed to write rows");
         destination
-            .truncate_table(schema.id)
+            .truncate_table(&replicated_table_schema)
             .await
             .expect("failed to truncate table");
 
