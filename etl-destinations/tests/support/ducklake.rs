@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
+
 use duckdb::{Config, Connection};
 use pg_escape::quote_literal;
-use std::path::{Path, PathBuf};
 
 const DUCKDB_EXTENSION_VERSION: &str = "1.5.1";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";

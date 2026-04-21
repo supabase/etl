@@ -1,23 +1,26 @@
-use etl::state::table::TableReplicationPhaseType;
-use etl::test_utils::database::spawn_source_database;
-use etl::test_utils::notifying_store::NotifyingStore;
-use etl::test_utils::pipeline::create_pipeline;
-use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::{
-    TableSelection, TestDatabaseSchema, assert_table_rows_equal_ignoring_size, insert_mock_data,
-    setup_test_database_schema,
+use etl::{
+    state::table::TableReplicationPhaseType,
+    test_utils::{
+        database::spawn_source_database,
+        notifying_store::NotifyingStore,
+        pipeline::create_pipeline,
+        test_destination_wrapper::TestDestinationWrapper,
+        test_schema::{
+            TableSelection, TestDatabaseSchema, assert_table_rows_equal_ignoring_size,
+            insert_mock_data, setup_test_database_schema,
+        },
+    },
+    types::{Cell, EventType, PipelineId, TableRow},
 };
-use etl::types::{Cell, EventType, PipelineId, TableRow};
-use etl_destinations::iceberg::test_utils::LakekeeperClient;
 use etl_destinations::iceberg::{
     DestinationNamespace, IcebergClient, IcebergDestination, IcebergOperationType,
     table_name_to_iceberg_table_name,
+    test_utils::{LAKEKEEPER_URL, LakekeeperClient, create_minio_props, get_catalog_url},
 };
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
 use crate::support::iceberg::read_all_rows;
-use etl_destinations::iceberg::test_utils::{LAKEKEEPER_URL, create_minio_props, get_catalog_url};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy() {
@@ -65,7 +68,8 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     let single_destination_namespace = destination_namespace.is_single();
     let raw_destination =
         IcebergDestination::new(client.clone(), destination_namespace, store.clone());
-    // let raw_destination = bigquery_database.build_destination(store.clone()).await;
+    // let raw_destination =
+    // bigquery_database.build_destination(store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -128,7 +132,8 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
         ]),
     ];
 
-    // Sort deterministically by the debug representation as a simple stable key for tests.
+    // Sort deterministically by the debug representation as a simple stable key for
+    // tests.
     actual_users
         .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
     assert_table_rows_equal_ignoring_size(&actual_users, &expected_users);
@@ -151,28 +156,20 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
         ]),
     ];
 
-    // Sort deterministically by the debug representation as a simple stable key for tests.
+    // Sort deterministically by the debug representation as a simple stable key for
+    // tests.
     actual_orders
         .sort_by(|a, b| format!("{:?}", a.values()[0]).cmp(&format!("{:?}", b.values()[0])));
     assert_table_rows_equal_ignoring_size(&actual_orders, &expected_orders);
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the warehouse level
-    // This feature is planned for future releases. We'll start to use it when it becomes available.
-    // The cleanup is not in a Drop impl because each test has different number of object specitic to
-    // that test.
-    client
-        .drop_table_if_exists(&namespace, users_table)
-        .await
-        .unwrap();
-    client
-        .drop_table_if_exists(&namespace, orders_table)
-        .await
-        .unwrap();
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
+    // warehouse level This feature is planned for future releases. We'll start
+    // to use it when it becomes available. The cleanup is not in a Drop impl
+    // because each test has different number of object specitic to that test.
+    client.drop_table_if_exists(&namespace, users_table).await.unwrap();
+    client.drop_table_if_exists(&namespace, orders_table).await.unwrap();
     client.drop_namespace(&namespace).await.unwrap();
-    lakekeeper_client
-        .drop_warehouse(warehouse_id)
-        .await
-        .unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -244,9 +241,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
 
     // === CDC INSERT EVENTS ===
     // We'll expect 2 inserts per table -> 4 insert events total.
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 4)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
 
     // Insert rows AFTER Ready so they are captured as CDC events.
     insert_mock_data(
@@ -264,9 +259,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
 
     // === CDC UPDATE EVENTS ===
     // We'll expect 2 updates per table -> 4 update events total.
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Update, 4)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 4)]).await;
 
     // Update users
     database
@@ -294,29 +287,17 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
 
     // === CDC DELETE EVENTS ===
     // We'll expect 1 delete per table -> 2 delete events total.
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Delete, 2)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 2)]).await;
 
     // Delete user with id 1
     database
-        .delete_values(
-            database_schema.users_schema().name.clone(),
-            &["id"],
-            &["1"],
-            "",
-        )
+        .delete_values(database_schema.users_schema().name.clone(), &["id"], &["1"], "")
         .await
         .unwrap();
 
     // Delete order with id 2
     database
-        .delete_values(
-            database_schema.orders_schema().name.clone(),
-            &["id"],
-            &["2"],
-            "",
-        )
+        .delete_values(database_schema.orders_schema().name.clone(), &["id"], &["2"], "")
         .await
         .unwrap();
 
@@ -350,8 +331,8 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     }
 
     // Expected CDC rows: 2 inserts (UPSERT), 2 updates (UPSERT), 1 delete (DELETE)
-    // Note: order here is messed up due to limitations in how read_all_rows can't sort, so we sort manually
-    // by id and cdc operation columns
+    // Note: order here is messed up due to limitations in how read_all_rows can't
+    // sort, so we sort manually by id and cdc operation columns
     let expected_users = vec![
         // Initial insert of user 1
         TableRow::new(vec![
@@ -395,7 +376,8 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     let mut actual_orders =
         read_all_rows(&client, namespace.to_string(), orders_table.clone()).await;
 
-    // Sort deterministically by the primary key (id) and sequence key for stable assertions
+    // Sort deterministically by the primary key (id) and sequence key for stable
+    // assertions
     actual_orders.sort_by(|a, b| {
         let a_key = format!("{:?}", a.values()[3]);
         let b_key = format!("{:?}", b.values()[3]);
@@ -446,19 +428,10 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Cleanup: drop CDC tables, namespace, and warehouse.
-    client
-        .drop_table_if_exists(&namespace, users_table)
-        .await
-        .unwrap();
-    client
-        .drop_table_if_exists(&namespace, orders_table)
-        .await
-        .unwrap();
+    client.drop_table_if_exists(&namespace, users_table).await.unwrap();
+    client.drop_table_if_exists(&namespace, orders_table).await.unwrap();
     client.drop_namespace(&namespace).await.unwrap();
-    lakekeeper_client
-        .drop_warehouse(warehouse_id)
-        .await
-        .unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -532,9 +505,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     orders_state_notify.notified().await;
 
     // We'll expect 2 inserts per table -> 4 insert events total.
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 4)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
 
     // Insert 2 rows per each table (captured as CDC UPSERT events).
     insert_mock_data(
@@ -550,19 +521,12 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     event_notify.notified().await;
     destination.clear_events().await;
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Truncate, 2)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Truncate, 2)]).await;
 
-    // Truncate both tables in the source; destination should drop and recreate base + CDC tables.
-    database
-        .truncate_table(database_schema.users_schema().name.clone())
-        .await
-        .unwrap();
-    database
-        .truncate_table(database_schema.orders_schema().name.clone())
-        .await
-        .unwrap();
+    // Truncate both tables in the source; destination should drop and recreate base
+    // + CDC tables.
+    database.truncate_table(database_schema.users_schema().name.clone()).await.unwrap();
+    database.truncate_table(database_schema.orders_schema().name.clone()).await.unwrap();
 
     // Wait for all expected truncate events to be processed.
     event_notify.notified().await;
@@ -587,9 +551,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     assert!(actual_orders.is_empty());
 
     // We'll expect 2 inserts per table -> 4 insert events total.
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 4)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
 
     // Insert 2 extra rows per each table after truncation.
     insert_mock_data(
@@ -605,7 +567,8 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     event_notify.notified().await;
     destination.clear_events().await;
 
-    // After truncate, pre-truncate CDC rows should be gone (tables were dropped). Only post-truncate rows remain.
+    // After truncate, pre-truncate CDC rows should be gone (tables were dropped).
+    // Only post-truncate rows remain.
     let mut actual_users = read_all_rows(&client, namespace.to_string(), users_table.clone()).await;
     for row in &mut actual_users {
         let _ = row.values_mut().pop(); // drop sequence_key
@@ -655,17 +618,8 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Cleanup: drop CDC tables, namespace, and warehouse.
-    client
-        .drop_table_if_exists(&namespace, users_table)
-        .await
-        .unwrap();
-    client
-        .drop_table_if_exists(&namespace, orders_table)
-        .await
-        .unwrap();
+    client.drop_table_if_exists(&namespace, users_table).await.unwrap();
+    client.drop_table_if_exists(&namespace, orders_table).await.unwrap();
     client.drop_namespace(&namespace).await.unwrap();
-    lakekeeper_client
-        .drop_warehouse(warehouse_id)
-        .await
-        .unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }

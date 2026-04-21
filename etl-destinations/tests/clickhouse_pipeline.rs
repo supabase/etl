@@ -349,9 +349,8 @@ async fn all_types_table_copy() {
     let pipeline_id: PipelineId = random();
     let destination = ch_db.build_destination(store.clone());
 
-    let table_ready = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -377,32 +376,20 @@ async fn all_types_table_copy() {
     assert_eq!(r1.integer_col, 1000);
     assert_eq!(r1.bigint_col, 9_999_999);
     assert!((r1.real_col - 1.5_f32).abs() < 1e-3, "real_col mismatch");
-    assert!(
-        (r1.double_col - 2.5_f64).abs() < 1e-6,
-        "double_col mismatch"
-    );
+    assert!((r1.double_col - 2.5_f64).abs() < 1e-6, "double_col mismatch");
     assert_eq!(r1.numeric_col, "12345.67");
     assert!(r1.boolean_col);
     assert_eq!(r1.text_col, "hello text");
     assert_eq!(r1.varchar_col, "hello varchar");
     assert_eq!(r1.date_col, DATE_2024_01_15_DAYS, "date round-trip failed");
-    assert_eq!(
-        r1.timestamp_col, TS_2024_01_15_12_00_US,
-        "timestamp round-trip failed"
-    );
-    assert_eq!(
-        r1.timestamptz_col, TS_2024_01_15_12_00_US,
-        "timestamptz round-trip failed"
-    );
+    assert_eq!(r1.timestamp_col, TS_2024_01_15_12_00_US, "timestamp round-trip failed");
+    assert_eq!(r1.timestamptz_col, TS_2024_01_15_12_00_US, "timestamptz round-trip failed");
     assert_eq!(r1.time_col, "14:30:00");
     assert_eq!(r1.bytea_col, "deadbeef");
     assert_eq!(r1.inet_col, "192.168.1.1");
     assert_eq!(r1.cidr_col, "192.168.0.0/16");
     assert_eq!(r1.macaddr_col, "aa:bb:cc:dd:ee:ff");
-    assert_eq!(
-        r1.uuid_col.to_lowercase(),
-        "f47ac10b-58cc-4372-a567-0e02b2c3d479"
-    );
+    assert_eq!(r1.uuid_col.to_lowercase(), "f47ac10b-58cc-4372-a567-0e02b2c3d479");
     assert_eq!(r1.cdc_operation, "INSERT");
     // Empty arrays -- the regression case that accidentally worked before the fix.
     assert_eq!(
@@ -425,10 +412,7 @@ async fn all_types_table_copy() {
     assert!(!r2.boolean_col);
     assert_eq!(r2.numeric_col, "-99999.99");
     assert_eq!(r2.bytea_col, "cafebabe");
-    assert_eq!(
-        r2.uuid_col.to_lowercase(),
-        "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-    );
+    assert_eq!(r2.uuid_col.to_lowercase(), "a1b2c3d4-e5f6-7890-abcd-ef1234567890");
     assert_eq!(r2.cdc_operation, "INSERT");
     // Non-empty arrays -- the regression case that triggered the bug before the fix.
     assert_eq!(
@@ -493,9 +477,8 @@ async fn updates_are_streamed_to_clickhouse() {
     let pipeline_id: PipelineId = random();
     let destination = ch_db.build_destination(store.clone());
 
-    let table_ready = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -533,10 +516,7 @@ async fn updates_are_streamed_to_clickhouse() {
     assert_eq!(update_row.id, 1);
     assert_eq!(update_row.value, "after");
     assert_eq!(update_row.cdc_operation, "UPDATE");
-    assert!(
-        update_row.cdc_lsn > insert_row.cdc_lsn,
-        "streamed update should have a positive LSN"
-    );
+    assert!(update_row.cdc_lsn > insert_row.cdc_lsn, "streamed update should have a positive LSN");
 }
 
 const BOUNDARY_VALUES_SELECT: &str = concat!(
@@ -652,9 +632,8 @@ async fn boundary_values_table_copy() {
     let pipeline_id: PipelineId = random();
     let destination = ch_db.build_destination(store.clone());
 
-    let table_ready = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -674,10 +653,7 @@ async fn boundary_values_table_copy() {
 
     // Row 1: NULL scalars stay NULL, empty arrays stay empty.
     let r = &rows[0];
-    assert_eq!(
-        r.nullable_text, None,
-        "NULL text must not become empty string"
-    );
+    assert_eq!(r.nullable_text, None, "NULL text must not become empty string");
     assert_eq!(r.nullable_int, None, "NULL int must not become zero");
     assert!(r.int_array_col.is_empty());
     assert!(r.text_array_col.is_empty());
@@ -706,11 +682,7 @@ async fn boundary_values_table_copy() {
     );
     assert_eq!(r.nullable_int, None);
     assert_eq!(r.int_array_col, vec![Some(99)], "single-element array");
-    assert_eq!(
-        r.text_array_col,
-        vec![Some("only".to_string())],
-        "single-element array"
-    );
+    assert_eq!(r.text_array_col, vec![Some("only".to_string())], "single-element array");
 
     // Row 4: multi-byte UTF-8 preserved byte-for-byte.
     let r = &rows[3];
@@ -792,9 +764,8 @@ async fn deletes_are_streamed_to_clickhouse() {
     let pipeline_id: PipelineId = random();
     let destination = ch_db.build_destination(store.clone());
 
-    let table_ready = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -808,10 +779,7 @@ async fn deletes_are_streamed_to_clickhouse() {
     table_ready.notified().await;
 
     database
-        .run_sql(&format!(
-            "DELETE FROM {} WHERE id = 2",
-            table_name.as_quoted_identifier(),
-        ))
+        .run_sql(&format!("DELETE FROM {} WHERE id = 2", table_name.as_quoted_identifier(),))
         .await
         .expect("Failed to delete delete_flow row");
 
@@ -821,11 +789,7 @@ async fn deletes_are_streamed_to_clickhouse() {
 
     // --- THEN: two INSERTs from table copy, one DELETE from streaming ---
 
-    assert_eq!(
-        rows.len(),
-        3,
-        "expected 2 copied rows plus 1 streamed delete"
-    );
+    assert_eq!(rows.len(), 3, "expected 2 copied rows plus 1 streamed delete");
 
     // Row 1: copied, untouched.
     let r = &rows[0];
@@ -844,10 +808,7 @@ async fn deletes_are_streamed_to_clickhouse() {
     // Row 3: the streamed DELETE for id=2, preserving old row data.
     let r = &rows[2];
     assert_eq!(r.id, 2, "delete must target the correct row");
-    assert_eq!(
-        r.value, "delete_me",
-        "old row data must be preserved in DELETE"
-    );
+    assert_eq!(r.value, "delete_me", "old row data must be preserved in DELETE");
     assert_eq!(r.cdc_operation, "DELETE");
     assert!(r.cdc_lsn > 0, "streamed delete should have a positive LSN");
 }
@@ -906,9 +867,8 @@ async fn pipeline_restart_resumes_streaming() {
     let pipeline_id: PipelineId = random();
     let destination = ch_db.build_destination(store.clone());
 
-    let table_ready = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -970,10 +930,7 @@ async fn pipeline_restart_resumes_streaming() {
     assert_eq!(r.id, 2);
     assert_eq!(r.value, "after_restart");
     assert_eq!(r.cdc_operation, "INSERT");
-    assert!(
-        r.cdc_lsn > 0,
-        "second row should be from CDC streaming after restart"
-    );
+    assert!(r.cdc_lsn > 0, "second row should be from CDC streaming after restart");
 }
 
 /// Tests that TRUNCATE clears the ClickHouse table and that subsequent inserts
@@ -1029,9 +986,8 @@ async fn truncate_clears_table_and_accepts_new_inserts() {
     let pipeline_id: PipelineId = random();
     let destination = ch_db.build_destination(store.clone());
 
-    let table_ready = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1072,16 +1028,10 @@ async fn truncate_clears_table_and_accepts_new_inserts() {
     assert_eq!(rows.len(), 1, "only post-truncate row should exist");
 
     let r = &rows[0];
-    assert_eq!(
-        r.id, 3,
-        "post-truncate row should have id=3 (serial continues)"
-    );
+    assert_eq!(r.id, 3, "post-truncate row should have id=3 (serial continues)");
     assert_eq!(r.value, "gamma");
     assert_eq!(r.cdc_operation, "INSERT");
-    assert!(
-        r.cdc_lsn > 0,
-        "post-truncate insert should come from CDC streaming"
-    );
+    assert!(r.cdc_lsn > 0, "post-truncate insert should come from CDC streaming");
 }
 
 /// SELECT query used to verify the `flush_split` test.
@@ -1149,9 +1099,8 @@ async fn intermediate_flush_preserves_all_rows() {
         },
     );
 
-    let table_ready = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     // --- WHEN: pipeline copies data with aggressive flush splitting ---
     let mut pipeline = create_pipeline(
@@ -1168,11 +1117,7 @@ async fn intermediate_flush_preserves_all_rows() {
 
     // --- THEN: all rows arrive despite being split across many INSERTs ---
     let rows: Vec<UpdateFlowRow> = ch_db.query(FLUSH_SPLIT_SELECT).await;
-    assert_eq!(
-        rows.len(),
-        row_count,
-        "all rows must survive intermediate flush splits"
-    );
+    assert_eq!(rows.len(), row_count, "all rows must survive intermediate flush splits");
 
     for (i, r) in rows.iter().enumerate() {
         let expected_id = (i + 1) as i64;
@@ -1251,12 +1196,10 @@ async fn multiple_tables_receive_independent_writes() {
     let pipeline_id: PipelineId = random();
     let destination = ch_db.build_destination(store.clone());
 
-    let table_a_ready = store
-        .notify_on_table_state_type(table_a_id, TableReplicationPhaseType::Ready)
-        .await;
-    let table_b_ready = store
-        .notify_on_table_state_type(table_b_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_a_ready =
+        store.notify_on_table_state_type(table_a_id, TableReplicationPhaseType::Ready).await;
+    let table_b_ready =
+        store.notify_on_table_state_type(table_b_id, TableReplicationPhaseType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1398,9 +1341,8 @@ async fn sequential_transactions_preserve_commit_order() {
     let pipeline_id: PipelineId = random();
     let destination = ch_db.build_destination(store.clone());
 
-    let table_ready = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database_1.config,
@@ -1460,10 +1402,7 @@ async fn sequential_transactions_preserve_commit_order() {
     let r = &rows[2];
     assert_eq!(r.value, "update_b");
     assert_eq!(r.cdc_operation, "UPDATE");
-    assert!(
-        r.cdc_lsn > rows[1].cdc_lsn,
-        "update_b must have a higher LSN than update_a"
-    );
+    assert!(r.cdc_lsn > rows[1].cdc_lsn, "update_b must have a higher LSN than update_a");
 }
 
 /// SELECT query used to verify the `default_identity_delete` test.
@@ -1532,9 +1471,8 @@ async fn delete_with_default_replica_identity() {
     let pipeline_id: PipelineId = random();
     let destination = ch_db.build_destination(store.clone());
 
-    let table_ready = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1549,10 +1487,7 @@ async fn delete_with_default_replica_identity() {
 
     // --- WHEN: delete id=2, and insert a new row ---
     database
-        .run_sql(&format!(
-            "DELETE FROM {} WHERE id = 2",
-            table_name.as_quoted_identifier(),
-        ))
+        .run_sql(&format!("DELETE FROM {} WHERE id = 2", table_name.as_quoted_identifier(),))
         .await
         .expect("Failed to delete row");
 
@@ -1577,11 +1512,7 @@ async fn delete_with_default_replica_identity() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // --- THEN: DELETE targets the correct row, non-PK columns are zero-values ---
-    assert_eq!(
-        rows.len(),
-        4,
-        "expected 2 copied INSERTs + DELETE + new INSERT"
-    );
+    assert_eq!(rows.len(), 4, "expected 2 copied INSERTs + DELETE + new INSERT");
 
     let r = &rows[0];
     assert_eq!(r.id, 1);
@@ -1678,9 +1609,8 @@ async fn large_batch_table_copy() {
     let pipeline_id: PipelineId = random();
     let destination = ch_db.build_destination(store.clone());
 
-    let table_ready = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_ready =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     // --- WHEN: pipeline copies all rows ---
     let mut pipeline = create_pipeline(
@@ -1700,9 +1630,7 @@ async fn large_batch_table_copy() {
     assert_eq!(rows.len(), row_count, "all 1024 rows must arrive");
 
     // Spot-check: first, last, powers of two, and a few interior points.
-    let sample_ids: &[usize] = &[
-        1, 2, 4, 8, 16, 32, 64, 100, 128, 256, 500, 512, 750, 1000, 1024,
-    ];
+    let sample_ids: &[usize] = &[1, 2, 4, 8, 16, 32, 64, 100, 128, 256, 500, 512, 750, 1000, 1024];
     for &id in sample_ids {
         let r = &rows[id - 1];
         assert_eq!(r.id, id as i64, "row {id} id mismatch");

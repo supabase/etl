@@ -82,11 +82,7 @@ pub fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -> Strin
         format!("Array(Nullable({elem}))")
     } else {
         let base = postgres_column_type_to_clickhouse_sql(&col.typ);
-        if col.nullable || force_nullable {
-            format!("Nullable({base})")
-        } else {
-            base.to_string()
-        }
+        if col.nullable || force_nullable { format!("Nullable({base})") } else { base.to_string() }
     }
 }
 
@@ -122,10 +118,7 @@ mod tests {
 
     #[test]
     fn test_table_name_escaping() {
-        assert_eq!(
-            table_name_to_clickhouse_table_name("public", "orders"),
-            "public_orders"
-        );
+        assert_eq!(table_name_to_clickhouse_table_name("public", "orders"), "public_orders");
         assert_eq!(
             table_name_to_clickhouse_table_name("my_schema", "my_table"),
             "my__schema_my__table"
@@ -138,104 +131,41 @@ mod tests {
 
     #[test]
     fn test_scalar_type_mapping() {
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::BOOL),
-            "Boolean"
-        );
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::CHAR),
-            "String"
-        );
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::BPCHAR),
-            "String"
-        );
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::VARCHAR),
-            "String"
-        );
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::NAME),
-            "String"
-        );
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::TEXT),
-            "String"
-        );
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BOOL), "Boolean");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::CHAR), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BPCHAR), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::VARCHAR), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::NAME), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TEXT), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::INT2), "Int16");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::INT4), "Int32");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::INT8), "Int64");
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::FLOAT4),
-            "Float32"
-        );
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::FLOAT8),
-            "Float64"
-        );
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::NUMERIC),
-            "String"
-        );
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::FLOAT4), "Float32");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::FLOAT8), "Float64");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::NUMERIC), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::DATE), "Date");
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::TIME),
-            "String"
-        );
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMP),
-            "DateTime64(6)"
-        );
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIME), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMP), "DateTime64(6)");
         assert_eq!(
             postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMPTZ),
             "DateTime64(6, 'UTC')"
         );
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::UUID), "UUID");
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::JSON),
-            "String"
-        );
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::JSONB),
-            "String"
-        );
-        assert_eq!(
-            postgres_column_type_to_clickhouse_sql(&Type::BYTEA),
-            "String"
-        );
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::JSON), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::JSONB), "String");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BYTEA), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::OID), "UInt32");
     }
 
     #[test]
     fn test_array_type_mapping() {
-        assert_eq!(
-            postgres_array_element_clickhouse_sql(&Type::BOOL_ARRAY),
-            "Boolean"
-        );
-        assert_eq!(
-            postgres_array_element_clickhouse_sql(&Type::TEXT_ARRAY),
-            "String"
-        );
-        assert_eq!(
-            postgres_array_element_clickhouse_sql(&Type::INT4_ARRAY),
-            "Int32"
-        );
-        assert_eq!(
-            postgres_array_element_clickhouse_sql(&Type::INT8_ARRAY),
-            "Int64"
-        );
-        assert_eq!(
-            postgres_array_element_clickhouse_sql(&Type::FLOAT8_ARRAY),
-            "Float64"
-        );
-        assert_eq!(
-            postgres_array_element_clickhouse_sql(&Type::UUID_ARRAY),
-            "UUID"
-        );
-        assert_eq!(
-            postgres_array_element_clickhouse_sql(&Type::JSONB_ARRAY),
-            "String"
-        );
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::BOOL_ARRAY), "Boolean");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::TEXT_ARRAY), "String");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::INT4_ARRAY), "Int32");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::INT8_ARRAY), "Int64");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::FLOAT8_ARRAY), "Float64");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::UUID_ARRAY), "UUID");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::JSONB_ARRAY), "String");
     }
 
     #[test]
@@ -259,14 +189,8 @@ mod tests {
             },
         ];
         let sql = build_create_table_sql("public_users", &schemas);
-        assert!(
-            sql.contains("\"id\" Int32"),
-            "id should be non-nullable Int32"
-        );
-        assert!(
-            sql.contains("\"name\" Nullable(String)"),
-            "name should be Nullable(String)"
-        );
+        assert!(sql.contains("\"id\" Int32"), "id should be non-nullable Int32");
+        assert!(sql.contains("\"name\" Nullable(String)"), "name should be Nullable(String)");
     }
 
     #[test]
@@ -280,14 +204,8 @@ mod tests {
             nullable: false,
         }];
         let sql = build_create_table_sql("public_t", &schemas);
-        assert!(
-            sql.contains("\"cdc_operation\" String"),
-            "cdc_operation should be non-nullable"
-        );
-        assert!(
-            sql.contains("\"cdc_lsn\" Int64"),
-            "cdc_lsn should be non-nullable Int64"
-        );
+        assert!(sql.contains("\"cdc_operation\" String"), "cdc_operation should be non-nullable");
+        assert!(sql.contains("\"cdc_lsn\" Int64"), "cdc_lsn should be non-nullable Int64");
         assert!(sql.contains("ENGINE = MergeTree()"));
         assert!(sql.contains("ORDER BY tuple()"));
     }

@@ -1,23 +1,26 @@
+use std::{str::FromStr, sync::Once, time::Duration};
+
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use etl::config::BatchConfig;
-use etl::error::ErrorKind;
-use etl::state::table::{TableReplicationPhase, TableReplicationPhaseType};
-use etl::store::state::StateStore;
-use etl::test_utils::database::{spawn_source_database, test_table_name};
-use etl::test_utils::notifying_store::NotifyingStore;
-use etl::test_utils::pipeline::{create_pipeline, create_pipeline_with_batch_config};
-use etl::test_utils::test_destination_wrapper::TestDestinationWrapper;
-use etl::test_utils::test_schema::{TableSelection, insert_mock_data, setup_test_database_schema};
-use etl::types::{EventType, PgNumeric, PipelineId};
+use etl::{
+    config::BatchConfig,
+    error::ErrorKind,
+    state::table::{TableReplicationPhase, TableReplicationPhaseType},
+    store::state::StateStore,
+    test_utils::{
+        database::{spawn_source_database, test_table_name},
+        notifying_store::NotifyingStore,
+        pipeline::{create_pipeline, create_pipeline_with_batch_config},
+        test_destination_wrapper::TestDestinationWrapper,
+        test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
+    },
+    types::{EventType, PgNumeric, PipelineId},
+};
 use etl_destinations::bigquery::test_utils::{
     setup_bigquery_database, skip_if_missing_bigquery_env_vars,
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
-use std::str::FromStr;
-use std::sync::Once;
-use std::time::Duration;
 use tokio::time::sleep;
 
 /// Ensures crypto provider is only initialized once.
@@ -64,9 +67,7 @@ async fn table_copy_and_streaming_with_restart() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database
-        .build_destination(pipeline_id, store.clone())
-        .await;
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -100,36 +101,24 @@ async fn table_copy_and_streaming_with_restart() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // We query BigQuery directly to get the data which has been inserted by tests.
-    let users_rows = bigquery_database
-        .query_table(database_schema.users_schema().name)
-        .await
-        .unwrap();
+    let users_rows =
+        bigquery_database.query_table(database_schema.users_schema().name).await.unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
     assert_eq!(
         parsed_users_rows,
-        vec![
-            BigQueryUser::new(1, "user_1", 1),
-            BigQueryUser::new(2, "user_2", 2),
-        ]
+        vec![BigQueryUser::new(1, "user_1", 1), BigQueryUser::new(2, "user_2", 2),]
     );
-    let orders_rows = bigquery_database
-        .query_table(database_schema.orders_schema().name)
-        .await
-        .unwrap();
+    let orders_rows =
+        bigquery_database.query_table(database_schema.orders_schema().name).await.unwrap();
     let parsed_orders_rows = parse_bigquery_table_rows::<BigQueryOrder>(orders_rows);
     assert_eq!(
         parsed_orders_rows,
-        vec![
-            BigQueryOrder::new(1, "description_1"),
-            BigQueryOrder::new(2, "description_2"),
-        ]
+        vec![BigQueryOrder::new(1, "description_1"), BigQueryOrder::new(2, "description_2"),]
     );
 
     // Rebuild the destination for the restart so the test exercises state/schema
     // recovery instead of relying on a reused, previously shut-down wrapper.
-    let raw_destination = bigquery_database
-        .build_destination(pipeline_id, store.clone())
-        .await;
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // We restart the pipeline and check that we can process events since we have
@@ -145,9 +134,7 @@ async fn table_copy_and_streaming_with_restart() {
     pipeline.start().await.unwrap();
 
     // We expect 2 insert events for each table (4 total).
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 4)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 4)]).await;
 
     // Insert additional data.
     insert_mock_data(
@@ -164,10 +151,8 @@ async fn table_copy_and_streaming_with_restart() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // We query BigQuery directly to get the data which has been inserted by tests.
-    let users_rows = bigquery_database
-        .query_table(database_schema.users_schema().name)
-        .await
-        .unwrap();
+    let users_rows =
+        bigquery_database.query_table(database_schema.users_schema().name).await.unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
     assert_eq!(
         parsed_users_rows,
@@ -178,10 +163,8 @@ async fn table_copy_and_streaming_with_restart() {
             BigQueryUser::new(4, "user_4", 4),
         ]
     );
-    let orders_rows = bigquery_database
-        .query_table(database_schema.orders_schema().name)
-        .await
-        .unwrap();
+    let orders_rows =
+        bigquery_database.query_table(database_schema.orders_schema().name).await.unwrap();
     let parsed_orders_rows = parse_bigquery_table_rows::<BigQueryOrder>(orders_rows);
     assert_eq!(
         parsed_orders_rows,
@@ -210,9 +193,7 @@ async fn table_insert_update_delete() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database
-        .build_destination(pipeline_id, store.clone())
-        .await;
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -237,9 +218,7 @@ async fn table_insert_update_delete() {
     users_state_notify.notified().await;
 
     // Wait for the first insert.
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     // Insert a row.
     database
@@ -254,17 +233,13 @@ async fn table_insert_update_delete() {
     event_notify.notified().await;
 
     // We query BigQuery to check for the insert.
-    let users_rows = bigquery_database
-        .query_table(database_schema.users_schema().name)
-        .await
-        .unwrap();
+    let users_rows =
+        bigquery_database.query_table(database_schema.users_schema().name).await.unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
     assert_eq!(parsed_users_rows, vec![BigQueryUser::new(1, "user_1", 1),]);
 
     // Wait for the update.
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Update, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
 
     // Update the row.
     database
@@ -279,29 +254,17 @@ async fn table_insert_update_delete() {
     event_notify.notified().await;
 
     // We query BigQuery to check for the update.
-    let users_rows = bigquery_database
-        .query_table(database_schema.users_schema().name)
-        .await
-        .unwrap();
+    let users_rows =
+        bigquery_database.query_table(database_schema.users_schema().name).await.unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
-    assert_eq!(
-        parsed_users_rows,
-        vec![BigQueryUser::new(1, "user_10", 10),]
-    );
+    assert_eq!(parsed_users_rows, vec![BigQueryUser::new(1, "user_10", 10),]);
 
     // Wait for the update.
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Delete, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
 
     // Update the row.
     database
-        .delete_values(
-            database_schema.users_schema().name.clone(),
-            &["name"],
-            &["'user_10'"],
-            "",
-        )
+        .delete_values(database_schema.users_schema().name.clone(), &["name"], &["'user_10'"], "")
         .await
         .unwrap();
 
@@ -310,9 +273,7 @@ async fn table_insert_update_delete() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // We query BigQuery to check for deletion.
-    let users_rows = bigquery_database
-        .query_table(database_schema.users_schema().name)
-        .await;
+    let users_rows = bigquery_database.query_table(database_schema.users_schema().name).await;
     assert!(users_rows.is_none());
 }
 
@@ -333,9 +294,7 @@ async fn table_subsequent_updates() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database
-        .build_destination(pipeline_id, store.clone())
-        .await;
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -374,8 +333,8 @@ async fn table_subsequent_updates() {
         .await
         .unwrap();
 
-    // Create two transactions A and B on separate connections to make sure that the updates are
-    // ordered correctly.
+    // Create two transactions A and B on separate connections to make sure that the
+    // updates are ordered correctly.
     let transaction_a = database_1.begin_transaction().await;
     transaction_a
         .update_values(
@@ -402,10 +361,8 @@ async fn table_subsequent_updates() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // We query BigQuery to check for the final value.
-    let users_rows = bigquery_database
-        .query_table(database_schema.users_schema().name)
-        .await
-        .unwrap();
+    let users_rows =
+        bigquery_database.query_table(database_schema.users_schema().name).await.unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
     assert_eq!(parsed_users_rows, vec![BigQueryUser::new(1, "user_2", 2),]);
 }
@@ -424,17 +381,14 @@ async fn table_truncate_with_batching() {
 
     let bigquery_database = setup_bigquery_database().await;
 
-    // We create table `test_users_1` to simulate an error in the system where a table with that name
-    // already exists and should be replaced for replication to work correctly.
-    bigquery_database
-        .create_table("test_users_1", &[("age", "integer")])
-        .await;
+    // We create table `test_users_1` to simulate an error in the system where a
+    // table with that name already exists and should be replaced for
+    // replication to work correctly.
+    bigquery_database.create_table("test_users_1", &[("age", "integer")]).await;
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database
-        .build_destination(pipeline_id, store.clone())
-        .await;
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     // Start pipeline from scratch.
@@ -446,10 +400,7 @@ async fn table_truncate_with_batching() {
         destination.clone(),
         // We use a batch size > 1, so that we can make sure that interleaved truncate statements
         // work well with multiple batches of events.
-        BatchConfig {
-            max_fill_ms: 1000,
-            memory_budget_ratio: 0.2,
-        },
+        BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2 },
     );
 
     // Register notifications for table copy completion.
@@ -471,7 +422,8 @@ async fn table_truncate_with_batching() {
     users_state_notify.notified().await;
     orders_state_notify.notified().await;
 
-    // Wait for the 8 inserts (4 per table + 4 after truncate) and 2 truncates (1 per table).
+    // Wait for the 8 inserts (4 per table + 4 after truncate) and 2 truncates (1
+    // per table).
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Insert, 8), (EventType::Truncate, 2)])
         .await;
@@ -487,14 +439,8 @@ async fn table_truncate_with_batching() {
     .await;
 
     // We truncate both tables.
-    database
-        .truncate_table(database_schema.users_schema().name.clone())
-        .await
-        .unwrap();
-    database
-        .truncate_table(database_schema.orders_schema().name.clone())
-        .await
-        .unwrap();
+    database.truncate_table(database_schema.users_schema().name.clone()).await.unwrap();
+    database.truncate_table(database_schema.orders_schema().name.clone()).await.unwrap();
 
     // Insert 2 extra rows per each table.
     insert_mock_data(
@@ -510,31 +456,21 @@ async fn table_truncate_with_batching() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We query BigQuery directly to get the data which tests have inserted, expecting that
-    // only the rows after truncation are there.
-    let users_rows = bigquery_database
-        .query_table(database_schema.users_schema().name)
-        .await
-        .unwrap();
+    // We query BigQuery directly to get the data which tests have inserted,
+    // expecting that only the rows after truncation are there.
+    let users_rows =
+        bigquery_database.query_table(database_schema.users_schema().name).await.unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
     assert_eq!(
         parsed_users_rows,
-        vec![
-            BigQueryUser::new(3, "user_3", 3),
-            BigQueryUser::new(4, "user_4", 4),
-        ]
+        vec![BigQueryUser::new(3, "user_3", 3), BigQueryUser::new(4, "user_4", 4),]
     );
-    let orders_rows = bigquery_database
-        .query_table(database_schema.orders_schema().name)
-        .await
-        .unwrap();
+    let orders_rows =
+        bigquery_database.query_table(database_schema.orders_schema().name).await.unwrap();
     let parsed_orders_rows = parse_bigquery_table_rows::<BigQueryOrder>(orders_rows);
     assert_eq!(
         parsed_orders_rows,
-        vec![
-            BigQueryOrder::new(3, "description_3"),
-            BigQueryOrder::new(4, "description_4")
-        ]
+        vec![BigQueryOrder::new(3, "description_3"), BigQueryOrder::new(4, "description_4")]
     );
 }
 
@@ -579,9 +515,7 @@ async fn table_nullable_scalar_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database
-        .build_destination(pipeline_id, store.clone())
-        .await;
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub".to_string();
@@ -598,18 +532,15 @@ async fn table_nullable_scalar_columns() {
         destination.clone(),
     );
 
-    let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_sync_done_notification =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     table_sync_done_notification.notified().await;
 
     // Insert
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .insert_values(
@@ -643,17 +574,12 @@ async fn table_nullable_scalar_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
+    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsScalar>(table_rows);
     assert_eq!(parsed_table_rows, vec![NullableColsScalar::all_nulls(1),]);
 
     // Update
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Update, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
 
     // Define test values
     let updated_bool = true;
@@ -706,10 +632,7 @@ async fn table_nullable_scalar_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
+    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsScalar>(table_rows);
 
     let expected_row = NullableColsScalar::with_non_null_values(
@@ -736,14 +659,9 @@ async fn table_nullable_scalar_columns() {
     assert_eq!(parsed_table_rows, vec![expected_row]);
 
     // delete
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Delete, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
 
-    database
-        .delete_values(table_name.clone(), &["id"], &["'1'"], "")
-        .await
-        .unwrap();
+    database.delete_values(table_name.clone(), &["id"], &["'1'"], "").await.unwrap();
 
     event_notify.notified().await;
 
@@ -794,9 +712,7 @@ async fn table_nullable_array_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database
-        .build_destination(pipeline_id, store.clone())
-        .await;
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array".to_string();
@@ -813,18 +729,15 @@ async fn table_nullable_array_columns() {
         destination.clone(),
     );
 
-    let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_sync_done_notification =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     table_sync_done_notification.notified().await;
 
     // insert with null arrays
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
         .insert_values(
@@ -859,19 +772,14 @@ async fn table_nullable_array_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
+    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
     // null arrays are returned as empty arrays by big query: See this section:
     // https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#array_nulls
     assert_eq!(parsed_table_rows, vec![NullableColsArray::all_empty(1),]);
 
     // update with array values
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Update, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
 
     // Define test array values
     let updated_bool_arr = vec![true, false, true];
@@ -881,10 +789,8 @@ async fn table_nullable_array_columns() {
     let updated_i8_arr = vec![1000i64, 2000i64, 3000i64];
     let updated_f4_arr = vec![1.5f32, 2.5f32];
     let updated_f8_arr = vec![std::f64::consts::PI, std::f64::consts::E];
-    let updated_n_arr = vec![
-        PgNumeric::from_str("3.141").unwrap(),
-        PgNumeric::from_str("2.718").unwrap(),
-    ];
+    let updated_n_arr =
+        vec![PgNumeric::from_str("3.141").unwrap(), PgNumeric::from_str("2.718").unwrap()];
     let updated_bytes_arr = vec![b"test_bytes1".to_vec(), b"test_bytes2".to_vec()];
     let updated_date_arr = vec![
         NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
@@ -904,14 +810,10 @@ async fn table_nullable_array_columns() {
         DateTime::<Utc>::from_naive_utc_and_offset(updated_timestamp_arr[1], Utc),
     ];
     let updated_uuid_arr = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
-    let updated_json_arr = vec![
-        serde_json::json!({"key1": "value1"}),
-        serde_json::json!({"key2": "value2"}),
-    ];
-    let updated_jsonb_arr = vec![
-        serde_json::json!({"jsonb1": "data1"}),
-        serde_json::json!({"jsonb2": "data2"}),
-    ];
+    let updated_json_arr =
+        vec![serde_json::json!({"key1": "value1"}), serde_json::json!({"key2": "value2"})];
+    let updated_jsonb_arr =
+        vec![serde_json::json!({"jsonb1": "data1"}), serde_json::json!({"jsonb2": "data2"})];
     let updated_oid_arr = vec![12345u32, 67890u32];
 
     database
@@ -947,10 +849,7 @@ async fn table_nullable_array_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
+    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
 
     let expected_row = NullableColsArray::with_non_null_values(
@@ -977,14 +876,9 @@ async fn table_nullable_array_columns() {
     assert_eq!(parsed_table_rows, vec![expected_row]);
 
     // delete
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Delete, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
 
-    database
-        .delete_values(table_name.clone(), &["id"], &["'1'"], "")
-        .await
-        .unwrap();
+    database.delete_values(table_name.clone(), &["id"], &["'1'"], "").await.unwrap();
 
     event_notify.notified().await;
 
@@ -1035,9 +929,7 @@ async fn table_non_nullable_scalar_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database
-        .build_destination(pipeline_id, store.clone())
-        .await;
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null".to_string();
@@ -1054,18 +946,15 @@ async fn table_non_nullable_scalar_columns() {
         destination.clone(),
     );
 
-    let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_sync_done_notification =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     table_sync_done_notification.notified().await;
 
     // insert with non-null values
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     // Define test values - all non-null
     let test_bool = true;
@@ -1118,10 +1007,7 @@ async fn table_non_nullable_scalar_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
+    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NonNullableColsScalar>(table_rows);
 
     let expected_row = NonNullableColsScalar::new(
@@ -1148,9 +1034,7 @@ async fn table_non_nullable_scalar_columns() {
     assert_eq!(parsed_table_rows, vec![expected_row]);
 
     // update with different non-null values
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Update, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
 
     // Define updated test values
     let updated_bool = false;
@@ -1203,10 +1087,7 @@ async fn table_non_nullable_scalar_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
+    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NonNullableColsScalar>(table_rows);
 
     let expected_updated_row = NonNullableColsScalar::new(
@@ -1233,14 +1114,9 @@ async fn table_non_nullable_scalar_columns() {
     assert_eq!(parsed_table_rows, vec![expected_updated_row]);
 
     // delete
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Delete, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
 
-    database
-        .delete_values(table_name.clone(), &["id"], &["'1'"], "")
-        .await
-        .unwrap();
+    database.delete_values(table_name.clone(), &["id"], &["'1'"], "").await.unwrap();
 
     event_notify.notified().await;
 
@@ -1291,9 +1167,7 @@ async fn table_non_nullable_array_columns() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database
-        .build_destination(pipeline_id, store.clone())
-        .await;
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_non_null_array".to_string();
@@ -1310,18 +1184,15 @@ async fn table_non_nullable_array_columns() {
         destination.clone(),
     );
 
-    let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_sync_done_notification =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     table_sync_done_notification.notified().await;
 
     // insert with non-null array values
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     // Define test array values - all non-null
     let test_bool_arr = vec![true, false, true];
@@ -1331,10 +1202,8 @@ async fn table_non_nullable_array_columns() {
     let test_i8_arr = vec![1000i64, 2000i64, 3000i64];
     let test_f4_arr = vec![1.5f32, 2.5f32];
     let test_f8_arr = vec![std::f64::consts::PI, std::f64::consts::E];
-    let test_n_arr = vec![
-        PgNumeric::from_str("3.141").unwrap(),
-        PgNumeric::from_str("2.718").unwrap(),
-    ];
+    let test_n_arr =
+        vec![PgNumeric::from_str("3.141").unwrap(), PgNumeric::from_str("2.718").unwrap()];
     let test_bytes_arr = vec![b"test_bytes1".to_vec(), b"test_bytes2".to_vec()];
     let test_date_arr = vec![
         NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
@@ -1354,14 +1223,10 @@ async fn table_non_nullable_array_columns() {
         DateTime::<Utc>::from_naive_utc_and_offset(test_timestamp_arr[1], Utc),
     ];
     let test_uuid_arr = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
-    let test_json_arr = vec![
-        serde_json::json!({"key1": "value1"}),
-        serde_json::json!({"key2": "value2"}),
-    ];
-    let test_jsonb_arr = vec![
-        serde_json::json!({"jsonb1": "data1"}),
-        serde_json::json!({"jsonb2": "data2"}),
-    ];
+    let test_json_arr =
+        vec![serde_json::json!({"key1": "value1"}), serde_json::json!({"key2": "value2"})];
+    let test_jsonb_arr =
+        vec![serde_json::json!({"jsonb1": "data1"}), serde_json::json!({"jsonb2": "data2"})];
     let test_oid_arr = vec![12345u32, 67890u32];
 
     database
@@ -1397,10 +1262,7 @@ async fn table_non_nullable_array_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
+    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
 
     let expected_row = NullableColsArray::with_non_null_values(
@@ -1427,26 +1289,18 @@ async fn table_non_nullable_array_columns() {
     assert_eq!(parsed_table_rows, vec![expected_row]);
 
     // update with different non-null array values
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Update, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
 
     // Define updated test array values
     let updated_bool_arr = vec![false, true];
-    let updated_text_arr = vec![
-        "updated".to_string(),
-        "arrays".to_string(),
-        "test".to_string(),
-    ];
+    let updated_text_arr = vec!["updated".to_string(), "arrays".to_string(), "test".to_string()];
     let updated_i2_arr = vec![10i16, 20i16];
     let updated_i4_arr = vec![500i32, 600i32, 700i32];
     let updated_i8_arr = vec![5000i64, 6000i64];
     let updated_f4_arr = vec![std::f32::consts::PI, 2.71f32, 1.41f32];
     let updated_f8_arr = vec![std::f64::consts::E, std::f64::consts::PI];
-    let updated_n_arr = vec![
-        PgNumeric::from_str("1.2").unwrap(),
-        PgNumeric::from_str("2.2").unwrap(),
-    ];
+    let updated_n_arr =
+        vec![PgNumeric::from_str("1.2").unwrap(), PgNumeric::from_str("2.2").unwrap()];
     let updated_bytes_arr = vec![b"updated1".to_vec(), b"updated2".to_vec()];
     let updated_date_arr = vec![
         NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
@@ -1458,28 +1312,18 @@ async fn table_non_nullable_array_columns() {
     ];
     let updated_base_date = NaiveDate::from_ymd_opt(2024, 3, 10).unwrap();
     let updated_timestamp_arr = vec![
-        NaiveDateTime::new(
-            updated_base_date,
-            NaiveTime::from_hms_opt(11, 20, 10).unwrap(),
-        ),
-        NaiveDateTime::new(
-            updated_base_date,
-            NaiveTime::from_hms_opt(16, 40, 50).unwrap(),
-        ),
+        NaiveDateTime::new(updated_base_date, NaiveTime::from_hms_opt(11, 20, 10).unwrap()),
+        NaiveDateTime::new(updated_base_date, NaiveTime::from_hms_opt(16, 40, 50).unwrap()),
     ];
     let updated_timestamptz_arr = vec![
         DateTime::<Utc>::from_naive_utc_and_offset(updated_timestamp_arr[0], Utc),
         DateTime::<Utc>::from_naive_utc_and_offset(updated_timestamp_arr[1], Utc),
     ];
     let updated_uuid_arr = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
-    let updated_json_arr = vec![
-        serde_json::json!({"updated": "json1"}),
-        serde_json::json!({"updated": "json2"}),
-    ];
-    let updated_jsonb_arr = vec![
-        serde_json::json!({"updated": "jsonb1"}),
-        serde_json::json!({"updated": "jsonb2"}),
-    ];
+    let updated_json_arr =
+        vec![serde_json::json!({"updated": "json1"}), serde_json::json!({"updated": "json2"})];
+    let updated_jsonb_arr =
+        vec![serde_json::json!({"updated": "jsonb1"}), serde_json::json!({"updated": "jsonb2"})];
     let updated_oid_arr = vec![98765u32, 54321u32];
 
     database
@@ -1515,10 +1359,7 @@ async fn table_non_nullable_array_columns() {
 
     event_notify.notified().await;
 
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
+    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
     let parsed_table_rows = parse_bigquery_table_rows::<NullableColsArray>(table_rows);
 
     let expected_updated_row = NullableColsArray::with_non_null_values(
@@ -1545,14 +1386,9 @@ async fn table_non_nullable_array_columns() {
     assert_eq!(parsed_table_rows, vec![expected_updated_row]);
 
     // delete
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Delete, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
 
-    database
-        .delete_values(table_name.clone(), &["id"], &["'1'"], "")
-        .await
-        .unwrap();
+    database.delete_values(table_name.clone(), &["id"], &["'1'"], "").await.unwrap();
 
     event_notify.notified().await;
 
@@ -1574,16 +1410,12 @@ async fn table_array_with_null_values() {
     let database = spawn_source_database().await;
     let bigquery_database = setup_bigquery_database().await;
     let table_name = test_table_name("array_with_nulls");
-    let table_id = database
-        .create_table(table_name.clone(), true, &[("int_array", "int4[]")])
-        .await
-        .unwrap();
+    let table_id =
+        database.create_table(table_name.clone(), true, &[("int_array", "int4[]")]).await.unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database
-        .build_destination(pipeline_id, store.clone())
-        .await;
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_array_nulls".to_string();
@@ -1600,9 +1432,8 @@ async fn table_array_with_null_values() {
         destination.clone(),
     );
 
-    let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_sync_done_notification =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
@@ -1623,40 +1454,31 @@ async fn table_array_with_null_values() {
         .await
         .unwrap();
 
-    // We sleep to wait for the event to be processed. This is not ideal, but if we wanted to do
-    // this better, we would have to also implement error handling within the apply worker to write
-    // in the state store.
+    // We sleep to wait for the event to be processed. This is not ideal, but if we
+    // wanted to do this better, we would have to also implement error handling
+    // within the apply worker to write in the state store.
     sleep(Duration::from_secs(5)).await;
 
     // Wait for the pipeline expecting an error to be returned.
     let err = pipeline.shutdown_and_wait().await.err().unwrap();
     assert_eq!(err.kinds().len(), 1);
-    assert_eq!(
-        err.kinds()[0],
-        ErrorKind::NullValuesNotSupportedInArrayInDestination
-    );
+    assert_eq!(err.kinds()[0], ErrorKind::NullValuesNotSupportedInArrayInDestination);
 
     // Reset and try with valid array (no nulls)
     database
         .client
         .as_ref()
         .unwrap()
-        .execute(
-            &format!(
-                "delete from {} where true",
-                table_name.as_quoted_identifier()
-            ),
-            &[],
-        )
+        .execute(&format!("delete from {} where true", table_name.as_quoted_identifier()), &[])
         .await
         .unwrap();
 
-    // We have to reset the state of the table and copy it from scratch, otherwise the CDC will contain
-    // the inserts and deletes, failing again.
+    // We have to reset the state of the table and copy it from scratch, otherwise
+    // the CDC will contain the inserts and deletes, failing again.
     store.reset_table_state(table_id).await.unwrap();
 
-    // We also clear the events so that it's more idiomatic to wait for them, since we don't have
-    // the prior insert.
+    // We also clear the events so that it's more idiomatic to wait for them, since
+    // we don't have the prior insert.
     destination.clear_events().await;
 
     // We recreate the pipeline and try again.
@@ -1668,17 +1490,14 @@ async fn table_array_with_null_values() {
         destination.clone(),
     );
 
-    let table_sync_done_notification = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready)
-        .await;
+    let table_sync_done_notification =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
 
     table_sync_done_notification.notified().await;
 
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     // Insert array without null values
     database
@@ -1700,23 +1519,17 @@ async fn table_array_with_null_values() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify the valid array was successfully replicated to BigQuery
-    let table_rows = bigquery_database
-        .query_table(table_name.clone())
-        .await
-        .unwrap();
+    let table_rows = bigquery_database.query_table(table_name.clone()).await.unwrap();
 
     // Check that there is only the valid row in BigQuery
     assert_eq!(table_rows.len(), 1);
 
-    // Check that the int array contains 3 elements, meaning it must be the second insert with all
-    // NON-NULL values
+    // Check that the int array contains 3 elements, meaning it must be the second
+    // insert with all NON-NULL values
     let row = &table_rows[0];
     if let Some(columns) = &row.columns {
         assert_eq!(columns.len(), 2);
-        assert_eq!(
-            columns[1].value.clone().unwrap().as_array().unwrap().len(),
-            3
-        );
+        assert_eq!(columns[1].value.clone().unwrap().as_array().unwrap().len(), 3);
     }
 }
 
@@ -1735,11 +1548,7 @@ async fn table_validation_out_of_bounds_values() {
     // Create tables with different error types
     let huge_numeric_table = test_table_name("huge_numeric");
     let huge_numeric_table_id = database
-        .create_table(
-            huge_numeric_table.clone(),
-            true,
-            &[("huge_numeric", "numeric")],
-        )
+        .create_table(huge_numeric_table.clone(), true, &[("huge_numeric", "numeric")])
         .await
         .unwrap();
 
@@ -1751,11 +1560,7 @@ async fn table_validation_out_of_bounds_values() {
 
     let nan_array_table = test_table_name("nan_array");
     let nan_array_table_id = database
-        .create_table(
-            nan_array_table.clone(),
-            true,
-            &[("numeric_array", "numeric[]")],
-        )
+        .create_table(nan_array_table.clone(), true, &[("numeric_array", "numeric[]")])
         .await
         .unwrap();
 
@@ -1805,9 +1610,7 @@ async fn table_validation_out_of_bounds_values() {
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database
-        .build_destination(pipeline_id, store.clone())
-        .await;
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_validation".to_string();
@@ -1850,11 +1653,7 @@ async fn table_validation_out_of_bounds_values() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     for table_id in [huge_numeric_table_id, old_date_table_id, nan_array_table_id] {
-        let table_state = store
-            .get_table_replication_state(table_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let table_state = store.get_table_replication_state(table_id).await.unwrap().unwrap();
         assert!(matches!(table_state, TableReplicationPhase::Errored { .. }));
     }
 }
@@ -1871,20 +1670,14 @@ async fn table_schema_change() {
         .create_table(
             table_name.clone(),
             true,
-            &[
-                ("name", "text not null"),
-                ("age", "integer not null"),
-                ("status", "text"),
-            ],
+            &[("name", "text not null"), ("age", "integer not null"), ("status", "text")],
         )
         .await
         .unwrap();
 
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
-    let raw_destination = bigquery_database
-        .build_destination(pipeline_id, store.clone())
-        .await;
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
     let publication_name = "test_pub_multi_ops".to_string();
@@ -1901,24 +1694,17 @@ async fn table_schema_change() {
         destination.clone(),
     );
 
-    let table_sync_done = store
-        .notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone)
-        .await;
+    let table_sync_done =
+        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::SyncDone).await;
 
     pipeline.start().await.unwrap();
     table_sync_done.notified().await;
 
     // Insert the initial row.
-    let event_notify = destination
-        .wait_for_events_count(vec![(EventType::Insert, 1)])
-        .await;
+    let event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
 
     database
-        .insert_values(
-            table_name.clone(),
-            &["name", "age", "status"],
-            &[&"Alice", &25, &"active"],
-        )
+        .insert_values(table_name.clone(), &["name", "age", "status"], &[&"Alice", &25, &"active"])
         .await
         .unwrap();
 
@@ -1926,10 +1712,7 @@ async fn table_schema_change() {
     destination.clear_events().await;
 
     // Verify initial schema.
-    let initial_schema = bigquery_database
-        .query_table_schema(table_name.clone())
-        .await
-        .unwrap();
+    let initial_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
     initial_schema.assert_columns(&["id", "name", "age", "status"]);
 
     // Verify destination schema state is applied after initial table creation.
@@ -1945,10 +1728,11 @@ async fn table_schema_change() {
     // 2. Drop the status column
     // 3. Add email column
     //
-    // Note: Each DDL change is captured via the DDL event trigger and stored in the schema
-    // store, but PostgreSQL sends only ONE Relation message with the final schema when the
-    // next DML operation (INSERT) occurs. The schema diffing in handle_relation_event then
-    // computes and applies all changes at once.
+    // Note: Each DDL change is captured via the DDL event trigger and stored in the
+    // schema store, but PostgreSQL sends only ONE Relation message with the
+    // final schema when the next DML operation (INSERT) occurs. The schema
+    // diffing in handle_relation_event then computes and applies all changes at
+    // once.
     let event_notify = destination
         .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
         .await;
@@ -1956,29 +1740,20 @@ async fn table_schema_change() {
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::RenameColumn {
-                old_name: "name",
-                new_name: "full_name",
-            }],
+            &[TableModification::RenameColumn { old_name: "name", new_name: "full_name" }],
         )
+        .await
+        .unwrap();
+
+    database
+        .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "status" }])
         .await
         .unwrap();
 
     database
         .alter_table(
             table_name.clone(),
-            &[TableModification::DropColumn { name: "status" }],
-        )
-        .await
-        .unwrap();
-
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AddColumn {
-                name: "email",
-                data_type: "text",
-            }],
+            &[TableModification::AddColumn { name: "email", data_type: "text" }],
         )
         .await
         .unwrap();
@@ -2001,10 +1776,7 @@ async fn table_schema_change() {
     // - name should be renamed to full_name
     // - status should be dropped
     // - email should be added
-    let final_schema = bigquery_database
-        .query_table_schema(table_name.clone())
-        .await
-        .unwrap();
+    let final_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
     final_schema.assert_columns(&["id", "full_name", "age", "email"]);
     final_schema.assert_no_column("name");
     final_schema.assert_no_column("status");

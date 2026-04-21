@@ -3,8 +3,7 @@
 //! This module centralizes exponential backoff mechanics while leaving retry
 //! classification, logging, and metrics at the destination call site.
 
-use std::future::Future;
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 /// Retry policy for one destination-owned operation.
 ///
@@ -91,10 +90,7 @@ where
             Err(error) => {
                 let retry_index = total_attempts;
                 if retry_index > policy.max_retries || should_retry(&error) == RetryDecision::Stop {
-                    return Err(RetryFailure {
-                        total_attempts,
-                        last_error: error,
-                    });
+                    return Err(RetryFailure { total_attempts, last_error: error });
                 }
 
                 let sleep_delay = transform_delay(base_delay);
@@ -107,10 +103,8 @@ where
                 });
 
                 tokio::time::sleep(sleep_delay).await;
-                base_delay = base_delay
-                    .checked_mul(2)
-                    .unwrap_or(Duration::MAX)
-                    .min(policy.max_delay);
+                base_delay =
+                    base_delay.checked_mul(2).unwrap_or(Duration::MAX).min(policy.max_delay);
             }
         }
     }
@@ -118,10 +112,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use super::*;
 
     /// Retries until the operation succeeds.
     #[tokio::test(start_paused = true)]
@@ -151,11 +147,7 @@ mod tests {
                     let attempts = Arc::clone(&attempts_for_task);
                     async move {
                         let current = attempts.fetch_add(1, Ordering::SeqCst);
-                        if current < 2 {
-                            Err("retry me")
-                        } else {
-                            Ok("done")
-                        }
+                        if current < 2 { Err("retry me") } else { Ok("done") }
                     }
                 },
             )
@@ -198,10 +190,7 @@ mod tests {
                 |_| RetryDecision::Retry,
                 |delay| delay,
                 move |attempt: RetryAttempt<'_, &'static str>| {
-                    base_delays_for_task
-                        .lock()
-                        .unwrap()
-                        .push(attempt.base_delay);
+                    base_delays_for_task.lock().unwrap().push(attempt.base_delay);
                 },
                 || async { Err::<(), _>("still failing") },
             )
@@ -221,11 +210,7 @@ mod tests {
         assert_eq!(failure.last_error, "still failing");
         assert_eq!(
             *base_delays.lock().unwrap(),
-            vec![
-                Duration::from_millis(5),
-                Duration::from_millis(8),
-                Duration::from_millis(8),
-            ]
+            vec![Duration::from_millis(5), Duration::from_millis(8), Duration::from_millis(8),]
         );
     }
 
@@ -271,10 +256,7 @@ mod tests {
                 |_| RetryDecision::Retry,
                 |delay| delay + Duration::from_millis(3),
                 move |attempt: RetryAttempt<'_, &'static str>| {
-                    seen_sleep_delays_for_task
-                        .lock()
-                        .unwrap()
-                        .push(attempt.sleep_delay);
+                    seen_sleep_delays_for_task.lock().unwrap().push(attempt.sleep_delay);
                 },
                 {
                     let attempts = Arc::new(AtomicUsize::new(0));
@@ -282,11 +264,7 @@ mod tests {
                         let attempts = Arc::clone(&attempts);
                         async move {
                             let current = attempts.fetch_add(1, Ordering::SeqCst);
-                            if current == 0 {
-                                Err("retry once")
-                            } else {
-                                Ok("done")
-                            }
+                            if current == 0 { Err("retry once") } else { Ok("done") }
                         }
                     }
                 },
@@ -299,10 +277,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert_eq!(handle.await.unwrap().unwrap(), "done");
-        assert_eq!(
-            *seen_sleep_delays.lock().unwrap(),
-            vec![Duration::from_millis(8)]
-        );
+        assert_eq!(*seen_sleep_delays.lock().unwrap(), vec![Duration::from_millis(8)]);
     }
 
     /// Returns the last error after exhausting retries.

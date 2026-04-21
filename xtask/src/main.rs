@@ -2,9 +2,7 @@ mod commands;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use commands::chaos::ChaosArgs;
-use commands::nextest::NextestArgs;
-use commands::postgres::PostgresArgs;
+use commands::{ChaosArgs, NextestArgs, PostgresArgs};
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Project task runner")]

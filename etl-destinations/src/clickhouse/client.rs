@@ -38,18 +38,14 @@ impl ClickHouseClient {
         password: Option<String>,
         database: impl Into<String>,
     ) -> Self {
-        let mut client = Client::default()
-            .with_url(url.to_string())
-            .with_user(user)
-            .with_database(database);
+        let mut client =
+            Client::default().with_url(url.to_string()).with_user(user).with_database(database);
 
         if let Some(pw) = password {
             client = client.with_password(pw);
         }
 
-        Self {
-            inner: Arc::new(client),
-        }
+        Self { inner: Arc::new(client) }
     }
 
     pub async fn ping(&self) -> EtlResult<()> {
@@ -58,13 +54,7 @@ impl ClickHouseClient {
             .fetch_one::<u8>()
             .await
             .map(|_| ())
-            .map_err(|e| {
-                etl_error!(
-                    ErrorKind::Unknown,
-                    "ClickHouse connectivity check failed",
-                    e
-                )
-            })
+            .map_err(|e| etl_error!(ErrorKind::Unknown, "ClickHouse connectivity check failed", e))
     }
 
     /// Executes a DDL statement (e.g. `CREATE TABLE IF NOT EXISTS …`).
@@ -88,10 +78,7 @@ impl ClickHouseClient {
         column: &etl::types::ColumnSchema,
     ) -> EtlResult<()> {
         let col_type = clickhouse_column_type(column, true);
-        let sql = format!(
-            "ALTER TABLE \"{table_name}\" ADD COLUMN \"{}\" {col_type}",
-            column.name
-        );
+        let sql = format!("ALTER TABLE \"{table_name}\" ADD COLUMN \"{}\" {col_type}", column.name);
         self.execute_ddl(&sql).await
     }
 
@@ -151,10 +138,8 @@ impl ClickHouseClient {
     ) -> EtlResult<()> {
         let sql = format!("INSERT INTO \"{table_name}\" FORMAT RowBinary");
 
-        let mut insert = self
-            .inner
-            .insert_formatted_with(sql.clone())
-            .buffered_with_capacity(BUFFERED_CAPACITY);
+        let mut insert =
+            self.inner.insert_formatted_with(sql.clone()).buffered_with_capacity(BUFFERED_CAPACITY);
         let mut bytes = 0u64;
         let mut row_buf = Vec::new();
         let mut insert_start = Instant::now();

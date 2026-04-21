@@ -1,6 +1,8 @@
-use crate::types::{Event, EventType, TableRow};
-use etl_postgres::types::TableId;
 use std::collections::HashMap;
+
+use etl_postgres::types::TableId;
+
+use crate::types::{Event, EventType, TableRow};
 
 /// Condition for waiting on events in tests.
 #[derive(Clone, Debug)]
@@ -15,10 +17,7 @@ pub fn group_events_by_type(events: &[Event]) -> HashMap<EventType, Vec<Event>> 
     let mut grouped = HashMap::new();
     for event in events {
         let event_type = EventType::from(event);
-        grouped
-            .entry(event_type)
-            .or_insert_with(Vec::new)
-            .push(event.clone());
+        grouped.entry(event_type).or_insert_with(Vec::new).push(event.clone());
     }
 
     grouped
@@ -36,11 +35,9 @@ pub fn group_events_by_type_and_table_id(
             Event::Insert(event) => vec![event.replicated_table_schema.id()],
             Event::Update(event) => vec![event.replicated_table_schema.id()],
             Event::Delete(event) => vec![event.replicated_table_schema.id()],
-            Event::Truncate(event) => event
-                .truncated_tables
-                .iter()
-                .map(|schema| schema.id())
-                .collect(),
+            Event::Truncate(event) => {
+                event.truncated_tables.iter().map(|schema| schema.id()).collect()
+            }
             _ => vec![],
         };
         for table_id in table_ids {
@@ -58,17 +55,14 @@ pub fn check_events_count(events: &[Event], conditions: Vec<(EventType, u64)>) -
     let grouped_events = group_events_by_type(events);
 
     conditions.into_iter().all(|(event_type, count)| {
-        grouped_events
-            .get(&event_type)
-            .map(|inner| inner.len() == count as usize)
-            .unwrap_or(false)
+        grouped_events.get(&event_type).map(|inner| inner.len() == count as usize).unwrap_or(false)
     })
 }
 
 /// Compares two events for equality in test contexts.
 ///
-/// This function compares events based on their key fields, ignoring LSN values since those
-/// may vary between pipeline runs.
+/// This function compares events based on their key fields, ignoring LSN values
+/// since those may vary between pipeline runs.
 fn events_equal(a: &Event, b: &Event) -> bool {
     match (a, b) {
         (Event::Begin(a), Event::Begin(b)) => a == b,
@@ -102,14 +96,15 @@ fn events_equal(a: &Event, b: &Event) -> bool {
     }
 }
 
-/// Checks if the combined count of events and table rows meets the expected counts.
+/// Checks if the combined count of events and table rows meets the expected
+/// counts.
 ///
 /// Supports two condition types:
 /// - [`EventCondition::Any`]: counts events across all tables
 /// - [`EventCondition::Table`]: counts events for a specific table only
 ///
-/// For [`EventType::Insert`], both streaming insert events and table copy rows are counted.
-/// For other event types, only streaming events are counted.
+/// For [`EventType::Insert`], both streaming insert events and table copy rows
+/// are counted. For other event types, only streaming events are counted.
 pub fn check_all_events_count(
     events: &[Event],
     table_rows: &HashMap<TableId, Vec<TableRow>>,
@@ -140,10 +135,7 @@ pub fn check_all_events_count(
                 .unwrap_or(0);
 
             let table_row_count = if *event_type == EventType::Insert {
-                table_rows
-                    .get(table_id)
-                    .map(|rows| rows.len() as u64)
-                    .unwrap_or(0)
+                table_rows.get(table_id).map(|rows| rows.len() as u64).unwrap_or(0)
             } else {
                 0
             };
@@ -155,15 +147,17 @@ pub fn check_all_events_count(
 
 /// Returns a new Vec of events with duplicates removed.
 ///
-/// Row-level events (Insert, Update, Delete) are de-duplicated by comparing key fields,
-/// ignoring LSN values that may vary between pipeline runs. Non-row events
-/// (Begin, Commit, Relation, Truncate, Unsupported) are also de-duplicated using the
-/// same equality comparison.
+/// Row-level events (Insert, Update, Delete) are de-duplicated by comparing key
+/// fields, ignoring LSN values that may vary between pipeline runs. Non-row
+/// events (Begin, Commit, Relation, Truncate, Unsupported) are also
+/// de-duplicated using the same equality comparison.
 ///
-/// The first occurrence of each event is kept and subsequent duplicates are dropped.
+/// The first occurrence of each event is kept and subsequent duplicates are
+/// dropped.
 ///
-/// The rationale for having this method is that the pipeline doesn't guarantee exactly once delivery,
-/// thus in some tests we might have to exclude duplicates while performing assertions.
+/// The rationale for having this method is that the pipeline doesn't guarantee
+/// exactly once delivery, thus in some tests we might have to exclude
+/// duplicates while performing assertions.
 pub fn deduplicate_events(events: &[Event]) -> Vec<Event> {
     let mut result: Vec<Event> = Vec::with_capacity(events.len());
 

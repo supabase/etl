@@ -19,7 +19,9 @@
 - Build everything:
   - `cargo build --workspace --all-targets --all-features`
 - Format:
-  - `cargo fmt --all`
+  - `./scripts/fmt`
+- Check formatting:
+  - `./scripts/fmt-check`
 - Lint:
   - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Run unit tests (no Postgres required):
@@ -39,6 +41,8 @@
 - Before adding new patterns, inspect nearby code and follow the local style first.
 - Do not add dependencies unless they are justified by the task.
 - If you change workflow assumptions, build or test the smallest relevant target and report what actually ran.
+- Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
+- Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `./scripts/fmt` and `./scripts/fmt-check`.
 
 ## Rust Style
 - Follow default Rust formatting and idioms.
@@ -52,6 +56,15 @@
 - Keep top-level binaries focused on orchestration; move implementation detail into helpers or modules.
 - Prefer clear, boring code over clever abstractions.
 - Prefer existing workspace patterns over introducing new local conventions.
+- Default to private visibility and only widen when a real caller requires it.
+- Prefer the narrowest working visibility in this order: private, `pub(super)`, `pub(crate)`, then `pub`.
+- Use `pub` only for intentional crate APIs consumed by other crates, integration tests, examples, or documented user-facing entrypoints.
+- Keep struct fields private by default; prefer constructors, accessors, and focused helper methods over exposing mutable fields.
+- When a module is internal, tighten the module itself before leaving deep items `pub`.
+- In `mod.rs` and other module roots, prefer private child modules plus selective `pub use` lists over `pub mod` or `pub use child::*` when building a facade API.
+- Treat `pub use` as part of the public API contract: re-export only items you intentionally want callers to depend on, and avoid wildcard re-exports from internal modules.
+- When a crate re-exports dependency types through its own facade, prefer referring to them via the crate facade (for example `crate::types::SchemaError`) inside that crate unless you are working at an explicit integration boundary or the item is not re-exported.
+- After visibility changes, verify with `cargo rustc -p <crate> --all-features -- -W unreachable_pub` for the relevant target and then rerun the smallest relevant checks/tests.
 - Use `Arc::clone(&value)` instead of `value.clone()` when cloning `Arc` pointers — it makes the cheap reference-count increment explicit and avoids confusion with deep clones.
 - All logs should be strictly lowercase.
 

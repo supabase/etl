@@ -88,10 +88,7 @@ where
     .fetch_optional(executor)
     .await?;
 
-    Ok(record.map(|r| Tenant {
-        id: r.id,
-        name: r.name,
-    }))
+    Ok(record.map(|r| Tenant { id: r.id, name: r.name }))
 }
 
 pub async fn update_tenant<'c, E>(
@@ -152,11 +149,5 @@ where
     .fetch_all(executor)
     .await?;
 
-    Ok(record
-        .drain(..)
-        .map(|r| Tenant {
-            id: r.id,
-            name: r.name,
-        })
-        .collect())
+    Ok(record.drain(..).map(|r| Tenant { id: r.id, name: r.name }).collect())
 }

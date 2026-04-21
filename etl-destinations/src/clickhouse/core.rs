@@ -78,6 +78,12 @@ pub struct ClickHouseDestination<S> {
     store: Arc<S>,
     /// Cache: ClickHouse table name -> `Arc<[bool]>` (nullable flags per column,
     /// including the two trailing CDC columns which are always `false`).
+    ///
+    /// `std::sync::RwLock` is appropriate here: both reads (hot path) and writes
+    /// (rare, only on first encounter of a new table) are brief in-memory
+    /// operations. The lock is always released before any `.await` point (DDL is
+    /// executed with no lock held), so the async `tokio::sync::RwLock` would be
+    /// unnecessary overhead.
     table_cache: Arc<RwLock<HashMap<String, Arc<[bool]>>>>,
 }
 
@@ -137,9 +143,7 @@ where
             snapshot_id,
             replication_mask,
         );
-        self.store
-            .store_destination_table_metadata(table_id, metadata.clone())
-            .await?;
+        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
 
         // Compute nullable flags (user columns + 2 CDC columns always non-nullable).
         //
@@ -147,10 +151,8 @@ where
         // is nullable. The DDL always emits `Array(Nullable(T))` (no outer `Nullable`
         // wrapper), so ClickHouse does not expect a null-indicator byte before the array.
         let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
-        let mut nullable_flags_vec: Vec<bool> = column_schemas
-            .iter()
-            .map(|c| c.nullable && !is_array_type(&c.typ))
-            .collect();
+        let mut nullable_flags_vec: Vec<bool> =
+            column_schemas.iter().map(|c| c.nullable && !is_array_type(&c.typ)).collect();
         nullable_flags_vec.push(false); // cdc_operation
         nullable_flags_vec.push(false); // cdc_lsn
         let nullable_flags: Arc<[bool]> = nullable_flags_vec.into();
@@ -163,17 +165,13 @@ where
             .record(ddl_start.elapsed().as_secs_f64());
 
         // Mark as Applied after successful DDL.
-        self.store
-            .store_destination_table_metadata(table_id, metadata.to_applied())
-            .await?;
+        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
 
         // Write-lock: insert, using or_insert to handle concurrent first-writer race.
         let stored_flags = {
             let mut guard = self.table_cache.write();
             Arc::clone(
-                guard
-                    .entry(ch_table_name.clone())
-                    .or_insert_with(|| Arc::clone(&nullable_flags)),
+                guard.entry(ch_table_name.clone()).or_insert_with(|| Arc::clone(&nullable_flags)),
             )
         };
 
@@ -195,11 +193,8 @@ where
         let rows: Vec<Vec<ClickHouseValue>> = table_rows
             .into_iter()
             .map(|table_row| {
-                let mut values: Vec<ClickHouseValue> = table_row
-                    .into_values()
-                    .into_iter()
-                    .map(cell_to_clickhouse_value)
-                    .collect();
+                let mut values: Vec<ClickHouseValue> =
+                    table_row.into_values().into_iter().map(cell_to_clickhouse_value).collect();
                 values.push(ClickHouseValue::String(String::from("INSERT")));
                 values.push(ClickHouseValue::Int64(0));
                 values
@@ -226,10 +221,7 @@ where
         let new_snapshot_id = new_schema.inner().snapshot_id;
         let new_replication_mask = new_schema.replication_mask().clone();
 
-        let Some(metadata) = self
-            .store
-            .get_applied_destination_table_metadata(table_id)
-            .await?
+        let Some(metadata) = self.store.get_applied_destination_table_metadata(table_id).await?
         else {
             bail!(
                 ErrorKind::CorruptedTableSchema,
@@ -249,10 +241,7 @@ where
         if current_snapshot_id == new_snapshot_id
             && current_replication_mask == new_replication_mask
         {
-            info!(
-                "schema for table {} unchanged (snapshot_id: {})",
-                table_id, new_snapshot_id
-            );
+            info!("schema for table {} unchanged (snapshot_id: {})", table_id, new_snapshot_id);
             return Ok(());
         }
 
@@ -262,20 +251,19 @@ where
         );
 
         // Retrieve the old schema to compute the diff.
-        let current_table_schema = self
-            .store
-            .get_table_schema(&table_id, current_snapshot_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::InvalidState,
-                    "Old schema not found",
-                    format!(
-                        "Could not find schema for table {} at snapshot_id {}",
-                        table_id, current_snapshot_id
+        let current_table_schema =
+            self.store.get_table_schema(&table_id, current_snapshot_id).await?.ok_or_else(
+                || {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "Old schema not found",
+                        format!(
+                            "Could not find schema for table {} at snapshot_id {}",
+                            table_id, current_snapshot_id
+                        )
                     )
-                )
-            })?;
+                },
+            )?;
 
         let current_schema = ReplicatedTableSchema::from_mask(
             current_table_schema,
@@ -295,9 +283,7 @@ where
             new_replication_mask,
             DestinationTableSchemaStatus::Applying,
         );
-        self.store
-            .store_destination_table_metadata(table_id, updated_metadata.clone())
-            .await?;
+        self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
 
         // Compute and apply the diff.
         let diff = current_schema.diff(new_schema);
@@ -330,6 +316,19 @@ where
 
     /// Applies a schema diff to a ClickHouse table: add columns, rename columns,
     /// then drop columns (in that order for safety).
+    ///
+    /// Schema changes create an inherently inconsistent window: rows written before
+    /// the ALTER were encoded with the old column set, while rows after use the new
+    /// one. Specifically:
+    ///
+    /// - ADD COLUMN: existing rows get NULL/default for the new column.
+    /// - DROP COLUMN: data in the dropped column is lost for all rows.
+    /// - RENAME COLUMN: existing data is preserved under the new name.
+    ///
+    /// ClickHouse does not support transactional DDL, so if the replicator is
+    /// killed between individual ALTER statements the table may be left in a
+    /// partially altered state. The `DestinationTableMetadata` Applying/Applied
+    /// status tracks this for diagnostic purposes.
     async fn apply_schema_diff(&self, ch_table_name: &str, diff: &SchemaDiff) -> EtlResult<()> {
         if diff.is_empty() {
             return Ok(());
@@ -340,9 +339,7 @@ where
         }
 
         for rename in &diff.columns_to_rename {
-            self.client
-                .rename_column(ch_table_name, &rename.old_name, &rename.new_name)
-                .await?;
+            self.client.rename_column(ch_table_name, &rename.old_name, &rename.new_name).await?;
         }
 
         for column in &diff.columns_to_remove {
@@ -374,37 +371,29 @@ where
                     break;
                 }
 
-                let event = event_iter
-                    .next()
-                    .expect("peeked event must be present; qed");
+                let event = event_iter.next().expect("peeked event must be present; qed");
                 match event {
                     Event::Insert(insert) => {
                         let table_id = insert.replicated_table_schema.id();
                         table_schemas
                             .entry(table_id)
                             .or_insert_with(|| insert.replicated_table_schema.clone());
-                        table_id_to_rows
-                            .entry(table_id)
-                            .or_default()
-                            .push(PendingRow {
-                                operation: CdcOperation::Insert,
-                                lsn: insert.commit_lsn,
-                                cells: insert.table_row.into_values(),
-                            });
+                        table_id_to_rows.entry(table_id).or_default().push(PendingRow {
+                            operation: CdcOperation::Insert,
+                            lsn: insert.commit_lsn,
+                            cells: insert.table_row.into_values(),
+                        });
                     }
                     Event::Update(update) => {
                         let table_id = update.replicated_table_schema.id();
                         table_schemas
                             .entry(table_id)
                             .or_insert_with(|| update.replicated_table_schema.clone());
-                        table_id_to_rows
-                            .entry(table_id)
-                            .or_default()
-                            .push(PendingRow {
-                                operation: CdcOperation::Update,
-                                lsn: update.commit_lsn,
-                                cells: update.table_row.into_values(),
-                            });
+                        table_id_to_rows.entry(table_id).or_default().push(PendingRow {
+                            operation: CdcOperation::Update,
+                            lsn: update.commit_lsn,
+                            cells: update.table_row.into_values(),
+                        });
                     }
                     Event::Delete(delete) => {
                         let Some((_, old_row)) = delete.old_table_row else {
@@ -415,14 +404,11 @@ where
                         table_schemas
                             .entry(table_id)
                             .or_insert_with(|| delete.replicated_table_schema.clone());
-                        table_id_to_rows
-                            .entry(table_id)
-                            .or_default()
-                            .push(PendingRow {
-                                operation: CdcOperation::Delete,
-                                lsn: delete.commit_lsn,
-                                cells: old_row.into_values(),
-                            });
+                        table_id_to_rows.entry(table_id).or_default().push(PendingRow {
+                            operation: CdcOperation::Delete,
+                            lsn: delete.commit_lsn,
+                            cells: old_row.into_values(),
+                        });
                     }
                     event => {
                         debug!(
@@ -480,11 +466,7 @@ where
 
                 while let Some(result) = join_set.join_next().await {
                     result.map_err(|e| {
-                        etl_error!(
-                            ErrorKind::ApplyWorkerPanic,
-                            "insert task failed",
-                            e.to_string()
-                        )
+                        etl_error!(ErrorKind::ApplyWorkerPanic, "insert task failed", e.to_string())
                     })??;
                 }
             }
@@ -492,8 +474,7 @@ where
             // Process Relation events (schema changes) sequentially.
             while let Some(Event::Relation(_)) = event_iter.peek() {
                 if let Some(Event::Relation(relation)) = event_iter.next() {
-                    self.handle_relation_event(&relation.replicated_table_schema)
-                        .await?;
+                    self.handle_relation_event(&relation.replicated_table_schema).await?;
                 }
             }
 
@@ -508,9 +489,7 @@ where
             }
 
             futures::future::try_join_all(
-                truncate_schemas
-                    .values()
-                    .map(|schema| self.truncate_table_inner(schema)),
+                truncate_schemas.values().map(|schema| self.truncate_table_inner(schema)),
             )
             .await?;
         }
@@ -543,9 +522,7 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        let result = self
-            .write_table_rows_inner(replicated_table_schema, table_rows)
-            .await;
+        let result = self.write_table_rows_inner(replicated_table_schema, table_rows).await;
         async_result.send(result);
         Ok(())
     }

@@ -40,9 +40,7 @@ pub fn get_clickhouse_user() -> String {
 
 /// Returns the ClickHouse password from the environment, or `None` if unset.
 pub fn get_clickhouse_password() -> Option<String> {
-    std::env::var(CLICKHOUSE_PASSWORD_ENV)
-        .ok()
-        .filter(|s| !s.is_empty())
+    std::env::var(CLICKHOUSE_PASSWORD_ENV).ok().filter(|s| !s.is_empty())
 }
 
 /// Generates a unique database name for test isolation.
@@ -90,10 +88,7 @@ impl ClickHouseTestDatabase {
     /// Creates the test database in ClickHouse.
     pub async fn create_database(&self) {
         self.root_client
-            .query(&format!(
-                "CREATE DATABASE IF NOT EXISTS `{}`",
-                self.database
-            ))
+            .query(&format!("CREATE DATABASE IF NOT EXISTS `{}`", self.database))
             .execute()
             .await
             .expect("Failed to create test ClickHouse database");
@@ -117,9 +112,7 @@ impl ClickHouseTestDatabase {
     {
         self.build_destination_with_config(
             store,
-            ClickHouseInserterConfig {
-                max_bytes_per_insert: 100 * 1024 * 1024,
-            },
+            ClickHouseInserterConfig { max_bytes_per_insert: 100 * 1024 * 1024 },
         )
     }
 
@@ -153,11 +146,7 @@ impl ClickHouseTestDatabase {
     where
         T: for<'a> clickhouse::Row<Value<'a> = T> + serde::de::DeserializeOwned + 'static,
     {
-        self.db_client
-            .query(sql)
-            .fetch_all::<T>()
-            .await
-            .expect("ClickHouse query failed")
+        self.db_client.query(sql).fetch_all::<T>().await.expect("ClickHouse query failed")
     }
 }
 

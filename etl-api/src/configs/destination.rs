@@ -1,15 +1,19 @@
-use etl_config::SerializableSecretString;
-use etl_config::shared::{DestinationConfig, IcebergConfig};
+use etl_config::{
+    SerializableSecretString,
+    shared::{DestinationConfig, IcebergConfig},
+};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use url::Url;
 use utoipa::ToSchema;
 
-use crate::configs::encryption::{
-    Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
-    decrypt_text, encrypt_text,
+use crate::configs::{
+    encryption::{
+        Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
+        decrypt_text, encrypt_text,
+    },
+    store::Store,
 };
-use crate::configs::store::Store;
 
 /// Returns the default connection pool size for BigQuery destinations.
 pub const fn default_connection_pool_size() -> usize {
@@ -134,17 +138,9 @@ impl From<StoredDestinationConfig> for FullApiDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size: Some(connection_pool_size),
             },
-            StoredDestinationConfig::ClickHouse {
-                url,
-                user,
-                password,
-                database,
-            } => Self::ClickHouse {
-                url,
-                user,
-                password,
-                database,
-            },
+            StoredDestinationConfig::ClickHouse { url, user, password, database } => {
+                Self::ClickHouse { url, user, password, database }
+            }
             StoredDestinationConfig::Iceberg { config } => match config {
                 StoredIcebergConfig::Supabase {
                     project_ref,
@@ -258,12 +254,7 @@ impl StoredDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size,
             },
-            Self::ClickHouse {
-                url,
-                user,
-                password,
-                database,
-            } => DestinationConfig::ClickHouse {
+            Self::ClickHouse { url, user, password, database } => DestinationConfig::ClickHouse {
                 url,
                 user,
                 password: password.map(|s| s.into()),
@@ -351,17 +342,9 @@ impl From<FullApiDestinationConfig> for StoredDestinationConfig {
                 connection_pool_size: connection_pool_size
                     .unwrap_or(DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE),
             },
-            FullApiDestinationConfig::ClickHouse {
-                url,
-                user,
-                password,
-                database,
-            } => Self::ClickHouse {
-                url,
-                user,
-                password,
-                database,
-            },
+            FullApiDestinationConfig::ClickHouse { url, user, password, database } => {
+                Self::ClickHouse { url, user, password, database }
+            }
             FullApiDestinationConfig::Iceberg { config } => match config {
                 FullApiIcebergConfig::Supabase {
                     project_ref,
@@ -440,10 +423,8 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                 max_staleness_mins,
                 connection_pool_size,
             } => {
-                let encrypted_service_account_key = encrypt_text(
-                    service_account_key.expose_secret().to_owned(),
-                    encryption_key,
-                )?;
+                let encrypted_service_account_key =
+                    encrypt_text(service_account_key.expose_secret().to_owned(), encryption_key)?;
 
                 Ok(EncryptedStoredDestinationConfig::BigQuery {
                     project_id,
@@ -453,12 +434,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
                     connection_pool_size,
                 })
             }
-            Self::ClickHouse {
-                url,
-                user,
-                password,
-                database,
-            } => {
+            Self::ClickHouse { url, user, password, database } => {
                 let encrypted_password = match password {
                     Some(p) => Some(encrypt_text(p.expose_secret().to_owned(), encryption_key)?),
                     None => None,
@@ -694,26 +670,15 @@ impl Decrypt<StoredDestinationConfig> for EncryptedStoredDestinationConfig {
                     })
                 }
             },
-            EncryptedStoredDestinationConfig::ClickHouse {
-                url,
-                user,
-                password,
-                database,
-            } => {
+            EncryptedStoredDestinationConfig::ClickHouse { url, user, password, database } => {
                 let password = match password {
-                    Some(p) => Some(SerializableSecretString::from(decrypt_text(
-                        p,
-                        encryption_key,
-                    )?)),
+                    Some(p) => {
+                        Some(SerializableSecretString::from(decrypt_text(p, encryption_key)?))
+                    }
                     None => None,
                 };
 
-                Ok(StoredDestinationConfig::ClickHouse {
-                    url,
-                    user,
-                    password,
-                    database,
-                })
+                Ok(StoredDestinationConfig::ClickHouse { url, user, password, database })
             }
             Self::Ducklake {
                 catalog_url,
@@ -844,9 +809,10 @@ pub enum EncryptedStoredIcebergConfig {
 
 #[cfg(test)]
 mod tests {
+    use insta::assert_json_snapshot;
+
     use super::*;
     use crate::configs::encryption::{EncryptionKey, generate_random_key};
-    use insta::assert_json_snapshot;
 
     #[test]
     fn test_stored_destination_config_encryption_decryption_bigquery() {
@@ -858,10 +824,7 @@ mod tests {
             connection_pool_size: 8,
         };
 
-        let key = EncryptionKey {
-            id: 1,
-            key: generate_random_key::<32>().unwrap(),
-        };
+        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -908,10 +871,7 @@ mod tests {
             },
         };
 
-        let key = EncryptionKey {
-            id: 1,
-            key: generate_random_key::<32>().unwrap(),
-        };
+        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -952,10 +912,7 @@ mod tests {
                 );
                 assert_eq!(p1_s3_region, p2_s3_region);
                 // Assert that secret fields were encrypted and decrypted correctly
-                assert_eq!(
-                    p1_catalog_token.expose_secret(),
-                    p2_catalog_token.expose_secret()
-                );
+                assert_eq!(p1_catalog_token.expose_secret(), p2_catalog_token.expose_secret());
                 assert_eq!(
                     p1_s3_secret_access_key.expose_secret(),
                     p2_s3_secret_access_key.expose_secret()
@@ -979,10 +936,7 @@ mod tests {
             },
         };
 
-        let key = EncryptionKey {
-            id: 1,
-            key: generate_random_key::<32>().unwrap(),
-        };
+        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -1038,10 +992,7 @@ mod tests {
             database: "analytics".to_string(),
         };
 
-        let key = EncryptionKey {
-            id: 1,
-            key: generate_random_key::<32>().unwrap(),
-        };
+        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -1126,12 +1077,7 @@ mod tests {
 
         let deserialized: FullApiDestinationConfig = serde_json::from_str(json).unwrap();
         match deserialized {
-            FullApiDestinationConfig::ClickHouse {
-                url,
-                user,
-                password,
-                database,
-            } => {
+            FullApiDestinationConfig::ClickHouse { url, user, password, database } => {
                 assert_eq!(url.as_str(), "https://example.com:8443/");
                 assert_eq!(user, "etl");
                 assert!(password.is_none());
@@ -1154,11 +1100,7 @@ mod tests {
         "#;
 
         let error = serde_json::from_str::<FullApiDestinationConfig>(json).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("url must use http or https scheme")
-        );
+        assert!(error.to_string().contains("url must use http or https scheme"));
     }
 
     #[test]
@@ -1256,10 +1198,7 @@ mod tests {
                 assert_eq!(p1_project_ref, p2_project_ref);
                 assert_eq!(p1_warehouse_name, p2_warehouse_name);
                 assert_eq!(p1_namespace, p2_namespace);
-                assert_eq!(
-                    p1_catalog_token.expose_secret(),
-                    p2_catalog_token.expose_secret()
-                );
+                assert_eq!(p1_catalog_token.expose_secret(), p2_catalog_token.expose_secret());
                 assert_eq!(
                     p1_s3_access_key_id.expose_secret(),
                     p2_s3_access_key_id.expose_secret()
@@ -1348,10 +1287,7 @@ mod tests {
             metadata_schema: Some("ducklake".to_string()),
         };
 
-        let key = EncryptionKey {
-            id: 1,
-            key: generate_random_key::<32>().unwrap(),
-        };
+        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
@@ -1566,10 +1502,7 @@ mod tests {
                 assert_eq!(orig_project_ref, &deser_project_ref);
                 assert_eq!(orig_warehouse_name, &deser_warehouse_name);
                 assert_eq!(orig_namespace, &deser_namespace);
-                assert_eq!(
-                    orig_catalog_token.expose_secret(),
-                    deser_catalog_token.expose_secret()
-                );
+                assert_eq!(orig_catalog_token.expose_secret(), deser_catalog_token.expose_secret());
                 assert_eq!(
                     orig_s3_access_key_id.expose_secret(),
                     deser_s3_access_key_id.expose_secret()

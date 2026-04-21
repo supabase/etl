@@ -1,23 +1,44 @@
-use etl_config::Environment;
-use etl_config::shared::{ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets, TlsConfig};
+use etl_config::{
+    Environment,
+    shared::{ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets, TlsConfig},
+};
 use secrecy::ExposeSecret;
+use thiserror::Error;
 
-use crate::configs::destination::{StoredDestinationConfig, StoredIcebergConfig};
-use crate::configs::log::LogLevel;
-use crate::configs::pipeline::StoredPipelineConfig;
-use crate::configs::source::StoredSourceConfig;
-use crate::db::destinations::Destination;
-use crate::db::images::Image;
-use crate::db::pipelines::Pipeline;
-use crate::db::replicators::Replicator;
-use crate::db::sources::Source;
-use crate::k8s::{DestinationType, K8sClient, PodStatus, ReplicatorConfigMapFile};
-use crate::routes::pipelines::PipelineError;
+use crate::{
+    configs::{
+        destination::{StoredDestinationConfig, StoredIcebergConfig},
+        log::LogLevel,
+        pipeline::StoredPipelineConfig,
+        source::StoredSourceConfig,
+    },
+    db::{
+        destinations::Destination,
+        images::Image,
+        pipelines::{Pipeline, PipelineDeletion},
+        replicators::Replicator,
+        sources::Source,
+    },
+    k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile},
+};
+
+/// Errors raised while preparing or applying Kubernetes pipeline resources.
+#[derive(Debug, Error)]
+pub enum K8sCoreError {
+    #[error("A K8s error occurred: {0}")]
+    K8s(#[from] K8sError),
+
+    #[error("invalid destination config")]
+    InvalidConfig(#[from] serde_json::Error),
+
+    #[error("Could not load app environment")]
+    MissingEnvironment,
+}
 
 /// Secret types required by different destination configurations.
 ///
-/// This enum encapsulates the various credential combinations needed for different
-/// replicator destinations, ensuring type-safe secret management.
+/// This enum encapsulates the various credential combinations needed for
+/// different replicator destinations, ensuring type-safe secret management.
 #[derive(Debug)]
 pub enum Secrets {
     /// No secrets required for the destination.
@@ -60,10 +81,10 @@ pub enum Secrets {
 
 /// Creates or updates all Kubernetes resources required for a pipeline.
 ///
-/// This function orchestrates the creation or update of secrets, config maps, and stateful
-/// sets needed to run a pipeline in Kubernetes. It extracts credentials from the
-/// source and destination configurations, builds the replicator configuration, and applies
-/// all resources to the cluster.
+/// This function orchestrates the creation or update of secrets, config maps,
+/// and stateful sets needed to run a pipeline in Kubernetes. It extracts
+/// credentials from the source and destination configurations, builds the
+/// replicator configuration, and applies all resources to the cluster.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_or_update_pipeline_resources_in_k8s(
     k8s_client: &dyn K8sClient,
@@ -75,12 +96,12 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     destination: Destination,
     supabase_api_url: Option<&str>,
     tls_config: TlsConfig,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
     let secrets = build_secrets_from_configs(&source.config, &destination.config);
 
-    let environment = Environment::load().map_err(|_| PipelineError::MissingEnvironment)?;
+    let environment = Environment::load().map_err(|_| K8sCoreError::MissingEnvironment)?;
 
     let destination_type = (&destination.config).into();
 
@@ -92,8 +113,8 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
     let log_level = pipeline.config.log_level.clone().unwrap_or_default();
     let replicator_config = build_replicator_config_without_secrets(
         // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
-        // around, and we won't have two different values map to the same u64, since the domain size
-        // is the same.
+        // around, and we won't have two different values map to the same u64, since the domain
+        // size is the same.
         pipeline.id as u64,
         source.config,
         destination.config,
@@ -119,14 +140,14 @@ pub async fn create_or_update_pipeline_resources_in_k8s(
 
 /// Deletes all Kubernetes resources associated with a pipeline.
 ///
-/// This function removes all secrets, config maps, and stateful sets created for a
-/// replicator. It uses the tenant ID and replicator ID to identify and delete
-/// the correct resources.
+/// This function removes all secrets, config maps, and stateful sets created
+/// for a replicator. It uses the tenant ID and replicator ID to identify and
+/// delete the correct resources.
 pub async fn delete_pipeline_resources_in_k8s(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
     replicator: Replicator,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
     delete_dynamic_replicator_secrets(k8s_client, &prefix).await?;
@@ -141,39 +162,69 @@ pub async fn is_replicator_pod_stopped(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
     replicator_id: i64,
-) -> Result<bool, PipelineError> {
+) -> Result<bool, K8sCoreError> {
     let prefix = create_k8s_object_prefix(tenant_id, replicator_id);
     let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
 
     Ok(matches!(pod_status, PodStatus::Stopped))
 }
 
-/// Extracts and combines credentials from source and destination configurations.
+/// Returns `true` when the replicator is active in Kubernetes.
+pub async fn is_replicator_active(
+    k8s_client: &dyn K8sClient,
+    tenant_id: &str,
+    replicator_id: i64,
+) -> Result<bool, K8sCoreError> {
+    let prefix = create_k8s_object_prefix(tenant_id, replicator_id);
+    let pod_status = k8s_client.get_replicator_pod_status(&prefix).await?;
+
+    Ok(matches!(
+        pod_status,
+        PodStatus::Starting
+            | PodStatus::Started
+            | PodStatus::Stopping
+            | PodStatus::Failed
+            | PodStatus::Unknown
+    ))
+}
+
+/// Returns the first active pipeline id, if any pipeline is currently active in
+/// Kubernetes.
+pub async fn first_active_pipeline_id(
+    k8s_client: &dyn K8sClient,
+    tenant_id: &str,
+    pipelines: &[PipelineDeletion],
+) -> Result<Option<i64>, K8sCoreError> {
+    for pipeline in pipelines {
+        if is_replicator_active(k8s_client, tenant_id, pipeline.replicator_id).await? {
+            return Ok(Some(pipeline.id));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Extracts and combines credentials from source and destination
+/// configurations.
 ///
-/// This function determines which credentials are needed based on the destination type
-/// and extracts them from the provided configurations, exposing secrets as plain strings
-/// for Kubernetes secret creation.
+/// This function determines which credentials are needed based on the
+/// destination type and extracts them from the provided configurations,
+/// exposing secrets as plain strings for Kubernetes secret creation.
 fn build_secrets_from_configs(
     source_config: &StoredSourceConfig,
     destination_config: &StoredDestinationConfig,
 ) -> Secrets {
-    let postgres_password = source_config
-        .password
-        .as_ref()
-        .map(|p| p.expose_secret().to_owned())
-        .unwrap_or_default();
+    let postgres_password =
+        source_config.password.as_ref().map(|p| p.expose_secret().to_owned()).unwrap_or_default();
 
     match destination_config {
-        StoredDestinationConfig::BigQuery {
-            service_account_key,
-            ..
-        } => Secrets::BigQuery {
+        StoredDestinationConfig::BigQuery { service_account_key, .. } => Secrets::BigQuery {
             postgres_password,
             big_query_service_account_key: service_account_key.expose_secret().to_string(),
         },
-        StoredDestinationConfig::Iceberg {
-            config: StoredIcebergConfig::Rest { .. },
-        } => Secrets::None,
+        StoredDestinationConfig::Iceberg { config: StoredIcebergConfig::Rest { .. } } => {
+            Secrets::None
+        }
         StoredDestinationConfig::Iceberg {
             config:
                 StoredIcebergConfig::Supabase {
@@ -192,27 +243,26 @@ fn build_secrets_from_configs(
             postgres_password,
             password: password.as_ref().map(|p| p.expose_secret().to_string()),
         },
-        StoredDestinationConfig::Ducklake {
-            s3_access_key_id,
-            s3_secret_access_key,
-            ..
-        } => Secrets::Ducklake {
-            postgres_password,
-            s3_access_key_id: s3_access_key_id
-                .as_ref()
-                .map(|value| value.expose_secret().to_string()),
-            s3_secret_access_key: s3_secret_access_key
-                .as_ref()
-                .map(|value| value.expose_secret().to_string()),
-        },
+        StoredDestinationConfig::Ducklake { s3_access_key_id, s3_secret_access_key, .. } => {
+            Secrets::Ducklake {
+                postgres_password,
+                s3_access_key_id: s3_access_key_id
+                    .as_ref()
+                    .map(|value| value.expose_secret().to_string()),
+                s3_secret_access_key: s3_secret_access_key
+                    .as_ref()
+                    .map(|value| value.expose_secret().to_string()),
+            }
+        }
     }
 }
 
 /// Builds a replicator configuration with credentials omitted.
 ///
-/// This function constructs a [`ReplicatorConfigWithoutSecrets`] by combining pipeline,
-/// source, and destination configurations. It uses the provided trusted root certificates
-/// for TLS configuration. Secrets are managed separately through Kubernetes secret resources.
+/// This function constructs a [`ReplicatorConfigWithoutSecrets`] by combining
+/// pipeline, source, and destination configurations. It uses the provided
+/// trusted root certificates for TLS configuration. Secrets are managed
+/// separately through Kubernetes secret resources.
 fn build_replicator_config_without_secrets(
     pipeline_id: u64,
     source_config: StoredSourceConfig,
@@ -225,41 +275,34 @@ fn build_replicator_config_without_secrets(
 
     ReplicatorConfigWithoutSecrets {
         destination: destination_config.into_etl_config().into(),
-        pipeline: pipeline_config
-            .into_etl_config(pipeline_id, pg_connection_config)
-            .into(),
+        pipeline: pipeline_config.into_etl_config(pipeline_id, pg_connection_config).into(),
         supabase: Some(supabase_config),
     }
 }
 
 /// Creates a consistent naming prefix for Kubernetes resources.
 ///
-/// This function generates a prefix string by combining the tenant ID and replicator ID,
-/// which is used to name all Kubernetes resources (secrets, config maps, stateful sets)
-/// associated with a specific pipeline instance.
+/// This function generates a prefix string by combining the tenant ID and
+/// replicator ID, which is used to name all Kubernetes resources (secrets,
+/// config maps, stateful sets) associated with a specific pipeline instance.
 pub fn create_k8s_object_prefix(tenant_id: &str, replicator_id: i64) -> String {
     format!("{tenant_id}-{replicator_id}")
 }
 
 /// Creates or updates Kubernetes secrets based on the destination type.
 ///
-/// This function creates different sets of secrets depending on the [`Secrets`] variant,
-/// handling PostgreSQL credentials and destination-specific authentication credentials.
-/// For [`Secrets::None`], no secrets are created.
+/// This function creates different sets of secrets depending on the [`Secrets`]
+/// variant, handling PostgreSQL credentials and destination-specific
+/// authentication credentials. For [`Secrets::None`], no secrets are created.
 async fn create_or_update_dynamic_replicator_secrets(
     k8s_client: &dyn K8sClient,
     prefix: &str,
     secrets: Secrets,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     match secrets {
         Secrets::None => {}
-        Secrets::BigQuery {
-            postgres_password,
-            big_query_service_account_key,
-        } => {
-            k8s_client
-                .create_or_update_postgres_secret(prefix, &postgres_password)
-                .await?;
+        Secrets::BigQuery { postgres_password, big_query_service_account_key } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
             k8s_client
                 .create_or_update_bigquery_secret(prefix, &big_query_service_account_key)
                 .await?;
@@ -270,9 +313,7 @@ async fn create_or_update_dynamic_replicator_secrets(
             s3_access_key_id,
             s3_secret_access_key,
         } => {
-            k8s_client
-                .create_or_update_postgres_secret(prefix, &postgres_password)
-                .await?;
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
             k8s_client
                 .create_or_update_iceberg_secret(
                     prefix,
@@ -282,25 +323,12 @@ async fn create_or_update_dynamic_replicator_secrets(
                 )
                 .await?;
         }
-        Secrets::ClickHouse {
-            postgres_password,
-            password,
-        } => {
-            k8s_client
-                .create_or_update_postgres_secret(prefix, &postgres_password)
-                .await?;
-            k8s_client
-                .create_or_update_clickhouse_secret(prefix, password.as_deref())
-                .await?;
+        Secrets::ClickHouse { postgres_password, password } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
+            k8s_client.create_or_update_clickhouse_secret(prefix, password.as_deref()).await?;
         }
-        Secrets::Ducklake {
-            postgres_password,
-            s3_access_key_id,
-            s3_secret_access_key,
-        } => {
-            k8s_client
-                .create_or_update_postgres_secret(prefix, &postgres_password)
-                .await?;
+        Secrets::Ducklake { postgres_password, s3_access_key_id, s3_secret_access_key } => {
+            k8s_client.create_or_update_postgres_secret(prefix, &postgres_password).await?;
             if let (Some(s3_access_key_id), Some(s3_secret_access_key)) =
                 (s3_access_key_id, s3_secret_access_key)
             {
@@ -322,15 +350,15 @@ async fn create_or_update_dynamic_replicator_secrets(
 
 /// Creates or updates the replicator configuration in a Kubernetes config map.
 ///
-/// This function serializes the [`ReplicatorConfigWithoutSecrets`] to JSON and stores it
-/// in a Kubernetes config map. The replicator pods mount this config map to access their
-/// runtime configuration.
+/// This function serializes the [`ReplicatorConfigWithoutSecrets`] to JSON and
+/// stores it in a Kubernetes config map. The replicator pods mount this config
+/// map to access their runtime configuration.
 async fn create_or_update_replicator_config(
     k8s_client: &dyn K8sClient,
     prefix: &str,
     config: ReplicatorConfigWithoutSecrets,
     environment: Environment,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     let env_config = serde_json::to_string(&config)?;
 
     let files = vec![
@@ -340,24 +368,20 @@ async fn create_or_update_replicator_config(
             // is added directly in the environment-specific config file.
             content: "{}".to_owned(),
         },
-        ReplicatorConfigMapFile {
-            filename: format!("{environment}.json"),
-            content: env_config,
-        },
+        ReplicatorConfigMapFile { filename: format!("{environment}.json"), content: env_config },
     ];
 
-    k8s_client
-        .create_or_update_replicator_config_map(prefix, files)
-        .await?;
+    k8s_client.create_or_update_replicator_config_map(prefix, files).await?;
 
     Ok(())
 }
 
 /// Creates or updates the Kubernetes stateful set for the replicator.
 ///
-/// This function creates a stateful set that runs the replicator container with the
-/// specified image. The stateful set is configured with environment-specific settings
-/// and destination-type-specific resource requirements.
+/// This function creates a stateful set that runs the replicator container with
+/// the specified image. The stateful set is configured with
+/// environment-specific settings and destination-type-specific resource
+/// requirements.
 async fn create_or_update_replicator_stateful_set(
     k8s_client: &dyn K8sClient,
     prefix: &str,
@@ -365,7 +389,7 @@ async fn create_or_update_replicator_stateful_set(
     environment: Environment,
     destination_type: DestinationType,
     log_level: LogLevel,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     k8s_client
         .create_or_update_replicator_stateful_set(
             prefix,
@@ -381,14 +405,15 @@ async fn create_or_update_replicator_stateful_set(
 
 /// Deletes all Kubernetes secrets associated with a replicator.
 ///
-/// This function deletes PostgreSQL, BigQuery, and Iceberg secrets for the given prefix.
-/// It attempts to delete all secret types regardless of which were actually created,
-/// safely handling cases where secrets don't exist. This approach prevents orphaned
-/// secrets when a pipeline's destination type is changed.
+/// This function deletes PostgreSQL, BigQuery, and Iceberg secrets for the
+/// given prefix. It attempts to delete all secret types regardless of which
+/// were actually created, safely handling cases where secrets don't exist. This
+/// approach prevents orphaned secrets when a pipeline's destination type is
+/// changed.
 async fn delete_dynamic_replicator_secrets(
     k8s_client: &dyn K8sClient,
     prefix: &str,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     k8s_client.delete_postgres_secret(prefix).await?;
 
     // Delete all destination-specific secret types unconditionally. Only one will
@@ -407,7 +432,7 @@ async fn delete_dynamic_replicator_secrets(
 async fn delete_replicator_config(
     k8s_client: &dyn K8sClient,
     prefix: &str,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     k8s_client.delete_replicator_config_map(prefix).await?;
 
     Ok(())
@@ -417,7 +442,7 @@ async fn delete_replicator_config(
 async fn delete_replicator_stateful_set(
     k8s_client: &dyn K8sClient,
     prefix: &str,
-) -> Result<(), PipelineError> {
+) -> Result<(), K8sCoreError> {
     k8s_client.delete_replicator_stateful_set(prefix).await?;
 
     Ok(())
@@ -432,19 +457,28 @@ mod tests {
     use k8s_openapi::api::core::v1::ConfigMap;
 
     use super::*;
-    use crate::configs::destination::StoredDestinationConfig;
-    use crate::configs::log::LogLevel;
-    use crate::configs::source::StoredSourceConfig;
-    use crate::k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile};
+    use crate::{
+        configs::{
+            destination::StoredDestinationConfig, log::LogLevel, source::StoredSourceConfig,
+        },
+        k8s::{DestinationType, K8sClient, K8sError, PodStatus, ReplicatorConfigMapFile},
+    };
 
-    #[derive(Debug, Default, Clone)]
+    #[derive(Debug, Clone)]
     struct RecordingK8sClient {
         calls: Arc<Mutex<Vec<String>>>,
+        pod_status: PodStatus,
     }
 
     impl RecordingK8sClient {
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Default for RecordingK8sClient {
+        fn default() -> Self {
+            Self { calls: Arc::default(), pod_status: PodStatus::Stopped }
         }
     }
 
@@ -455,10 +489,7 @@ mod tests {
             prefix: &str,
             postgres_password: &str,
         ) -> Result<(), K8sError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("postgres:{prefix}:{postgres_password}"));
+            self.calls.lock().unwrap().push(format!("postgres:{prefix}:{postgres_password}"));
             Ok(())
         }
 
@@ -494,9 +525,10 @@ mod tests {
             s3_access_key_id: &str,
             s3_secret_access_key: &str,
         ) -> Result<(), K8sError> {
-            self.calls.lock().unwrap().push(format!(
-                "ducklake:{prefix}:{s3_access_key_id}:{s3_secret_access_key}"
-            ));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("ducklake:{prefix}:{s3_access_key_id}:{s3_secret_access_key}"));
             Ok(())
         }
 
@@ -517,10 +549,7 @@ mod tests {
         }
 
         async fn delete_ducklake_secret(&self, prefix: &str) -> Result<(), K8sError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("delete-ducklake:{prefix}"));
+            self.calls.lock().unwrap().push(format!("delete-ducklake:{prefix}"));
             Ok(())
         }
 
@@ -556,8 +585,21 @@ mod tests {
         }
 
         async fn get_replicator_pod_status(&self, _prefix: &str) -> Result<PodStatus, K8sError> {
-            Ok(PodStatus::Started)
+            Ok(self.pod_status)
         }
+    }
+
+    #[tokio::test]
+    async fn test_failed_pod_is_considered_active_for_deletion_guards() {
+        let client = RecordingK8sClient { pod_status: PodStatus::Failed, ..Default::default() };
+        let pipeline =
+            PipelineDeletion { id: 1, source_id: 2, destination_id: 3, replicator_id: 4 };
+
+        let is_active = is_replicator_active(&client, "tenant-42", pipeline.replicator_id)
+            .await
+            .expect("failed to inspect pipeline status");
+
+        assert!(is_active);
     }
 
     #[tokio::test]
@@ -585,9 +627,7 @@ mod tests {
         let secrets = build_secrets_from_configs(&source_config, &destination_config);
         let client = RecordingK8sClient::default();
 
-        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets)
-            .await
-            .unwrap();
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
 
         assert_eq!(
             client.calls(),
@@ -623,9 +663,7 @@ mod tests {
         let secrets = build_secrets_from_configs(&source_config, &destination_config);
         let client = RecordingK8sClient::default();
 
-        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets)
-            .await
-            .unwrap();
+        create_or_update_dynamic_replicator_secrets(&client, "tenant-42", secrets).await.unwrap();
 
         assert_eq!(
             client.calls(),

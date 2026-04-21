@@ -1,6 +1,7 @@
-use etl_postgres::types::{ReplicationMask, SnapshotId};
-
-use crate::error::{ErrorKind, EtlResult};
+use crate::{
+    error::{ErrorKind, EtlResult},
+    types::{ReplicationMask, SnapshotId},
+};
 
 /// Status of the schema at a destination.
 ///
@@ -34,7 +35,8 @@ pub struct DestinationTableMetadata {
     /// Status of the current schema change operation.
     ///
     /// If `Applying` is found on startup, the destination schema may be in
-    /// an unknown state and recovery may be needed depending on the destination.
+    /// an unknown state and recovery may be needed depending on the
+    /// destination.
     pub schema_status: DestinationTableSchemaStatus,
     /// The replication mask indicating which columns are replicated.
     ///
@@ -46,8 +48,9 @@ pub struct DestinationTableMetadata {
 impl DestinationTableMetadata {
     /// Creates new metadata for a table being created at the destination.
     ///
-    /// Initializes with `Applying` status since the table creation is in progress.
-    /// For initial table creation, `previous_snapshot_id` is None.
+    /// Initializes with `Applying` status since the table creation is in
+    /// progress. For initial table creation, `previous_snapshot_id` is
+    /// None.
     pub fn new_applying(
         destination_table_id: String,
         snapshot_id: SnapshotId,
@@ -101,7 +104,8 @@ impl DestinationTableMetadata {
     /// Updates the schema state for a new schema change.
     ///
     /// Sets `previous_snapshot_id` to the current snapshot before updating,
-    /// enabling recovery if the change fails on destinations that support atomic DDL.
+    /// enabling recovery if the change fails on destinations that support
+    /// atomic DDL.
     pub fn with_schema_change(
         mut self,
         snapshot_id: SnapshotId,
@@ -115,20 +119,22 @@ impl DestinationTableMetadata {
         self
     }
 
-    /// Converts this metadata into [`AppliedDestinationTableMetadata`], returning an
-    /// error if the schema is not in [`DestinationTableSchemaStatus::Applied`] state.
+    /// Converts this metadata into [`AppliedDestinationTableMetadata`],
+    /// returning an error if the schema is not in
+    /// [`DestinationTableSchemaStatus::Applied`] state.
     ///
-    /// Use this at any point where downstream code must guarantee that the destination
-    /// DDL completed successfully before proceeding. The caller decides whether to
-    /// propagate the error or handle it (e.g. warn and skip an optional operation).
+    /// Use this at any point where downstream code must guarantee that the
+    /// destination DDL completed successfully before proceeding. The caller
+    /// decides whether to propagate the error or handle it (e.g. warn and
+    /// skip an optional operation).
     pub fn into_applied(self) -> EtlResult<AppliedDestinationTableMetadata> {
         if !self.is_applied() {
             return Err(crate::etl_error!(
                 ErrorKind::InvalidState,
                 "destination table schema is not in applied state",
                 format!(
-                    "table '{}' has schema_status '{:?}'; \
-                     the DDL may not have completed — manual intervention may be required",
+                    "table '{}' has schema_status '{:?}'; the DDL may not have completed — manual \
+                     intervention may be required",
                     self.destination_table_id, self.schema_status
                 )
             ));
@@ -141,12 +147,13 @@ impl DestinationTableMetadata {
     }
 }
 
-/// Destination table metadata guaranteed to be in [`DestinationTableSchemaStatus::Applied`] state.
+/// Destination table metadata guaranteed to be in
+/// [`DestinationTableSchemaStatus::Applied`] state.
 ///
-/// Can only be constructed via [`DestinationTableMetadata::into_applied`], which returns
-/// an error if the underlying metadata is not fully applied. Code that accepts this type
-/// has a static guarantee that the destination DDL completed successfully and the table
-/// is ready for reads and writes.
+/// Can only be constructed via [`DestinationTableMetadata::into_applied`],
+/// which returns an error if the underlying metadata is not fully applied. Code
+/// that accepts this type has a static guarantee that the destination DDL
+/// completed successfully and the table is ready for reads and writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedDestinationTableMetadata {
     /// The name/identifier of the table in the destination system.

@@ -60,10 +60,9 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> ClickHouseValue {
         Cell::F64(v) => ClickHouseValue::Float64(v),
         Cell::Numeric(n) => ClickHouseValue::String(n.to_string()),
         Cell::Date(d) => {
-            let days = d
-                .signed_duration_since(unix_epoch())
-                .num_days()
-                .clamp(0, i64::from(u16::MAX)) as u16;
+            let days =
+                d.signed_duration_since(unix_epoch()).num_days().clamp(0, i64::from(u16::MAX))
+                    as u16;
             ClickHouseValue::Date(days)
         }
         Cell::Time(t) => ClickHouseValue::String(t.to_string()),
@@ -81,26 +80,22 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> ClickHouseValue {
 
 fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> Vec<ClickHouseValue> {
     match array_cell {
-        ArrayCell::Bool(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Bool))
-            .collect(),
+        ArrayCell::Bool(v) => {
+            v.into_iter().map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Bool)).collect()
+        }
         ArrayCell::String(v) => v
             .into_iter()
             .map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::String))
             .collect(),
-        ArrayCell::I16(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Int16))
-            .collect(),
-        ArrayCell::I32(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Int32))
-            .collect(),
-        ArrayCell::I64(v) => v
-            .into_iter()
-            .map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Int64))
-            .collect(),
+        ArrayCell::I16(v) => {
+            v.into_iter().map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Int16)).collect()
+        }
+        ArrayCell::I32(v) => {
+            v.into_iter().map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Int32)).collect()
+        }
+        ArrayCell::I64(v) => {
+            v.into_iter().map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::Int64)).collect()
+        }
         ArrayCell::U32(v) => v
             .into_iter()
             .map(|o| o.map_or(ClickHouseValue::Null, ClickHouseValue::UInt32))
@@ -115,11 +110,7 @@ fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> Vec<ClickHouseValue
             .collect(),
         ArrayCell::Numeric(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or(ClickHouseValue::Null, |n| {
-                    ClickHouseValue::String(n.to_string())
-                })
-            })
+            .map(|o| o.map_or(ClickHouseValue::Null, |n| ClickHouseValue::String(n.to_string())))
             .collect(),
         ArrayCell::Date(v) => v
             .into_iter()
@@ -135,11 +126,7 @@ fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> Vec<ClickHouseValue
             .collect(),
         ArrayCell::Time(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or(ClickHouseValue::Null, |t| {
-                    ClickHouseValue::String(t.to_string())
-                })
-            })
+            .map(|o| o.map_or(ClickHouseValue::Null, |t| ClickHouseValue::String(t.to_string())))
             .collect(),
         ArrayCell::Timestamp(v) => v
             .into_iter()
@@ -159,27 +146,15 @@ fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> Vec<ClickHouseValue
             .collect(),
         ArrayCell::Uuid(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or(ClickHouseValue::Null, |u| {
-                    ClickHouseValue::Uuid(*u.as_bytes())
-                })
-            })
+            .map(|o| o.map_or(ClickHouseValue::Null, |u| ClickHouseValue::Uuid(*u.as_bytes())))
             .collect(),
         ArrayCell::Json(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or(ClickHouseValue::Null, |j| {
-                    ClickHouseValue::String(j.to_string())
-                })
-            })
+            .map(|o| o.map_or(ClickHouseValue::Null, |j| ClickHouseValue::String(j.to_string())))
             .collect(),
         ArrayCell::Bytes(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or(ClickHouseValue::Null, |b| {
-                    ClickHouseValue::String(bytes_to_hex(b))
-                })
-            })
+            .map(|o| o.map_or(ClickHouseValue::Null, |b| ClickHouseValue::String(bytes_to_hex(b))))
             .collect(),
     }
 }
@@ -255,20 +230,12 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
             // and write each in little-endian.
             let high = u64::from_be_bytes(bytes[0..8].try_into().map_err(
                 |e: std::array::TryFromSliceError| {
-                    etl_error!(
-                        ErrorKind::ConversionError,
-                        "UUID high-half conversion failed",
-                        e
-                    )
+                    etl_error!(ErrorKind::ConversionError, "UUID high-half conversion failed", e)
                 },
             )?);
             let low = u64::from_be_bytes(bytes[8..16].try_into().map_err(
                 |e: std::array::TryFromSliceError| {
-                    etl_error!(
-                        ErrorKind::ConversionError,
-                        "UUID low-half conversion failed",
-                        e
-                    )
+                    etl_error!(ErrorKind::ConversionError, "UUID low-half conversion failed", e)
                 },
             )?);
             buf.extend_from_slice(&high.to_le_bytes());
@@ -312,26 +279,17 @@ mod tests {
 
     #[test]
     fn test_cell_to_clickhouse_value_null() {
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::Null),
-            ClickHouseValue::Null
-        ));
+        assert!(matches!(cell_to_clickhouse_value(Cell::Null), ClickHouseValue::Null));
     }
 
     #[test]
     fn test_cell_to_clickhouse_value_bool() {
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::Bool(true)),
-            ClickHouseValue::Bool(true)
-        ));
+        assert!(matches!(cell_to_clickhouse_value(Cell::Bool(true)), ClickHouseValue::Bool(true)));
     }
 
     #[test]
     fn test_cell_to_clickhouse_value_i32() {
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::I32(42)),
-            ClickHouseValue::Int32(42)
-        ));
+        assert!(matches!(cell_to_clickhouse_value(Cell::I32(42)), ClickHouseValue::Int32(42)));
     }
 
     #[test]
@@ -348,16 +306,10 @@ mod tests {
     #[test]
     fn test_cell_to_clickhouse_value_date() {
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(epoch)),
-            ClickHouseValue::Date(0)
-        ));
+        assert!(matches!(cell_to_clickhouse_value(Cell::Date(epoch)), ClickHouseValue::Date(0)));
 
         let day1 = NaiveDate::from_ymd_opt(1970, 1, 2).unwrap();
-        assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(day1)),
-            ClickHouseValue::Date(1)
-        ));
+        assert!(matches!(cell_to_clickhouse_value(Cell::Date(day1)), ClickHouseValue::Date(1)));
     }
 
     #[test]

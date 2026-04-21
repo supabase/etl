@@ -57,11 +57,7 @@ where
     .fetch_optional(executor)
     .await?;
 
-    Ok(record.map(|r| Replicator {
-        id: r.id,
-        tenant_id: r.tenant_id,
-        image_id: r.image_id,
-    }))
+    Ok(record.map(|r| Replicator { id: r.id, tenant_id: r.tenant_id, image_id: r.image_id }))
 }
 
 pub async fn read_replicators<'c, E>(
@@ -85,11 +81,7 @@ where
 
     Ok(records
         .drain(..)
-        .map(|r| Replicator {
-            id: r.id,
-            tenant_id: r.tenant_id,
-            image_id: r.image_id,
-        })
+        .map(|r| Replicator { id: r.id, tenant_id: r.tenant_id, image_id: r.image_id })
         .collect())
 }
 

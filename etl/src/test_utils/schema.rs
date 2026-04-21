@@ -1,5 +1,6 @@
-use crate::types::Type;
 use etl_postgres::types::{ColumnSchema, ReplicatedTableSchema, SnapshotId, TableSchema};
+
+use crate::types::Type;
 
 /// Asserts that two column schemas are equal.
 pub fn assert_column_schema_eq(actual: &ColumnSchema, expected: &ColumnSchema) {
@@ -99,7 +100,8 @@ pub fn assert_columns_names_types<'a>(
         );
         assert_eq!(
             actual.typ, *expected_type,
-            "column '{expected_name}' type mismatch at index {i}: got {:?}, expected {expected_type:?}",
+            "column '{expected_name}' type mismatch at index {i}: got {:?}, expected \
+             {expected_type:?}",
             actual.typ
         );
     }
@@ -128,7 +130,8 @@ pub fn assert_columns_names<'a>(
     }
 }
 
-/// Asserts that a table schema has columns matching the expected column schemas.
+/// Asserts that a table schema has columns matching the expected column
+/// schemas.
 pub fn assert_table_schema_columns(schema: &TableSchema, expected_columns: &[ColumnSchema]) {
     assert_columns_eq(schema.column_schemas.iter(), expected_columns);
 }
@@ -146,8 +149,8 @@ pub fn assert_table_schema_column_names(schema: &TableSchema, expected_names: &[
     assert_columns_names(schema.column_schemas.iter(), expected_names);
 }
 
-/// Asserts that a replicated table schema has columns matching the expected column schemas,
-/// and that all columns are replicated.
+/// Asserts that a replicated table schema has columns matching the expected
+/// column schemas, and that all columns are replicated.
 pub fn assert_replicated_schema_columns(
     schema: &ReplicatedTableSchema,
     expected_columns: &[ColumnSchema],
@@ -156,8 +159,8 @@ pub fn assert_replicated_schema_columns(
     assert_all_columns_replicated(schema, expected_columns.len());
 }
 
-/// Asserts that a replicated table schema has columns with the expected names and types,
-/// and that all columns are replicated.
+/// Asserts that a replicated table schema has columns with the expected names
+/// and types, and that all columns are replicated.
 pub fn assert_replicated_schema_column_names_types(
     schema: &ReplicatedTableSchema,
     expected_columns: &[(&str, Type)],
@@ -192,7 +195,8 @@ fn assert_all_columns_replicated(schema: &ReplicatedTableSchema, expected_len: u
     );
 }
 
-/// Asserts that schema snapshots are in strictly increasing order by snapshot ID.
+/// Asserts that schema snapshots are in strictly increasing order by snapshot
+/// ID.
 ///
 /// If `first_is_zero` is true, the first snapshot ID must be 0.
 /// If `first_is_zero` is false, the first snapshot ID must be > 0.
@@ -201,10 +205,7 @@ pub fn assert_schema_snapshots_ordering(
     snapshots: &[(SnapshotId, TableSchema)],
     first_is_zero: bool,
 ) {
-    assert!(
-        !snapshots.is_empty(),
-        "expected at least one schema snapshot"
-    );
+    assert!(!snapshots.is_empty(), "expected at least one schema snapshot");
 
     let (first_snapshot_id, _) = &snapshots[0];
     if first_is_zero {
@@ -225,7 +226,8 @@ pub fn assert_schema_snapshots_ordering(
         let (snapshot_id, _) = &snapshots[i];
         assert!(
             *snapshot_id > *prev_snapshot_id,
-            "snapshot at index {i} has snapshot_id {snapshot_id} which is not greater than previous snapshot_id {prev_snapshot_id}"
+            "snapshot at index {i} has snapshot_id {snapshot_id} which is not greater than \
+             previous snapshot_id {prev_snapshot_id}"
         );
     }
 }

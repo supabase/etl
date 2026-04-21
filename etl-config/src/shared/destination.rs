@@ -43,7 +43,8 @@ pub enum DestinationConfig {
         /// for writing to BigQuery. The maximum number of inflight requests is
         /// calculated as `connection_pool_size * 100`.
         ///
-        /// A higher connection pool size allows more parallel writes but consumes more resources.
+        /// A higher connection pool size allows more parallel writes but
+        /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
     },
@@ -108,9 +109,9 @@ pub enum IcebergConfig {
         project_ref: String,
         /// Name of the warehouse in the catalog
         warehouse_name: String,
-        /// If present, the iceberg catalog namespace where tables will be created.
-        /// If missing, multiple catlog namespaces will be created, one per source
-        /// schema.
+        /// If present, the iceberg catalog namespace where tables will be
+        /// created. If missing, multiple catlog namespaces will be
+        /// created, one per source schema.
         namespace: Option<String>,
         /// Catalog authentication token
         catalog_token: SecretString,
@@ -126,9 +127,9 @@ pub enum IcebergConfig {
         catalog_uri: String,
         /// Name of the warehouse in the catalog
         warehouse_name: String,
-        /// If present, the iceberg catalog namespace where tables will be created.
-        /// If missing, multiple catlog namespaces will be created, one per source
-        /// schema.
+        /// If present, the iceberg catalog namespace where tables will be
+        /// created. If missing, multiple catlog namespaces will be
+        /// created, one per source schema.
         namespace: Option<String>,
         /// The S3 access key id
         s3_access_key_id: SecretString,
@@ -150,9 +151,9 @@ pub enum IcebergConfigWithoutSecrets {
         project_ref: String,
         /// Name of the warehouse in the catalog
         warehouse_name: String,
-        /// If present, the iceberg catalog namespace where tables will be created.
-        /// If missing, multiple catlog namespaces will be created, one per source
-        /// schema.
+        /// If present, the iceberg catalog namespace where tables will be
+        /// created. If missing, multiple catlog namespaces will be
+        /// created, one per source schema.
         namespace: Option<String>,
         /// The S3 region
         s3_region: String,
@@ -231,7 +232,8 @@ pub enum DestinationConfigWithoutSecrets {
         /// for writing to BigQuery. The maximum number of inflight requests is
         /// calculated as `connection_pool_size * 100`.
         ///
-        /// A higher connection pool size allows more parallel writes but consumes more resources.
+        /// A higher connection pool size allows more parallel writes but
+        /// consumes more resources.
         #[serde(default = "default_connection_pool_size")]
         connection_pool_size: usize,
     },
@@ -283,19 +285,12 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 max_staleness_mins,
                 connection_pool_size,
             },
-            DestinationConfig::ClickHouse {
-                url,
-                user,
-                database,
-                ..
-            } => DestinationConfigWithoutSecrets::ClickHouse {
-                url,
-                user,
-                database,
-            },
-            DestinationConfig::Iceberg { config } => DestinationConfigWithoutSecrets::Iceberg {
-                config: config.into(),
-            },
+            DestinationConfig::ClickHouse { url, user, database, .. } => {
+                DestinationConfigWithoutSecrets::ClickHouse { url, user, database }
+            }
+            DestinationConfig::Iceberg { config } => {
+                DestinationConfigWithoutSecrets::Iceberg { config: config.into() }
+            }
             DestinationConfig::Ducklake {
                 catalog_url,
                 data_path,

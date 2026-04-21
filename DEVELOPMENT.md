@@ -40,6 +40,22 @@ cargo install --version='~0.8.6' sqlx-cli --no-default-features --features rustl
   - [Install OrbStack](https://orbstack.dev)
   - Enable Kubernetes in OrbStack settings
 
+## Formatting
+
+The workspace stays on the stable toolchain pinned in `rust-toolchain.toml` for builds, tests, and linting.
+Formatting is the only workflow that uses nightly Rust, because the repository relies on nightly-only
+`rustfmt` options for import grouping and layout.
+
+Use the pinned formatter scripts from the project root:
+
+```bash
+./scripts/fmt
+./scripts/fmt-check
+```
+
+Both scripts default to `nightly-2026-04-15`. You can temporarily override the formatter toolchain with
+`RUSTFMT_NIGHTLY_TOOLCHAIN`, but CI and the repository defaults should stay pinned so formatting does not drift.
+
 ## Quick Start
 
 The fastest way to get started is using the setup script:

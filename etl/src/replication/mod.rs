@@ -3,8 +3,15 @@
 //! Handles the Postgres logical replication protocol including slot management,
 //! streaming changes, and maintaining replication consistency.
 
-pub mod apply;
+mod apply;
 pub mod client;
-pub mod stream;
-pub mod table_cache;
-pub mod table_sync;
+mod stream;
+mod table_cache;
+mod table_sync;
+
+pub(crate) use apply::{
+    ApplyLoop, ApplyLoopResult, ApplyWorkerContext, TableSyncWorkerContext, WorkerContext,
+};
+pub(crate) use stream::{EventsStream, StatusUpdateType, TableCopyStream};
+pub(crate) use table_cache::{SharedTableCache, SharedTableState};
+pub(crate) use table_sync::{TableSyncResult, start_table_sync};

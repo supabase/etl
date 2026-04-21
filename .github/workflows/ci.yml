@@ -116,9 +116,13 @@ jobs:
         if: matrix.check == 'sort'
         run: cargo install cargo-sort
 
+      - name: Install pinned nightly rustfmt
+        if: matrix.check == 'fmt'
+        run: rustup toolchain install nightly-2026-04-15 --profile minimal --component rustfmt
+
       - name: Run Cargo Fmt
         if: matrix.check == 'fmt'
-        run: cargo fmt --check
+        run: ./scripts/fmt-check
 
       - name: Run Cargo Clippy
         if: matrix.check == 'clippy'
@@ -129,14 +133,38 @@ jobs:
         run: cargo sort --workspace --grouped --check
 
   test-full:
-    name: Tests (Full)
+    name: Tests (Full, ${{ matrix.postgres_label }})
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
       id-token: write
     strategy:
       matrix:
-        postgres_version: [18, 17, 16, 15, 14]
+        include:
+          - postgres_label: postgres-18
+            postgres_version: 18
+            postgres_image: postgres:18
+            coverage: true
+          - postgres_label: postgres-17
+            postgres_version: 17
+            postgres_image: postgres:17
+            coverage: false
+          - postgres_label: postgres-16
+            postgres_version: 16
+            postgres_image: postgres:16
+            coverage: false
+          - postgres_label: postgres-15
+            postgres_version: 15
+            postgres_image: postgres:15
+            coverage: false
+          - postgres_label: postgres-14
+            postgres_version: 14
+            postgres_image: postgres:14
+            coverage: false
+          - postgres_label: orioledb-beta14-pg17
+            postgres_version: 17
+            postgres_image: orioledb/orioledb:beta14-pg17
+            coverage: false
     env:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -165,8 +193,9 @@ jobs:
         with:
           key: test-full
 
-      - name: Start Docker Compose (Postgres ${{ matrix.postgres_version }})
+      - name: Start Docker Compose (${{ matrix.postgres_label }})
         run: |
+          POSTGRES_IMAGE=${{ matrix.postgres_image }} \
           POSTGRES_VERSION=${{ matrix.postgres_version }} \
             cargo xtask postgres start
 
@@ -204,12 +233,12 @@ jobs:
           tool: cargo-nextest
 
       - name: Run Unit and Integration Tests
-        if: matrix.postgres_version != 18
+        if: matrix.coverage == false
         run: |
           cargo xtask nextest run
 
       - name: Install cargo-llvm-cov
-        if: matrix.postgres_version == 18
+        if: matrix.coverage == true
         uses: taiki-e/install-action@328a871ad8f62ecac78390391f463ccabc974b72 # v2.69.9
         with:
           tool: cargo-llvm-cov
@@ -219,17 +248,17 @@ jobs:
           cargo test --doc --workspace --all-features --no-fail-fast
 
       - name: Run Unit and Integration Tests with Coverage
-        if: matrix.postgres_version == 18
+        if: matrix.coverage == true
         run: |
           cargo xtask nextest llvm-cov
 
       - name: Merge Coverage Data
-        if: matrix.postgres_version == 18
+        if: matrix.coverage == true
         run: |
           cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload Coverage to Coveralls
-        if: matrix.postgres_version == 18
+        if: matrix.coverage == true
         uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e # v2.3.7
         with:
           fail-on-error: false

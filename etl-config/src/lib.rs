@@ -10,7 +10,7 @@ mod load;
 mod secret;
 pub mod shared;
 
-pub use ducklake::*;
-pub use environment::*;
-pub use load::*;
-pub use secret::*;
+pub use ducklake::{ParseDucklakeUrlError, parse_ducklake_url};
+pub use environment::Environment;
+pub use load::{Config, LoadConfigError, load_config};
+pub use secret::SerializableSecretString;

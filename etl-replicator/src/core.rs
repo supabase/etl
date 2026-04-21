@@ -1,40 +1,46 @@
 use std::collections::HashMap;
 
-use crate::error::{ReplicatorError, ReplicatorResult};
-use crate::error_notification::ErrorNotificationClient;
-use crate::error_reporting::ErrorReportingStateStore;
-use crate::metrics;
-use crate::sentry::set_destination_tag;
-use etl::concurrency::memory_monitor::MemorySnapshot;
-use etl::config::MemoryBackpressureConfig;
-use etl::pipeline::Pipeline;
-use etl::store::both::postgres::PostgresStore;
-use etl::store::cleanup::CleanupStore;
-use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
-use etl::types::PipelineId;
-use etl::{config::IcebergConfig, destination::Destination};
-use etl_config::shared::{DestinationConfig, PgConnectionConfig, ReplicatorConfig};
-use etl_config::{Environment, parse_ducklake_url};
-use etl_destinations::clickhouse::{ClickHouseDestination, ClickHouseInserterConfig};
-use etl_destinations::iceberg::{
-    DestinationNamespace, S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY,
+use etl::{
+    config::{IcebergConfig, MemoryBackpressureConfig},
+    destination::Destination,
+    pipeline::Pipeline,
+    store::{
+        both::postgres::PostgresStore, cleanup::CleanupStore, schema::SchemaStore,
+        state::StateStore,
+    },
+    types::PipelineId,
+};
+use etl_config::{
+    Environment, parse_ducklake_url,
+    shared::{DestinationConfig, PgConnectionConfig, ReplicatorConfig},
 };
 use etl_destinations::{
     bigquery::BigQueryDestination,
+    clickhouse::{ClickHouseDestination, ClickHouseInserterConfig},
     ducklake::{DuckLakeDestination, S3Config as DucklakeS3Config},
-    iceberg::{IcebergClient, IcebergDestination},
+    iceberg::{
+        DestinationNamespace, IcebergClient, IcebergDestination, S3_ACCESS_KEY_ID, S3_ENDPOINT,
+        S3_SECRET_ACCESS_KEY,
+    },
 };
 use secrecy::ExposeSecret;
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info, warn};
 
+use crate::{
+    error::{ReplicatorError, ReplicatorResult},
+    error_notification::ErrorNotificationClient,
+    error_reporting::ErrorReportingStateStore,
+    metrics,
+    sentry::set_destination_tag,
+};
+
 /// Starts the replicator service with the provided configuration.
 ///
 /// Initializes the state store, creates the appropriate destination based on
 /// configuration, and starts the pipeline.
-pub async fn start_replicator_with_config(
+pub(crate) async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
@@ -48,8 +54,9 @@ pub async fn start_replicator_with_config(
     )
     .await?;
 
-    // For each destination, we start the pipeline. This is more verbose due to static dispatch, but
-    // we prefer more performance at the cost of ergonomics.
+    // For each destination, we start the pipeline. This is more verbose due to
+    // static dispatch, but we prefer more performance at the cost of
+    // ergonomics.
     match &replicator_config.destination {
         DestinationConfig::BigQuery {
             project_id,
@@ -168,7 +175,8 @@ pub async fn start_replicator_with_config(
                 (None, None) => None,
                 _ => {
                     return Err(ReplicatorError::config(std::io::Error::other(
-                        "ducklake s3 credentials must include both access key id and secret access key",
+                        "ducklake s3 credentials must include both access key id and secret \
+                         access key",
                     )));
                 }
             };
@@ -186,16 +194,15 @@ pub async fn start_replicator_with_config(
             let pipeline = Pipeline::new(replicator_config.pipeline, state_store, destination);
             start_pipeline(pipeline).await?;
         }
-        DestinationConfig::ClickHouse {
-            url,
-            user,
-            password,
-            database,
-        } => {
+        DestinationConfig::ClickHouse { url, user, password, database } => {
             let mut sys = System::new_with_specifics(
                 RefreshKind::nothing().with_memory(MemoryRefreshKind::everything()),
             );
-            let total_memory_bytes = MemorySnapshot::from_system(&mut sys).total();
+            sys.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
+            let total_memory_bytes = match sys.cgroup_limits() {
+                Some(cgroup) => cgroup.total_memory,
+                None => sys.total_memory(),
+            };
             let max_bytes_per_insert = (total_memory_bytes as f64
                 * replicator_config
                     .pipeline
@@ -207,9 +214,7 @@ pub async fn start_replicator_with_config(
                 / replicator_config.pipeline.max_table_sync_workers as f64)
                 as u64;
 
-            let inserter_config = ClickHouseInserterConfig {
-                max_bytes_per_insert,
-            };
+            let inserter_config = ClickHouseInserterConfig { max_bytes_per_insert };
             let destination = ClickHouseDestination::new(
                 url.clone(),
                 user,
@@ -232,7 +237,7 @@ fn set_destination_scope<D: Destination>() {
     set_destination_tag(D::name());
 }
 
-pub fn create_props(
+fn create_props(
     s3_access_key_id: String,
     s3_secret_access_key: String,
     s3_endpoint: String,
@@ -277,8 +282,9 @@ where
     // Start the pipeline.
     pipeline.start().await?;
 
-    // We spawn metrics collection after the pipeline was started, so that if we crash before starting
-    // we don't keep emitting metrics that make it look as if the system is running.
+    // We spawn metrics collection after the pipeline was started, so that if we
+    // crash before starting we don't keep emitting metrics that make it look as
+    // if the system is running.
     metrics::spawn_metrics_tasks();
 
     // Spawn a task to listen for shutdown signals and trigger shutdown.
@@ -286,8 +292,9 @@ where
     let shutdown_handle = tokio::spawn(async move {
         // Listen for SIGTERM, sent by Kubernetes before SIGKILL during pod termination.
         //
-        // If the process is killed before shutdown completes, the pipeline may become corrupted,
-        // depending on the state store and destination implementations.
+        // If the process is killed before shutdown completes, the pipeline may become
+        // corrupted, depending on the state store and destination
+        // implementations.
         let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
             error!("failed to register sigterm handler, shutting down pipeline");
 
@@ -317,8 +324,9 @@ where
 
     // Ensure the shutdown task is finished before returning.
     // If the pipeline finished before Ctrl+C, we want to abort the shutdown task.
-    // If Ctrl+C was pressed, the shutdown task will have already triggered shutdown.
-    // We don't care about the result of the shutdown_handle, but we should abort it if it's still running.
+    // If Ctrl+C was pressed, the shutdown task will have already triggered
+    // shutdown. We don't care about the result of the shutdown_handle, but we
+    // should abort it if it's still running.
     shutdown_handle.abort();
     let _ = shutdown_handle.await;
 

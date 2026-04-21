@@ -1,63 +1,64 @@
 //! Shared per-table protocol state for logical replication workers.
 //!
-//! PostgreSQL 15+ supports column-level publication filtering, where only specific
-//! columns are replicated rather than all columns. The worker that currently owns a
-//! table therefore needs two pieces of protocol state to decode row changes:
-//! the schema snapshot to decode against, and the replication mask built from the
-//! latest `RELATION` message for that snapshot.
+//! PostgreSQL 15+ supports column-level publication filtering, where only
+//! specific columns are replicated rather than all columns. The worker that
+//! currently owns a table therefore needs two pieces of protocol state to
+//! decode row changes: the schema snapshot to decode against, and the
+//! replication mask built from the latest `RELATION` message for that snapshot.
 //!
-//! The apply worker and table sync workers share this state because ownership of a
-//! table can move between them over time, but at any point exactly one worker owns
-//! protocol interpretation for that table. Non-owning workers skip DDL, RELATION,
-//! and DML for that table and rely on the owning worker to advance the shared state.
+//! The apply worker and table sync workers share this state because ownership
+//! of a table can move between them over time, but at any point exactly one
+//! worker owns protocol interpretation for that table. Non-owning workers skip
+//! DDL, RELATION, and DML for that table and rely on the owning worker to
+//! advance the shared state.
 //!
 //! The cache is kept in-memory because PostgreSQL guarantees that `RELATION`
 //! messages are sent at the start of each connection and after schema changes
-//! before any dependent DML. Persisted schemas remain the durable source of truth;
-//! this cache only tracks the latest per-table decoding state needed by active
-//! workers.
+//! before any dependent DML. Persisted schemas remain the durable source of
+//! truth; this cache only tracks the latest per-table decoding state needed by
+//! active workers.
+
+use std::{collections::HashMap, sync::Arc};
 
 use etl_postgres::types::{ReplicationMask, SnapshotId, TableId};
-use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::warn;
 
 /// Shared per-table protocol state used to decode logical replication messages.
 #[derive(Debug, Clone)]
-pub struct SharedTableState {
+pub(crate) struct SharedTableState {
     /// The latest schema snapshot known for the table.
-    pub snapshot_id: SnapshotId,
-    /// The replication mask for [`SharedTableState::snapshot_id`], if a `RELATION`
-    /// message has already been processed for that snapshot.
-    pub replication_mask: Option<ReplicationMask>,
+    pub(crate) snapshot_id: SnapshotId,
+    /// The replication mask for [`SharedTableState::snapshot_id`], if a
+    /// `RELATION` message has already been processed for that snapshot.
+    pub(crate) replication_mask: Option<ReplicationMask>,
 }
 
 /// Thread-safe container for shared per-table protocol state.
 #[derive(Debug, Clone, Default)]
-pub struct SharedTableCache {
+pub(crate) struct SharedTableCache {
     inner: Arc<RwLock<HashMap<TableId, SharedTableState>>>,
 }
 
 impl SharedTableCache {
     /// Creates a new empty [`SharedTableCache`] container.
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(HashMap::new())),
-        }
+    pub(crate) fn new() -> Self {
+        Self { inner: Arc::new(RwLock::new(HashMap::new())) }
     }
 
     /// Returns the shared state for a table, if present.
-    pub async fn get(&self, table_id: &TableId) -> Option<SharedTableState> {
+    pub(crate) async fn get(&self, table_id: &TableId) -> Option<SharedTableState> {
         let guard = self.inner.read().await;
         guard.get(table_id).cloned()
     }
 
-    /// Inserts or updates shared table state when the incoming snapshot is not stale.
+    /// Inserts or updates shared table state when the incoming snapshot is not
+    /// stale.
     ///
-    /// Pass `Some(mask)` to refresh the replication mask for that snapshot, or `None`
-    /// to clear it when a newer schema snapshot invalidates the old `RELATION` state.
-    pub async fn upsert(
+    /// Pass `Some(mask)` to refresh the replication mask for that snapshot, or
+    /// `None` to clear it when a newer schema snapshot invalidates the old
+    /// `RELATION` state.
+    pub(crate) async fn upsert(
         &self,
         table_id: TableId,
         snapshot_id: SnapshotId,
@@ -75,7 +76,8 @@ impl SharedTableCache {
 
                 debug_assert!(
                     state.snapshot_id <= snapshot_id,
-                    "shared table cache received stale snapshot update for table {table_id}: current={}, requested={}",
+                    "shared table cache received stale snapshot update for table {table_id}: \
+                     current={}, requested={}",
                     state.snapshot_id,
                     snapshot_id
                 );
@@ -85,13 +87,7 @@ impl SharedTableCache {
                 state.replication_mask = replication_mask;
             }
             None => {
-                guard.insert(
-                    table_id,
-                    SharedTableState {
-                        snapshot_id,
-                        replication_mask,
-                    },
-                );
+                guard.insert(table_id, SharedTableState { snapshot_id, replication_mask });
             }
         }
     }
@@ -99,10 +95,12 @@ impl SharedTableCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use etl_postgres::types::{ColumnSchema, TableName, TableSchema};
     use std::collections::HashSet;
+
+    use etl_postgres::types::{ColumnSchema, TableName, TableSchema};
     use tokio_postgres::types::Type;
+
+    use super::*;
 
     fn create_test_mask() -> ReplicationMask {
         let schema = TableSchema::new(
@@ -127,20 +125,12 @@ mod tests {
         let snapshot_id = SnapshotId::new(10.into());
         let replication_mask = create_test_mask();
 
-        cache
-            .upsert(table_id, snapshot_id, Some(replication_mask.clone()))
-            .await;
+        cache.upsert(table_id, snapshot_id, Some(replication_mask.clone())).await;
 
-        let state = cache
-            .get(&table_id)
-            .await
-            .expect("table state should exist");
+        let state = cache.get(&table_id).await.expect("table state should exist");
         assert_eq!(state.snapshot_id, snapshot_id);
         assert_eq!(
-            state
-                .replication_mask
-                .expect("replication mask should exist")
-                .as_slice(),
+            state.replication_mask.expect("replication mask should exist").as_slice(),
             replication_mask.as_slice()
         );
     }
@@ -151,17 +141,10 @@ mod tests {
         let table_id = TableId::new(123);
         let replication_mask = create_test_mask();
 
-        cache
-            .upsert(table_id, SnapshotId::new(10.into()), Some(replication_mask))
-            .await;
-        cache
-            .upsert(table_id, SnapshotId::new(11.into()), None)
-            .await;
+        cache.upsert(table_id, SnapshotId::new(10.into()), Some(replication_mask)).await;
+        cache.upsert(table_id, SnapshotId::new(11.into()), None).await;
 
-        let state = cache
-            .get(&table_id)
-            .await
-            .expect("table state should exist");
+        let state = cache.get(&table_id).await.expect("table state should exist");
         assert_eq!(state.snapshot_id, SnapshotId::new(11.into()));
         assert!(state.replication_mask.is_none());
     }
@@ -173,16 +156,8 @@ mod tests {
         let table_id = TableId::new(123);
         let replication_mask = create_test_mask();
 
-        cache
-            .upsert(
-                table_id,
-                SnapshotId::new(11.into()),
-                Some(replication_mask.clone()),
-            )
-            .await;
-        cache
-            .upsert(table_id, SnapshotId::new(10.into()), None)
-            .await;
+        cache.upsert(table_id, SnapshotId::new(11.into()), Some(replication_mask.clone())).await;
+        cache.upsert(table_id, SnapshotId::new(10.into()), None).await;
     }
 
     #[tokio::test]
@@ -193,20 +168,12 @@ mod tests {
         let snapshot_id = SnapshotId::new(10.into());
         let replication_mask = create_test_mask();
 
-        cache1
-            .upsert(table_id, snapshot_id, Some(replication_mask.clone()))
-            .await;
+        cache1.upsert(table_id, snapshot_id, Some(replication_mask.clone())).await;
 
-        let state = cache2
-            .get(&table_id)
-            .await
-            .expect("table state should exist");
+        let state = cache2.get(&table_id).await.expect("table state should exist");
         assert_eq!(state.snapshot_id, snapshot_id);
         assert_eq!(
-            state
-                .replication_mask
-                .expect("replication mask should exist")
-                .as_slice(),
+            state.replication_mask.expect("replication mask should exist").as_slice(),
             replication_mask.as_slice()
         );
     }

@@ -1,13 +1,20 @@
-use sqlx::PgTransaction;
 use std::ops::DerefMut;
+
+use sqlx::PgTransaction;
 use thiserror::Error;
 
-use crate::configs::destination::FullApiDestinationConfig;
-use crate::configs::encryption::EncryptionKey;
-use crate::configs::pipeline::FullApiPipelineConfig;
-use crate::configs::serde::{DbDeserializationError, DbSerializationError};
-use crate::db::destinations::{DestinationsDbError, create_destination, update_destination};
-use crate::db::pipelines::{PipelinesDbError, create_pipeline, update_pipeline};
+use crate::{
+    configs::{
+        destination::FullApiDestinationConfig,
+        encryption::EncryptionKey,
+        pipeline::FullApiPipelineConfig,
+        serde::{DbDeserializationError, DbSerializationError},
+    },
+    db::{
+        destinations::{DestinationsDbError, create_destination, update_destination},
+        pipelines::{PipelinesDbError, create_pipeline, update_pipeline},
+    },
+};
 
 #[derive(Debug, Error)]
 pub enum DestinationPipelinesDbError {
@@ -53,15 +60,9 @@ pub async fn create_destination_and_pipeline(
     )
     .await?;
 
-    let pipeline_id = create_pipeline(
-        txn,
-        tenant_id,
-        source_id,
-        destination_id,
-        image_id,
-        pipeline_config,
-    )
-    .await?;
+    let pipeline_id =
+        create_pipeline(txn, tenant_id, source_id, destination_id, image_id, pipeline_config)
+            .await?;
 
     Ok((destination_id, pipeline_id))
 }
@@ -90,9 +91,7 @@ pub async fn update_destination_and_pipeline(
 
     if destination_id_res.is_none() {
         txn.rollback().await?;
-        return Err(DestinationPipelinesDbError::DestinationNotFound(
-            destination_id,
-        ));
+        return Err(DestinationPipelinesDbError::DestinationNotFound(destination_id));
     };
 
     let pipeline_id_res = update_pipeline(

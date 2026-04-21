@@ -1,14 +1,18 @@
-use etl_config::SerializableSecretString;
-use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
+use etl_config::{
+    SerializableSecretString,
+    shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig},
+};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::configs::encryption::{
-    Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
-    decrypt_text, encrypt_text,
+use crate::configs::{
+    encryption::{
+        Decrypt, DecryptionError, Encrypt, EncryptedValue, EncryptionError, EncryptionKey,
+        decrypt_text, encrypt_text,
+    },
+    store::Store,
 };
-use crate::configs::store::Store;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -56,12 +60,7 @@ pub struct StrippedApiSourceConfig {
 
 impl From<StoredSourceConfig> for StrippedApiSourceConfig {
     fn from(source: StoredSourceConfig) -> Self {
-        Self {
-            host: source.host,
-            port: source.port,
-            name: source.name,
-            username: source.username,
-        }
+        Self { host: source.host, port: source.port, name: source.name, username: source.username }
     }
 }
 
@@ -75,7 +74,8 @@ pub struct StoredSourceConfig {
 }
 
 impl StoredSourceConfig {
-    /// Converts the stored source config into a Postgres connection config with TLS settings.
+    /// Converts the stored source config into a Postgres connection config with
+    /// TLS settings.
     pub fn into_connection_config(self, tls_config: TlsConfig) -> PgConnectionConfig {
         PgConnectionConfig {
             host: self.host,
@@ -108,10 +108,8 @@ impl Encrypt<EncryptedStoredSourceConfig> for StoredSourceConfig {
     ) -> Result<EncryptedStoredSourceConfig, EncryptionError> {
         let mut encrypted_password = None;
         if let Some(password) = self.password {
-            encrypted_password = Some(encrypt_text(
-                password.expose_secret().to_owned(),
-                encryption_key,
-            )?);
+            encrypted_password =
+                Some(encrypt_text(password.expose_secret().to_owned(), encryption_key)?);
         }
 
         Ok(EncryptedStoredSourceConfig {
@@ -171,10 +169,7 @@ mod tests {
             password: Some(SerializableSecretString::from("password".to_string())),
         };
 
-        let key = EncryptionKey {
-            id: 1,
-            key: generate_random_key::<32>().unwrap(),
-        };
+        let key = EncryptionKey { id: 1, key: generate_random_key::<32>().unwrap() };
 
         let encrypted = config.clone().encrypt(&key).unwrap();
         let decrypted = encrypted.decrypt(&key).unwrap();
