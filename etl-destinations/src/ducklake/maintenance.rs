@@ -337,7 +337,9 @@ impl TableMaintenanceState {
         pending_rows_threshold: Option<u64>,
     ) -> Option<MaintenanceReason> {
         if let Some(sizes) = self.current_pending_inline_data_sizes() {
-            return (sizes.inlined_data_bytes >= MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD)
+            return (sizes.inlined_data_bytes
+                >= (MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD
+                    * PARQUET_COMPRESSION_RATIO_ESTIMATE))
                 .then_some(MaintenanceReason::PendingInlinedDataBytesThreshold);
         }
 

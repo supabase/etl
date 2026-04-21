@@ -1109,7 +1109,7 @@ fn delete_predicate_from_row(table_schema: &TableSchema, row: &TableRow) -> EtlR
         .column_schemas
         .iter()
         .zip(row.values())
-        .filter(|(column_schema, _)| column_schema.primary)
+        .filter(|(column_schema, _)| column_schema.primary_key())
     {
         let quoted_column = quote_identifier(&column_schema.name).into_owned();
         let predicate = match value {

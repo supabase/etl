@@ -13,11 +13,14 @@ use etl::destination::async_result::{
 use etl::destination::task_set::DestinationTaskSet;
 use etl::error::{ErrorKind, EtlResult};
 use etl::etl_error;
+use etl::state::destination_metadata::DestinationTableMetadata;
 use etl::store::schema::SchemaStore;
 use etl::store::state::StateStore;
 #[cfg(test)]
 use etl::types::Cell;
-use etl::types::{Event, EventSequenceKey, SizeHint, TableId, TableName, TableRow, TableSchema};
+use etl::types::{
+    Event, EventSequenceKey, ReplicatedTableSchema, SizeHint, TableId, TableName, TableRow,
+};
 use metrics::gauge;
 use parking_lot::Mutex;
 use pg_escape::quote_identifier;
@@ -135,10 +138,10 @@ where
 
     async fn truncate_table(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         async_result: TruncateTableResult<()>,
     ) -> EtlResult<()> {
-        let result = self.truncate_table(table_id).await;
+        let result = self.truncate_table(replicated_table_schema).await;
         async_result.send(result);
 
         Ok(())
@@ -146,11 +149,11 @@ where
 
     async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult<()>,
     ) -> EtlResult<()> {
-        let result = self.write_table_rows(table_id, table_rows).await;
+        let result = self.write_table_rows(replicated_table_schema, table_rows).await;
         async_result.send(result);
 
         Ok(())
@@ -183,8 +186,11 @@ where
     ///
     /// This convenience wrapper preserves the pre-async-result direct-call API
     /// by awaiting the truncate work inline.
-    pub async fn truncate_table(&self, table_id: TableId) -> EtlResult<()> {
-        self.truncate_table_inner(table_id).await
+    pub async fn truncate_table(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        self.truncate_table_inner(replicated_table_schema).await
     }
 
     /// Writes an initial-copy batch directly to the destination table.
@@ -193,10 +199,10 @@ where
     /// by awaiting the write inline.
     pub async fn write_table_rows(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.write_table_rows_inner(table_id, table_rows).await
+        self.write_table_rows_inner(replicated_table_schema, table_rows).await
     }
 
     /// Writes one streaming CDC batch directly to the destination.
@@ -399,8 +405,11 @@ where
     }
 
     /// Truncates the destination table while keeping its schema and name.
-    async fn truncate_table_inner(&self, table_id: TableId) -> EtlResult<()> {
-        let table_name = self.ensure_table_exists(table_id).await?;
+    async fn truncate_table_inner(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        let table_name = self.ensure_table_exists(replicated_table_schema).await?;
         let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.ensure_applied_batches_table_exists().await?;
         self.ensure_streaming_progress_table_exists().await?;
@@ -480,7 +489,7 @@ where
     /// materialization after we emit the maintenance notification.
     async fn write_table_rows_inner(
         &self,
-        table_id: TableId,
+        replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         if table_rows.is_empty() {
@@ -489,7 +498,7 @@ where
 
         self.maybe_run_requested_inline_flush().await?;
 
-        let table_name = self.ensure_table_exists(table_id).await?;
+        let table_name = self.ensure_table_exists(replicated_table_schema).await?;
         let approx_bytes = table_rows
             .iter()
             .map(|row| row.size_hint() as u64)
@@ -498,9 +507,9 @@ where
 
         // Here we can have concurrent table writers because it's INSERTs only and CDC (write_events) won't start before the copy phase is complete
         self.ensure_applied_batches_table_exists().await?;
-        let table_schema = self.get_table_schema(table_id).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
-        let prepared_batch = prepare_copy_table_batch(&table_schema, table_name, table_rows)?;
+        let prepared_batch =
+            prepare_copy_table_batch(replicated_table_schema.inner(), table_name, table_rows)?;
         let table_name = prepared_batch.table_name().to_owned();
         apply_table_batch_with_retry(
             Arc::clone(&self.pool),
@@ -541,8 +550,10 @@ where
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
-            let mut table_id_to_mutations: HashMap<TableId, Vec<TrackedTableMutation>> =
-                HashMap::new();
+            let mut table_id_to_mutations: HashMap<
+                TableId,
+                (ReplicatedTableSchema, Vec<TrackedTableMutation>),
+            > = HashMap::new();
 
             // Accumulate non-truncate events, stopping at the first Truncate.
             while let Some(event) = event_iter.peek() {
@@ -554,10 +565,12 @@ where
                 let event = event_iter.next().unwrap();
                 match event {
                     Event::Insert(insert) => {
-                        table_id_to_mutations
-                            .entry(insert.table_id)
-                            .or_default()
-                            .push(TrackedTableMutation::new(
+                        let table_id = insert.replicated_table_schema.id();
+                        let entry = table_id_to_mutations
+                            .entry(table_id)
+                            .or_insert_with(|| (insert.replicated_table_schema.clone(), Vec::new()));
+                        entry.0 = insert.replicated_table_schema;
+                        entry.1.push(TrackedTableMutation::new(
                                 insert.start_lsn,
                                 insert.commit_lsn,
                                 insert.tx_ordinal,
@@ -565,10 +578,14 @@ where
                             ));
                     }
                     Event::Update(update) => {
-                        let table_id = update.table_id;
+                        let table_id = update.replicated_table_schema.id();
+                        let entry = table_id_to_mutations
+                            .entry(table_id)
+                            .or_insert_with(|| (update.replicated_table_schema.clone(), Vec::new()));
+                        entry.0 = update.replicated_table_schema;
                         let table_row = update.table_row;
                         let old_table_row = update.old_table_row;
-                        let mutations = table_id_to_mutations.entry(table_id).or_default();
+                        let mutations = &mut entry.1;
                         if let Some((_, old_row)) = old_table_row {
                             mutations.push(TrackedTableMutation::new(
                                 update.start_lsn,
@@ -596,10 +613,12 @@ where
                             debug!("delete event has no old row, skipping");
                             continue;
                         };
-                        table_id_to_mutations
-                            .entry(delete.table_id)
-                            .or_default()
-                            .push(TrackedTableMutation::new(
+                        let table_id = delete.replicated_table_schema.id();
+                        let entry = table_id_to_mutations
+                            .entry(table_id)
+                            .or_insert_with(|| (delete.replicated_table_schema.clone(), Vec::new()));
+                        entry.0 = delete.replicated_table_schema;
+                        entry.1.push(TrackedTableMutation::new(
                                 delete.start_lsn,
                                 delete.commit_lsn,
                                 delete.tx_ordinal,
@@ -617,9 +636,9 @@ where
                 self.ensure_streaming_progress_table_exists().await?;
                 let mut join_set = JoinSet::new();
 
-                for (table_id, mutations) in table_id_to_mutations {
-                    let table_name = self.ensure_table_exists(table_id).await?;
-                    let table_schema = self.get_table_schema(table_id).await?;
+                for (_, (replicated_table_schema, mutations)) in table_id_to_mutations {
+                    let table_name = self.ensure_table_exists(&replicated_table_schema).await?;
+                    let table_schema = replicated_table_schema.inner().clone();
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
                     let checkpoint_gate = Arc::clone(&self.checkpoint_gate);
                     let pool = Arc::clone(&self.pool);
@@ -682,15 +701,19 @@ where
             }
 
             // Collect contiguous truncate events while preserving table-local order.
-            let mut truncate_table_ids: HashMap<TableId, Vec<TrackedTruncateEvent>> =
-                HashMap::new();
+            let mut truncate_table_ids: HashMap<
+                TableId,
+                (ReplicatedTableSchema, Vec<TrackedTruncateEvent>),
+            > = HashMap::new();
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate)) = event_iter.next() {
-                    for rel_id in truncate.rel_ids {
-                        truncate_table_ids
-                            .entry(TableId::new(rel_id))
-                            .or_default()
-                            .push(TrackedTruncateEvent::new(
+                    for replicated_table_schema in truncate.truncated_tables {
+                        let table_id = replicated_table_schema.id();
+                        let entry = truncate_table_ids
+                            .entry(table_id)
+                            .or_insert_with(|| (replicated_table_schema.clone(), Vec::new()));
+                        entry.0 = replicated_table_schema;
+                        entry.1.push(TrackedTruncateEvent::new(
                                 truncate.start_lsn,
                                 truncate.commit_lsn,
                                 truncate.tx_ordinal,
@@ -705,8 +728,8 @@ where
                 self.ensure_streaming_progress_table_exists().await?;
                 let mut join_set = JoinSet::new();
 
-                for (table_id, truncates) in truncate_table_ids {
-                    let table_name = self.ensure_table_exists(table_id).await?;
+                for (_, (replicated_table_schema, truncates)) in truncate_table_ids {
+                    let table_name = self.ensure_table_exists(&replicated_table_schema).await?;
                     let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
                     let checkpoint_gate = Arc::clone(&self.checkpoint_gate);
                     let pool = Arc::clone(&self.pool);
@@ -752,22 +775,13 @@ where
     }
 
     /// Ensures the destination table exists, creating it (DDL) if necessary.
-    async fn ensure_table_exists(&self, table_id: TableId) -> EtlResult<DuckLakeTableName> {
-        let table_schema = self
-            .store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found",
-                    format!("No schema found for table {table_id}")
-                )
-            })?;
-
-        let table_name = self
-            .get_or_create_table_mapping(table_id, &table_schema.name)
-            .await?;
+    async fn ensure_table_exists(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<DuckLakeTableName> {
+        let table_id = replicated_table_schema.id();
+        let table_name =
+            self.get_or_create_destination_table_name(replicated_table_schema).await?;
 
         // Fast path: already created.
         {
@@ -796,10 +810,20 @@ where
             }
         }
 
+        let metadata = DestinationTableMetadata::new_applying(
+            table_name.clone(),
+            replicated_table_schema.inner().snapshot_id,
+            replicated_table_schema.replication_mask().clone(),
+        );
+        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+
         // `build_create_table_sql_ducklake` generates `CREATE TABLE IF NOT EXISTS "name" (...)`.
         // Prefix the table name with the catalog alias so DuckLake knows which
         // catalog to create the table in.
-        let ddl = build_create_table_sql_ducklake(&table_name, &table_schema.column_schemas);
+        let ddl = build_create_table_sql_ducklake(
+            &table_name,
+            &replicated_table_schema.inner().column_schemas,
+        );
         let quoted_table_name = quote_identifier(&table_name).into_owned();
         let qualified_ddl = ddl.replace(
             &quoted_table_name,
@@ -835,6 +859,7 @@ where
             },
         )
         .await?;
+        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
 
         Ok(table_name)
     }
@@ -863,36 +888,19 @@ where
         .await
     }
 
-    /// Returns the current source schema for `table_id`.
-    async fn get_table_schema(&self, table_id: TableId) -> EtlResult<Arc<TableSchema>> {
-        self.store
-            .get_table_schema(&table_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found",
-                    format!("No schema found for table {table_id}")
-                )
-            })
-    }
-
-    /// Returns the stored destination table name for `table_id`, creating and
-    /// persisting a new mapping if none exists yet.
-    async fn get_or_create_table_mapping(
+    /// Returns the stored destination table name for `table_id`, creating a
+    /// default name if none exists yet.
+    async fn get_or_create_destination_table_name(
         &self,
-        table_id: TableId,
-        table_name: &TableName,
+        replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<DuckLakeTableName> {
-        if let Some(existing) = self.store.get_table_mapping(&table_id).await? {
-            return Ok(existing);
+        let table_id = replicated_table_schema.id();
+
+        if let Some(existing) = self.store.get_destination_table_metadata(table_id).await? {
+            return Ok(existing.destination_table_id);
         }
 
-        let ducklake_table_name = table_name_to_ducklake_table_name(table_name)?;
-        self.store
-            .store_table_mapping(table_id, ducklake_table_name.clone())
-            .await?;
-        Ok(ducklake_table_name)
+        table_name_to_ducklake_table_name(replicated_table_schema.name())
     }
 
     /// Serializes table-local truncate and CDC mutation writes.
