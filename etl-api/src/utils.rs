@@ -1,7 +1,6 @@
 use etl_config::SerializableSecretString;
 use rand::Rng;
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de::Error as _};
 use url::Url;
 
 /// Deserializes a string and trims leading and trailing whitespace.
@@ -35,7 +34,7 @@ where
     Ok(opt.map(|s| SerializableSecretString::from(s.trim().to_string())))
 }
 
-/// Deserializes an HTTP(S) URL string and trims leading and trailing whitespace.
+/// Deserializes an HTTP(S) URL string, trimming whitespace.
 pub fn trim_http_url<'de, D>(deserializer: D) -> Result<Url, D::Error>
 where
     D: Deserializer<'de>,

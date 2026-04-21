@@ -1,8 +1,7 @@
 //! Test utilities for ClickHouse destinations.
 
 use clickhouse::Client;
-use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
+use etl::store::{schema::SchemaStore, state::StateStore};
 use tokio::runtime::Handle;
 use url::Url;
 use uuid::Uuid;
@@ -13,7 +12,8 @@ use crate::clickhouse::{ClickHouseDestination, ClickHouseInserterConfig};
 pub const CLICKHOUSE_URL_ENV: &str = "TESTS_CLICKHOUSE_URL";
 /// ClickHouse user name (required).
 pub const CLICKHOUSE_USER_ENV: &str = "TESTS_CLICKHOUSE_USER";
-/// ClickHouse password (optional — omit or leave empty for passwordless access).
+/// ClickHouse password (optional -- omit or leave empty for passwordless
+/// access).
 pub const CLICKHOUSE_PASSWORD_ENV: &str = "TESTS_CLICKHOUSE_PASSWORD";
 
 /// Returns the ClickHouse HTTP URL from the environment.
@@ -147,6 +147,33 @@ impl ClickHouseTestDatabase {
         T: for<'a> clickhouse::Row<Value<'a> = T> + serde::de::DeserializeOwned + 'static,
     {
         self.db_client.query(sql).fetch_all::<T>().await.expect("ClickHouse query failed")
+    }
+
+    /// Returns the underlying ClickHouse client for fallible queries.
+    pub fn db_client(&self) -> &Client {
+        &self.db_client
+    }
+
+    /// Returns the column names of a ClickHouse table in position order,
+    /// excluding the CDC columns (`cdc_operation`, `cdc_lsn`).
+    pub async fn column_names(&self, table_name: &str) -> Vec<String> {
+        #[derive(clickhouse::Row, serde::Deserialize)]
+        struct Col {
+            name: String,
+        }
+        let sql = format!(
+            "SELECT name FROM system.columns WHERE database = '{}' AND table = '{}' AND name NOT \
+             IN ('cdc_operation', 'cdc_lsn') ORDER BY position",
+            self.database, table_name
+        );
+        self.db_client
+            .query(&sql)
+            .fetch_all::<Col>()
+            .await
+            .expect("failed to query system.columns")
+            .into_iter()
+            .map(|c| c.name)
+            .collect()
     }
 }
 

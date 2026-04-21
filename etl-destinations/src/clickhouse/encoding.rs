@@ -1,28 +1,36 @@
 use std::fmt;
 
 use chrono::NaiveDate;
-use etl::error::{ErrorKind, EtlResult};
-use etl::etl_error;
-use etl::types::{ArrayCell, Cell};
+use etl::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    types::{ArrayCell, Cell},
+};
 
-// ── RowBinary encoding ────────────────────────────────────────────────────────
+// ── RowBinary encoding
+// ────────────────────────────────────────────────────────
 //
-// We bypass the `Row` / `Inserter` API entirely and write RowBinary bytes directly
-// via `Client::insert_formatted_with("INSERT INTO \"t\" FORMAT RowBinary")`.
+// We bypass the `Row` / `Inserter` API entirely and write RowBinary bytes
+// directly via `Client::insert_formatted_with("INSERT INTO \"t\" FORMAT
+// RowBinary")`.
 //
 // This avoids two fatal issues with the `Inserter<T>` path:
 //
-// 1. `Insert::new` always calls `join_column_names::<T>().expect(…)`, which panics
-//    when `COLUMN_NAMES = &[]` regardless of whether validation is enabled.
+// 1. `Insert::new` always calls `join_column_names::<T>().expect(…)`, which
+//    panics when `COLUMN_NAMES = &[]` regardless of whether validation is
+//    enabled.
 //
-// 2. The RowBinary serde serializer wraps its `BufMut` writer in a fresh `&mut` at
-//    every `serialize_some` call, telescoping the type to `&mut &mut … BytesMut` for
-//    nullable array elements and overflowing the compiler's recursion limit.
+// 2. The RowBinary serde serializer wraps its `BufMut` writer in a fresh `&mut`
+//    at every `serialize_some` call, telescoping the type to `&mut &mut …
+//    BytesMut` for nullable array elements and overflowing the compiler's
+//    recursion limit.
 //
-// Direct binary encoding has neither problem: it is a simple recursive function that
-// writes bytes to a `Vec<u8>` with no generics and no type-level recursion.
+// Direct binary encoding has neither problem: it is a simple recursive function
+// that writes bytes to a `Vec<u8>` with no generics and no type-level
+// recursion.
 
-// ── ClickHouseValue ───────────────────────────────────────────────────────────
+// ── ClickHouseValue
+// ───────────────────────────────────────────────────────────
 
 /// Owned ClickHouse-compatible value, moved (not cloned) from a [`Cell`].
 pub(crate) enum ClickHouseValue {
@@ -38,9 +46,11 @@ pub(crate) enum ClickHouseValue {
     String(String),
     /// Days since Unix epoch (ClickHouse `Date` on wire = UInt16 LE)
     Date(u16),
-    /// Microseconds since Unix epoch (ClickHouse `DateTime64(6)` on wire = Int64 LE)
+    /// Microseconds since Unix epoch (ClickHouse `DateTime64(6)` on wire =
+    /// Int64 LE)
     DateTime64(i64),
-    /// UUID in standard 16-byte big-endian order (converted to ClickHouse wire format on encode)
+    /// UUID in standard 16-byte big-endian order (converted to ClickHouse wire
+    /// format on encode)
     Uuid([u8; 16]),
     Array(Vec<ClickHouseValue>),
 }
@@ -172,9 +182,11 @@ fn bytes_to_hex(bytes: Vec<u8>) -> String {
     s
 }
 
-// ── RowBinary wire encoding ───────────────────────────────────────────────────
+// ── RowBinary wire encoding
+// ───────────────────────────────────────────────────
 
-/// Encodes a variable-length integer (LEB128) used by ClickHouse for string/array lengths.
+/// Encodes a variable-length integer (LEB128) for ClickHouse string/array
+/// lengths.
 pub(crate) fn rb_varint(mut v: usize, buf: &mut Vec<u8>) {
     loop {
         let byte = (v & 0x7f) as u8;
@@ -187,7 +199,7 @@ pub(crate) fn rb_varint(mut v: usize, buf: &mut Vec<u8>) {
     }
 }
 
-/// Encodes a value for a `Nullable(T)` column (1-byte null indicator + value if present).
+/// Encodes a value for a `Nullable(T)` column (1-byte null indicator + value).
 pub(crate) fn rb_encode_nullable(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlResult<()> {
     match val {
         ClickHouseValue::Null => buf.push(1),
@@ -252,7 +264,8 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
     Ok(())
 }
 
-/// Encodes a complete row into `buf`, selecting nullable vs non-nullable encoding per column.
+/// Encodes a complete row into `buf`, selecting nullable vs non-nullable
+/// encoding per column.
 pub(crate) fn rb_encode_row(
     values: Vec<ClickHouseValue>,
     nullable_flags: &[bool],
@@ -268,32 +281,34 @@ pub(crate) fn rb_encode_row(
     Ok(())
 }
 
-// ── Unit tests ────────────────────────────────────────────────────────────────
+// ── Unit tests
+// ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::NaiveDate;
     use etl::types::Cell;
     use uuid::Uuid;
 
+    use super::*;
+
     #[test]
-    fn test_cell_to_clickhouse_value_null() {
+    fn cell_to_clickhouse_value_null() {
         assert!(matches!(cell_to_clickhouse_value(Cell::Null), ClickHouseValue::Null));
     }
 
     #[test]
-    fn test_cell_to_clickhouse_value_bool() {
+    fn cell_to_clickhouse_value_bool() {
         assert!(matches!(cell_to_clickhouse_value(Cell::Bool(true)), ClickHouseValue::Bool(true)));
     }
 
     #[test]
-    fn test_cell_to_clickhouse_value_i32() {
+    fn cell_to_clickhouse_value_i32() {
         assert!(matches!(cell_to_clickhouse_value(Cell::I32(42)), ClickHouseValue::Int32(42)));
     }
 
     #[test]
-    fn test_cell_to_clickhouse_value_string() {
+    fn cell_to_clickhouse_value_string() {
         if let ClickHouseValue::String(s) =
             cell_to_clickhouse_value(Cell::String("hello".to_string()))
         {
@@ -304,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_clickhouse_value_date() {
+    fn cell_to_clickhouse_value_date() {
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
         assert!(matches!(cell_to_clickhouse_value(Cell::Date(epoch)), ClickHouseValue::Date(0)));
 
@@ -313,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_clickhouse_value_timestamp() {
+    fn cell_to_clickhouse_value_timestamp() {
         let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc();
         assert!(matches!(
             cell_to_clickhouse_value(Cell::Timestamp(epoch)),
@@ -322,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_clickhouse_value_uuid() {
+    fn cell_to_clickhouse_value_uuid() {
         let u = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let expected_bytes = *u.as_bytes();
         if let ClickHouseValue::Uuid(bytes) = cell_to_clickhouse_value(Cell::Uuid(u)) {
@@ -333,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_to_clickhouse_value_bytes_hex() {
+    fn cell_to_clickhouse_value_bytes_hex() {
         let bytes = vec![0xde, 0xad, 0xbe, 0xef];
         if let ClickHouseValue::String(s) = cell_to_clickhouse_value(Cell::Bytes(bytes)) {
             assert_eq!(s, "deadbeef");
@@ -343,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rb_encode_value_scalars() {
+    fn rb_encode_value_scalars() {
         let mut buf = Vec::new();
 
         buf.clear();
@@ -364,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rb_encode_uuid_wire_format() {
+    fn rb_encode_uuid_wire_format() {
         let u = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let val = ClickHouseValue::Uuid(*u.as_bytes());
         let mut buf = Vec::new();
@@ -380,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rb_encode_nullable() {
+    fn encode_nullable() {
         let mut buf = Vec::new();
 
         rb_encode_nullable(ClickHouseValue::Null, &mut buf).unwrap();
@@ -394,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rb_varint() {
+    fn varint_encoding() {
         let mut buf = Vec::new();
         rb_varint(0, &mut buf);
         assert_eq!(buf, [0x00]);
@@ -413,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bytes_to_hex() {
+    fn hex_encoding() {
         assert_eq!(bytes_to_hex([].to_vec()), "");
         assert_eq!(bytes_to_hex([0x00].to_vec()), "00");
         assert_eq!(bytes_to_hex([0xff].to_vec()), "ff");
@@ -429,7 +444,7 @@ mod tests {
     /// # THEN
     /// It returns a ConversionError rather than writing invalid RowBinary.
     #[test]
-    fn test_rb_encode_value_rejects_null_for_non_nullable_column() {
+    fn rb_encode_value_rejects_null_for_non_nullable_column() {
         let mut buf = Vec::new();
         let result = rb_encode_value(ClickHouseValue::Null, &mut buf);
 

@@ -28,8 +28,6 @@ pub fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
 }
 
 /// Returns the ClickHouse array element type for a Postgres array type.
-///
-/// Used by [`build_create_table_sql`] to construct `Array(Nullable(T))` columns.
 fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
     match typ {
         &Type::BOOL_ARRAY => "Boolean",
@@ -56,8 +54,9 @@ fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
     }
 }
 
-/// Converts a Postgres `public.my_table` style table name into a ClickHouse table
-/// name using the same double-underscore escaping convention used by DuckLake/Iceberg.
+/// Converts a Postgres `public.my_table` style table name into a ClickHouse
+/// table name using the same double-underscore escaping convention used by
+/// DuckLake/Iceberg.
 ///
 /// - Schema and table are joined with `_`
 /// - Any literal `_` in the schema or table name is escaped to `__`
@@ -71,11 +70,11 @@ pub fn table_name_to_clickhouse_table_name(schema: &str, table: &str) -> String 
     format!("{escaped_schema}_{escaped_table}")
 }
 
-/// Returns the full ClickHouse type string for a column, including Nullable
-/// wrapping for scalar columns and Array(Nullable(T)) for array columns.
+/// Returns the full ClickHouse type string for a column, with Nullable
+/// wrapping.
 ///
-/// New columns added via ALTER TABLE are always Nullable regardless of the
-/// Postgres NOT NULL constraint, since ClickHouse cannot backfill existing rows.
+/// When `force_nullable` is true (ALTER TABLE ADD), all scalar columns become
+/// Nullable since ClickHouse cannot backfill existing rows.
 pub fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -> String {
     if is_array_type(&col.typ) {
         let elem = postgres_array_element_clickhouse_sql(&col.typ);
@@ -86,14 +85,10 @@ pub fn clickhouse_column_type(col: &ColumnSchema, force_nullable: bool) -> Strin
     }
 }
 
-/// Generates a `CREATE TABLE IF NOT EXISTS` SQL statement for the given columns.
+/// Generates a `CREATE TABLE IF NOT EXISTS` DDL for the given columns.
 ///
-/// - Non-nullable columns use the bare ClickHouse type (`Int32`, `String`, ...).
-/// - Nullable columns use `Nullable(T)`.
-/// - Array columns always use `Array(Nullable(T))` (Postgres array elements are nullable).
-/// - Two CDC trailing columns are always appended as non-nullable:
-///   `cdc_operation String, cdc_lsn Int64`
-/// - The table uses `MergeTree()` with `ORDER BY tuple()` (pure append order).
+/// Appends `cdc_operation String` and `cdc_lsn Int64` as trailing non-nullable
+/// columns. Uses `MergeTree()` with `ORDER BY tuple()`.
 pub fn build_create_table_sql(table_name: &str, column_schemas: &[ColumnSchema]) -> String {
     let mut cols = Vec::with_capacity(column_schemas.len() + 2);
 
@@ -108,7 +103,8 @@ pub fn build_create_table_sql(table_name: &str, column_schemas: &[ColumnSchema])
 
     let col_defs = cols.join(",\n");
     format!(
-        "CREATE TABLE IF NOT EXISTS \"{table_name}\" (\n{col_defs}\n) ENGINE = MergeTree()\nORDER BY tuple()"
+        "CREATE TABLE IF NOT EXISTS \"{table_name}\" (\n{col_defs}\n) ENGINE = MergeTree()\nORDER \
+         BY tuple()"
     )
 }
 
@@ -117,7 +113,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_table_name_escaping() {
+    fn table_name_escaping() {
         assert_eq!(table_name_to_clickhouse_table_name("public", "orders"), "public_orders");
         assert_eq!(
             table_name_to_clickhouse_table_name("my_schema", "my_table"),
@@ -130,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_type_mapping() {
+    fn scalar_type_mapping() {
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BOOL), "Boolean");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::CHAR), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BPCHAR), "String");
@@ -158,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_type_mapping() {
+    fn array_type_mapping() {
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::BOOL_ARRAY), "Boolean");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::TEXT_ARRAY), "String");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::INT4_ARRAY), "Int32");
@@ -169,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_create_table_sql_nullable() {
+    fn build_create_table_sql_nullable() {
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_string(),
@@ -194,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_create_table_sql_cdc_columns() {
+    fn build_create_table_sql_cdc_columns() {
         let schemas = vec![ColumnSchema {
             name: "id".to_string(),
             typ: Type::INT4,
@@ -211,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_create_table_sql_array_columns() {
+    fn build_create_table_sql_array_columns() {
         let schemas = vec![ColumnSchema {
             name: "tags".to_string(),
             typ: Type::TEXT_ARRAY,

@@ -668,12 +668,9 @@ impl Validator for ClickHouseValidator {
             Ok(_) => Ok(Vec::new()),
             Err(_) => Ok(vec![ValidationFailure::critical(
                 "ClickHouse Connection Failed",
-                "Unable to create clickhouse client.\n\n\
-                    Please verify:\n\
-                    (1) The url is valid and accessible\n\
-                    (2) The username is correct\n\
-                    (3) You set the right password\n\
-                    (4) You set the right database name
+                "Unable to create clickhouse client.\n\nPlease verify:\n(1) The url is valid and \
+                 accessible\n(2) The username is correct\n(3) You set the right password\n(4) You \
+                 set the right database name
                     ",
             )]),
         }

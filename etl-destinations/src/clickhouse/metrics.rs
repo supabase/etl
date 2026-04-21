@@ -8,8 +8,9 @@ static REGISTER_METRICS: Once = Once::new();
 /// Labels: `table`.
 pub const ETL_CH_DDL_DURATION_SECONDS: &str = "etl_ch_ddl_duration_seconds";
 
-/// Duration of a single RowBinary INSERT statement from first write to server acknowledgement.
-/// Labels: `table`, `source` (`copy` = initial table sync, `streaming` = CDC events).
+/// Duration of a single RowBinary INSERT statement from first write to server
+/// acknowledgement. Labels: `table`, `source` (`copy` = initial table sync,
+/// `streaming` = CDC events).
 pub const ETL_CH_INSERT_DURATION_SECONDS: &str = "etl_ch_insert_duration_seconds";
 
 /// Register ClickHouse-specific metrics.
@@ -20,13 +21,15 @@ pub fn register_metrics() {
         describe_histogram!(
             ETL_CH_DDL_DURATION_SECONDS,
             Unit::Seconds,
-            "Duration of CREATE TABLE IF NOT EXISTS DDL operations sent to ClickHouse, labeled by table"
+            "Duration of CREATE TABLE IF NOT EXISTS DDL operations sent to ClickHouse, labeled by \
+             table"
         );
 
         describe_histogram!(
             ETL_CH_INSERT_DURATION_SECONDS,
             Unit::Seconds,
-            "Duration of RowBinary INSERT statements from first write to server acknowledgement, labeled by table and source"
+            "Duration of RowBinary INSERT statements from first write to server acknowledgement, \
+             labeled by table and source"
         );
     });
 }

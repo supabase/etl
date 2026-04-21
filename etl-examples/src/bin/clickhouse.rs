@@ -36,16 +36,18 @@ requires authentication.
 
 */
 
+use std::{error::Error, sync::Once};
+
 use clap::{Args, Parser};
-use etl::config::{
-    BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+use etl::{
+    config::{
+        BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
+        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+    },
+    pipeline::Pipeline,
+    store::both::memory::MemoryStore,
 };
-use etl::pipeline::Pipeline;
-use etl::store::both::memory::MemoryStore;
 use etl_destinations::clickhouse::{ClickHouseDestination, ClickHouseInserterConfig};
-use std::error::Error;
-use std::sync::Once;
 use sysinfo::MemoryRefreshKind;
 use tokio::signal;
 use tracing::{error, info};
@@ -74,7 +76,8 @@ struct AppArgs {
     /// ClickHouse destination parameters
     #[clap(flatten)]
     ch_args: ChArgs,
-    /// Postgres publication name (must be created beforehand with CREATE PUBLICATION)
+    /// Postgres publication name (must be created beforehand with CREATE
+    /// PUBLICATION)
     #[arg(long)]
     publication: String,
 }
@@ -114,10 +117,12 @@ struct ChArgs {
     /// ClickHouse target database
     #[arg(long)]
     ch_database: String,
-    /// Maximum time to wait for a batch to fill in milliseconds (lower values = lower latency, less throughput)
+    /// Maximum time to wait for a batch to fill in milliseconds (lower values =
+    /// lower latency, less throughput)
     #[arg(long, default_value = "5000")]
     max_batch_fill_duration_ms: u64,
-    /// Maximum number of concurrent table sync workers (higher values = faster initial sync, more resource usage)
+    /// Maximum number of concurrent table sync workers (higher values = faster
+    /// initial sync, more resource usage)
     #[arg(long, default_value = "4")]
     max_table_sync_workers: u16,
 }
@@ -133,7 +138,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Initialize structured logging with configurable log levels via RUST_LOG environment variable.
+/// Initialize structured logging with configurable log levels via RUST_LOG
+/// environment variable.
 fn init_tracing() {
     tracing_subscriber::registry()
         .with(
@@ -200,8 +206,9 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
     };
 
-    // Compute max_bytes_per_insert using the same formula as BatchBudget::ideal_batch_size_bytes:
-    //   total_memory * memory_budget_ratio / max_table_sync_workers
+    // Compute max_bytes_per_insert using the same formula as
+    // BatchBudget::ideal_batch_size_bytes:   total_memory * memory_budget_ratio
+    // / max_table_sync_workers
     let max_bytes_per_insert = {
         let mut sys = sysinfo::System::new();
         sys.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());

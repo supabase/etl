@@ -1,25 +1,30 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use crate::clickhouse::client::ClickHouseClient;
-use crate::clickhouse::encoding::{ClickHouseValue, cell_to_clickhouse_value};
-use crate::clickhouse::metrics::{ETL_CH_DDL_DURATION_SECONDS, register_metrics};
-use crate::clickhouse::schema::{build_create_table_sql, table_name_to_clickhouse_table_name};
-use etl::destination::async_result::{
-    TruncateTableResult, WriteEventsResult, WriteTableRowsResult,
+use etl::{
+    bail,
+    destination::{
+        Destination,
+        async_result::{TruncateTableResult, WriteEventsResult, WriteTableRowsResult},
+    },
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus},
+    store::{schema::SchemaStore, state::StateStore},
+    types::{
+        Cell, Event, PgLsn, ReplicatedTableSchema, SchemaDiff, TableId, TableRow, is_array_type,
+    },
 };
-use etl::error::{ErrorKind, EtlResult};
-use etl::state::destination_metadata::{DestinationTableMetadata, DestinationTableSchemaStatus};
-use etl::store::schema::SchemaStore;
-use etl::store::state::StateStore;
-use etl::types::{
-    Cell, Event, ReplicatedTableSchema, SchemaDiff, TableId, TableRow, is_array_type,
-};
-use etl::{bail, destination::Destination, etl_error, types::PgLsn};
 use parking_lot::RwLock;
-use std::time::Instant;
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use url::Url;
+
+use crate::clickhouse::{
+    client::ClickHouseClient,
+    encoding::{ClickHouseValue, cell_to_clickhouse_value},
+    metrics::{ETL_CH_DDL_DURATION_SECONDS, register_metrics},
+    schema::{build_create_table_sql, table_name_to_clickhouse_table_name},
+};
 
 // -- CDC operation type --
 
@@ -40,7 +45,7 @@ impl std::fmt::Display for CdcOperation {
     }
 }
 
-/// A single row pending insertion, carrying the CDC metadata alongside the cell data.
+/// A row pending insertion with its CDC metadata.
 struct PendingRow {
     operation: CdcOperation,
     lsn: PgLsn,
@@ -49,15 +54,18 @@ struct PendingRow {
 
 // -- Inserter configuration --
 
-/// Controls intermediate flushing inside a single `write_table_rows` / `write_events` call.
+/// Controls intermediate flushing inside a single `write_table_rows` /
+/// `write_events` call.
 ///
-/// The upstream `BatchConfig::max_fill_ms` controls when `write_events` is called;
-/// these limits prevent unbounded memory use for very large batches (e.g. initial copy).
+/// The upstream `BatchConfig::max_fill_ms` controls when `write_events` is
+/// called; these limits prevent unbounded memory use for very large batches
+/// (e.g. initial copy).
 pub struct ClickHouseInserterConfig {
     /// Start a new INSERT after this many uncompressed bytes.
     ///
-    /// Derive this from `BatchConfig::memory_budget_ratio * total_memory / max_table_sync_workers`
-    /// (the same formula used by `BatchBudget::ideal_batch_size_bytes`).
+    /// Derive this from `BatchConfig::memory_budget_ratio * total_memory /
+    /// max_table_sync_workers` (the same formula used by
+    /// `BatchBudget::ideal_batch_size_bytes`).
     pub max_bytes_per_insert: u64,
 }
 
@@ -65,8 +73,8 @@ pub struct ClickHouseInserterConfig {
 
 /// CDC-capable ClickHouse destination that replicates Postgres tables.
 ///
-/// Uses append-only MergeTree tables with two CDC columns (`cdc_operation`, `cdc_lsn`)
-/// appended to each row. Rows are encoded as RowBinary and sent via
+/// Uses append-only MergeTree tables with two CDC columns (`cdc_operation`,
+/// `cdc_lsn`) appended to each row. Rows are encoded as RowBinary and sent via
 /// `INSERT INTO "table" FORMAT RowBinary` -- no column-name header required.
 ///
 /// The struct is cheaply cloneable: `client` wraps an `Arc` internally, and
@@ -76,14 +84,15 @@ pub struct ClickHouseDestination<S> {
     client: ClickHouseClient,
     inserter_config: Arc<ClickHouseInserterConfig>,
     store: Arc<S>,
-    /// Cache: ClickHouse table name -> `Arc<[bool]>` (nullable flags per column,
-    /// including the two trailing CDC columns which are always `false`).
+    /// Cache: ClickHouse table name -> `Arc<[bool]>` (nullable flags per
+    /// column, including the two trailing CDC columns which are always
+    /// `false`).
     ///
-    /// `std::sync::RwLock` is appropriate here: both reads (hot path) and writes
-    /// (rare, only on first encounter of a new table) are brief in-memory
-    /// operations. The lock is always released before any `.await` point (DDL is
-    /// executed with no lock held), so the async `tokio::sync::RwLock` would be
-    /// unnecessary overhead.
+    /// `std::sync::RwLock` is appropriate here: both reads (hot path) and
+    /// writes (rare, only on first encounter of a new table) are brief
+    /// in-memory operations. The lock is always released before any
+    /// `.await` point (DDL is executed with no lock held), so the async
+    /// `tokio::sync::RwLock` would be unnecessary overhead.
     table_cache: Arc<RwLock<HashMap<String, Arc<[bool]>>>>,
 }
 
@@ -137,35 +146,41 @@ where
         let snapshot_id = schema.inner().snapshot_id;
         let replication_mask = schema.replication_mask().clone();
 
-        // Store metadata as Applying before DDL.
-        let metadata = DestinationTableMetadata::new_applying(
-            ch_table_name.clone(),
-            snapshot_id,
-            replication_mask,
-        );
-        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+        // Only store metadata and execute DDL on first table creation. After a
+        // schema change (handle_relation_event), the cache is invalidated but
+        // metadata already exists -- we just need to recompute nullable flags.
+        let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
+        if existing_metadata.is_none() {
+            let metadata = DestinationTableMetadata::new_applying(
+                ch_table_name.clone(),
+                snapshot_id,
+                replication_mask,
+            );
+            self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+
+            // Execute CREATE TABLE DDL.
+            let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
+            let ddl = build_create_table_sql(&ch_table_name, &column_schemas);
+            let ddl_start = Instant::now();
+            self.client.execute_ddl(&ddl).await?;
+            metrics::histogram!(ETL_CH_DDL_DURATION_SECONDS, "table" => ch_table_name.clone())
+                .record(ddl_start.elapsed().as_secs_f64());
+
+            self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        }
 
         // Compute nullable flags (user columns + 2 CDC columns always non-nullable).
         //
         // Array columns are NEVER marked nullable here, even if the Postgres column
         // is nullable. The DDL always emits `Array(Nullable(T))` (no outer `Nullable`
-        // wrapper), so ClickHouse does not expect a null-indicator byte before the array.
+        // wrapper), so ClickHouse does not expect a null-indicator byte before the
+        // array.
         let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
         let mut nullable_flags_vec: Vec<bool> =
             column_schemas.iter().map(|c| c.nullable && !is_array_type(&c.typ)).collect();
         nullable_flags_vec.push(false); // cdc_operation
         nullable_flags_vec.push(false); // cdc_lsn
         let nullable_flags: Arc<[bool]> = nullable_flags_vec.into();
-
-        // Execute DDL (no lock held during this await).
-        let ddl = build_create_table_sql(&ch_table_name, &column_schemas);
-        let ddl_start = Instant::now();
-        self.client.execute_ddl(&ddl).await?;
-        metrics::histogram!(ETL_CH_DDL_DURATION_SECONDS, "table" => ch_table_name.clone())
-            .record(ddl_start.elapsed().as_secs_f64());
-
-        // Mark as Applied after successful DDL.
-        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
 
         // Write-lock: insert, using or_insert to handle concurrent first-writer race.
         let stored_flags = {
@@ -214,8 +229,8 @@ where
 
     // -- Schema change handling --
 
-    /// Handles a schema change event (Relation) by computing the diff and applying
-    /// ALTER TABLE statements.
+    /// Handles a schema change event (Relation) by computing the diff and
+    /// applying ALTER TABLE statements.
     async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
         let table_id = new_schema.id();
         let new_snapshot_id = new_schema.inner().snapshot_id;
@@ -227,9 +242,9 @@ where
                 ErrorKind::CorruptedTableSchema,
                 "Missing destination table metadata",
                 format!(
-                    "No destination table metadata found for table {} when processing \
-                     schema change. The metadata should have been recorded during initial \
-                     table synchronization.",
+                    "No destination table metadata found for table {} when processing schema \
+                     change. The metadata should have been recorded during initial table \
+                     synchronization.",
                     table_id
                 )
             );
@@ -287,7 +302,7 @@ where
 
         // Compute and apply the diff.
         let diff = current_schema.diff(new_schema);
-        if let Err(err) = self.apply_schema_diff(ch_table_name, &diff).await {
+        if let Err(err) = self.apply_schema_diff(ch_table_name, &diff, &current_schema).await {
             warn!(
                 "schema change failed for table {}: {}. Manual intervention may be required.",
                 table_id, err
@@ -314,12 +329,17 @@ where
         Ok(())
     }
 
-    /// Applies a schema diff to a ClickHouse table: add columns, rename columns,
-    /// then drop columns (in that order for safety).
+    /// Applies a schema diff to a ClickHouse table: add columns, rename
+    /// columns, then drop columns (in that order for safety).
     ///
-    /// Schema changes create an inherently inconsistent window: rows written before
-    /// the ALTER were encoded with the old column set, while rows after use the new
-    /// one. Specifically:
+    /// New columns are placed AFTER the last existing user column (before the
+    /// CDC columns) using ClickHouse's `AFTER` clause. This is critical because
+    /// RowBinary encoding is positional -- without explicit placement, ADD
+    /// COLUMN appends after `cdc_lsn`, misaligning the encoding.
+    ///
+    /// Schema changes create an inherently inconsistent window: rows written
+    /// before the ALTER were encoded with the old column set, while rows
+    /// after use the new one. Specifically:
     ///
     /// - ADD COLUMN: existing rows get NULL/default for the new column.
     /// - DROP COLUMN: data in the dropped column is lost for all rows.
@@ -329,13 +349,25 @@ where
     /// killed between individual ALTER statements the table may be left in a
     /// partially altered state. The `DestinationTableMetadata` Applying/Applied
     /// status tracks this for diagnostic purposes.
-    async fn apply_schema_diff(&self, ch_table_name: &str, diff: &SchemaDiff) -> EtlResult<()> {
+    async fn apply_schema_diff(
+        &self,
+        ch_table_name: &str,
+        diff: &SchemaDiff,
+        current_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
         if diff.is_empty() {
             return Ok(());
         }
 
+        // Track the last user column name for AFTER placement. New columns are
+        // inserted after this column, and each added column becomes the new
+        // anchor for the next.
+        let mut last_user_column: String =
+            current_schema.column_schemas().last().map(|c| c.name.clone()).unwrap_or_default();
+
         for column in &diff.columns_to_add {
-            self.client.add_column(ch_table_name, column).await?;
+            self.client.add_column(ch_table_name, column, &last_user_column).await?;
+            last_user_column = column.name.clone();
         }
 
         for rename in &diff.columns_to_rename {
@@ -450,7 +482,11 @@ where
                                 values.push(ClickHouseValue::Int64(
                                     i64::try_from(u64::from(lsn))
                                         .inspect_err(|error| {
-                                            tracing::error!(?error, "cannot convert u64 LSN to i64, falling back to i64::MAX");
+                                            tracing::error!(
+                                                ?error,
+                                                "cannot convert u64 LSN to i64, falling back to \
+                                                 i64::MAX"
+                                            );
                                         })
                                         .unwrap_or(i64::MAX),
                                 ));
@@ -459,7 +495,13 @@ where
                             .collect();
 
                         client
-                            .insert_rows(&ch_table_name, rows, &nullable_flags, max_bytes, "streaming")
+                            .insert_rows(
+                                &ch_table_name,
+                                rows,
+                                &nullable_flags,
+                                max_bytes,
+                                "streaming",
+                            )
                             .await
                     });
                 }
@@ -541,7 +583,7 @@ where
 #[cfg(test)]
 mod tests {
     #[test]
-    fn test_nullable_flags_includes_cdc() {
+    fn nullable_flags_includes_cdc() {
         let mut all_flags: Vec<bool> = vec![true, false];
         all_flags.push(false); // cdc_operation
         all_flags.push(false); // cdc_lsn

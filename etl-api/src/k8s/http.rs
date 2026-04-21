@@ -355,9 +355,10 @@ impl K8sClient for HttpK8sClient {
             );
             let secret: Secret = serde_json::from_value(clickhouse_secret_json)?;
 
-            // We are forcing the update since we are the field manager that should own the fields. If
-            // there is an override (likely during an incident or SREs intervention), we want to override
-            // their changes. The API database is the source of truth for credentials.
+            // We are forcing the update since we are the field manager that should own the
+            // fields. If there is an override (likely during an incident or
+            // SREs intervention), we want to override their changes. The API
+            // database is the source of truth for credentials.
             let pp = PatchParams::apply(&clickhouse_secret_name).force();
             self.secrets_api.patch(&clickhouse_secret_name, &pp, &Patch::Apply(secret)).await?;
         }

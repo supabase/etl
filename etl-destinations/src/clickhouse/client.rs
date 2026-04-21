@@ -1,14 +1,17 @@
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use clickhouse::Client;
-use etl::error::{ErrorKind, EtlResult};
-use etl::etl_error;
+use etl::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+};
 use url::Url;
 
-use crate::clickhouse::encoding::{ClickHouseValue, rb_encode_row};
-use crate::clickhouse::metrics::ETL_CH_INSERT_DURATION_SECONDS;
-use crate::clickhouse::schema::clickhouse_column_type;
+use crate::clickhouse::{
+    encoding::{ClickHouseValue, rb_encode_row},
+    metrics::ETL_CH_INSERT_DURATION_SECONDS,
+    schema::clickhouse_column_type,
+};
 
 /// Capacity of the internal write buffer used per INSERT statement.
 ///
@@ -19,9 +22,10 @@ const BUFFERED_CAPACITY: usize = 256 * 1024;
 
 /// High-level ClickHouse client used by [`super::core::ClickHouseDestination`].
 ///
-/// Wraps a [`clickhouse::Client`] and exposes typed methods for DDL, truncation,
-/// and RowBinary bulk inserts. Cheaply cloneable — the inner client holds an `Arc`
-/// internally, and the outer `Arc` here ensures a single shared instance.
+/// Wraps a [`clickhouse::Client`] and exposes typed methods for DDL,
+/// truncation, and RowBinary bulk inserts. Cheaply cloneable — the inner client
+/// holds an `Arc` internally, and the outer `Arc` here ensures a single shared
+/// instance.
 #[derive(Clone)]
 pub struct ClickHouseClient {
     inner: Arc<Client>,
@@ -72,13 +76,22 @@ impl ClickHouseClient {
     ///
     /// New columns are always Nullable since ClickHouse cannot backfill
     /// existing rows with a NOT NULL default.
+    ///
+    /// `after_column` controls placement: the new column is inserted AFTER
+    /// the named column. This is critical because RowBinary encoding is
+    /// positional -- new user columns must appear before the CDC columns
+    /// (`cdc_operation`, `cdc_lsn`), not appended after them.
     pub(crate) async fn add_column(
         &self,
         table_name: &str,
         column: &etl::types::ColumnSchema,
+        after_column: &str,
     ) -> EtlResult<()> {
         let col_type = clickhouse_column_type(column, true);
-        let sql = format!("ALTER TABLE \"{table_name}\" ADD COLUMN \"{}\" {col_type}", column.name);
+        let sql = format!(
+            "ALTER TABLE \"{table_name}\" ADD COLUMN \"{}\" {col_type} AFTER \"{after_column}\"",
+            column.name
+        );
         self.execute_ddl(&sql).await
     }
 
@@ -121,9 +134,10 @@ impl ClickHouseClient {
     /// [`ClickHouseValue`]s in column order (user columns + CDC columns).
     /// `nullable_flags` must have the same length as each row.
     ///
-    /// When the accumulated uncompressed byte count reaches `max_bytes_per_insert`
-    /// the current INSERT statement is committed and a new one is opened, keeping
-    /// peak memory usage bounded for large initial copies.
+    /// When the accumulated uncompressed byte count reaches
+    /// `max_bytes_per_insert` the current INSERT statement is committed and
+    /// a new one is opened, keeping peak memory usage bounded for large
+    /// initial copies.
     ///
     /// The `source` label (`"copy"` or `"streaming"`) is attached to the
     /// `etl_ch_insert_duration_seconds` histogram recorded after each committed

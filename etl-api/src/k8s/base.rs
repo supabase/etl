@@ -141,9 +141,7 @@ pub trait K8sClient: Send + Sync {
         bq_service_account_key: &str,
     ) -> Result<(), K8sError>;
 
-    /// Creates or updates the ClickHouse password for a replicator.
-    ///
-    /// The secret name is derived from `prefix` and stored in the data-plane namespace.
+    /// Creates or updates the ClickHouse password secret for a replicator.
     async fn create_or_update_clickhouse_secret(
         &self,
         prefix: &str,
