@@ -81,7 +81,7 @@ pub async fn store_destination_table_metadata(
     .bind(SqlxTableId(table_id.into_inner()))
     .bind(destination_table_id)
     .bind(snapshot_id.to_pg_lsn_string())
-    .bind(previous_snapshot_id.map(|s| s.to_pg_lsn_string()))
+    .bind(previous_snapshot_id.map(SnapshotId::to_pg_lsn_string))
     .bind(schema_status)
     .bind(replication_mask)
     .execute(pool)

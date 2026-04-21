@@ -64,7 +64,7 @@ pub fn generate_sequence_number(start_lsn: PgLsn, commit_lsn: PgLsn) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn test_is_array_type() {
+    fn is_array_type_fn() {
         // array types
         assert!(is_array_type(&Type::BOOL_ARRAY));
         assert!(is_array_type(&Type::CHAR_ARRAY));
@@ -113,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_sequence_number() {
+    fn generate_sequence_number_fn() {
         assert_eq!(
             generate_sequence_number(PgLsn::from(0), PgLsn::from(0)),
             "0000000000000000/0000000000000000"

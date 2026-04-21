@@ -717,7 +717,7 @@ where
         let ducklake_table_name =
             table_name_to_ducklake_table_name(replicated_table_schema.name())?;
         let metadata = DestinationTableMetadata::new_applying(
-            ducklake_table_name.to_string(),
+            ducklake_table_name.clone(),
             replicated_table_schema.inner().snapshot_id,
             replicated_table_schema.replication_mask().clone(),
         );
@@ -1151,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_name_escaping() {
+    fn table_name_escaping() {
         assert_eq!(
             table_name_to_ducklake_table_name(&TableName {
                 schema: "public".to_string(),
@@ -1171,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_create_table_conflict_matches_ducklake_commit_conflict() {
+    fn is_create_table_conflict_matches_ducklake_commit_conflict() {
         let error = duckdb::Error::DuckDBFailure(
             duckdb::ffi::Error::new(1),
             Some(
@@ -1188,7 +1188,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_table_storage_metrics_reads_ducklake_metadata() {
+    async fn query_table_storage_metrics_reads_ducklake_metadata() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
         let data = path_to_file_url(&dir.path().join("data"));
@@ -1240,7 +1240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_table_rows_creates_only_replicated_columns() {
+    async fn write_table_rows_creates_only_replicated_columns() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
         let data = path_to_file_url(&dir.path().join("data"));
@@ -1290,7 +1290,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_catalog_maintenance_metrics_reports_active_data_files_total() {
+    async fn query_catalog_maintenance_metrics_reports_active_data_files_total() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
         let data = path_to_file_url(&dir.path().join("data"));
@@ -1339,7 +1339,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_catalog_maintenance_metrics_reads_ducklake_metadata() {
+    async fn query_catalog_maintenance_metrics_reads_ducklake_metadata() {
         let dir = TempDir::new().expect("failed to create temp dir");
         let catalog = path_to_file_url(&dir.path().join("catalog.ducklake"));
         let data = path_to_file_url(&dir.path().join("data"));

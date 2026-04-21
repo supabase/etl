@@ -276,6 +276,7 @@ fn validate_timestamptz_for_bigquery(timestamptz: &DateTime<Utc>) -> EtlResult<(
 /// type. This function checks all temporal types and numeric types for BigQuery
 /// compatibility.
 pub(super) fn validate_cell_for_bigquery(cell: &CellNonOptional) -> EtlResult<()> {
+    #[allow(clippy::match_same_arms)]
     match cell {
         CellNonOptional::Null => Ok(()),
         CellNonOptional::Bool(_) => Ok(()),
@@ -304,6 +305,7 @@ pub(super) fn validate_cell_for_bigquery(cell: &CellNonOptional) -> EtlResult<()
 /// Returns an error if any array element is outside BigQuery's supported range
 /// for its type.
 fn validate_array_cell_for_bigquery(array_cell: &ArrayCellNonOptional) -> EtlResult<()> {
+    #[allow(clippy::match_same_arms)]
     match array_cell {
         ArrayCellNonOptional::Bool(_) => Ok(()),
         ArrayCellNonOptional::String(_) => Ok(()),
@@ -390,7 +392,7 @@ fn is_numeric_within_bigquery_bignumeric_limits(pg_numeric: &PgNumeric) -> bool 
     let numeric_str = pg_numeric.to_string();
 
     // Count actual digits (excluding sign, decimal point)
-    let digit_count: usize = numeric_str.chars().filter(|c| c.is_ascii_digit()).count();
+    let digit_count: usize = numeric_str.chars().filter(char::is_ascii_digit).count();
 
     // BigQuery BIGNUMERIC supports up to ~77 digits of total precision
     if digit_count > BIGQUERY_BIGNUMERIC_MAX_PRACTICAL_DIGITS {
@@ -400,7 +402,7 @@ fn is_numeric_within_bigquery_bignumeric_limits(pg_numeric: &PgNumeric) -> bool 
     // Check decimal places if there's a decimal point
     if let Some(decimal_pos) = numeric_str.find('.') {
         let decimal_part = &numeric_str[decimal_pos + 1..];
-        let decimal_digits = decimal_part.chars().filter(|c| c.is_ascii_digit()).count();
+        let decimal_digits = decimal_part.chars().filter(char::is_ascii_digit).count();
 
         // BigQuery BIGNUMERIC supports up to 38 decimal places
         if decimal_digits > BIGQUERY_BIGNUMERIC_MAX_SCALE {
@@ -418,13 +420,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_validate_numeric_within_bounds() {
+    fn validate_numeric_within_bounds() {
         let numeric = PgNumeric::from_str("123.456").unwrap();
         assert!(validate_numeric_for_bigquery(&numeric).is_ok());
     }
 
     #[test]
-    fn test_validate_numeric_nan_fails() {
+    fn validate_numeric_nan_fails() {
         let result = validate_numeric_for_bigquery(&PgNumeric::NaN);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -433,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_numeric_positive_infinity_fails() {
+    fn validate_numeric_positive_infinity_fails() {
         let result = validate_numeric_for_bigquery(&PgNumeric::PositiveInfinity);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -442,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_numeric_negative_infinity_fails() {
+    fn validate_numeric_negative_infinity_fails() {
         let result = validate_numeric_for_bigquery(&PgNumeric::NegativeInfinity);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -451,13 +453,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_date_within_bounds() {
+    fn validate_date_within_bounds() {
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         assert!(validate_date_for_bigquery(&date).is_ok());
     }
 
     #[test]
-    fn test_validate_date_before_min_fails() {
+    fn validate_date_before_min_fails() {
         let date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap();
         let result = validate_date_for_bigquery(&date);
         assert!(result.is_err());
@@ -467,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_date_after_max_fails() {
+    fn validate_date_after_max_fails() {
         let date = NaiveDate::from_ymd_opt(10000, 1, 1).unwrap();
         let result = validate_date_for_bigquery(&date);
         assert!(result.is_err());
@@ -477,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cell_for_bigquery_valid_types() {
+    fn validate_cell_for_bigquery_valid_types() {
         assert!(validate_cell_for_bigquery(&CellNonOptional::Null).is_ok());
         assert!(validate_cell_for_bigquery(&CellNonOptional::Bool(true)).is_ok());
         assert!(validate_cell_for_bigquery(&CellNonOptional::String("test".to_string())).is_ok());
@@ -485,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_cell_for_bigquery_invalid_numeric() {
+    fn validate_cell_for_bigquery_invalid_numeric() {
         let cell = CellNonOptional::Numeric(PgNumeric::NaN);
         let result = validate_cell_for_bigquery(&cell);
         assert!(result.is_err());
@@ -493,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_array_cell_with_invalid_numeric() {
+    fn validate_array_cell_with_invalid_numeric() {
         let array_cell = ArrayCellNonOptional::Numeric(vec![
             PgNumeric::from_str("123.456").unwrap(),
             PgNumeric::NaN,

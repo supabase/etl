@@ -180,10 +180,10 @@ fn calculate_tuple_bytes(tuple_data: &[protocol::TupleData]) -> u64 {
     tuple_data
         .iter()
         .map(|data| match data {
-            protocol::TupleData::Null => 0,
-            protocol::TupleData::UnchangedToast => 0,
-            protocol::TupleData::Text(bytes) => bytes.len() as u64,
-            protocol::TupleData::Binary(bytes) => bytes.len() as u64,
+            protocol::TupleData::Null | protocol::TupleData::UnchangedToast => 0,
+            protocol::TupleData::Text(bytes) | protocol::TupleData::Binary(bytes) => {
+                bytes.len() as u64
+            }
         })
         .sum()
 }
@@ -234,7 +234,7 @@ pub(crate) fn parse_replicated_column_names(
     let column_names = relation_body
         .columns()
         .iter()
-        .map(|column| column.name().map(|name| name.to_string()))
+        .map(|column| column.name().map(ToString::to_string))
         .collect::<Result<HashSet<String>, _>>()?;
 
     Ok(column_names)

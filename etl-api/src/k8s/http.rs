@@ -256,6 +256,7 @@ impl HttpK8sClient {
         if let Some(waiting) = &state.waiting
             && let Some(reason) = &waiting.reason
         {
+            #[allow(clippy::match_same_arms)]
             match reason.as_str() {
                 // Crash/restart errors
                 "CrashLoopBackOff" => return true,
@@ -617,19 +618,13 @@ impl K8sClient for HttpK8sClient {
             return Ok(PodStatus::Stopping);
         }
 
-        let phase = pod
-            .status
-            .map(|status| {
-                let phase: PodPhase = status
-                    .phase
-                    .map(|phase| {
-                        let phase: PodPhase = phase.as_str().into();
-                        phase
-                    })
-                    .unwrap_or(PodPhase::Unknown);
+        let phase = pod.status.map_or(PodPhase::Unknown, |status| {
+            let phase: PodPhase = status.phase.map_or(PodPhase::Unknown, |phase| {
+                let phase: PodPhase = phase.as_str().into();
                 phase
-            })
-            .unwrap_or(PodPhase::Unknown);
+            });
+            phase
+        });
 
         Ok(match phase {
             PodPhase::Pending => PodStatus::Starting,
@@ -1281,6 +1276,7 @@ fn get_restarted_at_annotation_value() -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::redundant_test_prefix)]
 mod tests {
     use etl_config::shared::{
         BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,

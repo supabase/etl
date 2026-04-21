@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cache_returns_certs() {
+    async fn cache_returns_certs() {
         let expected_certs = "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----";
         let client = Arc::new(MockK8sClient { certs: expected_certs.to_string() });
         let cache = TrustedRootCertsCache::new(client);
@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cache_returns_cached_value() {
+    async fn cache_returns_cached_value() {
         let expected_certs = "cached-certs";
         let client = Arc::new(MockK8sClient { certs: expected_certs.to_string() });
         let cache = TrustedRootCertsCache::new(client);

@@ -203,8 +203,7 @@ impl MemoryMonitor {
         self.inner
             .backpressure
             .as_ref()
-            .map(|backpressure| *backpressure.active_tx.borrow())
-            .unwrap_or(false)
+            .is_some_and(|backpressure| *backpressure.active_tx.borrow())
     }
 
     /// Creates a new subscription for polling backpressure updates.

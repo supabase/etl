@@ -312,13 +312,6 @@ impl ReplicationProgress {
     }
 }
 
-/// An enum representing if the batch should be ended or not.
-#[derive(Debug)]
-enum EndBatch {
-    /// The batch should include the last processed event and end.
-    Inclusive,
-}
-
 /// Result returned from [`ApplyLoop::handle_replication_message`] and related
 /// functions.
 #[derive(Debug, Default)]
@@ -329,7 +322,7 @@ struct HandleMessageResult {
     end_lsn: Option<PgLsn>,
     /// Set when a batch should be ended earlier than the normal batching
     /// parameters.
-    end_batch: Option<EndBatch>,
+    end_batch: bool,
     /// Set when the table has encountered an error.
     table_replication_error: Option<TableReplicationError>,
 }
@@ -1021,7 +1014,7 @@ where
 
     /// Waits until the keep alive deadline expires.
     async fn wait_for_keep_alive_deadline(deadline: Instant) {
-        tokio::time::sleep_until(deadline.into()).await
+        tokio::time::sleep_until(deadline.into()).await;
     }
 
     /// Computes the keep alive deadline from PostgreSQL's `wal_sender_timeout`.
@@ -1340,10 +1333,7 @@ where
     ) -> EtlResult<()> {
         let result = self.handle_replication_message(events_stream.as_mut(), message).await?;
 
-        let should_include_event = matches!(result.end_batch, None | Some(EndBatch::Inclusive));
-        if let Some(event) = result.event
-            && should_include_event
-        {
+        if let Some(event) = result.event {
             // We add the element to the pending batch.
             self.state.add_event_to_batch(event);
 
@@ -1359,7 +1349,7 @@ where
         // or not.
         let batch_size_reached =
             self.state.events_batch_bytes >= self.cached_batch_budget.current_batch_size_bytes();
-        let early_flush_requested = result.end_batch.is_some();
+        let early_flush_requested = result.end_batch;
         let should_flush = batch_size_reached || early_flush_requested;
 
         if should_flush {
@@ -1707,7 +1697,7 @@ where
         // path requesting a pause exit, which lets that case reuse the normal
         // commit flush flow.
         if should_end_batch {
-            result.end_batch = Some(EndBatch::Inclusive);
+            result.end_batch = true;
         }
 
         Ok(result)
@@ -1753,8 +1743,7 @@ where
         let shared_table_state = self.shared_table_cache.get(&table_id).await;
         let used_bootstrap_snapshot = shared_table_state.is_none();
         let table_snapshot_id = shared_table_state
-            .map(|state| state.snapshot_id)
-            .unwrap_or_else(|| self.state.bootstrap_snapshot_id());
+            .map_or_else(|| self.state.bootstrap_snapshot_id(), |state| state.snapshot_id);
         let table_schema = get_table_schema(
             &self.schema_store,
             &table_id,
@@ -1915,7 +1904,7 @@ where
 
         // Collect the replicated schemas for tables this worker currently owns.
         let mut truncated_tables = Vec::with_capacity(message.rel_ids().len());
-        for &rel_id in message.rel_ids().iter() {
+        for &rel_id in message.rel_ids() {
             let table_id = TableId::new(rel_id);
 
             // Exactly one worker owns protocol interpretation for a table at a time, so

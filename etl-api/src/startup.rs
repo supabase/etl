@@ -105,9 +105,7 @@ impl Application {
 
         // Try to create Kubernetes client, but continue without it if unavailable
         let kube_client_result = match Environment::load() {
-            Ok(Environment::Staging) | Ok(Environment::Prod) => {
-                kube::Client::try_default().await.ok()
-            }
+            Ok(Environment::Staging | Environment::Prod) => kube::Client::try_default().await.ok(),
             Ok(Environment::Dev) => {
                 async {
                     let options = KubeConfigOptions {
@@ -348,7 +346,7 @@ pub fn run(
         let tracing_logger = TracingLogger::<ApiRootSpanBuilder>::new();
         let authentication = HttpAuthentication::bearer(auth_validator);
         let app = App::new()
-            .wrap(actix_metrics.clone())
+            .wrap(actix_metrics)
             .wrap(tracing_logger)
             .wrap(
                 sentry::integrations::actix::Sentry::builder()
