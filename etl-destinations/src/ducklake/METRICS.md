@@ -90,24 +90,31 @@ event count for non-skipped outcomes.
 
 It carries these labels:
 
-- `task`: `flush`, `targeted_maintenance`, or `checkpoint`
+- `task`: `flush`, `scheduled_maintenance`, `targeted_maintenance`, or `checkpoint`
 - `operation`: `flush_inlined_data`, `rewrite_data_files`,
   `merge_adjacent_files`, or `checkpoint`
 - `reason`: the primary cause for the maintenance decision
 - `outcome`: `applied`, `noop`, or `failed`
 
 `etl_ducklake_maintenance_skipped_total` counts maintenance operations that
-were skipped because the worker could not acquire the table-local write slot.
-It is labeled by `task`, `operation`, and `reason`.
+were deferred because their guard or execution window was unavailable. It is
+labeled by `task`, `operation`, and `reason`.
 
 How to read it:
 
+- `task="flush"` with
+  `reason="pending_inlined_data_bytes_threshold"` means the flush was
+  scheduled from sampled inline insert-data table size in a PostgreSQL-backed
+  DuckLake catalog.
 - `task="flush"` with `reason="pending_bytes_threshold"` means the flush was
-  scheduled because estimated pre-compression inline bytes crossed the
-  configured threshold. The current heuristic assumes a 4:1 raw-to-parquet
-  compression ratio.
+  scheduled because the fallback estimated pre-compression inline bytes
+  crossed the configured threshold. The current heuristic assumes a 4:1
+  raw-to-parquet compression ratio.
 - `task="flush"` with `reason="pending_inserted_rows_threshold"` means the
   optional row-count threshold was enabled in code and fired before shutdown.
+- `task="scheduled_maintenance"` with `reason="merge_interval"` means the
+  next `write_events` batch tried to run the tier-0 `< 1MiB -> ~5MiB`
+  `merge_adjacent_files` pass first.
 - `task="targeted_maintenance"` with
   `reason="idle_rewrite_metrics_threshold"` or
   `reason="emergency_rewrite_metrics_threshold"` means rewrite was selected
@@ -118,8 +125,9 @@ How to read it:
   sampled small-file pressure.
 - `task="targeted_maintenance"` may emit one duration series or two for a
   maintenance cycle, depending on which operations crossed their thresholds.
-- rising `etl_ducklake_maintenance_skipped_total` means the worker wants to run
-  maintenance but the table-local write slot is still busy.
+- rising `etl_ducklake_maintenance_skipped_total` means maintenance keeps
+  missing its execution window because writes or another guarded operation are
+  still active.
 - rising histogram `_count` for `outcome="failed"` points to maintenance
   execution issues, while many `outcome="noop"` samples usually mean
   maintenance is polling more often than work is actually accumulating.

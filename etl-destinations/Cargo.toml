@@ -17,6 +17,7 @@ ducklake = [
     "dep:pg_escape",
     "dep:r2d2",
     "dep:rand",
+    "dep:sqlx",
     "dep:tokio-postgres",
     "dep:tracing",
     "dep:tokio",
@@ -57,7 +58,7 @@ arrow = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 chrono = { workspace = true }
-duckdb = { workspace = true, optional = true, features = ["bundled", "r2d2"] }
+duckdb = { workspace = true, optional = true, features = ["bundled", "json", "parquet", "r2d2"] }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
@@ -71,6 +72,7 @@ rand = { workspace = true, optional = true, features = ["thread_rng"] }
 reqwest = { workspace = true, optional = true, features = ["json"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true, features = ["runtime-tokio-rustls", "postgres"] }
 tokio = { workspace = true, optional = true, features = ["rt", "sync", "time"] }
 tokio-postgres = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
@@ -79,7 +81,7 @@ url = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true, features = ["v4"] }
 
 [dev-dependencies]
-duckdb = { workspace = true, features = ["bundled"] }
+duckdb = { workspace = true, features = ["bundled", "json", "parquet"] }
 etl = { workspace = true, features = ["test-utils"] }
 etl-postgres = { workspace = true, features = ["test-utils"] }
 etl-telemetry = { workspace = true }

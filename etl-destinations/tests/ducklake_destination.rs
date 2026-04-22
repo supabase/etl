@@ -37,15 +37,16 @@ use etl::{
     error::ErrorKind,
     store::{both::memory::MemoryStore, schema::SchemaStore},
     types::{
-        Cell, ColumnSchema, Event, OldTableRow, ReplicatedTableSchema, TableId, TableName,
-        TableRow, TableSchema, Type as PgType,
+        Cell, ColumnSchema, Event, OldTableRow, PgLsn, ReplicatedTableSchema, TableId, TableName,
+        TableRow, TableSchema, Type as PgType, UpdatedTableRow,
     },
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
 #[cfg(feature = "test-utils")]
 use etl_destinations::ducklake::{
     arm_fail_after_atomic_batch_commit_once_for_tests,
-    arm_fail_after_copy_batch_commit_once_for_tests, reset_ducklake_test_hooks,
+    arm_fail_after_copy_batch_commit_once_for_tests, ducklake_staging_table_creations_for_tests,
+    reset_ducklake_test_hooks,
 };
 use pg_escape::{quote_identifier, quote_literal};
 #[cfg(feature = "test-utils")]
@@ -112,9 +113,8 @@ fn make_rich_schema(table_id: u32) -> TableSchema {
     )
 }
 
-/// Creates the replicated schema view for a test table.
-fn make_replicated_schema(table_schema: TableSchema) -> ReplicatedTableSchema {
-    ReplicatedTableSchema::all(Arc::new(table_schema))
+fn make_replicated_table_schema(schema: &TableSchema) -> ReplicatedTableSchema {
+    ReplicatedTableSchema::all(Arc::new(schema.clone()))
 }
 
 /// Opens a verification connection to the same DuckLake catalog and returns it.
@@ -196,6 +196,34 @@ fn count_applied_batches(conn: &Connection, table_name: &str, batch_kind: &str) 
     .expect("batch marker count query failed")
 }
 
+fn count_streaming_progress_rows(conn: &Connection, table_name: &str) -> i64 {
+    conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM {}.{} WHERE table_name = {}",
+            quote_identifier("lake"),
+            quote_identifier("__etl_streaming_progress"),
+            quote_literal(table_name),
+        ),
+        [],
+        |r| r.get(0),
+    )
+    .expect("streaming progress count query failed")
+}
+
+fn read_streaming_progress(conn: &Connection, table_name: &str) -> Option<(u64, u64)> {
+    conn.query_row(
+        &format!(
+            "SELECT last_commit_lsn, last_tx_ordinal FROM {}.{} WHERE table_name = {}",
+            quote_identifier("lake"),
+            quote_identifier("__etl_streaming_progress"),
+            quote_literal(table_name),
+        ),
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .ok()
+}
+
 fn count_table_files(data: &Path, table_name: &str) -> usize {
     let table_dir = data.join("main").join(table_name);
     match std::fs::read_dir(&table_dir) {
@@ -219,22 +247,6 @@ fn flush_inlined_rows(conn: &Connection, table_name: &str) -> i64 {
         |r| r.get(0),
     )
     .expect("inlined data flush query failed")
-}
-
-async fn wait_for_condition<F>(timeout: Duration, mut condition: F)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if condition() {
-            return;
-        }
-
-        assert!(tokio::time::Instant::now() < deadline, "condition not met within {timeout:?}");
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 }
 
 /// Forces DuckLake to checkpoint catalog metadata before cross-connection
@@ -265,20 +277,29 @@ async fn write_table_rows_basic() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(1);
     let schema = make_schema(1, "public", "users");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
     destination
         .write_table_rows(
-            &replicated_schema,
+            &replicated_table_schema,
             vec![
                 TableRow::new(vec![Cell::I32(1), Cell::String("Alice".to_string())]),
                 TableRow::new(vec![Cell::I32(2), Cell::String("Bob".to_string())]),
@@ -317,21 +338,30 @@ async fn write_table_rows_small_batch_stays_inlined_after_return() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(16);
     let schema = make_schema(16, "public", "copy_flush");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     destination
         .write_table_rows(
-            &replicated_schema,
+            &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())])],
         )
         .await
@@ -361,6 +391,8 @@ async fn ducklake_rejects_zero_pool_size() {
         0,
         None,
         None,
+        None,
+        None,
         MemoryStore::new(),
     )
     .await
@@ -385,23 +417,32 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(21);
     let schema = make_schema(21, "public", "pooled_copy");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(destination.connection_open_count_for_tests(), 1);
 
     destination
         .write_table_rows(
-            &replicated_schema,
+            &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())])],
         )
         .await
@@ -410,7 +451,7 @@ async fn write_table_rows_reuses_warm_pooled_connection() {
 
     destination
         .write_table_rows(
-            &replicated_schema,
+            &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())])],
         )
         .await
@@ -437,24 +478,33 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(22);
     let schema = make_schema(22, "public", "pooled_retry");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(destination.connection_open_count_for_tests(), 1);
 
     arm_fail_after_copy_batch_commit_once_for_tests(&table_name);
     destination
         .write_table_rows(
-            &replicated_schema,
+            &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())])],
         )
         .await
@@ -463,7 +513,7 @@ async fn write_table_rows_replaces_broken_pooled_connection_after_retry() {
 
     destination
         .write_table_rows(
-            &replicated_schema,
+            &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())])],
         )
         .await
@@ -491,22 +541,31 @@ async fn write_table_rows_retry_after_post_commit_failure_is_idempotent() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(13);
     let schema = make_schema(13, "public", "copy_retry");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     arm_fail_after_copy_batch_commit_once_for_tests(&table_name);
     destination
         .write_table_rows(
-            &replicated_schema,
+            &replicated_table_schema,
             vec![
                 TableRow::new(vec![Cell::I32(1), Cell::String("alpha".to_string())]),
                 TableRow::new(vec![Cell::I32(2), Cell::String("beta".to_string())]),
@@ -534,17 +593,27 @@ async fn concurrent_same_table_copy_batches_complete() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(14);
     let schema = make_schema(14, "public", "parallel_copy");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
     let destination = Arc::new(
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap(),
+        DuckLakeDestination::new(
+            catalog_url.clone(),
+            data_url.clone(),
+            1,
+            None,
+            None,
+            None,
+            None,
+            store,
+        )
+        .await
+        .unwrap(),
     );
 
     // Create the replay marker table ahead of the concurrent scenario so this
@@ -552,12 +621,12 @@ async fn concurrent_same_table_copy_batches_complete() {
     // marker-table initialization.
     destination
         .write_table_rows(
-            &replicated_schema,
+            &replicated_table_schema,
             vec![TableRow::new(vec![Cell::I32(-1), Cell::String("seed".to_string())])],
         )
         .await
         .unwrap();
-    destination.truncate_table(&replicated_schema).await.unwrap();
+    destination.truncate_table(&replicated_table_schema).await.unwrap();
 
     let first_batch: Vec<TableRow> = (0..50)
         .map(|id| TableRow::new(vec![Cell::I32(id), Cell::String(format!("first-{id}"))]))
@@ -568,16 +637,17 @@ async fn concurrent_same_table_copy_batches_complete() {
 
     let task_a = {
         let destination = Arc::clone(&destination);
-        let replicated_schema = replicated_schema.clone();
-        tokio::spawn(
-            async move { destination.write_table_rows(&replicated_schema, first_batch).await },
-        )
+        let replicated_table_schema = replicated_table_schema.clone();
+        tokio::spawn(async move {
+            destination.write_table_rows(&replicated_table_schema, first_batch).await
+        })
     };
     let task_b = {
         let destination = Arc::clone(&destination);
-        tokio::spawn(
-            async move { destination.write_table_rows(&replicated_schema, second_batch).await },
-        )
+        let replicated_table_schema = replicated_table_schema.clone();
+        tokio::spawn(async move {
+            destination.write_table_rows(&replicated_table_schema, second_batch).await
+        })
     };
 
     task_a.await.unwrap().unwrap();
@@ -603,18 +673,30 @@ async fn write_table_rows_empty_creates_table() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(2);
     let schema = make_schema(2, "public", "events");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
-    destination.write_table_rows(&replicated_schema, vec![]).await.expect("empty write failed");
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+    destination
+        .write_table_rows(&replicated_table_schema, vec![])
+        .await
+        .expect("empty write failed");
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 0, "table should exist but be empty");
@@ -631,20 +713,29 @@ async fn truncate_clears_rows() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(3);
     let schema = make_schema(3, "public", "logs");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
     destination
         .write_table_rows(
-            &replicated_schema,
+            &replicated_table_schema,
             vec![
                 TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())]),
                 TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())]),
@@ -653,7 +744,7 @@ async fn truncate_clears_rows() {
         .await
         .unwrap();
 
-    destination.truncate_table(&replicated_schema).await.expect("truncate failed");
+    destination.truncate_table(&replicated_table_schema).await.expect("truncate failed");
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 0, "table should be empty after truncate");
@@ -686,26 +777,35 @@ async fn truncate_clears_copy_markers_for_recopy() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(15);
     let schema = make_schema(15, "public", "recopy_logs");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let rows = vec![
         TableRow::new(vec![Cell::I32(1), Cell::String("first".to_string())]),
         TableRow::new(vec![Cell::I32(2), Cell::String("second".to_string())]),
     ];
 
-    destination.write_table_rows(&replicated_schema, rows.clone()).await.unwrap();
-    destination.truncate_table(&replicated_schema).await.unwrap();
-    destination.write_table_rows(&replicated_schema, rows).await.unwrap();
+    destination.write_table_rows(&replicated_table_schema, rows.clone()).await.unwrap();
+    destination.truncate_table(&replicated_table_schema).await.unwrap();
+    destination.write_table_rows(&replicated_table_schema, rows).await.unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 2);
@@ -716,7 +816,7 @@ async fn truncate_clears_copy_markers_for_recopy() {
 /// state.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent, UpdatedTableRow};
+    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
 
     let dir = make_test_dir("write_events");
     let catalog = dir.join("catalog.ducklake");
@@ -726,17 +826,26 @@ async fn write_events() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(4);
     let schema = make_schema(4, "public", "products");
-    let replicated_schema = make_replicated_schema(schema.clone());
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(100u64);
     destination
@@ -745,14 +854,14 @@ async fn write_events() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                replicated_table_schema: replicated_schema.clone(),
+                replicated_table_schema: replicated_table_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                replicated_table_schema: replicated_schema.clone(),
+                replicated_table_schema: replicated_table_schema.clone(),
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("Gadget".to_string()),
@@ -763,14 +872,14 @@ async fn write_events() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
-                replicated_table_schema: replicated_schema.clone(),
+                replicated_table_schema: replicated_table_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_string())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 3,
-                replicated_table_schema: replicated_schema,
+                replicated_table_schema: replicated_table_schema.clone(),
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(2),
                     Cell::String("Spare".to_string()),
@@ -811,17 +920,26 @@ async fn write_events_small_batch_stays_inlined_after_return() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(17);
     let schema = make_schema(17, "public", "cdc_flush");
-    let replicated_schema = make_replicated_schema(schema.clone());
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(700u64);
     destination
@@ -829,7 +947,7 @@ async fn write_events_small_batch_stays_inlined_after_return() {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 0,
-            replicated_table_schema: replicated_schema,
+            replicated_table_schema: replicated_table_schema.clone(),
             table_row: TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())]),
         })])
         .await
@@ -837,7 +955,8 @@ async fn write_events_small_batch_stays_inlined_after_return() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 0);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
     assert_eq!(
         count_table_files(&data, &table_name),
         0,
@@ -848,7 +967,7 @@ async fn write_events_small_batch_stays_inlined_after_return() {
 /// `write_events` keeps update events with old rows on the current-state path.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_with_old_row_update() {
-    use etl::types::{InsertEvent, PgLsn, UpdateEvent, UpdatedTableRow};
+    use etl::types::{InsertEvent, PgLsn, UpdateEvent};
 
     let dir = make_test_dir("write_events_with_old_row_update");
     let catalog = dir.join("catalog.ducklake");
@@ -858,17 +977,26 @@ async fn write_events_with_old_row_update() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(8);
     let schema = make_schema(8, "public", "inventory");
-    let replicated_schema = make_replicated_schema(schema.clone());
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(200u64);
     destination
@@ -877,14 +1005,14 @@ async fn write_events_with_old_row_update() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                replicated_table_schema: replicated_schema.clone(),
+                replicated_table_schema: replicated_table_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                replicated_table_schema: replicated_schema,
+                replicated_table_schema: replicated_table_schema.clone(),
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("Gadget".to_string()),
@@ -916,11 +1044,11 @@ async fn write_events_with_old_row_update() {
     assert_eq!(name, "Gadget");
 }
 
-/// Replaying the same CDC batch should be a no-op after the marker row is
+/// Replaying the same CDC batch should be a no-op after the progress row is
 /// committed.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_replay_is_idempotent() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent, UpdatedTableRow};
+    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
 
     let dir = make_test_dir("write_events_replay_is_idempotent");
     let catalog = dir.join("catalog.ducklake");
@@ -930,17 +1058,26 @@ async fn write_events_replay_is_idempotent() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(9);
     let schema = make_schema(9, "public", "orders");
-    let replicated_schema = make_replicated_schema(schema.clone());
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(300u64);
     let batch = vec![
@@ -948,14 +1085,14 @@ async fn write_events_replay_is_idempotent() {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 0,
-            replicated_table_schema: replicated_schema.clone(),
+            replicated_table_schema: replicated_table_schema.clone(),
             table_row: TableRow::new(vec![Cell::I32(1), Cell::String("draft".to_string())]),
         }),
         Event::Update(UpdateEvent {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 1,
-            replicated_table_schema: replicated_schema.clone(),
+            replicated_table_schema: replicated_table_schema.clone(),
             updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                 Cell::I32(1),
                 Cell::String("paid".to_string()),
@@ -969,14 +1106,14 @@ async fn write_events_replay_is_idempotent() {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 2,
-            replicated_table_schema: replicated_schema.clone(),
+            replicated_table_schema: replicated_table_schema.clone(),
             table_row: TableRow::new(vec![Cell::I32(2), Cell::String("temp".to_string())]),
         }),
         Event::Delete(DeleteEvent {
             start_lsn: lsn,
             commit_lsn: lsn,
             tx_ordinal: 3,
-            replicated_table_schema: replicated_schema,
+            replicated_table_schema: replicated_table_schema.clone(),
             old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                 Cell::I32(2),
                 Cell::String("temp".to_string()),
@@ -989,7 +1126,8 @@ async fn write_events_replay_is_idempotent() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 0);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
 
     let (id, name): (i32, String) = conn
         .query_row(
@@ -1006,12 +1144,304 @@ async fn write_events_replay_is_idempotent() {
     assert_eq!(name, "paid");
 }
 
+/// Streaming progress must compare transaction ordinals when commit LSNs match.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
+    use etl::types::{InsertEvent, UpdateEvent};
+
+    let dir = make_test_dir("write_events_same_commit_lsn_higher_tx_ordinal_still_applies");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let _table_id = TableId::new(18);
+    let schema = make_schema(18, "public", "tx_ordinal_progress");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    let lsn = PgLsn::from(350u64);
+    destination
+        .write_events(vec![Event::Insert(InsertEvent {
+            start_lsn: lsn,
+            commit_lsn: lsn,
+            tx_ordinal: 0,
+            replicated_table_schema: replicated_table_schema.clone(),
+            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
+        })])
+        .await
+        .unwrap();
+    destination
+        .write_events(vec![Event::Update(UpdateEvent {
+            start_lsn: lsn,
+            commit_lsn: lsn,
+            tx_ordinal: 1,
+            replicated_table_schema: replicated_table_schema.clone(),
+            updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("posted".to_string()),
+            ])),
+            old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("queued".to_string()),
+            ]))),
+        })])
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 1);
+    assert_eq!(read_streaming_progress(&conn, &table_name), Some((350, 1)));
+
+    let name: String = conn
+        .query_row(
+            &format!(
+                "SELECT name FROM {}.{} WHERE id = 1",
+                quote_identifier("lake"),
+                quote_identifier(&table_name)
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(name, "posted");
+}
+
+/// Restart replays should drop already-applied events before rebatching larger
+/// overlaps.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
+    use etl::types::InsertEvent;
+
+    let dir = make_test_dir("write_events_restart_overlap_rebatches_only_pending_suffix");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let _table_id = TableId::new(19);
+    let schema = make_schema(19, "public", "restart_overlap_progress");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_events(
+            (0..8)
+                .map(|idx| {
+                    let lsn = PgLsn::from(400u64 + idx as u64);
+                    Event::Insert(InsertEvent {
+                        start_lsn: lsn,
+                        commit_lsn: lsn,
+                        tx_ordinal: 0,
+                        replicated_table_schema: replicated_table_schema.clone(),
+                        table_row: TableRow::new(vec![
+                            Cell::I32(idx + 1),
+                            Cell::String(format!("name-{}", idx + 1)),
+                        ]),
+                    })
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(flush_inlined_rows(&conn, &table_name), 8);
+    drop(conn);
+    destination.shutdown().await.unwrap();
+    drop(destination);
+    checkpoint_lake(&catalog_url, &data_url);
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_events(
+            (3..16)
+                .map(|idx| {
+                    let lsn = PgLsn::from(400u64 + idx as u64);
+                    Event::Insert(InsertEvent {
+                        start_lsn: lsn,
+                        commit_lsn: lsn,
+                        tx_ordinal: 0,
+                        replicated_table_schema: replicated_table_schema.clone(),
+                        table_row: TableRow::new(vec![
+                            Cell::I32(idx + 1),
+                            Cell::String(format!("name-{}", idx + 1)),
+                        ]),
+                    })
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 16);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
+    assert_eq!(read_streaming_progress(&conn, &table_name), Some((415, 0)));
+
+    let names: Vec<String> = conn
+        .prepare(&format!(
+            "SELECT name FROM {}.{} ORDER BY id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(names.len(), 16);
+    assert_eq!(names[0], "name-1");
+    assert_eq!(names[15], "name-16");
+}
+
+/// A mixed mutation batch should reuse one temp staging table for multiple
+/// upserts.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_reuses_one_staging_table_per_atomic_batch() {
+    use etl::types::{InsertEvent, UpdateEvent};
+
+    let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
+    reset_ducklake_test_hooks();
+
+    let dir = make_test_dir("write_events_reuses_one_staging_table_per_atomic_batch");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let _table_id = TableId::new(19);
+    let schema = make_schema(19, "public", "staging_reuse");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    let lsn = PgLsn::from(360u64);
+    destination
+        .write_events(vec![
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                replicated_table_schema: replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("before".to_string())]),
+            }),
+            Event::Update(UpdateEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: replicated_table_schema.clone(),
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("after".to_string()),
+                ])),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("before".to_string()),
+                ]))),
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 2,
+                replicated_table_schema: replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tail".to_string())]),
+            }),
+        ])
+        .await
+        .unwrap();
+
+    assert_eq!(ducklake_staging_table_creations_for_tests(&table_name), 1);
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 2);
+
+    let rows = conn
+        .prepare(&format!(
+            "SELECT id, name FROM {}.{} ORDER BY id",
+            quote_identifier("lake"),
+            quote_identifier(&table_name)
+        ))
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows, vec![(1, "after".to_string()), (2, "tail".to_string())]);
+
+    reset_ducklake_test_hooks();
+}
+
 /// Marker-table rows should stay in the DuckLake catalog instead of creating
 /// Parquet files.
 #[tokio::test(flavor = "multi_thread")]
 async fn applied_batches_table_uses_data_inlining() {
-    use etl::types::{InsertEvent, PgLsn};
-
     let dir = make_test_dir("applied_batches_table_uses_data_inlining");
     let catalog = dir.join("catalog.ducklake");
     let data = dir.join("data");
@@ -1020,202 +1450,46 @@ async fn applied_batches_table_uses_data_inlining() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(13);
     let schema = make_schema(13, "public", "audit");
-    let replicated_schema = make_replicated_schema(schema.clone());
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
-
-    let lsn = PgLsn::from(600u64);
-    destination
-        .write_events(vec![Event::Insert(InsertEvent {
-            start_lsn: lsn,
-            commit_lsn: lsn,
-            tx_ordinal: 0,
-            replicated_table_schema: replicated_schema,
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())]),
-        })])
-        .await
-        .unwrap();
-
-    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
-    assert_eq!(count_table_files(&data, "__etl_applied_table_batches"), 0);
-}
-
-/// Shutdown should materialize copy rows that were still inlined.
-#[tokio::test(flavor = "multi_thread")]
-async fn shutdown_flushes_inlined_copy_rows() {
-    let dir = make_test_dir("shutdown_flushes_inlined_copy_rows");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
-
-    let schema = make_schema(34, "public", "shutdown_copy_flush");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
-    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
-
-    let store = MemoryStore::new();
-    store.store_table_schema(schema).await.unwrap();
-
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     destination
         .write_table_rows(
-            &replicated_schema,
-            vec![TableRow::new(vec![Cell::I32(1), Cell::String("pending copy row".to_string())])],
+            &replicated_table_schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("created".to_string())])],
         )
         .await
         .unwrap();
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(
-        count_table_files(&data, &table_name),
-        0,
-        "small copy batch should stay inlined before shutdown"
-    );
-    drop(conn);
-
-    destination.shutdown().await.unwrap();
-
-    wait_for_condition(Duration::from_secs(10), || count_table_files(&data, &table_name) >= 1)
-        .await;
-
-    drop(destination);
-    checkpoint_lake(&catalog_url, &data_url);
-
-    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(count_rows(&conn, &table_name), 1);
-    assert!(
-        count_table_files(&data, &table_name) >= 1,
-        "shutdown should materialize inlined copy rows"
-    );
-    assert_eq!(
-        flush_inlined_rows(&conn, &table_name),
-        0,
-        "shutdown should leave no inlined copy rows pending"
-    );
-}
-
-/// Shutdown should flush inlined CDC rows for all known tables.
-#[tokio::test(flavor = "multi_thread")]
-async fn shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
-    use etl::types::{InsertEvent, PgLsn};
-
-    let dir = make_test_dir("shutdown_flushes_inlined_cdc_rows_for_all_known_tables");
-    let catalog = dir.join("catalog.ducklake");
-    let data = dir.join("data");
-    std::fs::create_dir_all(&data).unwrap();
-
-    let catalog_url = path_to_file_url(&catalog);
-    let data_url = path_to_file_url(&data);
-
-    let schema_a = make_schema(35, "public", "shutdown_cdc_alpha");
-    let schema_b = make_schema(36, "public", "shutdown_cdc_beta");
-    let replicated_schema_a = make_replicated_schema(schema_a.clone());
-    let replicated_schema_b = make_replicated_schema(schema_b.clone());
-    let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
-    let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
-
-    let store = MemoryStore::new();
-    store.store_table_schema(schema_a).await.unwrap();
-    store.store_table_schema(schema_b).await.unwrap();
-
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
-
-    let lsn = PgLsn::from(900u64);
-    destination
-        .write_events(vec![
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 0,
-                replicated_table_schema: replicated_schema_a,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("alpha".to_string())]),
-            }),
-            Event::Insert(InsertEvent {
-                start_lsn: lsn,
-                commit_lsn: lsn,
-                tx_ordinal: 1,
-                replicated_table_schema: replicated_schema_b,
-                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("beta".to_string())]),
-            }),
-        ])
-        .await
-        .unwrap();
-
-    let conn = open_lake_conn_when_tables_visible(
-        &catalog_url,
-        &data_url,
-        &[&table_name_a, &table_name_b],
-    )
-    .await;
-    assert_eq!(count_rows(&conn, &table_name_a), 1);
-    assert_eq!(count_rows(&conn, &table_name_b), 1);
-    assert_eq!(
-        count_table_files(&data, &table_name_a),
-        0,
-        "small CDC batch should stay inlined before shutdown for alpha"
-    );
-    assert_eq!(
-        count_table_files(&data, &table_name_b),
-        0,
-        "small CDC batch should stay inlined before shutdown for beta"
-    );
-    drop(conn);
-
-    destination.shutdown().await.unwrap();
-
-    wait_for_condition(Duration::from_secs(10), || {
-        count_table_files(&data, &table_name_a) >= 1 && count_table_files(&data, &table_name_b) >= 1
-    })
-    .await;
-
-    drop(destination);
-    checkpoint_lake(&catalog_url, &data_url);
-
-    let conn = open_lake_conn_when_tables_visible(
-        &catalog_url,
-        &data_url,
-        &[&table_name_a, &table_name_b],
-    )
-    .await;
-    assert_eq!(count_rows(&conn, &table_name_a), 1);
-    assert_eq!(count_rows(&conn, &table_name_b), 1);
-    assert_eq!(
-        flush_inlined_rows(&conn, &table_name_a),
-        0,
-        "shutdown should leave no inlined CDC rows pending for alpha"
-    );
-    assert_eq!(
-        flush_inlined_rows(&conn, &table_name_b),
-        0,
-        "shutdown should leave no inlined CDC rows pending for beta"
-    );
+    assert_eq!(count_applied_batches(&conn, &table_name, "copy"), 1);
+    assert_eq!(count_table_files(&data, "__etl_applied_table_batches"), 0);
 }
 
 /// Mixed table batches remain correct when multiple tables are written in one
 /// flush.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_mixed_multi_table_batches() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent, UpdatedTableRow};
+    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
 
     let dir = make_test_dir("write_events_mixed_multi_table_batches");
     let catalog = dir.join("catalog.ducklake");
@@ -1225,10 +1499,12 @@ async fn write_events_mixed_multi_table_batches() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id_a = TableId::new(10);
+    let _table_id_b = TableId::new(11);
     let schema_a = make_schema(10, "public", "alpha_events");
     let schema_b = make_schema(11, "public", "beta_events");
-    let replicated_schema_a = make_replicated_schema(schema_a.clone());
-    let replicated_schema_b = make_replicated_schema(schema_b.clone());
+    let replicated_table_schema_a = make_replicated_table_schema(&schema_a);
+    let replicated_table_schema_b = make_replicated_table_schema(&schema_b);
     let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
     let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
 
@@ -1236,10 +1512,18 @@ async fn write_events_mixed_multi_table_batches() {
     store.store_table_schema(schema_a).await.unwrap();
     store.store_table_schema(schema_b).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     let lsn = PgLsn::from(400u64);
     destination
@@ -1248,21 +1532,21 @@ async fn write_events_mixed_multi_table_batches() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                replicated_table_schema: replicated_schema_a.clone(),
+                replicated_table_schema: replicated_table_schema_a.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("a-one".to_string())]),
             }),
             Event::Insert(InsertEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                replicated_table_schema: replicated_schema_b.clone(),
+                replicated_table_schema: replicated_table_schema_b.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("b-one".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
-                replicated_table_schema: replicated_schema_a,
+                replicated_table_schema: replicated_table_schema_a.clone(),
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("a-one-updated".to_string()),
@@ -1276,14 +1560,14 @@ async fn write_events_mixed_multi_table_batches() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 3,
-                replicated_table_schema: replicated_schema_b.clone(),
+                replicated_table_schema: replicated_table_schema_b.clone(),
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("b-two".to_string())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 4,
-                replicated_table_schema: replicated_schema_b,
+                replicated_table_schema: replicated_table_schema_b.clone(),
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("b-one".to_string()),
@@ -1305,8 +1589,10 @@ async fn write_events_mixed_multi_table_batches() {
     .await;
     assert_eq!(count_rows(&conn, &table_name_a), 1);
     assert_eq!(count_rows(&conn, &table_name_b), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name_a, "mutation"), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name_b, "mutation"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name_a, "mutation"), 0);
+    assert_eq!(count_applied_batches(&conn, &table_name_b, "mutation"), 0);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name_a), 1);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name_b), 1);
 
     let name_a: String = conn
         .query_row(
@@ -1335,12 +1621,111 @@ async fn write_events_mixed_multi_table_batches() {
     assert_eq!(name_b, "b-two");
 }
 
-/// A post-commit retry should detect the batch marker and avoid double-applying
-/// rows.
+/// A post-commit retry should replay a truncate batch without resurrecting
+/// pre-truncate rows.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
+    use etl::types::{InsertEvent, PgLsn, TruncateEvent};
+
+    let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
+    reset_ducklake_test_hooks();
+
+    let dir = make_test_dir("write_events_truncate_retry_after_post_commit_failure_is_idempotent");
+    let catalog = dir.join("catalog.ducklake");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+
+    let catalog_url = path_to_file_url(&catalog);
+    let data_url = path_to_file_url(&data);
+
+    let _table_id = TableId::new(16);
+    let schema = make_schema(16, "public", "truncate_retries");
+    let replicated_table_schema = make_replicated_table_schema(&schema);
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    destination
+        .write_table_rows(
+            &replicated_table_schema,
+            vec![
+                TableRow::new(vec![Cell::I32(1), Cell::String("before-1".to_string())]),
+                TableRow::new(vec![Cell::I32(2), Cell::String("before-2".to_string())]),
+            ],
+        )
+        .await
+        .unwrap();
+
+    arm_fail_after_atomic_batch_commit_once_for_tests(&table_name);
+
+    let lsn = PgLsn::from(800u64);
+    destination
+        .write_events(vec![
+            Event::Truncate(TruncateEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 0,
+                options: 0,
+                truncated_tables: vec![replicated_table_schema.clone()],
+            }),
+            Event::Insert(InsertEvent {
+                start_lsn: lsn,
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: replicated_table_schema.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(3),
+                    Cell::String("after-truncate".to_string()),
+                ]),
+            }),
+        ])
+        .await
+        .unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "truncate"), 0);
+    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 0);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
+    assert_eq!(read_streaming_progress(&conn, &table_name), Some((800, 1)));
+
+    let name: String = conn
+        .query_row(
+            &format!(
+                "SELECT name FROM {}.{} WHERE id = 3",
+                quote_identifier("lake"),
+                quote_identifier(&table_name)
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(name, "after-truncate");
+
+    reset_ducklake_test_hooks();
+}
+
+/// A post-commit retry should detect the streaming progress row and avoid
+/// double-applying rows.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_retry_after_post_commit_failure_is_idempotent() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent, UpdatedTableRow};
+    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
@@ -1353,17 +1738,26 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(12);
     let schema = make_schema(12, "public", "payments");
-    let replicated_schema = make_replicated_schema(schema.clone());
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
 
     arm_fail_after_atomic_batch_commit_once_for_tests(&table_name);
 
@@ -1374,14 +1768,14 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 0,
-                replicated_table_schema: replicated_schema.clone(),
+                replicated_table_schema: replicated_table_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
             }),
             Event::Update(UpdateEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                replicated_table_schema: replicated_schema.clone(),
+                replicated_table_schema: replicated_table_schema.clone(),
                 updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("posted".to_string()),
@@ -1395,14 +1789,14 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 2,
-                replicated_table_schema: replicated_schema.clone(),
+                replicated_table_schema: replicated_table_schema.clone(),
                 table_row: TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_string())]),
             }),
             Event::Delete(DeleteEvent {
                 start_lsn: lsn,
                 commit_lsn: lsn,
                 tx_ordinal: 3,
-                replicated_table_schema: replicated_schema,
+                replicated_table_schema: replicated_table_schema.clone(),
                 old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
                     Cell::I32(2),
                     Cell::String("tmp".to_string()),
@@ -1414,7 +1808,9 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 1);
-    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 1);
+    assert_eq!(count_applied_batches(&conn, &table_name, "mutation"), 0);
+    assert_eq!(count_streaming_progress_rows(&conn, &table_name), 1);
+    assert_eq!(read_streaming_progress(&conn, &table_name), Some((500, 3)));
 
     let name: String = conn
         .query_row(
@@ -1443,10 +1839,12 @@ async fn concurrent_writes_with_single_slot_complete() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id_a = TableId::new(6);
+    let _table_id_b = TableId::new(7);
     let schema_a = make_schema(6, "public", "alpha");
     let schema_b = make_schema(7, "public", "beta");
-    let replicated_schema_a = ReplicatedTableSchema::all(Arc::new(schema_a.clone()));
-    let replicated_schema_b = ReplicatedTableSchema::all(Arc::new(schema_b.clone()));
+    let replicated_table_schema_a = make_replicated_table_schema(&schema_a);
+    let replicated_table_schema_b = make_replicated_table_schema(&schema_b);
     let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
     let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
 
@@ -1455,9 +1853,18 @@ async fn concurrent_writes_with_single_slot_complete() {
     store.store_table_schema(schema_b).await.unwrap();
 
     let destination = Arc::new(
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap(),
+        DuckLakeDestination::new(
+            catalog_url.clone(),
+            data_url.clone(),
+            1,
+            None,
+            None,
+            None,
+            None,
+            store,
+        )
+        .await
+        .unwrap(),
     );
 
     let rows_a: Vec<TableRow> = (0..50)
@@ -1469,16 +1876,17 @@ async fn concurrent_writes_with_single_slot_complete() {
 
     let task_a = {
         let destination = Arc::clone(&destination);
-        let replicated_schema_a = replicated_schema_a.clone();
-        tokio::spawn(
-            async move { destination.write_table_rows(&replicated_schema_a, rows_a).await },
-        )
+        let replicated_table_schema_a = replicated_table_schema_a.clone();
+        tokio::spawn(async move {
+            destination.write_table_rows(&replicated_table_schema_a, rows_a).await
+        })
     };
     let task_b = {
         let destination = Arc::clone(&destination);
-        tokio::spawn(
-            async move { destination.write_table_rows(&replicated_schema_b, rows_b).await },
-        )
+        let replicated_table_schema_b = replicated_table_schema_b.clone();
+        tokio::spawn(async move {
+            destination.write_table_rows(&replicated_table_schema_b, rows_b).await
+        })
     };
 
     task_a.await.unwrap().unwrap();
@@ -1505,20 +1913,29 @@ async fn type_mapping_round_trip() {
     let catalog_url = path_to_file_url(&catalog);
     let data_url = path_to_file_url(&data);
 
+    let _table_id = TableId::new(5);
     let schema = make_rich_schema(5);
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_table_schema = make_replicated_table_schema(&schema);
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
     store.store_table_schema(schema).await.unwrap();
 
-    let destination =
-        DuckLakeDestination::new(catalog_url.clone(), data_url.clone(), 1, None, None, store)
-            .await
-            .unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
     destination
         .write_table_rows(
-            &replicated_schema,
+            &replicated_table_schema,
             vec![TableRow::new(vec![
                 Cell::I32(42),
                 Cell::String("hello".to_string()),

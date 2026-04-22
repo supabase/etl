@@ -164,7 +164,13 @@ impl GetOrCreateSlotResult {
     pub(crate) fn get_start_lsn(&self) -> PgLsn {
         match self {
             GetOrCreateSlotResult::CreateSlot(result) => result.consistent_point,
-            GetOrCreateSlotResult::GetSlot(result) => result.confirmed_flush_lsn,
+            GetOrCreateSlotResult::GetSlot(result) => {
+                // `START_REPLICATION` resumes from the requested position, so
+                // when a slot already reports a durable flush point we must
+                // advance past that byte to avoid replaying the last flushed
+                // transaction after reconnect.
+                PgLsn::from(u64::from(result.confirmed_flush_lsn).saturating_add(1))
+            }
         }
     }
 }

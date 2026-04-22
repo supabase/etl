@@ -73,6 +73,10 @@ pub enum DestinationConfig {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
+        /// Optional DuckDB memory limit for each DuckLake connection.
+        duckdb_memory_cache_limit: Option<String>,
+        /// Optional DuckLake maintenance target file size.
+        maintenance_target_file_size: Option<String>,
     },
 }
 
@@ -248,6 +252,10 @@ pub enum DestinationConfigWithoutSecrets {
         s3_use_ssl: Option<bool>,
         /// Optional metadata schema for DuckLake metadata tables.
         metadata_schema: Option<String>,
+        /// Optional DuckDB memory limit for each DuckLake connection.
+        duckdb_memory_cache_limit: Option<String>,
+        /// Optional DuckLake maintenance target file size.
+        maintenance_target_file_size: Option<String>,
     },
 }
 
@@ -280,6 +288,8 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                duckdb_memory_cache_limit,
+                maintenance_target_file_size,
             } => DestinationConfigWithoutSecrets::Ducklake {
                 catalog_url,
                 data_path,
@@ -289,6 +299,8 @@ impl From<DestinationConfig> for DestinationConfigWithoutSecrets {
                 s3_url_style,
                 s3_use_ssl,
                 metadata_schema,
+                duckdb_memory_cache_limit,
+                maintenance_target_file_size,
             },
         }
     }

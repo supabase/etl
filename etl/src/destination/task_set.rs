@@ -68,6 +68,20 @@ impl DestinationTaskSet {
         Ok(())
     }
 
+    /// Waits for all remaining tasks to finish without aborting them.
+    ///
+    /// This is useful for destinations that want shutdown to complete
+    /// already-accepted work before cleaning up related resources.
+    pub async fn drain(&self) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+
+        while let Some(result) = inner.join_set.join_next().await {
+            self.handle_task_result(result)?;
+        }
+
+        Ok(())
+    }
+
     /// Reaps all remaining tasks during shutdown.
     ///
     /// Destination shutdown is a one-shot lifecycle operation. We therefore
