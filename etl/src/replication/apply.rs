@@ -65,8 +65,9 @@ use crate::{
         WORKER_TYPE_LABEL,
     },
     replication::{
-        EventsStream, SharedTableCache, SharedTableState, StatusUpdateType,
+        EventsStream, SharedTableCache, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
+        table_cache::SharedTableState,
     },
     state::table::{TableReplicationError, TableReplicationPhase, TableReplicationPhaseType},
     store::{schema::SchemaStore, state::StateStore},
@@ -828,10 +829,10 @@ where
 
             // PRIORITY 3: Handle the pending destination write result.
             // Finishing an in-flight flush may advance progress and unblock a queued batch.
-                apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
-                    self.handle_flush_result(apply_result)
-                        .await?;
-                }
+            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
+                self.handle_flush_result(apply_result)
+                    .await?;
+            }
 
             // PRIORITY 4: Handle batch flush timer expiry.
             // This prevents buffered work from waiting forever when traffic is low.
@@ -1241,31 +1242,33 @@ where
         // If there was an error in the flushing, we return it immediately.
         result?;
 
-        counter!(
-            ETL_EVENTS_PROCESSED_TOTAL,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-            ACTION_LABEL => "table_streaming",
-            DESTINATION_LABEL => D::name(),
-        )
-        .increment(metadata.metrics.items_count as u64);
+        if let Some(metadata) = metadata {
+            counter!(
+                ETL_EVENTS_PROCESSED_TOTAL,
+                WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                ACTION_LABEL => "table_streaming",
+                DESTINATION_LABEL => D::name(),
+            )
+            .increment(metadata.metrics.items_count as u64);
 
-        histogram!(
-            ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
-            WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-            ACTION_LABEL => "table_streaming",
-            DESTINATION_LABEL => D::name(),
-        )
-        .record(metadata.metrics.dispatched_at.elapsed().as_secs_f64());
+            histogram!(
+                ETL_BATCH_ITEMS_SEND_DURATION_SECONDS,
+                WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                ACTION_LABEL => "table_streaming",
+                DESTINATION_LABEL => D::name(),
+            )
+            .record(metadata.metrics.dispatched_at.elapsed().as_secs_f64());
 
-        // We process the syncing tables with the last end lsn that the batch contains.
-        //
-        // Note that it could be that there is no end lsn for a specific batch, which
-        // could happen if we process a huge transaction, and we don't reach the
-        // commit before flushing. In that case, we don't process syncing
-        // tables, meaning that progress it not tracked, since it's not going to
-        // do anything because we can only track progress at commit boundaries.
-        if let Some(commit_end_lsn) = metadata.commit_end_lsn {
-            self.process_syncing_tables_after_flush(commit_end_lsn).await?;
+            // We process the syncing tables with the last end lsn that the batch contains.
+            //
+            // Note that it could be that there is no end lsn for a specific batch, which
+            // could happen if we process a huge transaction, and we don't reach the
+            // commit before flushing. In that case, we don't process syncing
+            // tables, meaning that progress it not tracked, since it's not going to
+            // do anything because we can only track progress at commit boundaries.
+            if let Some(commit_end_lsn) = metadata.commit_end_lsn {
+                self.process_syncing_tables_after_flush(commit_end_lsn).await?;
+            }
         }
 
         // If processing was paused, there must be a queued batch that still needs to be
@@ -1609,7 +1612,9 @@ where
         // message for this table. Record the new snapshot and clear any cached
         // mask now so relation handling rebuilds it from the schema version we
         // just stored rather than reusing pre-DDL state.
-        self.shared_table_cache.upsert(table_id, snapshot_id, None).await;
+        self.shared_table_cache
+            .note_waiting_for_relation(table_id, snapshot_id)
+            .await;
 
         let table_id_u32: u32 = table_id.into();
         info!(
@@ -1743,7 +1748,7 @@ where
         let shared_table_state = self.shared_table_cache.get(&table_id).await;
         let used_bootstrap_snapshot = shared_table_state.is_none();
         let table_snapshot_id = shared_table_state
-            .map_or_else(|| self.state.bootstrap_snapshot_id(), |state| state.snapshot_id);
+            .map_or_else(|| self.state.bootstrap_snapshot_id(), |state| state.snapshot_id());
         let table_schema = get_table_schema(
             &self.schema_store,
             &table_id,
@@ -1753,7 +1758,13 @@ where
         .await?;
         let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
         self.shared_table_cache
-            .upsert(table_id, table_schema.snapshot_id, Some(replication_mask.clone()))
+            .note_ready(
+                table_id,
+                ReplicatedTableSchema::from_mask(
+                    Arc::clone(&table_schema),
+                    replication_mask.clone(),
+                ),
+            )
             .await;
 
         // Build the ReplicatedTableSchema and emit a Relation event.
@@ -2692,13 +2703,17 @@ mod apply_worker {
         S: StateStore + Clone + Send + Sync + 'static,
     {
         let table_id = table_replication_error.table_id();
-        TableSyncWorkerState::set_and_store(
-            &ctx.pool,
-            &ctx.store,
-            table_id,
-            table_replication_error.into(),
-        )
-        .await?;
+        let state = ctx.pool.get_active_worker_state(table_id).await.ok_or_else(|| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "table sync worker state missing while marking table errored",
+                format!("table_id={table_id}")
+            )
+        })?;
+        let mut state_guard = state.lock().await;
+        state_guard
+            .set_and_store(table_replication_error.into(), &ctx.store)
+            .await?;
 
         Ok(None)
     }
@@ -2981,9 +2996,7 @@ async fn get_replicated_table_schema<S>(
 where
     S: SchemaStore + Clone + Send + 'static,
 {
-    let Some(SharedTableState { snapshot_id, replication_mask: Some(replication_mask) }) =
-        shared_table_cache.get(table_id).await
-    else {
+    let Some(shared_table_state) = shared_table_cache.get(table_id).await else {
         bail!(
             ErrorKind::InvalidState,
             "Missing shared table state",
@@ -2995,7 +3008,11 @@ where
         );
     };
 
-    let table_schema = get_table_schema(schema_store, table_id, snapshot_id, false).await?;
-
-    Ok(ReplicatedTableSchema::from_mask(table_schema, replication_mask))
+    match shared_table_state {
+        SharedTableState::Ready { replicated_table_schema } => Ok(replicated_table_schema),
+        SharedTableState::WaitingForRelation { snapshot_id } => {
+            let table_schema = get_table_schema(schema_store, table_id, snapshot_id, false).await?;
+            Ok(ReplicatedTableSchema::all(table_schema))
+        }
+    }
 }

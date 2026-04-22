@@ -33,8 +33,7 @@ macro_rules! convert_array_variant {
 ///
 /// The enum is designed to preserve type information and enable efficient
 /// conversion to destination formats while maintaining data fidelity.
-#[derive(Debug, PartialEq)]
-#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Cell {
     /// Represents a NULL database value
     Null,
@@ -111,8 +110,7 @@ impl Cell {
 /// This type is used internally during data conversion and can be converted to
 /// [`ArrayCellNonOptional`] for destinations that don't support nullable array
 /// elements.
-#[derive(Debug, PartialEq)]
-#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ArrayCell {
     /// Array of nullable boolean values
     Bool(Vec<Option<bool>>),

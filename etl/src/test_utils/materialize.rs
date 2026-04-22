@@ -48,7 +48,10 @@ where
                 }
             }
             Event::Update(update_event) => {
-                if let Some(new_record) = T::from_table_row(&update_event.table_row) {
+                let Some(table_row) = update_event.updated_table_row.as_full() else {
+                    continue;
+                };
+                if let Some(new_record) = T::from_table_row(table_row) {
                     let new_id = new_record.id();
 
                     // Find and replace existing record with same ID
@@ -61,8 +64,9 @@ where
                 }
             }
             Event::Delete(delete_event) => {
-                if let Some((_, old_table_row)) = &delete_event.old_table_row
-                    && let Some(old_record) = T::from_table_row(old_table_row)
+                if let Some(old_table_row) = &delete_event.old_table_row
+                    && let Some(full_row) = old_table_row.as_full()
+                    && let Some(old_record) = T::from_table_row(full_row)
                 {
                     let delete_id = old_record.id();
                     records.retain(|r| r.id() != delete_id);

@@ -425,7 +425,7 @@ where
         let mut errors: Vec<EtlError> = errors.into_iter().map(Into::into).collect();
 
         if errors.len() == 1 {
-            return errors.pop().expect("just checked length is 1");
+            return errors.remove(0);
         }
 
         EtlError { repr: ErrorRepr::Many { errors } }

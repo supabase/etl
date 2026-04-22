@@ -72,6 +72,7 @@
 - Use typed errors and `Result` for recoverable failures.
 - Prefer propagating errors with context instead of flattening to strings.
 - Reserve panics for programmer errors or violated invariants.
+- Use `debug_assert!` and `unreachable!` where they make internal invariants explicit, but prefer typed errors for runtime failures that can be triggered by external input or system state.
 - Only document `# Panics` when a function can actually panic.
 
 ## Unsafe And Concurrency
