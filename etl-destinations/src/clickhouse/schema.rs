@@ -5,6 +5,7 @@ use etl::types::{ColumnSchema, Type, is_array_type};
 /// The returned string does not include `Nullable(...)` wrapping — callers are
 /// responsible for applying that when the column is nullable. Arrays always use
 /// `Array(Nullable(T))` since Postgres array elements are nullable.
+#[allow(clippy::match_same_arms)] // Explicit arms document intentional type mappings.
 pub fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
     match typ {
         &Type::BOOL => "Boolean",
@@ -28,6 +29,7 @@ pub fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
 }
 
 /// Returns the ClickHouse array element type for a Postgres array type.
+#[allow(clippy::match_same_arms)] // Explicit arms document intentional type mappings.
 fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
     match typ {
         &Type::BOOL_ARRAY => "Boolean",

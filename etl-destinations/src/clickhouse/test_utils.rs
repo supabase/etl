@@ -85,13 +85,21 @@ impl ClickHouseTestDatabase {
         }
     }
 
-    /// Creates the test database in ClickHouse.
+    /// Creates the test database in ClickHouse, retrying on transient errors.
     pub async fn create_database(&self) {
-        self.root_client
-            .query(&format!("CREATE DATABASE IF NOT EXISTS `{}`", self.database))
-            .execute()
-            .await
-            .expect("Failed to create test ClickHouse database");
+        let query = format!("CREATE DATABASE IF NOT EXISTS `{}`", self.database);
+        for attempt in 1..=5 {
+            match self.root_client.query(&query).execute().await {
+                Ok(()) => return,
+                Err(e) if attempt < 5 => {
+                    eprintln!(
+                        "warning: create_database attempt {attempt}/5 failed: {e}, retrying..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(200 * attempt)).await;
+                }
+                Err(e) => panic!("Failed to create test ClickHouse database after 5 attempts: {e}"),
+            }
+        }
     }
 
     /// Drops the test database from ClickHouse.
