@@ -351,20 +351,18 @@ where
         })
     }
 
-    /// Prepares a table for CDC streaming operations with schema-aware table
-    /// creation.
+    /// Prepares a table for BigQuery writes with schema-aware table creation.
     ///
     /// Creates or verifies the BigQuery table exists using the provided schema,
-    /// and ensures the view points to the current versioned table. Uses caching
-    /// to avoid redundant table creation checks.
+    /// ensures the view points to the current versioned table, and validates
+    /// that the source replica identity is compatible with BigQuery deletes and
+    /// upserts. Uses caching to avoid redundant table creation checks.
     async fn prepare_table_for_streaming(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
     ) -> EtlResult<(SequencedBigQueryTableId, TableDescriptor)> {
-        if use_cdc_sequence_column {
-            validate_bigquery_replica_identity(replicated_table_schema)?;
-        }
+        validate_bigquery_replica_identity(replicated_table_schema)?;
 
         // We hold the lock for the entire preparation to avoid race conditions since
         // the consistency of this code path is critical.
@@ -517,11 +515,11 @@ where
         Ok(true)
     }
 
-    /// Writes table rows with CDC metadata for non-event streaming operations.
+    /// Writes table-copy rows using the BigQuery upsert row format.
     ///
     /// Adds an `Upsert` operation type to each row, splits them into optimal
     /// batches based on estimated row size to maximize the 10MB per request
-    /// limit, and streams to BigQuery using concurrent processing.
+    /// limit, and streams them to BigQuery concurrently.
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -598,6 +596,8 @@ where
         &self,
         new_replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
+        validate_bigquery_replica_identity(new_replicated_table_schema)?;
+
         let table_id = new_replicated_table_schema.id();
         let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
 
@@ -1067,21 +1067,21 @@ where
     }
 }
 
-/// Validates that a replicated table schema can be applied via BigQuery CDC.
+/// Validates that a replicated table schema can be applied in BigQuery.
 ///
-/// BigQuery CDC matches deletes and upserts by the destination table primary
-/// key, so the source table must expose a primary key to declare on the
-/// destination. PostgreSQL replica identity may use that primary key directly
-/// or request full old-row images, but alternative replica-identity indexes
-/// would identify rows differently from the destination key and would
-/// therefore apply updates and deletes incorrectly.
+/// BigQuery matches deletes and upserts by the destination table primary key,
+/// so the source table must always expose a compatible row identity.
+/// PostgreSQL replica identity may use that primary key directly or request
+/// full old-row images, but alternative replica-identity indexes would
+/// identify rows differently from the destination key and would therefore
+/// apply updates and deletes incorrectly.
 fn validate_bigquery_replica_identity(
     replicated_table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<()> {
     if replicated_table_schema.primary_key_column_schemas().len() == 0 {
         bail!(
             ErrorKind::SourceSchemaError,
-            "BigQuery CDC requires a source primary key",
+            "BigQuery requires a source primary key",
             format!(
                 "Table '{}' does not expose any replicated primary-key columns",
                 replicated_table_schema.name()
@@ -1094,9 +1094,9 @@ fn validate_bigquery_replica_identity(
         identity_type => {
             bail!(
                 ErrorKind::SourceSchemaError,
-                "BigQuery CDC requires primary-key or full replica identity",
+                "BigQuery requires primary-key or full replica identity",
                 format!(
-                    "Table '{}' uses replica identity {:?}, but BigQuery CDC only supports source \
+                    "Table '{}' uses replica identity {:?}, but BigQuery only supports source \
                      primary-key identity or full old-row images",
                     replicated_table_schema.name(),
                     identity_type

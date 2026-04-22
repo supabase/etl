@@ -183,6 +183,24 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
 
+    // We make the table with replica identity full since this is required by
+    // Iceberg to work after we made the changes to properly handle deletions
+    // with non-full idenntities.
+    database
+        .run_sql(&format!(
+            "alter table {} replica identity full",
+            database_schema.users_schema().name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} replica identity full",
+            database_schema.orders_schema().name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
 

@@ -757,7 +757,7 @@ fn prepare_table_mutations(
     Ok(prepared_mutations)
 }
 
-/// Builds a `WHERE` clause from the primary-key values stored in `row`.
+/// Builds a `WHERE` clause from the replica-identity values stored in `row`.
 fn delete_predicate_from_row<'a>(
     replicated_table_schema: &ReplicatedTableSchema,
     row: impl Into<DeletePredicateRowRef<'a>>,

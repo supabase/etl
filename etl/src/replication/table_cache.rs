@@ -145,7 +145,7 @@ mod tests {
     use super::*;
 
     fn create_test_schema() -> ReplicatedTableSchema {
-        let schema = TableSchema::new(
+        let schema = TableSchema::with_snapshot_id(
             TableId::new(123),
             TableName::new("public".to_string(), "test_table".to_string()),
             vec![
@@ -153,6 +153,7 @@ mod tests {
                 ColumnSchema::new("name".to_string(), Type::TEXT, -1, 2, None, true),
                 ColumnSchema::new("age".to_string(), Type::INT4, -1, 3, None, true),
             ],
+            SnapshotId::new(10.into()),
         );
 
         let replicated_columns: HashSet<String> =
@@ -206,7 +207,7 @@ mod tests {
         let replicated_table_schema = create_test_schema();
 
         cache.note_ready(table_id, replicated_table_schema).await;
-        cache.note_waiting_for_relation(table_id, SnapshotId::new(10.into())).await;
+        cache.note_waiting_for_relation(table_id, SnapshotId::new(9.into())).await;
     }
 
     #[tokio::test]

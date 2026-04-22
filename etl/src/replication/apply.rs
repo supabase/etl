@@ -817,24 +817,28 @@ where
         tokio::select! {
             biased;
 
-            // PRIORITY 1: Handle shutdown signals.
+            // PRIORITY 1: Handle the pending destination write result.
+            // If a flush has already completed at the same time as shutdown,
+            // prefer consuming that durable progress before entering the
+            // shutdown wait loop. This reduces the chance that already-done
+            // work gets replayed after restart, while still allowing replay
+            // when shutdown catches work that is only pending.
+            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
+                self.handle_flush_result(apply_result)
+                    .await?;
+            }
+
+            // PRIORITY 2: Handle shutdown signals.
             // Once shutdown is requested, the loop stops new intake and
             // switches into the graceful shutdown loop.
             _ = self.shutdown_rx.changed() => {
                 self.handle_shutdown_signal(events_stream.as_mut()).await?;
             }
 
-            // PRIORITY 2: Handle PostgreSQL connection lifecycle updates.
+            // PRIORITY 3: Handle PostgreSQL connection lifecycle updates.
             // A closed or errored source connection always stops the loop immediately.
             changed = connection_updates_rx.changed() => {
                 Self::handle_connection_update(changed, connection_updates_rx)?;
-            }
-
-            // PRIORITY 3: Handle the pending destination write result.
-            // Finishing an in-flight flush may advance progress and unblock a queued batch.
-            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
-                self.handle_flush_result(apply_result)
-                    .await?;
             }
 
             // PRIORITY 4: Handle batch flush timer expiry.
@@ -890,13 +894,13 @@ where
     /// acknowledge the requested flush LSN.
     ///
     /// In this phase the loop no longer accepts new replication messages and it
-    /// prioritizes any in-flight destination flush result before it waits for:
+    /// no longer waits for pending destination flushes. That keeps shutdown
+    /// best-effort and means work that was still pending may be replayed after
+    /// restart. Instead it only waits for:
     /// 1. PostgreSQL connection lifecycle updates.
-    /// 2. Any pending destination flush result that may advance durable
-    ///    progress during shutdown.
-    /// 3. PostgreSQL keepalives that may acknowledge the shutdown status update
+    /// 2. PostgreSQL keepalives that may acknowledge the shutdown status update
     ///    with `wal_end >= acked_flush_lsn`.
-    /// 4. Periodic heartbeats once the computed keep alive deadline expires.
+    /// 3. Periodic heartbeats once the computed keep alive deadline expires.
     ///
     /// Once the keepalive acknowledgement arrives, unresolved batch or flush
     /// work causes the loop to conservatively return
@@ -917,18 +921,7 @@ where
                 Self::handle_connection_update(changed, connection_updates_rx)?;
             }
 
-            // PRIORITY 2: If destination work was already in flight when shutdown started,
-            // consume that result before continuing the shutdown wait.
-            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
-                info!(
-                    worker_type = %self.worker_context.worker_type(),
-                    "graceful shutdown received in-flight destination flush result",
-                );
-
-                self.handle_flush_result(apply_result).await?;
-            }
-
-            // PRIORITY 3: Wait for the keepalive that acknowledges the shutdown flush LSN.
+            // PRIORITY 2: Wait for the keepalive that acknowledges the shutdown flush LSN.
             // Once this barrier is reached, shutdown may finish.
             message = events_stream.next() => {
                 if self
@@ -939,7 +932,7 @@ where
                 }
             }
 
-            // PRIORITY 4: Resend a heartbeat once the computed keep alive deadline expires while
+            // PRIORITY 3: Resend a heartbeat once the computed keep alive deadline expires while
             // shutdown is waiting for the primary keep alive acknowledgement barrier. This is a
             // last-resort safeguard for cases where PostgreSQL keep alives stop reaching the loop,
             // for example because the source has gone quiet, the stream is backpressured, or the
@@ -1130,9 +1123,12 @@ where
     /// [`ShutdownState::WaitingForPrimaryKeepAlive`].
     ///
     /// Shutdown stops new message intake immediately and sends the best flush
-    /// position currently known. If an in-flight destination flush resolves
-    /// afterward, the graceful shutdown loop may refresh this acknowledgement
-    /// target before completing.
+    /// position currently known. The active loop prefers an already-ready
+    /// destination flush result over a simultaneous shutdown signal to make
+    /// replay of already-finished destination work less likely on restart, but
+    /// once shutdown begins it does not wait for pending destination flushes.
+    /// Work that is still in flight when shutdown wins can therefore still be
+    /// replayed after restart.
     ///
     /// Note: the shutdown system is best-effort. Graceful shutdown may not
     /// complete if we are blocked on non-interruptible code or if keepalive
