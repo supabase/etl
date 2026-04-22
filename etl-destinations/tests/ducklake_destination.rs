@@ -37,8 +37,8 @@ use etl::{
     error::ErrorKind,
     store::{both::memory::MemoryStore, schema::SchemaStore},
     types::{
-        Cell, ColumnSchema, Event, ReplicatedTableSchema, TableId, TableName, TableRow,
-        TableSchema, Type as PgType,
+        Cell, ColumnSchema, Event, OldTableRow, ReplicatedTableSchema, TableId, TableName,
+        TableRow, TableSchema, Type as PgType,
     },
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
@@ -110,6 +110,11 @@ fn make_rich_schema(table_id: u32) -> TableSchema {
             ColumnSchema::new("birthday".to_string(), PgType::DATE, -1, 5, None, true),
         ],
     )
+}
+
+/// Creates the replicated schema view for a test table.
+fn make_replicated_schema(table_schema: TableSchema) -> ReplicatedTableSchema {
+    ReplicatedTableSchema::all(Arc::new(table_schema))
 }
 
 /// Opens a verification connection to the same DuckLake catalog and returns it.
@@ -711,7 +716,7 @@ async fn truncate_clears_copy_markers_for_recopy() {
 /// state.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent, UpdatedTableRow};
 
     let dir = make_test_dir("write_events");
     let catalog = dir.join("catalog.ducklake");
@@ -722,7 +727,7 @@ async fn write_events() {
     let data_url = path_to_file_url(&data);
 
     let schema = make_schema(4, "public", "products");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_schema = make_replicated_schema(schema.clone());
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -748,7 +753,10 @@ async fn write_events() {
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Gadget".to_string())]),
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("Gadget".to_string()),
+                ])),
                 old_table_row: None,
             }),
             Event::Insert(InsertEvent {
@@ -763,10 +771,10 @@ async fn write_events() {
                 commit_lsn: lsn,
                 tx_ordinal: 3,
                 replicated_table_schema: replicated_schema,
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_string())]),
-                )),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Spare".to_string()),
+                ]))),
             }),
         ])
         .await
@@ -804,7 +812,7 @@ async fn write_events_small_batch_stays_inlined_after_return() {
     let data_url = path_to_file_url(&data);
 
     let schema = make_schema(17, "public", "cdc_flush");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_schema = make_replicated_schema(schema.clone());
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -840,7 +848,7 @@ async fn write_events_small_batch_stays_inlined_after_return() {
 /// `write_events` keeps update events with old rows on the current-state path.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_with_old_row_update() {
-    use etl::types::{InsertEvent, PgLsn, UpdateEvent};
+    use etl::types::{InsertEvent, PgLsn, UpdateEvent, UpdatedTableRow};
 
     let dir = make_test_dir("write_events_with_old_row_update");
     let catalog = dir.join("catalog.ducklake");
@@ -851,7 +859,7 @@ async fn write_events_with_old_row_update() {
     let data_url = path_to_file_url(&data);
 
     let schema = make_schema(8, "public", "inventory");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_schema = make_replicated_schema(schema.clone());
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -877,11 +885,14 @@ async fn write_events_with_old_row_update() {
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_schema,
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Gadget".to_string())]),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
-                )),
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("Gadget".to_string()),
+                ])),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("Widget".to_string()),
+                ]))),
             }),
         ])
         .await
@@ -909,7 +920,7 @@ async fn write_events_with_old_row_update() {
 /// committed.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_replay_is_idempotent() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent, UpdatedTableRow};
 
     let dir = make_test_dir("write_events_replay_is_idempotent");
     let catalog = dir.join("catalog.ducklake");
@@ -920,7 +931,7 @@ async fn write_events_replay_is_idempotent() {
     let data_url = path_to_file_url(&data);
 
     let schema = make_schema(9, "public", "orders");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_schema = make_replicated_schema(schema.clone());
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -945,11 +956,14 @@ async fn write_events_replay_is_idempotent() {
             commit_lsn: lsn,
             tx_ordinal: 1,
             replicated_table_schema: replicated_schema.clone(),
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("paid".to_string())]),
-            old_table_row: Some((
-                false,
-                TableRow::new(vec![Cell::I32(1), Cell::String("draft".to_string())]),
-            )),
+            updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("paid".to_string()),
+            ])),
+            old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("draft".to_string()),
+            ]))),
         }),
         Event::Insert(InsertEvent {
             start_lsn: lsn,
@@ -963,10 +977,10 @@ async fn write_events_replay_is_idempotent() {
             commit_lsn: lsn,
             tx_ordinal: 3,
             replicated_table_schema: replicated_schema,
-            old_table_row: Some((
-                false,
-                TableRow::new(vec![Cell::I32(2), Cell::String("temp".to_string())]),
-            )),
+            old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(2),
+                Cell::String("temp".to_string()),
+            ]))),
         }),
     ];
 
@@ -1007,7 +1021,7 @@ async fn applied_batches_table_uses_data_inlining() {
     let data_url = path_to_file_url(&data);
 
     let schema = make_schema(13, "public", "audit");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_schema = make_replicated_schema(schema.clone());
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -1112,8 +1126,8 @@ async fn shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
 
     let schema_a = make_schema(35, "public", "shutdown_cdc_alpha");
     let schema_b = make_schema(36, "public", "shutdown_cdc_beta");
-    let replicated_schema_a = ReplicatedTableSchema::all(Arc::new(schema_a.clone()));
-    let replicated_schema_b = ReplicatedTableSchema::all(Arc::new(schema_b.clone()));
+    let replicated_schema_a = make_replicated_schema(schema_a.clone());
+    let replicated_schema_b = make_replicated_schema(schema_b.clone());
     let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
     let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
 
@@ -1201,7 +1215,7 @@ async fn shutdown_flushes_inlined_cdc_rows_for_all_known_tables() {
 /// flush.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_mixed_multi_table_batches() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent, UpdatedTableRow};
 
     let dir = make_test_dir("write_events_mixed_multi_table_batches");
     let catalog = dir.join("catalog.ducklake");
@@ -1213,8 +1227,8 @@ async fn write_events_mixed_multi_table_batches() {
 
     let schema_a = make_schema(10, "public", "alpha_events");
     let schema_b = make_schema(11, "public", "beta_events");
-    let replicated_schema_a = ReplicatedTableSchema::all(Arc::new(schema_a.clone()));
-    let replicated_schema_b = ReplicatedTableSchema::all(Arc::new(schema_b.clone()));
+    let replicated_schema_a = make_replicated_schema(schema_a.clone());
+    let replicated_schema_b = make_replicated_schema(schema_b.clone());
     let table_name_a = table_name_to_ducklake_table_name(&schema_a.name).unwrap();
     let table_name_b = table_name_to_ducklake_table_name(&schema_b.name).unwrap();
 
@@ -1249,14 +1263,14 @@ async fn write_events_mixed_multi_table_batches() {
                 commit_lsn: lsn,
                 tx_ordinal: 2,
                 replicated_table_schema: replicated_schema_a,
-                table_row: TableRow::new(vec![
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("a-one-updated".to_string()),
-                ]),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("a-one".to_string())]),
-                )),
+                ])),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("a-one".to_string()),
+                ]))),
             }),
             Event::Insert(InsertEvent {
                 start_lsn: lsn,
@@ -1270,10 +1284,10 @@ async fn write_events_mixed_multi_table_batches() {
                 commit_lsn: lsn,
                 tx_ordinal: 4,
                 replicated_table_schema: replicated_schema_b,
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("b-one".to_string())]),
-                )),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("b-one".to_string()),
+                ]))),
             }),
         ])
         .await
@@ -1326,7 +1340,7 @@ async fn write_events_mixed_multi_table_batches() {
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_retry_after_post_commit_failure_is_idempotent() {
-    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent};
+    use etl::types::{DeleteEvent, InsertEvent, PgLsn, UpdateEvent, UpdatedTableRow};
 
     let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
     reset_ducklake_test_hooks();
@@ -1340,7 +1354,7 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
     let data_url = path_to_file_url(&data);
 
     let schema = make_schema(12, "public", "payments");
-    let replicated_schema = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+    let replicated_schema = make_replicated_schema(schema.clone());
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
 
     let store = MemoryStore::new();
@@ -1368,11 +1382,14 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("posted".to_string())]),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
-                )),
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("posted".to_string()),
+                ])),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("queued".to_string()),
+                ]))),
             }),
             Event::Insert(InsertEvent {
                 start_lsn: lsn,
@@ -1386,10 +1403,10 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 commit_lsn: lsn,
                 tx_ordinal: 3,
                 replicated_table_schema: replicated_schema,
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_string())]),
-                )),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("tmp".to_string()),
+                ]))),
             }),
         ])
         .await
