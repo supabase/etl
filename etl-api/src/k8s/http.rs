@@ -256,7 +256,6 @@ impl HttpK8sClient {
         if let Some(waiting) = &state.waiting
             && let Some(reason) = &waiting.reason
         {
-            #[allow(clippy::match_same_arms)]
             match reason.as_str() {
                 // Crash/restart errors
                 "CrashLoopBackOff" => return true,
