@@ -1612,9 +1612,7 @@ where
         // message for this table. Record the new snapshot and clear any cached
         // mask now so relation handling rebuilds it from the schema version we
         // just stored rather than reusing pre-DDL state.
-        self.shared_table_cache
-            .note_waiting_for_relation(table_id, snapshot_id)
-            .await;
+        self.shared_table_cache.note_waiting_for_relation(table_id, snapshot_id).await;
 
         let table_id_u32: u32 = table_id.into();
         info!(
@@ -2711,9 +2709,7 @@ mod apply_worker {
             )
         })?;
         let mut state_guard = state.lock().await;
-        state_guard
-            .set_and_store(table_replication_error.into(), &ctx.store)
-            .await?;
+        state_guard.set_and_store(table_replication_error.into(), &ctx.store).await?;
 
         Ok(None)
     }

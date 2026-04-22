@@ -2119,11 +2119,9 @@ mod tests {
         let replicated_table_schema = make_replicated_schema();
         let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_string())]);
 
-        let prepared = prepare_table_mutations(
-            &replicated_table_schema,
-            vec![TableMutation::Replace(row)],
-        )
-        .unwrap();
+        let prepared =
+            prepare_table_mutations(&replicated_table_schema, vec![TableMutation::Replace(row)])
+                .unwrap();
 
         assert_eq!(prepared.len(), 2);
         match &prepared[0] {

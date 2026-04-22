@@ -37,8 +37,8 @@ use etl::{
     error::ErrorKind,
     store::{both::memory::MemoryStore, schema::SchemaStore},
     types::{
-        Cell, ColumnSchema, Event, OldTableRow, PgLsn, ReplicatedTableSchema, TableId,
-        TableName, TableRow, TableSchema, Type as PgType, UpdatedTableRow,
+        Cell, ColumnSchema, Event, OldTableRow, PgLsn, ReplicatedTableSchema, TableId, TableName,
+        TableRow, TableSchema, Type as PgType, UpdatedTableRow,
     },
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};

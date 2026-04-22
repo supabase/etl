@@ -670,10 +670,7 @@ where
                                 update.start_lsn,
                                 update.commit_lsn,
                                 update.tx_ordinal,
-                                TableMutation::Update {
-                                    delete_row: old_row,
-                                    new_row: table_row,
-                                },
+                                TableMutation::Update { delete_row: old_row, new_row: table_row },
                             ));
                         } else {
                             match table_row {
