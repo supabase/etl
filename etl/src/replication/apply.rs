@@ -71,7 +71,7 @@ use crate::{
         EventsStream, SharedTableCache, StatusUpdateType,
         client::{PgReplicationClient, PostgresConnectionUpdate},
     },
-    state::table::{TableReplicationError, TableReplicationPhase, TableReplicationPhaseType},
+    state::table::{TableReplicationPhase, TableReplicationPhaseType},
     store::{schema::SchemaStore, state::StateStore},
     types::{Event, PipelineId, RelationEvent, SizeHint},
     workers::{TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState},
@@ -332,8 +332,6 @@ struct HandleMessageResult {
     /// Set when a batch should be ended earlier than the normal batching
     /// parameters.
     end_batch: bool,
-    /// Set when the table has encountered an error.
-    table_replication_error: Option<TableReplicationError>,
 }
 
 impl HandleMessageResult {
@@ -1439,10 +1437,6 @@ where
             self.flush_batch(reason).await?;
         }
 
-        if let Some(error) = result.table_replication_error {
-            self.mark_table_errored(error).await?;
-        }
-
         Ok(())
     }
 
@@ -1757,27 +1751,20 @@ where
 
         let end_lsn = PgLsn::from(message.end_lsn());
 
-        // Process syncing tables after commit (worker-specific behavior).
         let should_end_batch = self.process_syncing_tables_after_commit_event(end_lsn).await?;
 
         let tx_ordinal = self.state.next_tx_ordinal();
         let event = parse_event_from_commit_message(start_lsn, commit_lsn, tx_ordinal, message);
 
-        let mut result = HandleMessageResult {
+        Ok(HandleMessageResult {
             event: Some(Event::Commit(event)),
             end_lsn: Some(end_lsn),
-            ..Default::default()
-        };
-
-        // Any requested exit forces the current commit batch to end, including the
-        // commit event itself. For shutdown, this is mainly the catch-up wait
-        // path requesting a pause exit, which lets that case reuse the normal
-        // commit flush flow.
-        if should_end_batch {
-            result.end_batch = true;
-        }
-
-        Ok(result)
+            // Any requested exit forces the current commit batch to end, including the
+            // commit event itself. For shutdown, this is mainly the catch-up wait
+            // path requesting a pause exit, which lets that case reuse the normal
+            // commit flush flow.
+            end_batch: should_end_batch,
+        })
     }
 
     /// Handles Postgres RELATION messages.
@@ -2044,10 +2031,9 @@ where
             }
         }?;
 
-        let should_end_batch = exit_intent.is_some();
         self.state.record_exit_intent(exit_intent);
 
-        Ok(should_end_batch)
+        Ok(exit_intent.is_some())
     }
 
     /// Processes syncing tables after a batch has been flushed.
@@ -2129,28 +2115,6 @@ where
             }
             WorkerContext::TableSync(ctx) => {
                 table_sync_worker::process_syncing_tables_when_idle(ctx, current_lsn).await
-            }
-        }?;
-
-        self.state.record_exit_intent(exit_intent);
-
-        Ok(())
-    }
-
-    /// Marks a table as errored.
-    ///
-    /// Dispatches to worker-specific implementation based on the worker
-    /// context.
-    async fn mark_table_errored(
-        &mut self,
-        table_replication_error: TableReplicationError,
-    ) -> EtlResult<()> {
-        let exit_intent = match &mut self.worker_context {
-            WorkerContext::Apply(ctx) => {
-                apply_worker::mark_table_errored(ctx, table_replication_error).await
-            }
-            WorkerContext::TableSync(ctx) => {
-                table_sync_worker::mark_table_errored(ctx, table_replication_error).await
             }
         }?;
 
@@ -2753,27 +2717,6 @@ mod apply_worker {
         Ok(None)
     }
 
-    /// Marks a table as errored.
-    ///
-    /// Updates the state store and continues the loop.
-    pub(super) async fn mark_table_errored<S, D>(
-        ctx: &ApplyWorkerContext<S, D>,
-        table_replication_error: TableReplicationError,
-    ) -> EtlResult<Option<ExitIntent>>
-    where
-        S: StateStore + Clone + Send + Sync + 'static,
-    {
-        let table_id = table_replication_error.table_id();
-        TableSyncWorkerState::set_and_store(
-            &ctx.pool,
-            &ctx.store,
-            table_id,
-            table_replication_error.into(),
-        )
-        .await?;
-
-        Ok(None)
-    }
     /// Creates a new table sync worker for the specified table.
     fn build_table_sync_worker<S, D>(
         ctx: &ApplyWorkerContext<S, D>,
@@ -2955,25 +2898,6 @@ mod table_sync_worker {
         }
 
         Ok(None)
-    }
-    /// Marks a table as errored.
-    ///
-    /// Updates the state and returns Complete if the table matches this worker.
-    pub(super) async fn mark_table_errored<S>(
-        ctx: &mut TableSyncWorkerContext<S>,
-        table_replication_error: TableReplicationError,
-    ) -> EtlResult<Option<ExitIntent>>
-    where
-        S: StateStore + Clone + Send + Sync + 'static,
-    {
-        if ctx.table_id != table_replication_error.table_id() {
-            return Ok(None);
-        }
-
-        let mut inner = ctx.table_sync_worker_state.lock().await;
-        inner.set_and_store(table_replication_error.into(), &ctx.state_store).await?;
-
-        Ok(Some(ExitIntent::Complete))
     }
 }
 
