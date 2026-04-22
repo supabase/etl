@@ -187,43 +187,6 @@ impl TableSyncWorkerState {
         Self { inner: Arc::new(Mutex::new(inner)) }
     }
 
-    /// Updates table replication state in both memory and persistent storage.
-    ///
-    /// This static method provides a unified interface for updating table state
-    /// regardless of whether the table has an active worker in the pool.
-    pub(crate) async fn set_and_store<S>(
-        pool: &TableSyncWorkerPool,
-        state_store: &S,
-        table_id: TableId,
-        table_replication_phase: TableReplicationPhase,
-    ) -> EtlResult<()>
-    where
-        S: StateStore,
-    {
-        let table_sync_worker_state = pool.get_active_worker_state(table_id).await;
-
-        // In case we have the state in memory, we will atomically update the memory and
-        // state store states. Otherwise, we just update the state store.
-        //
-        // Note: There is a potential race condition here where
-        // `get_active_worker_state` returns `None` (worker finished), then a
-        // new worker starts and loads old state from the store, and finally we
-        // update the store with the new state, leaving the new worker with stale
-        // in-memory state. However, this is not a problem in practice because if we are
-        // calling this from the table sync worker, the apply worker sees this
-        // worker as active and will not launch any new worker and if we are the
-        // apply worker, no one can start a table sync worker besides the apply
-        // worker itself, which is running this code.
-        if let Some(table_sync_worker_state) = table_sync_worker_state {
-            let mut inner = table_sync_worker_state.lock().await;
-            inner.set_and_store(table_replication_phase, state_store).await?;
-        } else {
-            state_store.update_table_replication_state(table_id, table_replication_phase).await?;
-        }
-
-        Ok(())
-    }
-
     /// Waits for the table to reach a specific replication phase type.
     ///
     /// This method blocks until either the table reaches one of the desired

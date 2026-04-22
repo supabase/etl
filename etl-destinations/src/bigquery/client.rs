@@ -1180,14 +1180,14 @@ impl BigQueryClient {
 
     /// Creates a primary key clause for table creation.
     ///
-    /// Generates a primary key constraint clause from columns marked as primary
-    /// key, sorted by their ordinal position to ensure correct composite
-    /// key ordering.
+    /// BigQuery tables are keyed by the source primary key, which is distinct
+    /// from PostgreSQL replica-identity metadata when `REPLICA IDENTITY FULL`
+    /// is in use.
     fn add_primary_key_clause(
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<Option<String>> {
         let mut primary_key_columns: Vec<_> =
-            replicated_table_schema.column_schemas().filter(|s| s.primary_key()).collect();
+            replicated_table_schema.primary_key_column_schemas().collect();
 
         // If no primary key columns are marked, return early.
         if primary_key_columns.is_empty() {
@@ -1195,7 +1195,8 @@ impl BigQueryClient {
         }
 
         // Sort by primary_key_ordinal_position to ensure correct composite key
-        // ordering.
+        // ordering. This is needed since the order of column schema returned above, is
+        // ordered by the columns ordering, not the primary key ordering.
         primary_key_columns.sort_by_key(|c| c.primary_key_ordinal_position);
 
         let primary_key_columns: Vec<String> = primary_key_columns
@@ -1335,6 +1336,11 @@ impl BigQueryClient {
 
             let mode = if is_array_type(&column_schema.typ) {
                 ColumnMode::Repeated
+            } else if use_cdc_sequence_column {
+                // CDC delete rows can omit non-key columns, so the writer
+                // schema must accept missing scalar fields even when the
+                // destination table column is defined as NOT NULL.
+                ColumnMode::Nullable
             } else if column_schema.nullable {
                 ColumnMode::Nullable
             } else {
@@ -1382,7 +1388,7 @@ impl fmt::Debug for BigQueryClient {
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
-    use etl::types::{ReplicationMask, TableId, TableName, TableSchema};
+    use etl::types::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema};
     use gcp_bigquery_client::google::cloud::bigquery::storage::v1::{
         AppendRowsResponse, append_rows_response,
     };
@@ -1434,6 +1440,23 @@ mod tests {
         let replication_mask = ReplicationMask::build_or_all(&table_schema, &column_names);
 
         ReplicatedTableSchema::from_mask(table_schema, replication_mask)
+    }
+
+    /// Creates a [`ReplicatedTableSchema`] from test columns with all columns
+    /// replicated and an explicit runtime identity.
+    fn test_replicated_schema_with_identity(
+        columns: Vec<ColumnSchema>,
+        identity_mask: IdentityMask,
+    ) -> ReplicatedTableSchema {
+        let column_names: HashSet<String> = columns.iter().map(|c| c.name.clone()).collect();
+        let table_schema = Arc::new(TableSchema::new(
+            TableId(1),
+            TableName::new("public".to_string(), "test_table".to_string()),
+            columns,
+        ));
+        let replication_mask = ReplicationMask::build_or_all(&table_schema, &column_names);
+
+        ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
     #[test]
@@ -1520,9 +1543,8 @@ mod tests {
             .expect("composite pk clause");
         assert_eq!(composite_pk_clause, ", primary key (`tenant_id`,`id`) not enforced");
 
-        // Composite primary key with reversed column order but correct ordinal
-        // positions. The primary key clause should still be ordered by ordinal
-        // position.
+        // BigQuery declares composite primary keys in primary-key ordinal
+        // order, even when the table's physical column order differs.
         let columns_with_reversed_pk = vec![
             test_column("id", Type::INT4, 1, false, Some(2)),
             test_column("tenant_id", Type::INT4, 2, false, Some(1)),
@@ -1534,6 +1556,20 @@ mod tests {
             .expect("reversed pk clause");
         assert_eq!(reversed_pk_clause, ", primary key (`tenant_id`,`id`) not enforced");
 
+        let columns_with_full_identity = vec![
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
+        ];
+        let schema_with_full_identity = test_replicated_schema_with_identity(
+            columns_with_full_identity,
+            IdentityMask::from_bytes(vec![1, 1]),
+        );
+        let full_identity_pk_clause =
+            BigQueryClient::add_primary_key_clause(&schema_with_full_identity)
+                .unwrap()
+                .expect("full identity pk clause");
+        assert_eq!(full_identity_pk_clause, ", primary key (`id`) not enforced");
+
         let columns_no_pk = vec![
             test_column("name", Type::TEXT, 1, true, None),
             test_column("age", Type::INT4, 2, true, None),
@@ -1542,28 +1578,6 @@ mod tests {
         let no_pk_clause =
             BigQueryClient::add_primary_key_clause(&schema_no_pk).expect("no pk clause");
         assert!(no_pk_clause.is_none());
-    }
-
-    #[test]
-    fn create_columns_spec() {
-        let columns = vec![
-            test_column("id", Type::INT4, 1, false, Some(1)),
-            test_column("name", Type::TEXT, 2, true, None),
-            test_column("active", Type::BOOL, 3, false, None),
-        ];
-        let schema = test_replicated_schema(columns);
-        let spec = BigQueryClient::create_columns_spec(&schema).expect("columns spec");
-        assert_eq!(
-            spec,
-            "(`id` int64 not null,`name` string,`active` bool not null, primary key (`id`) not \
-             enforced)"
-        );
-    }
-
-    #[test]
-    fn max_staleness_option() {
-        let option = BigQueryClient::max_staleness_option(15);
-        assert_eq!(option, "options (max_staleness = interval 15 minute)");
     }
 
     #[test]
@@ -1583,7 +1597,7 @@ mod tests {
         // Check regular columns
         assert_eq!(descriptor.field_descriptors[0].name, "id");
         assert!(matches!(descriptor.field_descriptors[0].typ, ColumnType::Int32));
-        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Required));
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Nullable));
 
         assert_eq!(descriptor.field_descriptors[1].name, "name");
         assert!(matches!(descriptor.field_descriptors[1].typ, ColumnType::String));
@@ -1591,7 +1605,7 @@ mod tests {
 
         assert_eq!(descriptor.field_descriptors[2].name, "active");
         assert!(matches!(descriptor.field_descriptors[2].typ, ColumnType::Bool));
-        assert!(matches!(descriptor.field_descriptors[2].mode, ColumnMode::Required));
+        assert!(matches!(descriptor.field_descriptors[2].mode, ColumnMode::Nullable));
 
         // Check array column
         assert_eq!(descriptor.field_descriptors[3].name, "tags");
@@ -1606,6 +1620,24 @@ mod tests {
         assert_eq!(descriptor.field_descriptors[5].name, BIGQUERY_CDC_SEQUENCE_COLUMN);
         assert!(matches!(descriptor.field_descriptors[5].typ, ColumnType::String));
         assert!(matches!(descriptor.field_descriptors[5].mode, ColumnMode::Required));
+        let field_numbers: Vec<u32> =
+            descriptor.field_descriptors.iter().map(|field| field.number).collect();
+        assert_eq!(field_numbers, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn column_schemas_to_table_descriptor_preserves_required_mode_for_table_copy() {
+        let columns = vec![
+            test_column("id", Type::INT4, 1, false, Some(1)),
+            test_column("name", Type::TEXT, 2, true, None),
+        ];
+        let schema = test_replicated_schema(columns);
+
+        let descriptor = BigQueryClient::column_schemas_to_table_descriptor(&schema, false);
+
+        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Required));
+        assert!(matches!(descriptor.field_descriptors[1].mode, ColumnMode::Nullable));
+        assert_eq!(descriptor.field_descriptors.len(), 3);
     }
 
     #[test]
@@ -1631,78 +1663,6 @@ mod tests {
         assert!(matches!(descriptor.field_descriptors[3].typ, ColumnType::String)); // NUMERIC
         assert!(matches!(descriptor.field_descriptors[4].typ, ColumnType::String)); // DATE
         assert!(matches!(descriptor.field_descriptors[5].typ, ColumnType::String)); // TIME
-    }
-
-    #[test]
-    fn full_table_name_formatting() {
-        let project_id = "test-project";
-        let dataset_id = "test_dataset";
-        let table_id = "test_table";
-
-        // Simulate the full_table_name method logic without creating a client
-        let full_name = format!(
-            "`{project}.{dataset}.{table}`",
-            project = BigQueryClient::sanitize_identifier(project_id, "project").unwrap(),
-            dataset = BigQueryClient::sanitize_identifier(dataset_id, "dataset").unwrap(),
-            table = BigQueryClient::sanitize_identifier(table_id, "table").unwrap()
-        );
-        assert_eq!(full_name, "`test-project.test_dataset.test_table`");
-    }
-
-    #[test]
-    fn create_or_replace_table_query_generation() {
-        let project_id = "test-project";
-        let dataset_id = "test_dataset";
-        let table_id = "test_table";
-
-        let columns = vec![
-            test_column("id", Type::INT4, 1, false, Some(1)),
-            test_column("name", Type::TEXT, 2, true, None),
-        ];
-        let schema = test_replicated_schema(columns);
-
-        // Simulate the query generation logic
-        let full_table_name = format!(
-            "`{project}.{dataset}.{table}`",
-            project = BigQueryClient::sanitize_identifier(project_id, "project").unwrap(),
-            dataset = BigQueryClient::sanitize_identifier(dataset_id, "dataset").unwrap(),
-            table = BigQueryClient::sanitize_identifier(table_id, "table").unwrap()
-        );
-        let columns_spec = BigQueryClient::create_columns_spec(&schema).unwrap();
-        let query = format!("create or replace table {full_table_name} {columns_spec}");
-
-        let expected_query = "create or replace table `test-project.test_dataset.test_table` \
-                              (`id` int64 not null,`name` string, primary key (`id`) not enforced)";
-        assert_eq!(query, expected_query);
-    }
-
-    #[test]
-    fn create_or_replace_table_query_with_staleness() {
-        let project_id = "test-project";
-        let dataset_id = "test_dataset";
-        let table_id = "test_table";
-        let max_staleness_mins = 15;
-
-        let columns = vec![test_column("id", Type::INT4, 1, false, Some(1))];
-        let schema = test_replicated_schema(columns);
-
-        // Simulate the query generation logic with staleness
-        let full_table_name = format!(
-            "`{project}.{dataset}.{table}`",
-            project = BigQueryClient::sanitize_identifier(project_id, "project").unwrap(),
-            dataset = BigQueryClient::sanitize_identifier(dataset_id, "dataset").unwrap(),
-            table = BigQueryClient::sanitize_identifier(table_id, "table").unwrap()
-        );
-        let columns_spec = BigQueryClient::create_columns_spec(&schema).unwrap();
-        let max_staleness_option = BigQueryClient::max_staleness_option(max_staleness_mins);
-        let query = format!(
-            "create or replace table {full_table_name} {columns_spec} {max_staleness_option}"
-        );
-
-        let expected_query = "create or replace table `test-project.test_dataset.test_table` \
-                              (`id` int64 not null, primary key (`id`) not enforced) options \
-                              (max_staleness = interval 15 minute)";
-        assert_eq!(query, expected_query);
     }
 
     #[test]

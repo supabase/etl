@@ -14,7 +14,7 @@ use crate::{
         database::{TEST_DATABASE_SCHEMA, test_table_name},
         test_destination_wrapper::TestDestinationWrapper,
     },
-    types::{Cell, Event, InsertEvent, TableRow},
+    types::{Cell, Event, InsertEvent, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
 };
 
 /// Creates a test column schema with sensible defaults.
@@ -297,14 +297,36 @@ pub fn assert_table_rows_equal_ignoring_size(left: &[TableRow], right: &[TableRo
     }
 }
 
+fn partial_table_rows_equal_ignoring_size(left: &PartialTableRow, right: &PartialTableRow) -> bool {
+    left.total_columns() == right.total_columns()
+        && left.table_row() == right.table_row()
+        && left.missing_column_indexes() == right.missing_column_indexes()
+}
+
+fn updated_table_rows_equal_ignoring_size(left: &UpdatedTableRow, right: &UpdatedTableRow) -> bool {
+    match (left, right) {
+        (UpdatedTableRow::Full(left), UpdatedTableRow::Full(right)) => {
+            table_rows_equal_ignoring_size(left, right)
+        }
+        (UpdatedTableRow::Partial(left), UpdatedTableRow::Partial(right)) => {
+            partial_table_rows_equal_ignoring_size(left, right)
+        }
+        _ => false,
+    }
+}
+
 fn old_table_rows_equal_ignoring_size(
-    left: &Option<(bool, TableRow)>,
-    right: &Option<(bool, TableRow)>,
+    left: &Option<OldTableRow>,
+    right: &Option<OldTableRow>,
 ) -> bool {
     match (left, right) {
-        (Some((left_keys_only, left_row)), Some((right_keys_only, right_row))) => {
-            left_keys_only == right_keys_only && table_rows_equal_ignoring_size(left_row, right_row)
-        }
+        (Some(left_row), Some(right_row)) => match (left_row, right_row) {
+            (OldTableRow::Full(left), OldTableRow::Full(right))
+            | (OldTableRow::Key(left), OldTableRow::Key(right)) => {
+                table_rows_equal_ignoring_size(left, right)
+            }
+            _ => false,
+        },
         (None, None) => true,
         _ => false,
     }
@@ -329,7 +351,10 @@ pub fn events_equal_excluding_fields(left: &Event, right: &Event) -> bool {
         }
         (Event::Update(left), Event::Update(right)) => {
             left.replicated_table_schema.id() == right.replicated_table_schema.id()
-                && table_rows_equal_ignoring_size(&left.table_row, &right.table_row)
+                && updated_table_rows_equal_ignoring_size(
+                    &left.updated_table_row,
+                    &right.updated_table_row,
+                )
                 && old_table_rows_equal_ignoring_size(&left.old_table_row, &right.old_table_row)
         }
         (Event::Delete(left), Event::Delete(right)) => {

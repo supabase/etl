@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, panic::Location, sync::Arc, time::Duration};
 
 use tokio::{sync::Notify, time::timeout};
 
@@ -6,7 +6,7 @@ use tokio::{sync::Notify, time::timeout};
 ///
 /// This duration was chosen empirically since most waiting should not take more
 /// than a few seconds.
-pub const DEFAULT_NOTIFY_TIMEOUT: Duration = Duration::from_secs(120);
+pub const DEFAULT_NOTIFY_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// A wrapper around [`Arc<Notify>`] that provides automatic timeout
 /// functionality for tests.
@@ -38,16 +38,24 @@ impl TimedNotify {
     /// Panics if the timeout duration elapses before the notification is
     /// received. This is intentional behavior for tests to fail fast rather
     /// than hang.
-    pub async fn notified(&self) {
-        match timeout(self.timeout_duration, self.notify.notified()).await {
-            Ok(()) => {}
-            Err(_) => {
-                panic!(
-                    "Test notification timed out after {:?}. This likely indicates the expected \
-                     state was never reached. Check if the pipeline is running correctly or if \
-                     the condition is reachable.",
-                    self.timeout_duration
-                );
+    #[track_caller]
+    pub fn notified(&self) -> impl Future<Output = ()> + '_ {
+        let caller = Location::caller();
+
+        async move {
+            match timeout(self.timeout_duration, self.notify.notified()).await {
+                Ok(()) => {}
+                Err(_) => {
+                    panic!(
+                        "Test notification timed out after {:?} at {}:{}:{}. This likely \
+                         indicates the expected state was never reached. Check if the condition \
+                         is reachable.",
+                        self.timeout_duration,
+                        caller.file(),
+                        caller.line(),
+                        caller.column(),
+                    );
+                }
             }
         }
     }

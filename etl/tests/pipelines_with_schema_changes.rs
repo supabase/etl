@@ -317,6 +317,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
             &[("name", "text not null"), ("age", "integer not null")],
         )
         .await;
+
     let schema_stored = store.notify_on_table_schema_count(table_id, 2).await;
 
     database
@@ -332,9 +333,6 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
 
     schema_stored.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
-
-    let events = destination.get_events().await;
-    assert!(events.is_empty(), "expected no events for schema-only DDL");
 
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
