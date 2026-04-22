@@ -2372,9 +2372,17 @@ mod tests {
         assert_eq!(batches.len(), 1);
         match &batches[0].action {
             PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
-                assert_eq!(prepared.len(), 2);
-                assert!(matches!(prepared[0], PreparedTableMutation::Update { .. }));
-                assert!(matches!(prepared[1], PreparedTableMutation::Update { .. }));
+                assert_eq!(prepared.len(), 4);
+                assert!(matches!(prepared[0], PreparedTableMutation::Delete { .. }));
+                assert!(matches!(
+                    prepared[1],
+                    PreparedTableMutation::Upsert(PreparedRows::Appender(_))
+                ));
+                assert!(matches!(prepared[2], PreparedTableMutation::Delete { .. }));
+                assert!(matches!(
+                    prepared[3],
+                    PreparedTableMutation::Upsert(PreparedRows::Appender(_))
+                ));
             }
             PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
         }
@@ -2431,7 +2439,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_mutation_table_batches_keep_update_separate_from_adjacent_inserts() {
+    fn prepare_mutation_table_batches_isolate_update_in_its_own_atomic_batch() {
         let replicated_table_schema = make_replicated_schema();
         let batches = prepare_mutation_table_batches(
             &replicated_table_schema,
@@ -2478,14 +2486,18 @@ mod tests {
 
         match &batches[0].action {
             PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
-                assert_eq!(prepared.len(), 3);
+                assert_eq!(prepared.len(), 4);
                 assert!(matches!(
                     prepared[0],
                     PreparedTableMutation::Upsert(PreparedRows::Appender(_))
                 ));
-                assert!(matches!(prepared[1], PreparedTableMutation::Update { .. }));
+                assert!(matches!(prepared[1], PreparedTableMutation::Delete { .. }));
                 assert!(matches!(
                     prepared[2],
+                    PreparedTableMutation::Upsert(PreparedRows::Appender(_))
+                ));
+                assert!(matches!(
+                    prepared[3],
                     PreparedTableMutation::Upsert(PreparedRows::Appender(_))
                 ));
             }
