@@ -135,6 +135,17 @@ impl TryFrom<EtlReplicationSlot> for String {
     }
 }
 
+/// Builds a SQL `LIKE` pattern that matches all table-sync replication slots
+/// belonging to the given pipeline.
+///
+/// The pattern escapes the literal `_` characters in the slot prefix so that
+/// LIKE does not treat them as single-character wildcards. Must be used with
+/// `LIKE ... ESCAPE '\'`.
+fn table_sync_like_pattern(pipeline_id: u64) -> Result<String, EtlReplicationSlotError> {
+    let prefix = EtlReplicationSlot::table_sync_prefix(pipeline_id)?;
+    Ok(format!("{}%", prefix.replace('_', r"\_")))
+}
+
 /// Deletes all replication slots for a given pipeline.
 ///
 /// This function deletes both the apply worker slot and all table sync worker
@@ -165,11 +176,10 @@ pub async fn delete_pipeline_replication_slots(
         warn!(%pipeline_id, "could not derive apply-worker replication slot name during cleanup");
         return Ok(());
     };
-    let Ok(table_sync_prefix) = EtlReplicationSlot::table_sync_prefix(pipeline_id) else {
+    let Ok(table_sync_pattern) = table_sync_like_pattern(pipeline_id) else {
         warn!(%pipeline_id, "could not derive table-sync replication slot prefix during cleanup");
         return Ok(());
     };
-    let table_sync_pattern = format!("{table_sync_prefix}%");
 
     const MAX_RETRIES: u32 = 3;
     const INITIAL_BACKOFF_MS: u64 = 100;
@@ -183,7 +193,7 @@ pub async fn delete_pipeline_replication_slots(
             r#"
             select pg_terminate_backend(r.active_pid)
             from pg_replication_slots r
-            where (r.slot_name = $1 or r.slot_name like $2)
+            where (r.slot_name = $1 or r.slot_name like $2 escape '\')
               and r.active = true
               and r.active_pid is not null;
             "#,
@@ -209,7 +219,7 @@ pub async fn delete_pipeline_replication_slots(
             r#"
             select pg_drop_replication_slot(r.slot_name)
             from pg_replication_slots r
-            where r.slot_name = $1 or r.slot_name like $2;
+            where r.slot_name = $1 or r.slot_name like $2 escape '\';
             "#,
         );
         let result = sqlx::query(&drop_query)
@@ -311,6 +321,12 @@ mod tests {
             parsed,
             EtlReplicationSlot::TableSync { pipeline_id: 7, table_id: TableId::new(12345_u32) }
         );
+    }
+
+    #[test]
+    fn table_sync_like_pattern_escapes_underscores() {
+        let pattern = table_sync_like_pattern(42).unwrap();
+        assert_eq!(pattern, r"supabase\_etl\_table\_sync\_42\_%");
     }
 
     #[test]
