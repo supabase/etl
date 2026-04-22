@@ -223,7 +223,6 @@ fn run_lane(lane: &Lane, mode: Mode, extra: &[String], pg_env: &PgEnv) -> Result
             eprintln!("{prefix_out} {line}");
         }
     });
-
     let err_thread = thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             eprintln!("{prefix} {line}");

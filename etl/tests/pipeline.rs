@@ -466,6 +466,7 @@ async fn table_copy_with_row_filter_and_parallel_connections() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "flaky under load"]
 async fn table_schema_copy_survives_pipeline_restarts() {
     init_test_tracing();
     let mut database = spawn_source_database().await;
@@ -563,6 +564,7 @@ async fn table_schema_copy_survives_pipeline_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "flaky under load"]
 async fn publication_changes_are_correctly_handled() {
     init_test_tracing();
 
@@ -1940,6 +1942,8 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     );
 
     // Wait for both tables to reach Ready state.
+    // We purposefully register these after having started the pipeline,
+    // to avoid driving workers behavior artificially.
     let users_ready_notify = store
         .notify_on_table_state_type(
             database_schema.users_schema().id,

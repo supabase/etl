@@ -278,6 +278,45 @@ impl ToSql for TableId {
     tokio_postgres::types::to_sql_checked!();
 }
 
+/// Validates that all named columns exist in the supplied [`TableSchema`].
+///
+/// # Errors
+///
+/// Returns [`SchemaError::UnknownReplicatedColumns`] if any provided column
+/// name does not exist in the table schema.
+fn validate_mask_column_names(
+    table_schema: &TableSchema,
+    column_names: &HashSet<String>,
+) -> Result<(), SchemaError> {
+    let schema_column_names: HashSet<&str> = table_schema
+        .column_schemas
+        .iter()
+        .map(|column_schema| column_schema.name.as_str())
+        .collect();
+
+    let unknown_columns: Vec<String> = column_names
+        .iter()
+        .filter(|name| !schema_column_names.contains(name.as_str()))
+        .cloned()
+        .collect();
+
+    if !unknown_columns.is_empty() {
+        return Err(SchemaError::UnknownReplicatedColumns(unknown_columns));
+    }
+
+    Ok(())
+}
+
+/// Builds raw mask bytes from schema order and a validated set of column
+/// names.
+fn build_mask_bytes(table_schema: &TableSchema, column_names: &HashSet<String>) -> Vec<u8> {
+    table_schema
+        .column_schemas
+        .iter()
+        .map(|column_schema| u8::from(column_names.contains(&column_schema.name)))
+        .collect()
+}
+
 /// Represents the complete schema of a Postgres table.
 ///
 /// This type contains all metadata about a table including its name, OID,
@@ -367,18 +406,6 @@ impl ReplicationMask {
         table_schema: &TableSchema,
         replicated_column_names: &HashSet<String>,
     ) -> Result<Self, SchemaError> {
-        let schema_column_names: HashSet<&str> = table_schema
-            .column_schemas
-            .iter()
-            .map(|column_schema| column_schema.name.as_str())
-            .collect();
-
-        let unknown_columns: Vec<String> = replicated_column_names
-            .iter()
-            .filter(|name| !schema_column_names.contains(name.as_str()))
-            .cloned()
-            .collect();
-
         // This check ensures all replicated columns are present in the schema.
         //
         // Limitation: If a column exists in the schema but is absent from the
@@ -402,11 +429,9 @@ impl ReplicationMask {
         //
         // In the future we might want to implement a system to go around this edge
         // case.
-        if !unknown_columns.is_empty() {
-            return Err(SchemaError::UnknownReplicatedColumns(unknown_columns));
-        }
+        validate_mask_column_names(table_schema, replicated_column_names)?;
 
-        Ok(Self::build(table_schema, replicated_column_names))
+        Ok(Self(Arc::new(build_mask_bytes(table_schema, replicated_column_names))))
     }
 
     /// Creates a new [`ReplicationMask`] from a table schema and column names,
@@ -434,13 +459,7 @@ impl ReplicationMask {
 
     /// Creates a new [`ReplicationMask`] from a table schema and column names.
     pub fn build(table_schema: &TableSchema, replicated_column_names: &HashSet<String>) -> Self {
-        let mask = table_schema
-            .column_schemas
-            .iter()
-            .map(|cs| u8::from(replicated_column_names.contains(&cs.name)))
-            .collect();
-
-        Self(Arc::new(mask))
+        Self(Arc::new(build_mask_bytes(table_schema, replicated_column_names)))
     }
 
     /// Creates a [`ReplicationMask`] with all columns marked as replicated.
@@ -481,6 +500,93 @@ impl ReplicationMask {
     /// Returns the number of replicated columns (count of 1s in the mask).
     pub fn replicated_count(&self) -> usize {
         self.0.iter().filter(|&&m| m == 1).count()
+    }
+}
+
+/// A bitmask indicating which replicated columns belong to the replica
+/// identity.
+///
+/// Unlike [`ReplicationMask`], this type is only used for runtime row-identity
+/// semantics. It therefore exposes a smaller API surface: callers can build it
+/// from schema metadata or raw bytes, then inspect the resulting bit pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityMask(Arc<Vec<u8>>);
+
+impl IdentityMask {
+    /// Tries to create a new [`IdentityMask`] from a table schema and column
+    /// names.
+    ///
+    /// The mask is constructed by checking which schema columns are present in
+    /// the provided set of identity column names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::UnknownReplicatedColumns`] if any provided column
+    /// name does not exist in the supplied table schema.
+    pub fn try_build(
+        table_schema: &TableSchema,
+        identity_column_names: &HashSet<String>,
+    ) -> Result<Self, SchemaError> {
+        validate_mask_column_names(table_schema, identity_column_names)?;
+
+        Ok(Self(Arc::new(build_mask_bytes(table_schema, identity_column_names))))
+    }
+
+    /// Creates an [`IdentityMask`] from raw bytes.
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(Arc::new(bytes))
+    }
+
+    /// Returns the underlying mask as a slice.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Returns the number of columns in the mask.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns `true` if the mask is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Semantic classification of the replica identity used for row events.
+///
+/// This captures the meaning of the runtime identity, not just the raw
+/// identity-column mask:
+/// - [`IdentityType::PrimaryKey`] means row identity matches the table primary
+///   key, whether that came from `REPLICA IDENTITY DEFAULT` or `USING INDEX`
+///   pointing at the primary-key index.
+/// - [`IdentityType::AlternativeKey`] means row identity comes from a distinct
+///   unique index.
+/// - [`IdentityType::Full`] means the whole replicated row is the old-row key.
+/// - [`IdentityType::Missing`] means updates and deletes do not have a usable
+///   row identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityType {
+    /// The full replicated row is the row identity.
+    Full,
+    /// The replica identity matches the table primary key.
+    PrimaryKey,
+    /// The replica identity comes from a non-primary-key unique index.
+    AlternativeKey,
+    /// No usable replica identity is available.
+    Missing,
+}
+
+impl fmt::Display for IdentityType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            IdentityType::Full => "full",
+            IdentityType::PrimaryKey => "primary_key",
+            IdentityType::AlternativeKey => "alternative_key",
+            IdentityType::Missing => "missing",
+        };
+
+        f.write_str(value)
     }
 }
 
@@ -525,37 +631,115 @@ impl<I: Iterator> ExactSizeIterator for SizedIterator<I> {
     }
 }
 
-/// A wrapper around [`TableSchema`] that tracks which columns are being
-/// replicated.
+/// A wrapper around [`TableSchema`] that tracks replicated and identity
+/// columns.
 ///
-/// This struct holds a reference to the underlying table schema and a
-/// [`ReplicationMask`] indicating which columns are included in the
-/// replication.
+/// This struct holds a reference to the underlying table schema, a
+/// [`ReplicationMask`] indicating which columns are included in replication,
+/// and an [`IdentityMask`] indicating which replicated columns participate in
+/// row identity for logical replication events.
 #[derive(Debug, Clone)]
 pub struct ReplicatedTableSchema {
     /// The underlying table schema.
     table_schema: Arc<TableSchema>,
     /// A bitmask where 1 indicates the column at that index is replicated.
     replication_mask: ReplicationMask,
+    /// Cached number of replicated columns.
+    replicated_column_count: usize,
+    /// A bitmask where 1 indicates the column at that index is part of the row
+    /// identity used by logical replication.
+    identity_mask: IdentityMask,
+    /// Cached number of replicated identity columns.
+    identity_column_count: usize,
+    /// Cached number of replicated primary-key columns.
+    primary_key_column_count: usize,
+    /// Semantic classification of the replica identity for this runtime schema.
+    identity_type: IdentityType,
 }
 
 impl ReplicatedTableSchema {
-    /// Creates a [`ReplicatedTableSchema`] from a schema and a pre-computed
+    /// Creates a [`ReplicatedTableSchema`] from a schema and pre-computed
+    /// masks, inferring the identity type from the mask shape.
+    ///
+    /// Both masks are expressed in full table-schema width. The identity mask
+    /// must therefore align with the same column order as the replication
     /// mask.
-    pub fn from_mask(table_schema: Arc<TableSchema>, replication_mask: ReplicationMask) -> Self {
+    ///
+    /// This constructor infers the semantic identity type from the table
+    /// schema and supplied masks, and caches the derived column counts needed
+    /// by the iterator accessors.
+    pub fn from_masks(
+        table_schema: Arc<TableSchema>,
+        replication_mask: ReplicationMask,
+        identity_mask: IdentityMask,
+    ) -> Self {
+        let identity_type =
+            Self::infer_identity_type(&table_schema, &replication_mask, &identity_mask);
+
         debug_assert_eq!(
             table_schema.column_schemas.len(),
             replication_mask.len(),
             "mask length must match column count"
         );
 
-        Self { table_schema, replication_mask }
+        debug_assert_eq!(
+            table_schema.column_schemas.len(),
+            identity_mask.len(),
+            "identity mask length must match column count"
+        );
+
+        for (&replicated, &identity) in
+            replication_mask.as_slice().iter().zip(identity_mask.as_slice().iter())
+        {
+            debug_assert!(
+                identity == 0 || replicated == 1,
+                "identity mask must be a subset of the replication mask"
+            );
+        }
+
+        // We pre-compute counts to avoid computing them each time since they are needed
+        // for the exact size iterators.
+        let replicated_column_count = replication_mask.replicated_count();
+        let identity_column_count = replication_mask
+            .as_slice()
+            .iter()
+            .zip(identity_mask.as_slice().iter())
+            .filter(|(replicated, identity)| **replicated == 1 && **identity == 1)
+            .count();
+        let primary_key_column_count = table_schema
+            .column_schemas
+            .iter()
+            .zip(replication_mask.as_slice().iter())
+            .filter(|(column_schema, replicated)| **replicated == 1 && column_schema.primary_key())
+            .count();
+
+        Self {
+            table_schema,
+            replication_mask,
+            replicated_column_count,
+            identity_mask,
+            identity_column_count,
+            primary_key_column_count,
+            identity_type,
+        }
     }
 
-    /// Creates a [`ReplicatedTableSchema`] where all columns are replicated.
+    /// Creates a [`ReplicatedTableSchema`] from a schema and a pre-computed
+    /// replication mask.
+    ///
+    /// The identity mask is derived from primary-key membership. This is a
+    /// convenient fallback for code paths that only need replicated columns or
+    /// when the source schema and identity are known to match primary-key
+    /// semantics.
+    pub fn from_mask(table_schema: Arc<TableSchema>, replication_mask: ReplicationMask) -> Self {
+        let identity_mask = Self::primary_key_identity_mask(&table_schema, &replication_mask);
+        Self::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    /// Creates a [`ReplicatedTableSchema`] where all columns are replicated. .
     pub fn all(table_schema: Arc<TableSchema>) -> Self {
         let replication_mask = ReplicationMask::all(&table_schema);
-        Self { table_schema, replication_mask }
+        Self::from_mask(table_schema, replication_mask)
     }
 
     /// Returns the table ID.
@@ -578,6 +762,29 @@ impl ReplicatedTableSchema {
         &self.replication_mask
     }
 
+    /// Returns the identity mask.
+    pub fn identity_mask(&self) -> &IdentityMask {
+        &self.identity_mask
+    }
+
+    /// Returns the semantic replica-identity classification for this schema.
+    pub fn identity_type(&self) -> IdentityType {
+        self.identity_type
+    }
+
+    /// Returns whether the runtime identity matches the table primary key.
+    ///
+    /// This is the semantic question destinations usually care about. A table
+    /// configured with `REPLICA IDENTITY USING INDEX` can still return `true`
+    /// here if the chosen index is the primary-key index.
+    pub fn identity_matches_primary_key(&self) -> bool {
+        self.identity_mask.as_slice().iter().eq(Self::primary_key_identity_mask(
+            &self.table_schema,
+            &self.replication_mask,
+        )
+        .as_slice())
+    }
+
     /// Returns an iterator over only the column schemas that are being
     /// replicated.
     ///
@@ -593,7 +800,6 @@ impl ReplicatedTableSchema {
              they should be the same"
         );
 
-        let len = self.replication_mask.replicated_count();
         let inner = self
             .table_schema
             .column_schemas
@@ -601,7 +807,47 @@ impl ReplicatedTableSchema {
             .zip(self.replication_mask.as_slice().iter())
             .filter_map(|(cs, &m)| if m == 1 { Some(cs) } else { None });
 
-        SizedIterator::new(inner, len)
+        SizedIterator::new(inner, self.replicated_column_count)
+    }
+
+    /// Returns an iterator over only the column schemas that are part of the
+    /// row identity, preserving replicated table-column order.
+    pub fn identity_column_schemas(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &ColumnSchema> + Clone + '_ {
+        let inner = self
+            .table_schema
+            .column_schemas
+            .iter()
+            .zip(self.replication_mask.as_slice().iter().zip(self.identity_mask.as_slice().iter()))
+            .filter_map(
+                |(column_schema, (&replicated, &identity))| {
+                    if replicated == 1 && identity == 1 { Some(column_schema) } else { None }
+                },
+            );
+
+        SizedIterator::new(inner, self.identity_column_count)
+    }
+
+    /// Returns an iterator over only the replicated primary-key columns,
+    /// preserving replicated table-column order.
+    pub fn primary_key_column_schemas(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &ColumnSchema> + Clone + '_ {
+        let inner = self
+            .table_schema
+            .column_schemas
+            .iter()
+            .zip(self.replication_mask.as_slice().iter())
+            .filter_map(|(column_schema, &replicated)| {
+                if replicated == 1 && column_schema.primary_key() {
+                    Some(column_schema)
+                } else {
+                    None
+                }
+            });
+
+        SizedIterator::new(inner, self.primary_key_column_count)
     }
 
     /// Computes the diff between this schema (old) and another schema (new).
@@ -648,6 +894,68 @@ impl ReplicatedTableSchema {
         columns_to_add.sort_by_key(|c| c.ordinal_position);
 
         SchemaDiff { columns_to_add, columns_to_remove, columns_to_rename }
+    }
+
+    /// Builds the primary-key identity mask within the replicated schema
+    /// width.
+    fn primary_key_identity_mask(
+        table_schema: &TableSchema,
+        replication_mask: &ReplicationMask,
+    ) -> IdentityMask {
+        IdentityMask::from_bytes(
+            table_schema
+                .column_schemas
+                .iter()
+                .zip(replication_mask.as_slice().iter())
+                .map(|(column_schema, &replicated)| {
+                    u8::from(replicated == 1 && column_schema.primary_key())
+                })
+                .collect(),
+        )
+    }
+
+    /// Infers the identity type from a schema and mask pair.
+    ///
+    /// This is used only for fallback constructors that do not receive the
+    /// explicit PostgreSQL identity mode.
+    ///
+    /// In the case when a primary key is made up of all the table columns, the
+    /// identity will be marked as [`IdentityType::PrimaryKey`].
+    fn infer_identity_type(
+        table_schema: &TableSchema,
+        replication_mask: &ReplicationMask,
+        identity_mask: &IdentityMask,
+    ) -> IdentityType {
+        let mut has_identity = false;
+        let mut matches_primary_key = true;
+        let mut matches_full = true;
+
+        for ((column_schema, &replicated), &identity) in table_schema
+            .column_schemas
+            .iter()
+            .zip(replication_mask.as_slice().iter())
+            .zip(identity_mask.as_slice().iter())
+        {
+            has_identity |= identity == 1;
+
+            if identity != u8::from(replicated == 1 && column_schema.primary_key()) {
+                matches_primary_key = false;
+            }
+
+            if identity != replicated {
+                matches_full = false;
+            }
+        }
+
+        if !has_identity {
+            IdentityType::Missing
+        } else if matches_primary_key {
+            IdentityType::PrimaryKey
+        } else if matches_full {
+            IdentityType::Full
+        } else {
+            IdentityType::AlternativeKey
+        }
     }
 }
 
@@ -811,6 +1119,52 @@ mod tests {
         ));
         let mask = ReplicationMask::build(&table_schema, &column_names);
         ReplicatedTableSchema::from_mask(table_schema, mask)
+    }
+
+    #[test]
+    fn identity_type_primary_key() {
+        let schema = Arc::new(create_test_table_schema());
+        let replication_mask = ReplicationMask::all(&schema);
+        let replicated_table_schema = ReplicatedTableSchema::from_mask(schema, replication_mask);
+
+        assert_eq!(replicated_table_schema.identity_type(), IdentityType::PrimaryKey);
+        assert!(replicated_table_schema.identity_matches_primary_key());
+    }
+
+    #[test]
+    fn identity_type_alternative_key() {
+        let schema = Arc::new(create_test_table_schema());
+        let replication_mask = ReplicationMask::all(&schema);
+        let identity_mask = IdentityMask::from_bytes(vec![0, 1, 1]);
+        let replicated_table_schema =
+            ReplicatedTableSchema::from_masks(schema, replication_mask, identity_mask);
+
+        assert_eq!(replicated_table_schema.identity_type(), IdentityType::AlternativeKey);
+        assert!(!replicated_table_schema.identity_matches_primary_key());
+    }
+
+    #[test]
+    fn identity_type_full() {
+        let schema = Arc::new(create_test_table_schema());
+        let replication_mask = ReplicationMask::all(&schema);
+        let identity_mask = IdentityMask::from_bytes(vec![1, 1, 1]);
+        let replicated_table_schema =
+            ReplicatedTableSchema::from_masks(schema, replication_mask, identity_mask);
+
+        assert_eq!(replicated_table_schema.identity_type(), IdentityType::Full);
+        assert!(!replicated_table_schema.identity_matches_primary_key());
+    }
+
+    #[test]
+    fn identity_type_missing() {
+        let schema = Arc::new(create_test_table_schema());
+        let replication_mask = ReplicationMask::all(&schema);
+        let identity_mask = IdentityMask::from_bytes(vec![0, 0, 0]);
+        let replicated_table_schema =
+            ReplicatedTableSchema::from_masks(schema, replication_mask, identity_mask);
+
+        assert_eq!(replicated_table_schema.identity_type(), IdentityType::Missing);
+        assert!(!replicated_table_schema.identity_matches_primary_key());
     }
 
     #[test]
@@ -985,44 +1339,5 @@ mod tests {
         assert!(removed_names.contains("name"));
         assert!(removed_names.contains("email"));
         assert!(diff.columns_to_rename.is_empty());
-    }
-
-    #[test]
-    fn replication_mask_display_all_replicated() {
-        let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> =
-            ["id", "name", "age"].into_iter().map(String::from).collect();
-
-        let mask = ReplicationMask::build(&schema, &replicated_columns);
-
-        assert_eq!(mask.to_string(), "(1,1,1)");
-    }
-
-    #[test]
-    fn replication_mask_display_partial_replicated() {
-        let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> =
-            ["id", "age"].into_iter().map(String::from).collect();
-
-        let mask = ReplicationMask::build(&schema, &replicated_columns);
-
-        assert_eq!(mask.to_string(), "(1,0,1)");
-    }
-
-    #[test]
-    fn replication_mask_display_none_replicated() {
-        let schema = create_test_table_schema();
-        let replicated_columns: HashSet<String> = HashSet::new();
-
-        let mask = ReplicationMask::build(&schema, &replicated_columns);
-
-        assert_eq!(mask.to_string(), "(0,0,0)");
-    }
-
-    #[test]
-    fn replication_mask_display_empty() {
-        let mask = ReplicationMask::from_bytes(vec![]);
-
-        assert_eq!(mask.to_string(), "()");
     }
 }

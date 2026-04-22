@@ -2,465 +2,172 @@ use etl::{
     state::table::TableReplicationPhaseType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
-        materialize::{FromTableRow, materialize_events},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
         pipeline::create_pipeline,
         test_destination_wrapper::TestDestinationWrapper,
     },
-    types::{Cell, EventType, PipelineId},
+    types::{
+        Cell, Event, EventType, OldTableRow, PartialTableRow, PipelineId, TableRow, UpdatedTableRow,
+    },
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
+use pg_escape::{quote_identifier, quote_literal};
 use rand::{Rng, distr::Alphanumeric, random};
 
-/// Simple struct to represent a row in our toast test table
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct ToastTable {
-    pub id: i64,
-    pub large_text: String,
-    pub small_int: i32,
+const LARGE_TEXT_SIZE_BYTES: usize = 8192;
+const INITIAL_ID: i64 = 1;
+const INITIAL_NAME: &str = "alice";
+const INITIAL_SURNAME: &str = "smith";
+const INITIAL_CITY: &str = "rome";
+const UPDATED_CITY: &str = "vienna";
+const UPDATED_NAME_IDENTITY: &str = "alicia";
+const UPDATED_SURNAME_IDENTITY: &str = "smithers";
+
+#[derive(Clone, Copy)]
+enum ReplicaIdentityMode {
+    Default,
+    Full,
+    UsingIndex,
+    Nothing,
 }
 
-impl ToastTable {
-    pub fn new(id: i64, large_text: &str, small_int: i32) -> Self {
-        Self { id, large_text: large_text.to_owned(), small_int }
-    }
-}
-
-impl FromTableRow for ToastTable {
-    type Id = i64;
-
-    fn from_table_row(table_row: &etl::types::TableRow) -> Option<Self> {
-        let values = table_row.values();
-        if values.len() == 3 {
-            let id = match &values[0] {
-                Cell::I64(i) => *i,
-                _other => {
-                    return None;
-                }
-            };
-            let large_text = match &values[1] {
-                Cell::String(s) => s.clone(),
-                Cell::Null => String::new(),
-                _other => {
-                    return None;
-                }
-            };
-            let small_int = match &values[2] {
-                Cell::I32(i) => *i,
-                _other => {
-                    return None;
-                }
-            };
-
-            Some(ToastTable::new(id, &large_text, small_int))
-        } else {
-            None
+impl ReplicaIdentityMode {
+    fn identity_update_sql(self, table_name: &str, final_large_text: &str) -> String {
+        match self {
+            Self::UsingIndex => format!(
+                "update {table_name} set name = {}, large_text = {} where id = {} and surname = {}",
+                quote_literal(UPDATED_NAME_IDENTITY),
+                quote_literal(final_large_text),
+                INITIAL_ID,
+                quote_literal(INITIAL_SURNAME),
+            ),
+            _ => format!(
+                "update {table_name} set surname = {}, large_text = {} where id = {} and surname \
+                 = {}",
+                quote_literal(UPDATED_SURNAME_IDENTITY),
+                quote_literal(final_large_text),
+                INITIAL_ID,
+                quote_literal(INITIAL_SURNAME),
+            ),
         }
     }
 
-    fn id(&self) -> Self::Id {
-        self.id
+    fn delete_sql(self, table_name: &str) -> String {
+        match self {
+            Self::UsingIndex => format!(
+                "delete from {table_name} where id = {} and name = {} and surname = {}",
+                INITIAL_ID,
+                quote_literal(UPDATED_NAME_IDENTITY),
+                quote_literal(INITIAL_SURNAME),
+            ),
+            Self::Nothing => format!(
+                "delete from {table_name} where id = {} and surname = {}",
+                INITIAL_ID,
+                quote_literal(INITIAL_SURNAME),
+            ),
+            _ => format!(
+                "delete from {table_name} where id = {} and surname = {}",
+                INITIAL_ID,
+                quote_literal(UPDATED_SURNAME_IDENTITY),
+            ),
+        }
     }
 }
 
-/// Generates a string of random ASCII printable characters of the specified
-/// length. This is useful for creating large text values that won't compress
-/// well, ensuring they trigger Postgres's TOAST storage mechanism.
+struct ReplicaIdentityScenarioResult {
+    events: Vec<Event>,
+    non_identity_update: Result<u64, tokio_postgres::Error>,
+    toast_update: Result<u64, tokio_postgres::Error>,
+    identity_update: Result<u64, tokio_postgres::Error>,
+    delete: Result<u64, tokio_postgres::Error>,
+    initial_large_text: String,
+    updated_large_text: String,
+    final_large_text: String,
+}
+
 fn generate_random_ascii_string(length: usize) -> String {
     let rng = rand::rng();
     rng.sample_iter(Alphanumeric).take(length).map(char::from).collect()
 }
 
-const LARGE_TEXT_SIZE_BYTES: usize = 8192;
-
-/// Tests that TOAST values are replaced with default values when updating
-/// non-TOAST columns with default replica identity. When a table uses default
-/// replica identity (primary key) and non-TOAST columns are updated, Postgres
-/// sends UnchangedToast for TOAST values. We send a default to the destination
-/// for the missing values .
-#[tokio::test(flavor = "multi_thread")]
-async fn update_non_toast_values_with_default_replica_identity() {
-    init_test_tracing();
-
-    let database = spawn_source_database().await;
-    let table_name = test_table_name("toast_values_test");
-
-    // Create a table with a text column that will be large enough to trigger TOAST
-    // and a regular integer column for testing updates
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
-            &[
-                ("large_text", "text not null"), // Column that will contain TOAST-able data
-                ("small_int", "int4 not null"),  // Column we'll update to test TOAST behavior
-            ],
-        )
-        .await
-        .unwrap();
-
-    // Forcing storage to be set to external so that unchanged TOAST columns are not
-    // sent in update events. Ideally, large values would automatically trigger
-    // the storage to external but couldn't force Postgres in the tests even
-    // with very large values, hence this workaround.
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AlterColumn {
-                name: "large_text",
-                alteration: "set storage external",
-            }],
-        )
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let memory_destination = MemoryDestination::new(store.clone());
-    let destination = TestDestinationWrapper::wrap(memory_destination);
-
-    let publication_name = "test_pub_toast".to_string();
-    database
-        .create_publication(&publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        store.clone(),
-        destination.clone(),
-    );
-
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
-
-    pipeline.start().await.unwrap();
-
-    table_ready_notify.notified().await;
-
-    // Insert a row with a large text value that will be TOASTed
-    // Postgres typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
-    let large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
-    let initial_int_value = 100;
-
-    let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
-
-    database
-        .insert_values(
-            table_name.clone(),
-            &["large_text", "small_int"],
-            &[&large_text_value, &initial_int_value],
-        )
-        .await
-        .unwrap();
-
-    insert_event_notify.notified().await;
-
-    // Verify the initial insert worked correctly
-    let parsed_table_rows = materialize_events::<ToastTable>(&destination.get_events().await, None);
-    assert_eq!(parsed_table_rows.len(), 1);
-
-    let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
-    assert_eq!(parsed_table_rows, vec![expected_initial_row]);
-
-    // Now update only the small_int column, leaving the large_text unchanged
-    // This should trigger TOAST behavior where Postgres sends UnchangedToast
-    // for the large_text column
-    let updated_int_value = 200;
-
-    let update_event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
-
-    database
-        .update_values(table_name.clone(), &["small_int"], &[&updated_int_value])
-        .await
-        .unwrap();
-
-    update_event_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // Verify the update behavior - the large_text should be replaced with
-    // default value (empty string) and small_int should be updated
-    let parsed_table_rows_after_update =
-        materialize_events::<ToastTable>(&destination.get_events().await, None);
-    assert_eq!(parsed_table_rows_after_update.len(), 1);
-
-    let expected_updated_row = ToastTable::new(1, "", updated_int_value);
-    assert_eq!(parsed_table_rows_after_update, vec![expected_updated_row]);
+fn data_events(events: Vec<Event>) -> Vec<Event> {
+    events
+        .into_iter()
+        .filter(|event| matches!(event, Event::Insert(_) | Event::Update(_) | Event::Delete(_)))
+        .collect()
 }
 
-/// Tests that TOAST values are preserved when updating non-TOAST columns with
-/// full replica identity. When a table uses full replica identity and non-TOAST
-/// columns are updated, Postgres includes all column values in the update
-/// event. We send these values to the destination.
-#[tokio::test(flavor = "multi_thread")]
-async fn update_non_toast_values_with_full_replica_identity() {
-    init_test_tracing();
-
-    let database = spawn_source_database().await;
-    let table_name = test_table_name("toast_values_test");
-
-    // Create a table with a text column that will be large enough to trigger TOAST
-    // and a regular integer column for testing updates
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
-            &[
-                ("large_text", "text not null"), // Column that will contain TOAST-able data
-                ("small_int", "int4 not null"),  // Column we'll update to test TOAST behavior
-            ],
-        )
-        .await
-        .unwrap();
-
-    // Forcing storage to be set to external so that unchanged TOAST columns are not
-    // sent in update events. Ideally, large values would automatically trigger
-    // the storage to external but couldn't force Postgres in the tests even
-    // with very large values, hence this workaround.
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AlterColumn {
-                name: "large_text",
-                alteration: "set storage external",
-            }],
-        )
-        .await
-        .unwrap();
-
-    // Set replica identity on the table to full to test that TOAST values are sent
-    // even if non-TOAST columns are updated
-    database
-        .alter_table(table_name.clone(), &[TableModification::ReplicaIdentity { value: "full" }])
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let memory_destination = MemoryDestination::new(store.clone());
-    let destination = TestDestinationWrapper::wrap(memory_destination);
-
-    let publication_name = "test_pub_toast".to_string();
-    database
-        .create_publication(&publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        store.clone(),
-        destination.clone(),
-    );
-
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
-
-    pipeline.start().await.unwrap();
-
-    table_ready_notify.notified().await;
-
-    // Insert a row with a large text value that will be TOASTed
-    // Postgres typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
-    let large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
-    let initial_int_value = 100;
-
-    let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
-
-    database
-        .insert_values(
-            table_name.clone(),
-            &["large_text", "small_int"],
-            &[&large_text_value, &initial_int_value],
-        )
-        .await
-        .unwrap();
-
-    insert_event_notify.notified().await;
-
-    // Verify the initial insert worked correctly
-    let parsed_table_rows = materialize_events::<ToastTable>(&destination.get_events().await, None);
-    assert_eq!(parsed_table_rows.len(), 1);
-
-    let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
-    assert_eq!(parsed_table_rows, vec![expected_initial_row]);
-
-    // Now update only the small_int column, leaving the large_text unchanged
-    // This should trigger TOAST behavior where Postgres sends UnchangedToast
-    // for the large_text column
-    let updated_int_value = 200;
-
-    let update_event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
-
-    database
-        .update_values(table_name.clone(), &["small_int"], &[&updated_int_value])
-        .await
-        .unwrap();
-
-    update_event_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // Verify the update behavior - the large_text should not be replaced with
-    // a default value and small_int should be updated
-    let parsed_table_rows_after_update =
-        materialize_events::<ToastTable>(&destination.get_events().await, None);
-    assert_eq!(parsed_table_rows_after_update.len(), 1);
-
-    let expected_updated_row = ToastTable::new(1, &large_text_value, updated_int_value);
-    assert_eq!(parsed_table_rows_after_update, vec![expected_updated_row]);
+fn find_update_event(events: &[Event], update_index: usize) -> &etl::types::UpdateEvent {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Update(update) => Some(update),
+            _ => None,
+        })
+        .nth(update_index)
+        .expect("expected update event")
 }
 
-/// Tests that TOAST values are correctly updated when directly modifying TOAST
-/// columns with default replica identity. When updating the TOAST column
-/// itself, Postgres sends the new value regardless of replica identity
-/// settings, ensuring the destination receives and applies the updated TOAST
-/// data correctly.
-#[tokio::test(flavor = "multi_thread")]
-async fn update_toast_values_with_default_replica_identity() {
-    init_test_tracing();
-
-    let database = spawn_source_database().await;
-    let table_name = test_table_name("toast_values_test");
-
-    // Create a table with a text column that will be large enough to trigger TOAST
-    // and a regular integer column for testing updates
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
-            &[
-                ("large_text", "text not null"), // Column that will contain TOAST-able data
-                ("small_int", "int4 not null"),  // Column we'll update to test TOAST behavior
-            ],
-        )
-        .await
-        .unwrap();
-
-    // Forcing size to be set to external so that unchanged TOAST columns are not
-    // sent in update events. Ideally, large values would automatically trigger
-    // the storage to external but couldn't force Postgres in the tests even
-    // with very large values, hence this workaround.
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AlterColumn {
-                name: "large_text",
-                alteration: "set storage external",
-            }],
-        )
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let memory_destination = MemoryDestination::new(store.clone());
-    let destination = TestDestinationWrapper::wrap(memory_destination);
-
-    let publication_name = "test_pub_toast".to_string();
-    database
-        .create_publication(&publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        store.clone(),
-        destination.clone(),
-    );
-
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
-
-    pipeline.start().await.unwrap();
-
-    table_ready_notify.notified().await;
-
-    // Insert a row with a large text value that will be TOASTed
-    // Postgres typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
-    let large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
-    let initial_int_value = 100;
-
-    let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
-
-    database
-        .insert_values(
-            table_name.clone(),
-            &["large_text", "small_int"],
-            &[&large_text_value, &initial_int_value],
-        )
-        .await
-        .unwrap();
-
-    insert_event_notify.notified().await;
-
-    // Verify the initial insert worked correctly
-    let parsed_table_rows = materialize_events::<ToastTable>(&destination.get_events().await, None);
-    assert_eq!(parsed_table_rows.len(), 1);
-
-    let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
-    assert_eq!(parsed_table_rows, vec![expected_initial_row]);
-
-    // Test update to the toast column does set it to that value
-    let update_event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
-
-    let updated_large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
-    database
-        .update_values(table_name.clone(), &["large_text"], &[&updated_large_text_value])
-        .await
-        .unwrap();
-
-    update_event_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // Verify that the large_text is updated
-    let parsed_table_rows_after_update =
-        materialize_events::<ToastTable>(&destination.get_events().await, None);
-    assert_eq!(parsed_table_rows_after_update.len(), 1);
-
-    let expected_updated_row = ToastTable::new(1, &updated_large_text_value, initial_int_value);
-    assert_eq!(parsed_table_rows_after_update, vec![expected_updated_row]);
+fn find_delete_event(events: &[Event]) -> &etl::types::DeleteEvent {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::Delete(delete) => Some(delete),
+            _ => None,
+        })
+        .expect("expected delete event")
 }
 
-/// Tests that Postgres rejects update operations when replica identity is set
-/// to none. When a table has replica identity none and is part of a publication
-/// that publishes updates, Postgres will reject update operations because it
-/// cannot identify which row to update without sufficient replica identity
-/// information.
-#[tokio::test(flavor = "multi_thread")]
-async fn update_non_toast_values_with_none_replica_identity() {
+fn full_row(name: &str, surname: &str, city: &str, large_text: &str) -> TableRow {
+    TableRow::new(vec![
+        Cell::I64(INITIAL_ID),
+        Cell::String(name.to_string()),
+        Cell::String(surname.to_string()),
+        Cell::String(city.to_string()),
+        Cell::String(large_text.to_string()),
+    ])
+}
+
+fn default_identity_row(surname: &str) -> TableRow {
+    TableRow::new(vec![Cell::I64(INITIAL_ID), Cell::String(surname.to_string())])
+}
+
+fn using_index_identity_row(name: &str, surname: &str) -> TableRow {
+    TableRow::new(vec![Cell::String(name.to_string()), Cell::String(surname.to_string())])
+}
+
+async fn run_replica_identity_scenario(
+    replica_identity: ReplicaIdentityMode,
+) -> ReplicaIdentityScenarioResult {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let table_name = test_table_name("toast_values_test");
-
-    // Create a table with a text column that will be large enough to trigger TOAST
-    // and a regular integer column for testing updates
+    let table_name = test_table_name("replica_identity_composite");
     let table_id = database
         .create_table(
             table_name.clone(),
-            true,
+            false,
             &[
-                ("large_text", "text not null"), // Column that will contain TOAST-able data
-                ("small_int", "int4 not null"),  // Column we'll update to test TOAST behavior
+                ("id", "bigint not null"),
+                ("name", "text not null"),
+                ("surname", "text not null"),
+                ("city", "text not null"),
+                ("large_text", "text not null"),
             ],
         )
         .await
         .unwrap();
 
-    // Forcing storage to be set to external so that unchanged TOAST columns are not
-    // sent in update events. Ideally, large values would automatically trigger
-    // the storage to external but couldn't force Postgres in the tests even
-    // with very large values, hence this workaround.
+    database
+        .run_sql(&format!(
+            "alter table {} add primary key (surname, id)",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
     database
         .alter_table(
             table_name.clone(),
@@ -472,22 +179,57 @@ async fn update_non_toast_values_with_none_replica_identity() {
         .await
         .unwrap();
 
-    // Set replica identity on the table to none to test that Postgres rejects
-    // update operations when there's insufficient replica identity information
-    database
-        .alter_table(table_name.clone(), &[TableModification::ReplicaIdentity { value: "nothing" }])
-        .await
-        .unwrap();
+    if matches!(replica_identity, ReplicaIdentityMode::UsingIndex) {
+        let index_name = format!("{}_replica_identity_idx", table_name.name);
+        database
+            .run_sql(&format!(
+                "create unique index {} on {} (surname, name)",
+                quote_identifier(&index_name),
+                table_name.as_quoted_identifier(),
+            ))
+            .await
+            .unwrap();
+        database
+            .run_sql(&format!(
+                "alter table {} replica identity using index {}",
+                table_name.as_quoted_identifier(),
+                quote_identifier(&index_name),
+            ))
+            .await
+            .unwrap();
+    } else {
+        match replica_identity {
+            ReplicaIdentityMode::Default => {}
+            ReplicaIdentityMode::Full => {
+                database
+                    .alter_table(
+                        table_name.clone(),
+                        &[TableModification::ReplicaIdentity { value: "full" }],
+                    )
+                    .await
+                    .unwrap();
+            }
+            ReplicaIdentityMode::Nothing => {
+                database
+                    .alter_table(
+                        table_name.clone(),
+                        &[TableModification::ReplicaIdentity { value: "nothing" }],
+                    )
+                    .await
+                    .unwrap();
+            }
+            ReplicaIdentityMode::UsingIndex => unreachable!(),
+        }
+    }
 
     let store = NotifyingStore::new();
-    let memory_destination = MemoryDestination::new(store.clone());
-    let destination = TestDestinationWrapper::wrap(memory_destination);
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let publication_name = "test_pub_toast".to_string();
+    let publication_name = "test_pub_replica_identity".to_string();
     database
         .create_publication(&publication_name, std::slice::from_ref(&table_name))
         .await
-        .expect("Failed to create publication");
+        .unwrap();
 
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
@@ -502,196 +244,294 @@ async fn update_non_toast_values_with_none_replica_identity() {
         store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
 
     pipeline.start().await.unwrap();
-
     table_ready_notify.notified().await;
 
-    // Insert a row with a large text value that will be TOASTed
-    // Postgres typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
-    let large_text_value = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
-    let initial_int_value = 100;
+    let initial_large_text = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
+    let updated_large_text = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
+    let final_large_text = generate_random_ascii_string(LARGE_TEXT_SIZE_BYTES);
 
     let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
-
     database
         .insert_values(
             table_name.clone(),
-            &["large_text", "small_int"],
-            &[&large_text_value, &initial_int_value],
+            &["id", "name", "surname", "city", "large_text"],
+            &[&INITIAL_ID, &INITIAL_NAME, &INITIAL_SURNAME, &INITIAL_CITY, &initial_large_text],
         )
         .await
         .unwrap();
-
     insert_event_notify.notified().await;
+
+    let mut update_count = 0;
+
+    let non_identity_update_sql = format!(
+        "update {} set city = {} where id = {} and surname = {}",
+        table_name.as_quoted_identifier(),
+        quote_literal(UPDATED_CITY),
+        INITIAL_ID,
+        quote_literal(INITIAL_SURNAME),
+    );
+    let non_identity_update_notify =
+        destination.wait_for_events_count(vec![(EventType::Update, update_count + 1)]).await;
+    let non_identity_update = database.run_sql(&non_identity_update_sql).await;
+    if non_identity_update.is_ok() {
+        non_identity_update_notify.notified().await;
+        update_count += 1;
+    }
+
+    let toast_update_sql = format!(
+        "update {} set large_text = {} where id = {} and surname = {}",
+        table_name.as_quoted_identifier(),
+        quote_literal(&updated_large_text),
+        INITIAL_ID,
+        quote_literal(INITIAL_SURNAME),
+    );
+    let toast_update_notify =
+        destination.wait_for_events_count(vec![(EventType::Update, update_count + 1)]).await;
+    let toast_update = database.run_sql(&toast_update_sql).await;
+    if toast_update.is_ok() {
+        toast_update_notify.notified().await;
+        update_count += 1;
+    }
+
+    let identity_update_notify =
+        destination.wait_for_events_count(vec![(EventType::Update, update_count + 1)]).await;
+    let identity_update = database
+        .run_sql(
+            &replica_identity
+                .identity_update_sql(&table_name.as_quoted_identifier(), &final_large_text),
+        )
+        .await;
+    if identity_update.is_ok() {
+        identity_update_notify.notified().await;
+    }
+
+    let delete_notify = destination.wait_for_events_count(vec![(EventType::Delete, 1)]).await;
+    let delete =
+        database.run_sql(&replica_identity.delete_sql(&table_name.as_quoted_identifier())).await;
+    if delete.is_ok() {
+        delete_notify.notified().await;
+    }
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Verify the initial insert worked correctly
-    let parsed_table_rows = materialize_events::<ToastTable>(&destination.get_events().await, None);
-    assert_eq!(parsed_table_rows.len(), 1);
+    ReplicaIdentityScenarioResult {
+        events: destination.get_events().await,
+        non_identity_update,
+        toast_update,
+        identity_update,
+        delete,
+        initial_large_text,
+        updated_large_text,
+        final_large_text,
+    }
+}
 
-    let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
-    assert_eq!(parsed_table_rows, vec![expected_initial_row]);
+#[tokio::test(flavor = "multi_thread")]
+async fn default_replica_identity_with_composite_primary_key_handles_partial_and_key_rows() {
+    let result = run_replica_identity_scenario(ReplicaIdentityMode::Default).await;
 
-    // Now attempt to update only the small_int column
-    // With replica identity NONE, Postgres should reject the update operation
-    // because the table does not have sufficient replica identity information for
-    // updates
-    let updated_int_value = 200;
+    assert!(result.non_identity_update.is_ok());
+    assert!(result.toast_update.is_ok());
+    assert!(result.identity_update.is_ok());
+    assert!(result.delete.is_ok());
 
-    let result =
-        database.update_values(table_name.clone(), &["small_int"], &[&updated_int_value]).await;
+    let events = data_events(result.events);
+    assert_eq!(events.len(), 5);
 
-    // Verify that the update operation fails with the expected error
-    assert!(result.is_err(), "Update should fail when replica identity is none");
-    let err = result.unwrap_err();
-    let db_err = err.as_db_error().unwrap();
+    assert!(matches!(
+        &events[0],
+        Event::Insert(insert) if insert.table_row
+            == full_row(INITIAL_NAME, INITIAL_SURNAME, INITIAL_CITY, &result.initial_large_text)
+    ));
 
-    let code = db_err.code().code();
-    // 55000 error code is for object_not_in_prerequisite_state
-    assert_eq!("55000", code);
-
-    let error_message = db_err.message();
+    let non_identity_update = find_update_event(&events, 0);
     assert_eq!(
-        error_message,
-        "cannot update table \"toast_values_test\" because it does not have a replica identity \
-         and publishes updates",
-        "Expected replica identity error, got: {error_message}"
+        non_identity_update.updated_table_row,
+        UpdatedTableRow::Partial(PartialTableRow::new(
+            5,
+            TableRow::new(vec![
+                Cell::I64(INITIAL_ID),
+                Cell::String(INITIAL_NAME.to_string()),
+                Cell::String(INITIAL_SURNAME.to_string()),
+                Cell::String(UPDATED_CITY.to_string()),
+            ]),
+            vec![4],
+        ))
+    );
+    assert_eq!(non_identity_update.old_table_row, None);
+
+    let toast_update = find_update_event(&events, 1);
+    assert_eq!(
+        toast_update.updated_table_row,
+        UpdatedTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.updated_large_text,
+        ))
+    );
+    assert_eq!(toast_update.old_table_row, None);
+
+    let identity_update = find_update_event(&events, 2);
+    assert_eq!(
+        identity_update.updated_table_row,
+        UpdatedTableRow::Full(full_row(
+            INITIAL_NAME,
+            UPDATED_SURNAME_IDENTITY,
+            UPDATED_CITY,
+            &result.final_large_text,
+        ))
+    );
+    assert_eq!(
+        identity_update.old_table_row,
+        Some(OldTableRow::Key(default_identity_row(INITIAL_SURNAME)))
+    );
+
+    let delete = find_delete_event(&events);
+    assert_eq!(
+        delete.old_table_row,
+        Some(OldTableRow::Key(default_identity_row(UPDATED_SURNAME_IDENTITY)))
     );
 }
 
-/// Tests that TOAST values are replaced with default values when the table uses
-/// replica identity with a unique index that includes columns being updated.
-/// When updating columns that are part of the replica identity index, Postgres
-/// sends UnchangedToast for large TOAST values. We send a default to the
-/// destination for the missing values .
 #[tokio::test(flavor = "multi_thread")]
-async fn update_non_toast_values_with_unique_index_replica_identity() {
-    init_test_tracing();
+async fn full_replica_identity_with_composite_primary_key_preserves_full_old_rows() {
+    let result = run_replica_identity_scenario(ReplicaIdentityMode::Full).await;
 
-    let database = spawn_source_database().await;
-    let table_name = test_table_name("toast_values_test");
+    assert!(result.non_identity_update.is_ok());
+    assert!(result.toast_update.is_ok());
+    assert!(result.identity_update.is_ok());
+    assert!(result.delete.is_ok());
 
-    // Create a table with a text column that will be large enough to trigger TOAST
-    // and a regular integer column for testing updates
-    let table_id = database
-        .create_table(
-            table_name.clone(),
-            true,
-            &[
-                ("large_text", "text not null"), // Column that will contain TOAST-able data
-                ("small_int", "int4 not null"),  // Column we'll update to test TOAST behavior
-            ],
-        )
-        .await
-        .unwrap();
+    let events = data_events(result.events);
+    assert_eq!(events.len(), 5);
 
-    // Forcing storage to be set to external so that unchanged TOAST columns are not
-    // sent in update events. Ideally, large values would automatically trigger
-    // the storage to external but couldn't force Postgres in the tests even
-    // with very large values, hence this workaround.
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AlterColumn {
-                name: "large_text",
-                alteration: "set storage external",
-            }],
-        )
-        .await
-        .unwrap();
-
-    // Create a unique index on id and small_int columns
-    let index_name = "unique_id_small_int_idx";
-    let create_index_query = format!(
-        "create unique index {index_name} on {} (id, small_int)",
-        table_name.as_quoted_identifier()
+    let non_identity_update = find_update_event(&events, 0);
+    assert_eq!(
+        non_identity_update.updated_table_row,
+        UpdatedTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.initial_large_text,
+        ))
     );
-    database.run_sql(&create_index_query).await.unwrap();
-
-    // Set replica identity to use the unique index
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::ReplicaIdentity { value: &format!("using index {index_name}") }],
-        )
-        .await
-        .unwrap();
-
-    let store = NotifyingStore::new();
-    let memory_destination = MemoryDestination::new(store.clone());
-    let destination = TestDestinationWrapper::wrap(memory_destination);
-
-    let publication_name = "test_pub_toast".to_string();
-    database
-        .create_publication(&publication_name, std::slice::from_ref(&table_name))
-        .await
-        .expect("Failed to create publication");
-
-    let pipeline_id: PipelineId = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication_name,
-        store.clone(),
-        destination.clone(),
+    assert_eq!(
+        non_identity_update.old_table_row,
+        Some(OldTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            INITIAL_CITY,
+            &result.initial_large_text,
+        )))
     );
 
-    let table_ready_notify =
-        store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+    let toast_update = find_update_event(&events, 1);
+    assert_eq!(
+        toast_update.old_table_row,
+        Some(OldTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.initial_large_text,
+        )))
+    );
 
-    pipeline.start().await.unwrap();
+    let identity_update = find_update_event(&events, 2);
+    assert_eq!(
+        identity_update.old_table_row,
+        Some(OldTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.updated_large_text,
+        )))
+    );
 
-    table_ready_notify.notified().await;
+    let delete = find_delete_event(&events);
+    assert_eq!(
+        delete.old_table_row,
+        Some(OldTableRow::Full(full_row(
+            INITIAL_NAME,
+            UPDATED_SURNAME_IDENTITY,
+            UPDATED_CITY,
+            &result.final_large_text,
+        )))
+    );
+}
 
-    // Insert a row with a large text value that will be TOASTed
-    // Postgres typically TOASTs values larger than ~2KB (TOAST_TUPLE_THRESHOLD)
-    let large_text_size_bytes = 8192;
-    let large_text_value = generate_random_ascii_string(large_text_size_bytes);
-    let initial_int_value = 100;
+#[tokio::test(flavor = "multi_thread")]
+async fn using_index_replica_identity_keeps_key_rows_in_table_order() {
+    let result = run_replica_identity_scenario(ReplicaIdentityMode::UsingIndex).await;
 
-    let insert_event_notify = destination.wait_for_events_count(vec![(EventType::Insert, 1)]).await;
+    assert!(result.non_identity_update.is_ok());
+    assert!(result.toast_update.is_ok());
+    assert!(result.identity_update.is_ok());
+    assert!(result.delete.is_ok());
 
-    database
-        .insert_values(
-            table_name.clone(),
-            &["large_text", "small_int"],
-            &[&large_text_value, &initial_int_value],
-        )
-        .await
-        .unwrap();
+    let events = data_events(result.events);
+    assert_eq!(events.len(), 5);
 
-    insert_event_notify.notified().await;
+    let non_identity_update = find_update_event(&events, 0);
+    assert_eq!(
+        non_identity_update.updated_table_row,
+        UpdatedTableRow::Partial(PartialTableRow::new(
+            5,
+            TableRow::new(vec![
+                Cell::I64(INITIAL_ID),
+                Cell::String(INITIAL_NAME.to_string()),
+                Cell::String(INITIAL_SURNAME.to_string()),
+                Cell::String(UPDATED_CITY.to_string()),
+            ]),
+            vec![4],
+        ))
+    );
+    assert_eq!(non_identity_update.old_table_row, None);
 
-    // Verify the initial insert worked correctly
-    let parsed_table_rows = materialize_events::<ToastTable>(&destination.get_events().await, None);
-    assert_eq!(parsed_table_rows.len(), 1);
+    let toast_update = find_update_event(&events, 1);
+    assert_eq!(
+        toast_update.updated_table_row,
+        UpdatedTableRow::Full(full_row(
+            INITIAL_NAME,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.updated_large_text,
+        ))
+    );
+    assert_eq!(toast_update.old_table_row, None);
 
-    let expected_initial_row = ToastTable::new(1, &large_text_value, initial_int_value);
-    assert_eq!(parsed_table_rows[0], expected_initial_row);
+    let identity_update = find_update_event(&events, 2);
+    assert_eq!(
+        identity_update.updated_table_row,
+        UpdatedTableRow::Full(full_row(
+            UPDATED_NAME_IDENTITY,
+            INITIAL_SURNAME,
+            UPDATED_CITY,
+            &result.final_large_text,
+        ))
+    );
+    assert_eq!(
+        identity_update.old_table_row,
+        Some(OldTableRow::Key(using_index_identity_row(INITIAL_NAME, INITIAL_SURNAME,)))
+    );
 
-    // Now update the small_int column, which is part of the unique index used for
-    // replica identity This should trigger TOAST behavior where Postgres sends
-    // UnchangedToast for the large_text column, since the replica identity
-    // includes the column being updated
-    let updated_int_value = 200;
+    let delete = find_delete_event(&events);
+    assert_eq!(
+        delete.old_table_row,
+        Some(OldTableRow::Key(using_index_identity_row(UPDATED_NAME_IDENTITY, INITIAL_SURNAME,)))
+    );
+}
 
-    let update_event_notify = destination.wait_for_events_count(vec![(EventType::Update, 1)]).await;
+#[tokio::test(flavor = "multi_thread")]
+async fn none_replica_identity_with_composite_primary_key_rejects_updates_and_deletes() {
+    let result = run_replica_identity_scenario(ReplicaIdentityMode::Nothing).await;
 
-    database
-        .update_values(table_name.clone(), &["small_int"], &[&updated_int_value])
-        .await
-        .unwrap();
+    assert!(result.non_identity_update.is_err());
+    assert!(result.toast_update.is_err());
+    assert!(result.identity_update.is_err());
+    assert!(result.delete.is_err());
 
-    update_event_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // Verify the update behavior - the large_text should be replaced with
-    // default value (empty string) and small_int should be updated
-    let parsed_table_rows_after_update =
-        materialize_events::<ToastTable>(&destination.get_events().await, None);
-    assert_eq!(parsed_table_rows_after_update.len(), 1);
-
-    let expected_updated_row = ToastTable::new(1, "", updated_int_value);
-    assert_eq!(parsed_table_rows_after_update[0], expected_updated_row);
+    let events = data_events(result.events);
+    assert_eq!(events.len(), 1);
+    assert!(matches!(&events[0], Event::Insert(_)));
 }

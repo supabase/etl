@@ -37,8 +37,8 @@ use etl::{
     error::ErrorKind,
     store::{both::memory::MemoryStore, schema::SchemaStore},
     types::{
-        Cell, ColumnSchema, Event, PgLsn, ReplicatedTableSchema, TableId, TableName, TableRow,
-        TableSchema, Type as PgType,
+        Cell, ColumnSchema, Event, OldTableRow, PgLsn, ReplicatedTableSchema, TableId,
+        TableName, TableRow, TableSchema, Type as PgType, UpdatedTableRow,
     },
 };
 use etl_destinations::ducklake::{DuckLakeDestination, table_name_to_ducklake_table_name};
@@ -862,7 +862,10 @@ async fn write_events() {
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_table_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Gadget".to_string())]),
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("Gadget".to_string()),
+                ])),
                 old_table_row: None,
             }),
             Event::Insert(InsertEvent {
@@ -877,10 +880,10 @@ async fn write_events() {
                 commit_lsn: lsn,
                 tx_ordinal: 3,
                 replicated_table_schema: replicated_table_schema.clone(),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(2), Cell::String("Spare".to_string())]),
-                )),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("Spare".to_string()),
+                ]))),
             }),
         ])
         .await
@@ -1010,11 +1013,14 @@ async fn write_events_with_old_row_update() {
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_table_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("Gadget".to_string())]),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("Widget".to_string())]),
-                )),
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("Gadget".to_string()),
+                ])),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("Widget".to_string()),
+                ]))),
             }),
         ])
         .await
@@ -1087,11 +1093,14 @@ async fn write_events_replay_is_idempotent() {
             commit_lsn: lsn,
             tx_ordinal: 1,
             replicated_table_schema: replicated_table_schema.clone(),
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("paid".to_string())]),
-            old_table_row: Some((
-                false,
-                TableRow::new(vec![Cell::I32(1), Cell::String("draft".to_string())]),
-            )),
+            updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("paid".to_string()),
+            ])),
+            old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("draft".to_string()),
+            ]))),
         }),
         Event::Insert(InsertEvent {
             start_lsn: lsn,
@@ -1105,10 +1114,10 @@ async fn write_events_replay_is_idempotent() {
             commit_lsn: lsn,
             tx_ordinal: 3,
             replicated_table_schema: replicated_table_schema.clone(),
-            old_table_row: Some((
-                false,
-                TableRow::new(vec![Cell::I32(2), Cell::String("temp".to_string())]),
-            )),
+            old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(2),
+                Cell::String("temp".to_string()),
+            ]))),
         }),
     ];
 
@@ -1186,11 +1195,14 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
             commit_lsn: lsn,
             tx_ordinal: 1,
             replicated_table_schema: replicated_table_schema.clone(),
-            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("posted".to_string())]),
-            old_table_row: Some((
-                false,
-                TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
-            )),
+            updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("posted".to_string()),
+            ])),
+            old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("queued".to_string()),
+            ]))),
         })])
         .await
         .unwrap();
@@ -1385,11 +1397,14 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_table_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("after".to_string())]),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("before".to_string())]),
-                )),
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("after".to_string()),
+                ])),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("before".to_string()),
+                ]))),
             }),
             Event::Insert(InsertEvent {
                 start_lsn: lsn,
@@ -1532,14 +1547,14 @@ async fn write_events_mixed_multi_table_batches() {
                 commit_lsn: lsn,
                 tx_ordinal: 2,
                 replicated_table_schema: replicated_table_schema_a.clone(),
-                table_row: TableRow::new(vec![
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("a-one-updated".to_string()),
-                ]),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("a-one".to_string())]),
-                )),
+                ])),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("a-one".to_string()),
+                ]))),
             }),
             Event::Insert(InsertEvent {
                 start_lsn: lsn,
@@ -1553,10 +1568,10 @@ async fn write_events_mixed_multi_table_batches() {
                 commit_lsn: lsn,
                 tx_ordinal: 4,
                 replicated_table_schema: replicated_table_schema_b.clone(),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("b-one".to_string())]),
-                )),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("b-one".to_string()),
+                ]))),
             }),
         ])
         .await
@@ -1761,11 +1776,14 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 commit_lsn: lsn,
                 tx_ordinal: 1,
                 replicated_table_schema: replicated_table_schema.clone(),
-                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("posted".to_string())]),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(1), Cell::String("queued".to_string())]),
-                )),
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("posted".to_string()),
+                ])),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("queued".to_string()),
+                ]))),
             }),
             Event::Insert(InsertEvent {
                 start_lsn: lsn,
@@ -1779,10 +1797,10 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
                 commit_lsn: lsn,
                 tx_ordinal: 3,
                 replicated_table_schema: replicated_table_schema.clone(),
-                old_table_row: Some((
-                    false,
-                    TableRow::new(vec![Cell::I32(2), Cell::String("tmp".to_string())]),
-                )),
+                old_table_row: Some(OldTableRow::Full(TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("tmp".to_string()),
+                ]))),
             }),
         ])
         .await
