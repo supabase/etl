@@ -292,7 +292,8 @@ async fn tenant_with_active_pipeline_cannot_be_deleted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tenant_with_inactive_pipelines_can_be_deleted_and_uninstalls_source_state() {
+async fn tenant_with_inactive_pipelines_can_be_deleted_and_uninstalls_source_state_and_ddl_event_trigger()
+ {
     init_test_tracing();
 
     let trusted_source = create_trusted_source_database().await;
@@ -319,6 +320,15 @@ async fn tenant_with_inactive_pipelines_can_be_deleted_and_uninstalls_source_sta
     let source_id = response.id;
 
     run_etl_migrations_on_source_database(&trusted_source.trusted_config).await;
+
+    let ddl_trigger_exists_before_delete: bool = sqlx::query_scalar(
+        "select exists(select 1 from pg_event_trigger where evtname = \
+         'supabase_etl_ddl_message_trigger')",
+    )
+    .fetch_one(&trusted_source.admin_pool)
+    .await
+    .expect("failed to check ddl event trigger before tenant deletion");
+    assert!(ddl_trigger_exists_before_delete);
 
     create_default_image(&app).await;
     let destination_id = create_destination(&app, tenant_id).await;
@@ -357,6 +367,15 @@ async fn tenant_with_inactive_pipelines_can_be_deleted_and_uninstalls_source_sta
             .await
             .expect("failed to check etl schema");
     assert!(!etl_schema_exists);
+
+    let ddl_trigger_exists_after_delete: bool = sqlx::query_scalar(
+        "select exists(select 1 from pg_event_trigger where evtname = \
+         'supabase_etl_ddl_message_trigger')",
+    )
+    .fetch_one(&trusted_source.admin_pool)
+    .await
+    .expect("failed to check ddl event trigger after tenant deletion");
+    assert!(!ddl_trigger_exists_after_delete);
 
     let publication_exists: bool = sqlx::query_scalar(
         "select exists(select 1 from pg_publication where pubname = 'tenant_uninstall_pub')",
