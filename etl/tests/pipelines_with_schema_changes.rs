@@ -4,7 +4,7 @@ use etl::{
     state::table::TableReplicationPhaseType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
-        event::group_events_by_type_and_table_id,
+        event::{group_events_by_type, group_events_by_type_and_table_id},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
         pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline},
@@ -35,6 +35,44 @@ fn get_last_insert_event(events: &[Event], table_id: TableId) -> &Event {
         .rev()
         .find(|e| matches!(e, Event::Insert(i) if i.replicated_table_schema.id() == table_id))
         .expect("no insert events for table")
+}
+
+fn schema_columns(schema: &etl_postgres::types::TableSchema) -> Vec<(String, Type)> {
+    schema.column_schemas.iter().map(|column| (column.name.clone(), column.typ.clone())).collect()
+}
+
+fn find_snapshot_index_after(
+    snapshots: &[(etl_postgres::types::SnapshotId, etl_postgres::types::TableSchema)],
+    start_index: usize,
+    expected: &[(&str, Type)],
+) -> usize {
+    let expected =
+        expected.iter().map(|(name, typ)| ((*name).to_string(), typ.clone())).collect::<Vec<_>>();
+
+    snapshots
+        .iter()
+        .enumerate()
+        .skip(start_index)
+        .find_map(|(index, (_, schema))| (schema_columns(schema) == expected).then_some(index))
+        .expect("expected schema snapshot in order")
+}
+
+async fn wait_for_at_least_events(
+    destination: &TestDestinationWrapper<MemoryDestination<NotifyingStore>>,
+    conditions: Vec<(EventType, u64)>,
+) {
+    destination
+        .notify_on_events(move |events| {
+            let grouped = group_events_by_type(events);
+            conditions.iter().all(|(event_type, expected_count)| {
+                grouped
+                    .get(event_type)
+                    .is_some_and(|matched_events| matched_events.len() >= *expected_count as usize)
+            })
+        })
+        .await
+        .notified()
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -430,10 +468,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await;
 
     // Add column + insert, then restart.
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
-        .await;
-
     database
         .alter_table(
             table_name.clone(),
@@ -451,7 +485,8 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    wait_for_at_least_events(&destination, vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     destination.clear_events().await;
@@ -466,10 +501,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     );
 
     pipeline.start().await.unwrap();
-
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
-        .await;
 
     database
         .alter_table(
@@ -496,7 +527,8 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    wait_for_at_least_events(&destination, vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     destination.clear_events().await;
@@ -512,10 +544,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
 
     pipeline.start().await.unwrap();
 
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
-        .await;
-
     database
         .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "status" }])
         .await
@@ -530,7 +558,8 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    wait_for_at_least_events(&destination, vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     destination.clear_events().await;
@@ -545,10 +574,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     );
 
     pipeline.start().await.unwrap();
-
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
-        .await;
 
     database
         .alter_table(
@@ -578,7 +603,8 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    wait_for_at_least_events(&destination, vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
@@ -601,30 +627,37 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     };
     assert_eq!(i.table_row.values().len(), 5);
 
-    // Verify all schema snapshots are stored in order.
-    // We have 7 snapshots:
-    // - Initial (id, name, age, status)
-    // - After adding email
-    // - After renaming age -> years
-    // - After changing years type to bigint
-    // - After dropping status
-    // - After adding created_at
-    // - After renaming email -> contact_email (this is the final schema for the
-    //   insert)
+    // Verify the expected schema versions are stored in order.
+    //
+    // Around restarts we may re-observe equivalent schema state, so this test
+    // checks that the important versions appear in order instead of pinning the
+    // total snapshot count exactly.
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
-    assert_eq!(snapshots.len(), 7);
     assert_schema_snapshots_ordering(snapshots, true);
-
-    let (_, schema) = &snapshots[0];
+    let mut index = find_snapshot_index_after(
+        snapshots,
+        0,
+        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("status", Type::TEXT)],
+    );
     assert_table_schema_column_names_types(
-        schema,
+        &snapshots[index].1,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("status", Type::TEXT)],
     );
 
-    let (_, schema) = &snapshots[1];
+    index = find_snapshot_index_after(
+        snapshots,
+        index + 1,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("age", Type::INT4),
+            ("status", Type::TEXT),
+            ("email", Type::TEXT),
+        ],
+    );
     assert_table_schema_column_names_types(
-        schema,
+        &snapshots[index].1,
         &[
             ("id", Type::INT8),
             ("name", Type::TEXT),
@@ -634,9 +667,19 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         ],
     );
 
-    let (_, schema) = &snapshots[2];
+    index = find_snapshot_index_after(
+        snapshots,
+        index + 1,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("years", Type::INT4),
+            ("status", Type::TEXT),
+            ("email", Type::TEXT),
+        ],
+    );
     assert_table_schema_column_names_types(
-        schema,
+        &snapshots[index].1,
         &[
             ("id", Type::INT8),
             ("name", Type::TEXT),
@@ -646,9 +689,19 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         ],
     );
 
-    let (_, schema) = &snapshots[3];
+    index = find_snapshot_index_after(
+        snapshots,
+        index + 1,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("years", Type::INT8),
+            ("status", Type::TEXT),
+            ("email", Type::TEXT),
+        ],
+    );
     assert_table_schema_column_names_types(
-        schema,
+        &snapshots[index].1,
         &[
             ("id", Type::INT8),
             ("name", Type::TEXT),
@@ -658,15 +711,29 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         ],
     );
 
-    let (_, schema) = &snapshots[4];
+    index = find_snapshot_index_after(
+        snapshots,
+        index + 1,
+        &[("id", Type::INT8), ("name", Type::TEXT), ("years", Type::INT8), ("email", Type::TEXT)],
+    );
     assert_table_schema_column_names_types(
-        schema,
+        &snapshots[index].1,
         &[("id", Type::INT8), ("name", Type::TEXT), ("years", Type::INT8), ("email", Type::TEXT)],
     );
 
-    let (_, schema) = &snapshots[5];
+    index = find_snapshot_index_after(
+        snapshots,
+        index + 1,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("years", Type::INT8),
+            ("email", Type::TEXT),
+            ("created_at", Type::TIMESTAMP),
+        ],
+    );
     assert_table_schema_column_names_types(
-        schema,
+        &snapshots[index].1,
         &[
             ("id", Type::INT8),
             ("name", Type::TEXT),
@@ -676,9 +743,19 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         ],
     );
 
-    let (_, schema) = &snapshots[6];
+    index = find_snapshot_index_after(
+        snapshots,
+        index + 1,
+        &[
+            ("id", Type::INT8),
+            ("name", Type::TEXT),
+            ("years", Type::INT8),
+            ("contact_email", Type::TEXT),
+            ("created_at", Type::TIMESTAMP),
+        ],
+    );
     assert_table_schema_column_names_types(
-        schema,
+        &snapshots[index].1,
         &[
             ("id", Type::INT8),
             ("name", Type::TEXT),

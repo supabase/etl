@@ -1,5 +1,3 @@
-#![allow(clippy::match_same_arms)]
-
 use std::fmt;
 
 use etl::{

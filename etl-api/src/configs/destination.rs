@@ -102,7 +102,7 @@ pub enum FullApiDestinationConfig {
             deserialize_with = "crate::utils::trim_option_string"
         )]
         metadata_schema: Option<String>,
-        #[schema(example = "50MB")]
+        #[schema(example = "150MB")]
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",

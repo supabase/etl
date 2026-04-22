@@ -60,10 +60,9 @@ use crate::{
         },
         inline_size::DuckLakePendingInlineSizeSampler,
         maintenance::{
-            DuckLakeMaintenanceWorker, ENABLE_CHECKPOINT_MAINTENANCE, PendingInlineFlushRequests,
-            TableMaintenanceNotification, TableWriteActivity, maybe_run_requested_checkpoint,
-            maybe_run_requested_merge_adjacent_files, send_maintenance_notification,
-            spawn_ducklake_maintenance_worker, table_write_slot,
+            DuckLakeMaintenanceWorker, PendingInlineFlushRequests, TableMaintenanceNotification,
+            TableWriteActivity, send_maintenance_notification, spawn_ducklake_maintenance_worker,
+            table_write_slot,
         },
         metrics::{
             DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, register_metrics,
@@ -102,8 +101,8 @@ pub struct DuckLakeDestination<S> {
     manager: Arc<DuckLakeConnectionManager>,
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
-    /// Shared gate that keeps checkpoint-style maintenance from overlapping
-    /// active foreground or table-scoped maintenance mutations.
+    /// Shared gate that keeps exclusive background maintenance from overlapping
+    /// active foreground or table-scoped mutations.
     checkpoint_gate: Arc<RwLock<()>>,
     streaming_tasks: DestinationTaskSet,
     maintenance_worker: Arc<Option<DuckLakeMaintenanceWorker>>,
@@ -118,23 +117,12 @@ pub struct DuckLakeDestination<S> {
     applied_batches_table_created: Arc<AtomicBool>,
     /// Cache tracking whether the ETL streaming progress table already exists.
     streaming_progress_table_created: Arc<AtomicBool>,
-    /// Signals that tier-0 merge_adjacent_files should run before the next
-    /// streaming batch when safe.
-    merge_adjacent_files_requested: Arc<AtomicBool>,
-    /// Tracks whether recent writes may have produced files worth revisiting
-    /// with tier-0 compaction.
-    merge_adjacent_files_dirty: Arc<AtomicBool>,
     /// Signals that one or more inline flushes should run before the next safe
     /// ingest point.
     inline_flush_requested: Arc<AtomicBool>,
     /// Tracks which tables need a requested inline flush before ingestion
     /// resumes.
     inline_flush_requests: Arc<PendingInlineFlushRequests>,
-    /// Signals that a checkpoint should run before the next streaming batch
-    /// when safe.
-    checkpoint_requested: Arc<AtomicBool>,
-    /// Configured DuckLake maintenance target file size for tier-0 merges.
-    maintenance_target_file_size: Arc<str>,
 }
 
 impl<S> Destination for DuckLakeDestination<S>
@@ -248,7 +236,7 @@ where
     ///   tables (e.g. `"ducklake"`). Uses the catalog default schema when not
     ///   set.
     /// - `duckdb_memory_cache_limit`: Optional DuckDB `memory_limit` value
-    ///   (e.g. `"50MB"`). Defaults to `50MB`.
+    ///   (e.g. `"150MB"`). Defaults to `150MB`.
     /// - `maintenance_target_file_size`: Optional DuckLake maintenance
     ///   `target_file_size` value (e.g. `"10MB"`). Defaults to `10MB`.
     /// - `duckdb_log`: Optional DuckDB log storage and shutdown dump paths.
@@ -341,11 +329,8 @@ where
             };
         let created_tables = Arc::default();
         let checkpoint_gate = Arc::new(RwLock::new(()));
-        let merge_adjacent_files_requested = Arc::new(AtomicBool::new(false));
-        let merge_adjacent_files_dirty = Arc::new(AtomicBool::new(false));
         let inline_flush_requested = Arc::new(AtomicBool::new(false));
         let inline_flush_requests = Arc::new(PendingInlineFlushRequests::default());
-        let checkpoint_requested = Arc::new(AtomicBool::new(false));
         let mut destination = Self {
             #[cfg(feature = "test-utils")]
             manager,
@@ -361,12 +346,8 @@ where
             created_tables: Arc::clone(&created_tables),
             applied_batches_table_created: Arc::default(),
             streaming_progress_table_created: Arc::default(),
-            merge_adjacent_files_requested: Arc::clone(&merge_adjacent_files_requested),
-            merge_adjacent_files_dirty: Arc::clone(&merge_adjacent_files_dirty),
             inline_flush_requested: Arc::clone(&inline_flush_requested),
             inline_flush_requests: Arc::clone(&inline_flush_requests),
-            checkpoint_requested: Arc::clone(&checkpoint_requested),
-            maintenance_target_file_size: Arc::clone(&maintenance_target_file_size),
         };
         gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
         destination.ensure_applied_batches_table_exists().await?;
@@ -383,10 +364,6 @@ where
                 Arc::clone(&destination.table_write_slots),
                 Arc::clone(&inline_flush_requested),
                 Arc::clone(&inline_flush_requests),
-                Arc::clone(&checkpoint_requested),
-                Arc::clone(&merge_adjacent_files_requested),
-                Arc::clone(&merge_adjacent_files_dirty),
-                Arc::clone(&maintenance_target_file_size),
                 pending_inline_size_sampler,
             )?
             .into(),
@@ -509,19 +486,21 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
+        let table_name = self.ensure_table_exists(replicated_table_schema).await?;
+
         if table_rows.is_empty() {
             return Ok(());
         }
 
         self.maybe_run_requested_inline_flush().await?;
 
-        let table_name = self.ensure_table_exists(replicated_table_schema).await?;
         let approx_bytes = table_rows.iter().map(|row| row.size_hint() as u64).sum::<u64>();
         let inserted_rows = table_rows.len() as u64;
 
-        // Here we can have concurrent table writers because it's INSERTs only and CDC
-        // (write_events) won't start before the copy phase is complete
+        // Copy batches for the same table must still serialize so concurrent
+        // callers do not race each other inside DuckDB.
         self.ensure_applied_batches_table_exists().await?;
+        let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         let _checkpoint_guard = self.acquire_mutation_guard().await;
         let prepared_batch =
             prepare_copy_table_batch(replicated_table_schema.inner(), table_name, table_rows)?;
@@ -532,9 +511,6 @@ where
             prepared_batch,
         )
         .await?;
-        // self.merge_adjacent_files_dirty
-        //     .store(true, Ordering::Release);
-
         self.notify_background_maintenance(TableMaintenanceNotification::WriteActivity(
             TableWriteActivity { table_name, approx_bytes, inserted_rows },
         ))
@@ -554,10 +530,6 @@ where
     /// committed work.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         self.maybe_run_requested_inline_flush().await?;
-        let merge_adjacent_files_ran = self.maybe_run_requested_merge_adjacent_files().await?;
-        if !merge_adjacent_files_ran {
-            self.maybe_run_requested_checkpoint().await?;
-        }
         let mut event_iter = events.into_iter().peekable();
 
         while event_iter.peek().is_some() {
@@ -693,7 +665,6 @@ where
                         )?;
                         apply_table_batches_with_retry(pool, blocking_slots, prepared_batches)
                             .await?;
-                        // merge_adjacent_files_dirty.store(true, Ordering::Release);
                         if let (Some(worker), Some(notification)) =
                             (maintenance_worker.as_ref(), maintenance_notification)
                         {
@@ -910,8 +881,8 @@ where
         })
     }
 
-    /// Acquires shared mutation access so checkpoint-style maintenance cannot
-    /// start in the middle of a foreground write sequence.
+    /// Acquires shared mutation access so exclusive background maintenance
+    /// cannot start in the middle of a foreground write sequence.
     async fn acquire_mutation_guard(&self) -> OwnedRwLockReadGuard<()> {
         Arc::clone(&self.checkpoint_gate).read_owned().await
     }
@@ -930,47 +901,6 @@ where
             self.inline_flush_requested.as_ref(),
             self.inline_flush_requests.as_ref(),
             self.maintenance_worker.as_ref().as_ref().map(|worker| worker.notification_tx.clone()),
-        )
-        .await
-    }
-
-    /// Runs one requested tier-0 merge before ingesting the next CDC batch when
-    /// safe.
-    ///
-    /// Returns whether the merge maintenance actually ran.
-    async fn maybe_run_requested_merge_adjacent_files(&self) -> EtlResult<bool> {
-        if !self.merge_adjacent_files_requested.load(Ordering::Acquire) {
-            return Ok(false);
-        }
-
-        maybe_run_requested_merge_adjacent_files(
-            Arc::clone(&self.pool),
-            Arc::clone(&self.checkpoint_gate),
-            Arc::clone(&self.blocking_slots),
-            self.merge_adjacent_files_requested.as_ref(),
-            self.merge_adjacent_files_dirty.as_ref(),
-            self.maintenance_target_file_size.as_ref(),
-        )
-        .await
-    }
-
-    /// Runs one requested checkpoint before ingesting the next CDC batch when
-    /// safe.
-    async fn maybe_run_requested_checkpoint(&self) -> EtlResult<()> {
-        if !ENABLE_CHECKPOINT_MAINTENANCE {
-            self.checkpoint_requested.store(false, Ordering::Release);
-            return Ok(());
-        }
-
-        if !self.checkpoint_requested.load(Ordering::Acquire) {
-            return Ok(());
-        }
-
-        maybe_run_requested_checkpoint(
-            Arc::clone(&self.pool),
-            Arc::clone(&self.checkpoint_gate),
-            Arc::clone(&self.blocking_slots),
-            self.checkpoint_requested.as_ref(),
         )
         .await
     }

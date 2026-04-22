@@ -909,7 +909,6 @@ impl From<ParseNumericError> for EtlError {
 /// [`ErrorKind::SourceConnectionFailed`].
 impl From<sqlx::Error> for EtlError {
     fn from(err: sqlx::Error) -> EtlError {
-        #[allow(clippy::match_same_arms)]
         let kind = match &err {
             sqlx::Error::Database(_) => ErrorKind::SourceQueryFailed,
             sqlx::Error::Io(_) => ErrorKind::IoError,
