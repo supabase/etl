@@ -1581,11 +1581,13 @@ async fn empty_tables_are_created_at_destination() {
         destination.clone(),
     );
 
-    pipeline.start().await.unwrap();
-
-    // Wait for the table to be ready.
+    // Register the ready notifier before starting the pipeline so we do not
+    // miss the Init -> Ready transition driven by the apply worker during
+    // startup.
     let table_ready_notify =
         state_store.notify_on_table_state_type(table_id, TableReplicationPhaseType::Ready).await;
+
+    pipeline.start().await.unwrap();
 
     table_ready_notify.notified().await;
 
