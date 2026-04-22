@@ -46,6 +46,18 @@ use crate::{
     validation::{FailureType, ValidationContext, ValidationError, ValidationFailure},
 };
 
+/// Shared application data used by [`update_pipeline`].
+pub(crate) struct UpdatePipelineDependencies {
+    /// API configuration for pipeline resource updates.
+    pub(crate) api_config: Data<ApiConfig>,
+    /// Kubernetes client used to manage pipeline resources.
+    pub(crate) k8s_client: Data<dyn K8sClient>,
+    /// Cache for trusted root certificates.
+    pub(crate) trusted_root_certs_cache: Data<TrustedRootCertsCache>,
+    /// Encryption key used to read source configuration.
+    pub(crate) encryption_key: Data<EncryptionKey>,
+}
+
 #[derive(Debug, Error)]
 pub enum PipelineError {
     #[error("The pipeline with id {0} was not found")]
@@ -654,23 +666,23 @@ pub async fn read_pipeline(
 pub async fn update_pipeline(
     req: HttpRequest,
     pool: Data<PgPool>,
-    trusted_root_certs_cache: Data<TrustedRootCertsCache>,
-    api_config: Data<ApiConfig>,
-    k8s_client: Data<dyn K8sClient>,
+    dependencies: Data<UpdatePipelineDependencies>,
     pipeline_id: Path<i64>,
     pipeline: Json<UpdatePipelineRequest>,
-    encryption_key: Data<EncryptionKey>,
 ) -> Result<impl Responder, PipelineError> {
     let tenant_id = extract_tenant_id(&req)?;
     let pipeline_id = pipeline_id.into_inner();
     let pipeline = pipeline.into_inner();
-    let k8s_client = k8s_client.into_inner();
+    let api_config = dependencies.api_config.as_ref();
+    let encryption_key = dependencies.encryption_key.as_ref();
+    let k8s_client = dependencies.k8s_client.as_ref();
+    let trusted_root_certs_cache = dependencies.trusted_root_certs_cache.as_ref();
     validate_pipeline_request(&pipeline.config)?;
 
     let mut txn = pool.begin().await?;
 
     // Verify source exists
-    db::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
+    db::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, encryption_key)
         .await?
         .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
@@ -690,9 +702,9 @@ pub async fn update_pipeline(
     .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
     let (pipeline, replicator, image, source, destination) =
-        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+        read_pipeline_components(&mut txn, tenant_id, pipeline_id, encryption_key).await?;
 
-    if is_replicator_pod_stopped(k8s_client.as_ref(), tenant_id, replicator.id).await? {
+    if is_replicator_pod_stopped(k8s_client, tenant_id, replicator.id).await? {
         txn.commit().await?;
 
         return Ok(HttpResponse::Ok().finish());
@@ -700,7 +712,7 @@ pub async fn update_pipeline(
 
     let tls_config = trusted_root_certs_cache.get_tls_config(api_config.source.tls_enabled).await?;
     create_or_update_pipeline_resources_in_k8s(
-        k8s_client.as_ref(),
+        k8s_client,
         tenant_id,
         pipeline,
         replicator,

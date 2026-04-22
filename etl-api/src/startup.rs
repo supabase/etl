@@ -228,6 +228,17 @@ pub fn run(
     let encryption_key = web::Data::new(encryption_key);
     let k8s_client: Option<web::Data<dyn K8sClient>> = k8s_client.map(Into::into);
     let trusted_root_certs_cache = trusted_root_certs_cache.map(web::Data::new);
+    let update_pipeline_dependencies = k8s_client
+        .as_ref()
+        .zip(trusted_root_certs_cache.as_ref())
+        .map(|(k8s_client, trusted_root_certs_cache)| {
+            web::Data::new(crate::routes::pipelines::UpdatePipelineDependencies {
+                api_config: config.clone(),
+                k8s_client: k8s_client.clone(),
+                trusted_root_certs_cache: trusted_root_certs_cache.clone(),
+                encryption_key: encryption_key.clone(),
+            })
+        });
     let feature_flags_client = feature_flags_client.map(web::Data::new);
 
     #[derive(OpenApi)]
@@ -429,6 +440,12 @@ pub fn run(
 
         let app = if let Some(trusted_root_certs_cache) = trusted_root_certs_cache.clone() {
             app.app_data(trusted_root_certs_cache)
+        } else {
+            app
+        };
+
+        let app = if let Some(update_pipeline_dependencies) = update_pipeline_dependencies.clone() {
+            app.app_data(update_pipeline_dependencies)
         } else {
             app
         };
