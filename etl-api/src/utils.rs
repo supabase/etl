@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_http_url_trims_and_parses() {
+    fn trim_http_url_trims_and_parses() {
         #[derive(Debug, Deserialize)]
         struct TestStruct {
             #[serde(rename = "value", deserialize_with = "trim_http_url")]
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_http_url_rejects_non_http_scheme() {
+    fn trim_http_url_rejects_non_http_scheme() {
         #[derive(Debug, Deserialize)]
         struct TestStruct {
             #[serde(rename = "value", deserialize_with = "trim_http_url")]

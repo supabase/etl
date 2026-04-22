@@ -121,6 +121,34 @@ where
         })
     }
 
+    /// Creates a new ClickHouse table with Applying -> DDL -> Applied metadata.
+    async fn create_table_with_metadata(
+        &self,
+        table_id: TableId,
+        ch_table_name: &str,
+        schema: &ReplicatedTableSchema,
+        snapshot_id: etl::types::SnapshotId,
+        replication_mask: etl::types::ReplicationMask,
+    ) -> EtlResult<()> {
+        let metadata = DestinationTableMetadata::new_applying(
+            ch_table_name.to_string(),
+            snapshot_id,
+            replication_mask,
+        );
+        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+
+        let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
+        let ddl = build_create_table_sql(ch_table_name, &column_schemas);
+        let ddl_start = Instant::now();
+        self.client.execute_ddl(&ddl).await?;
+        metrics::histogram!(ETL_CH_DDL_DURATION_SECONDS, "table" => ch_table_name.to_string())
+            .record(ddl_start.elapsed().as_secs_f64());
+
+        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+
+        Ok(())
+    }
+
     /// Ensures the ClickHouse table for the given schema exists, returning
     /// `(ch_table_name, nullable_flags)`.
     ///
@@ -146,27 +174,66 @@ where
         let snapshot_id = schema.inner().snapshot_id;
         let replication_mask = schema.replication_mask().clone();
 
-        // Only store metadata and execute DDL on first table creation. After a
-        // schema change (handle_relation_event), the cache is invalidated but
-        // metadata already exists -- we just need to recompute nullable flags.
         let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
-        if existing_metadata.is_none() {
-            let metadata = DestinationTableMetadata::new_applying(
-                ch_table_name.clone(),
-                snapshot_id,
-                replication_mask,
-            );
-            self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+        match existing_metadata {
+            None => {
+                // First table creation: Applying -> CREATE TABLE -> Applied.
+                self.create_table_with_metadata(
+                    table_id,
+                    &ch_table_name,
+                    schema,
+                    snapshot_id,
+                    replication_mask,
+                )
+                .await?;
+            }
+            Some(metadata) if metadata.is_applying() => {
+                // Crash recovery: the replicator was killed during a DDL
+                // operation. Re-apply idempotently and mark Applied.
+                warn!("table {} has Applying metadata, recovering interrupted operation", table_id);
 
-            // Execute CREATE TABLE DDL.
-            let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
-            let ddl = build_create_table_sql(&ch_table_name, &column_schemas);
-            let ddl_start = Instant::now();
-            self.client.execute_ddl(&ddl).await?;
-            metrics::histogram!(ETL_CH_DDL_DURATION_SECONDS, "table" => ch_table_name.clone())
-                .record(ddl_start.elapsed().as_secs_f64());
+                match metadata.previous_snapshot_id {
+                    Some(prev_snapshot_id) => {
+                        // Interrupted schema change: re-apply the diff.
+                        let old_table_schema = self
+                            .store
+                            .get_table_schema(&table_id, prev_snapshot_id)
+                            .await?
+                            .ok_or_else(|| {
+                                etl_error!(
+                                    ErrorKind::InvalidState,
+                                    "Old schema not found for recovery",
+                                    format!(
+                                        "Cannot find schema for table {} at snapshot_id {}",
+                                        table_id, prev_snapshot_id
+                                    )
+                                )
+                            })?;
+                        let old_schema = ReplicatedTableSchema::from_mask(
+                            old_table_schema,
+                            metadata.replication_mask.clone(),
+                        );
+                        let diff = old_schema.diff(schema);
+                        self.apply_schema_diff(&ch_table_name, &diff, &old_schema).await?;
+                    }
+                    None => {
+                        // Interrupted initial table creation: re-run CREATE
+                        // TABLE IF NOT EXISTS (idempotent).
+                        let column_schemas: Vec<_> = schema.column_schemas().cloned().collect();
+                        let ddl = build_create_table_sql(&ch_table_name, &column_schemas);
+                        self.client.execute_ddl(&ddl).await?;
+                    }
+                }
 
-            self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+                self.store
+                    .store_destination_table_metadata(table_id, metadata.to_applied())
+                    .await?;
+            }
+            Some(_applied) => {
+                // Applied metadata, cache miss after handle_relation_event
+                // invalidated the cache. No DDL needed -- fall through to
+                // recompute nullable flags below.
+            }
         }
 
         // Compute nullable flags (user columns + 2 CDC columns always non-nullable).

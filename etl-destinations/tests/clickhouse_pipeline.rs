@@ -1587,7 +1587,7 @@ const LARGE_BATCH_SELECT: &str = concat!(
 /// (first, last, powers of two, and a few interior points) are spot-checked
 /// for correct id and value.
 #[tokio::test(flavor = "multi_thread")]
-async fn large_batch_table_copy() {
+async fn exclusive_large_batch_table_copy() {
     init_test_tracing();
     install_crypto_provider();
 
@@ -1815,11 +1815,11 @@ async fn schema_change_add_column() {
     for _ in 0..50 {
         // The SELECT will fail if the email column doesn't exist yet, so
         // catch errors and retry.
-        if let Ok(r) = ch_db.db_client().query(select).fetch_all::<AddColumnRow>().await {
-            if r.len() >= 2 {
-                rows = r;
-                break;
-            }
+        if let Ok(r) = ch_db.db_client().query(select).fetch_all::<AddColumnRow>().await
+            && r.len() >= 2
+        {
+            rows = r;
+            break;
         }
         sleep(Duration::from_millis(200)).await;
     }
@@ -2001,11 +2001,10 @@ async fn schema_change_add_drop_rename() {
     let mut rows: Vec<CombinedSchemaChangeRow> = Vec::new();
     for _ in 0..50 {
         if let Ok(r) = ch_db.db_client().query(select).fetch_all::<CombinedSchemaChangeRow>().await
+            && r.len() >= 2
         {
-            if r.len() >= 2 {
-                rows = r;
-                break;
-            }
+            rows = r;
+            break;
         }
         sleep(Duration::from_millis(200)).await;
     }
