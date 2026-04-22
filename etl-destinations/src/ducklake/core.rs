@@ -973,12 +973,6 @@ where
     }
 }
 
-/// Returns the total semaphore permits used to coordinate foreground mutations
-/// against exclusive background maintenance.
-fn checkpoint_gate_permits(pool_size: u32) -> u32 {
-    pool_size.saturating_add(1)
-}
-
 /// Reads the persisted streaming replay watermark for one table on DuckDB's
 /// blocking pool.
 async fn read_table_streaming_progress_sequence_key_blocking(
