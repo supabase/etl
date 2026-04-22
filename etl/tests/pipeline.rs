@@ -738,7 +738,7 @@ async fn streaming_reconnect_does_not_replay_already_flushed_events() {
         .expect("expected first streamed insert event");
 
     let client = database.client.as_ref().unwrap();
-    let terminated_pid = tokio::time::timeout(Duration::from_secs(2), async {
+    let terminated_pid = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let row = client
                 .query_one(

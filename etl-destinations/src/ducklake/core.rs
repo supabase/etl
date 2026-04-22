@@ -486,13 +486,14 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
+        let table_name = self.ensure_table_exists(replicated_table_schema).await?;
+
         if table_rows.is_empty() {
             return Ok(());
         }
 
         self.maybe_run_requested_inline_flush().await?;
 
-        let table_name = self.ensure_table_exists(replicated_table_schema).await?;
         let approx_bytes = table_rows.iter().map(|row| row.size_hint() as u64).sum::<u64>();
         let inserted_rows = table_rows.len() as u64;
 

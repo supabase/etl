@@ -835,10 +835,10 @@ where
 
             // PRIORITY 3: Handle the pending destination write result.
             // Finishing an in-flight flush may advance progress and unblock a queued batch.
-            apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
-                self.handle_flush_result(apply_result)
-                    .await?;
-            }
+                apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
+                    self.handle_flush_result(apply_result)
+                        .await?;
+                }
 
             // PRIORITY 4: Handle batch flush timer expiry.
             // This prevents buffered work from waiting forever when traffic is low.

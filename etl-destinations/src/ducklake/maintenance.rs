@@ -746,35 +746,7 @@ async fn run_ducklake_maintenance_worker(
                     break;
                 };
 
-                let now = Instant::now();
-                match notification {
-                    TableMaintenanceNotification::WriteActivity(activity) => {
-                        table_states
-                            .entry(activity.table_name.clone())
-                            .and_modify(|state| state.record_write_activity(&activity, now))
-                            .or_insert_with(|| {
-                                let mut state = TableMaintenanceState::default();
-                                state.record_write_activity(&activity, now);
-                                state
-                            });
-                    }
-                    TableMaintenanceNotification::TableMetricsSample(sample) => {
-                        table_states
-                            .entry(sample.table_name.clone())
-                            .and_modify(|state| state.record_metrics_sample(sample.clone()))
-                            .or_insert_with(|| {
-                                let mut state = TableMaintenanceState::default();
-                                state.record_metrics_sample(sample);
-                                state
-                            });
-                    }
-                    TableMaintenanceNotification::FlushCompleted(completion) => {
-                        let Some(state) = table_states.get_mut(&completion.table_name) else {
-                            continue;
-                        };
-                        state.clear_pending_flush(completion.completed_at);
-                    }
-                }
+                apply_maintenance_notification(&mut table_states, notification);
             }
             _ = flush_interval.tick() => {
                 let mut now = Instant::now();
@@ -892,6 +864,42 @@ async fn run_ducklake_maintenance_worker(
                         || state.latest_storage_metrics.is_some()
                 });
             }
+        }
+    }
+}
+
+/// Applies one maintenance notification to the table-state cache.
+fn apply_maintenance_notification(
+    table_states: &mut HashMap<DuckLakeTableName, TableMaintenanceState>,
+    notification: TableMaintenanceNotification,
+) {
+    let now = Instant::now();
+    match notification {
+        TableMaintenanceNotification::WriteActivity(activity) => {
+            table_states
+                .entry(activity.table_name.clone())
+                .and_modify(|state| state.record_write_activity(&activity, now))
+                .or_insert_with(|| {
+                    let mut state = TableMaintenanceState::default();
+                    state.record_write_activity(&activity, now);
+                    state
+                });
+        }
+        TableMaintenanceNotification::TableMetricsSample(sample) => {
+            table_states
+                .entry(sample.table_name.clone())
+                .and_modify(|state| state.record_metrics_sample(sample.clone()))
+                .or_insert_with(|| {
+                    let mut state = TableMaintenanceState::default();
+                    state.record_metrics_sample(sample);
+                    state
+                });
+        }
+        TableMaintenanceNotification::FlushCompleted(completion) => {
+            let Some(state) = table_states.get_mut(&completion.table_name) else {
+                return;
+            };
+            state.clear_pending_flush(completion.completed_at);
         }
     }
 }
@@ -1506,7 +1514,8 @@ mod tests {
         state.record_pending_inline_data_sizes(
             now + Duration::from_secs(1),
             DuckLakePendingInlineDataSizes {
-                inlined_data_bytes: MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD,
+                inlined_data_bytes: MAINTENANCE_PENDING_INLINED_DATA_BYTES_THRESHOLD
+                    * PARQUET_COMPRESSION_RATIO_ESTIMATE,
             },
         );
 

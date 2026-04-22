@@ -4,7 +4,7 @@ use etl::{
     state::table::TableReplicationPhaseType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
-        event::group_events_by_type_and_table_id,
+        event::{group_events_by_type, group_events_by_type_and_table_id},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
         pipeline::{create_database_and_ready_pipeline_with_table, create_pipeline},
@@ -55,6 +55,24 @@ fn find_snapshot_index_after(
         .skip(start_index)
         .find_map(|(index, (_, schema))| (schema_columns(schema) == expected).then_some(index))
         .expect("expected schema snapshot in order")
+}
+
+async fn wait_for_at_least_events(
+    destination: &TestDestinationWrapper<MemoryDestination<NotifyingStore>>,
+    conditions: Vec<(EventType, u64)>,
+) {
+    destination
+        .notify_on_events(move |events| {
+            let grouped = group_events_by_type(events);
+            conditions.iter().all(|(event_type, expected_count)| {
+                grouped
+                    .get(event_type)
+                    .is_some_and(|matched_events| matched_events.len() >= *expected_count as usize)
+            })
+        })
+        .await
+        .notified()
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -450,10 +468,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await;
 
     // Add column + insert, then restart.
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
-        .await;
-
     database
         .alter_table(
             table_name.clone(),
@@ -471,7 +485,8 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    wait_for_at_least_events(&destination, vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     destination.clear_events().await;
@@ -486,10 +501,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     );
 
     pipeline.start().await.unwrap();
-
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
-        .await;
 
     database
         .alter_table(
@@ -516,7 +527,8 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    wait_for_at_least_events(&destination, vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     destination.clear_events().await;
@@ -532,10 +544,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
 
     pipeline.start().await.unwrap();
 
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
-        .await;
-
     database
         .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "status" }])
         .await
@@ -550,7 +558,8 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    wait_for_at_least_events(&destination, vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     destination.clear_events().await;
@@ -565,10 +574,6 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     );
 
     pipeline.start().await.unwrap();
-
-    let notify = destination
-        .wait_for_events_count(vec![(EventType::Relation, 1), (EventType::Insert, 1)])
-        .await;
 
     database
         .alter_table(
@@ -598,7 +603,8 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
         .await
         .unwrap();
 
-    notify.notified().await;
+    wait_for_at_least_events(&destination, vec![(EventType::Relation, 1), (EventType::Insert, 1)])
+        .await;
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
