@@ -129,18 +129,11 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
         let this = self.project();
 
         match this.rx.poll(cx) {
-            Poll::Ready(Ok(result)) => Poll::Ready(CompletedAsyncResult {
-                metadata: this
-                    .metadata
-                    .take()
-                    .expect("pending async result metadata must be present on completion"),
-                result,
-            }),
+            Poll::Ready(Ok(result)) => {
+                Poll::Ready(CompletedAsyncResult { metadata: this.metadata.take(), result })
+            }
             Poll::Ready(Err(_)) => Poll::Ready(CompletedAsyncResult {
-                metadata: this
-                    .metadata
-                    .take()
-                    .expect("pending async result metadata must be present on completion"),
+                metadata: this.metadata.take(),
                 result: Err(etl_error!(
                     ErrorKind::DestinationError,
                     "Async result channel closed before sending"
@@ -154,7 +147,7 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
 /// Completed typed asynchronous result.
 #[derive(Debug)]
 pub(crate) struct CompletedAsyncResult<T, M> {
-    metadata: M,
+    metadata: Option<M>,
     result: EtlResult<T>,
 }
 
@@ -165,7 +158,7 @@ impl<T, M> CompletedAsyncResult<T, M> {
     }
 
     /// Returns the metadata and final result.
-    pub fn into_parts(self) -> (M, EtlResult<T>) {
+    pub fn into_parts(self) -> (Option<M>, EtlResult<T>) {
         (self.metadata, self.result)
     }
 }
@@ -187,6 +180,7 @@ mod tests {
         let completed = pending_result.await;
         let (metadata, result) = completed.into_parts();
 
+        let metadata = metadata.expect("metadata should be present");
         assert_eq!(metadata.commit_end_lsn, Some(PgLsn::from(42)));
         assert_eq!(result.unwrap(), 7);
     }
@@ -199,5 +193,20 @@ mod tests {
         let err = pending_result.await.into_result().unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DestinationError);
         assert_eq!(err.description(), Some("Async result dropped without sending"));
+    }
+
+    #[tokio::test]
+    async fn completed_async_result_can_surface_missing_metadata_without_panicking() {
+        let (result_tx, rx) = oneshot::channel();
+        let mut pending_result =
+            PendingAsyncResult::<u64, ApplyLoopAsyncResultMetadata> { metadata: None, rx };
+
+        result_tx.send(Ok(7)).unwrap();
+
+        let completed = std::future::poll_fn(|cx| Pin::new(&mut pending_result).poll(cx)).await;
+        let (metadata, result) = completed.into_parts();
+
+        assert!(metadata.is_none());
+        assert_eq!(result.unwrap(), 7);
     }
 }

@@ -14,7 +14,10 @@ use etl::{
     etl_error,
     state::destination_metadata::DestinationTableMetadata,
     store::{schema::SchemaStore, state::StateStore},
-    types::{Event, ReplicatedTableSchema, SizeHint, TableId, TableName, TableRow},
+    types::{
+        Event, OldTableRow, PartialTableRow, ReplicatedTableSchema, SizeHint, TableId, TableName,
+        TableRow, UpdatedTableRow,
+    },
 };
 use metrics::{gauge, histogram};
 use parking_lot::Mutex;
@@ -166,6 +169,101 @@ impl<S> DuckLakeDestination<S>
 where
     S: StateStore + SchemaStore + Send + Sync,
 {
+    /// Builds a key-only row from a partial update row when PostgreSQL omits
+    /// the old key image because the replica identity did not change.
+    fn key_row_from_updated_partial_row(
+        replicated_table_schema: &ReplicatedTableSchema,
+        partial_row: &PartialTableRow,
+    ) -> EtlResult<TableRow> {
+        let column_schemas: Vec<_> = replicated_table_schema.column_schemas().collect();
+        if partial_row.total_columns() != column_schemas.len() {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake partial update row does not match schema",
+                format!(
+                    "Expected {} replicated columns for table '{}', got {}",
+                    column_schemas.len(),
+                    replicated_table_schema.name(),
+                    partial_row.total_columns()
+                )
+            ));
+        }
+
+        if partial_row.values().len() + partial_row.missing_column_indexes().len()
+            != partial_row.total_columns()
+        {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake partial update row shape is inconsistent",
+                format!(
+                    "Table '{}' partial row reports {} total columns but has {} present and {} \
+                     missing",
+                    replicated_table_schema.name(),
+                    partial_row.total_columns(),
+                    partial_row.values().len(),
+                    partial_row.missing_column_indexes().len()
+                )
+            ));
+        }
+
+        let mut missing_indexes = partial_row.missing_column_indexes().iter().copied().peekable();
+        let mut present_values = partial_row.values().iter();
+        let mut identity_columns = replicated_table_schema.identity_column_schemas().peekable();
+        let mut key_values =
+            Vec::with_capacity(replicated_table_schema.identity_column_schemas().len());
+
+        for (column_index, column_schema) in column_schemas.iter().enumerate() {
+            let is_identity = identity_columns.peek().is_some_and(|identity_column| {
+                identity_column.ordinal_position == column_schema.ordinal_position
+            });
+
+            if missing_indexes.peek().copied() == Some(column_index) {
+                missing_indexes.next();
+                if is_identity {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "DuckLake partial update is missing replica-identity columns",
+                        format!(
+                            "Table '{}' emitted a partial update without key column '{}'",
+                            replicated_table_schema.name(),
+                            column_schema.name
+                        )
+                    ));
+                }
+                continue;
+            }
+
+            let Some(value) = present_values.next() else {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "DuckLake partial update row ended early",
+                    format!(
+                        "Table '{}' did not provide enough values for its partial update row",
+                        replicated_table_schema.name()
+                    )
+                ));
+            };
+
+            if is_identity {
+                identity_columns.next();
+                key_values.push(value.clone());
+            }
+        }
+
+        if missing_indexes.next().is_some() || present_values.next().is_some() {
+            return Err(etl_error!(
+                ErrorKind::InvalidState,
+                "DuckLake partial update row shape is inconsistent",
+                format!(
+                    "Table '{}' partial row has leftover values or missing indexes after decoding",
+                    replicated_table_schema.name()
+                )
+            ));
+        }
+
+        Ok(TableRow::new(key_values))
+    }
+
     /// Deletes all rows from the destination table.
     ///
     /// This convenience wrapper preserves the pre-async-result direct-call API
@@ -461,36 +559,61 @@ where
                     }
                     Event::Update(update) => {
                         let table_id = update.replicated_table_schema.id();
-                        let table_row = update.table_row;
+                        let table_row = update.updated_table_row;
                         let old_table_row = update.old_table_row;
                         let upsert_bytes = table_row.size_hint() as u64;
                         table_schemas.entry(table_id).or_insert(update.replicated_table_schema);
                         let mutations = table_id_to_mutations.entry(table_id).or_default();
-                        if let Some((_, old_row)) = old_table_row {
+                        if let Some(old_row) = old_table_row {
                             mutations.push(TrackedTableMutation::new(
                                 update.start_lsn,
                                 update.commit_lsn,
-                                TableMutation::Update {
-                                    delete_row: old_row,
-                                    upsert_row: table_row,
-                                },
+                                TableMutation::Update { delete_row: old_row, new_row: table_row },
                             ));
                         } else {
-                            debug!(
-                                "update event has no old row, deleting by primary key from new row"
-                            );
-                            mutations.push(TrackedTableMutation::new(
-                                update.start_lsn,
-                                update.commit_lsn,
-                                TableMutation::Replace(table_row),
-                            ));
+                            match table_row {
+                                UpdatedTableRow::Full(table_row) => {
+                                    debug!(
+                                        "update event has no old row, deleting by primary key \
+                                         from new row"
+                                    );
+                                    mutations.push(TrackedTableMutation::new(
+                                        update.start_lsn,
+                                        update.commit_lsn,
+                                        TableMutation::Replace(table_row),
+                                    ));
+                                }
+                                UpdatedTableRow::Partial(_) => {
+                                    let UpdatedTableRow::Partial(partial_row) = table_row else {
+                                        unreachable!()
+                                    };
+                                    let key_row = Self::key_row_from_updated_partial_row(
+                                        table_schemas
+                                            .get(&table_id)
+                                            .expect("schema must be present for partial update"),
+                                        &partial_row,
+                                    )?;
+                                    debug!(
+                                        "update event has no old row, building key image from \
+                                         partial new row"
+                                    );
+                                    mutations.push(TrackedTableMutation::new(
+                                        update.start_lsn,
+                                        update.commit_lsn,
+                                        TableMutation::Update {
+                                            delete_row: OldTableRow::Key(key_row),
+                                            new_row: UpdatedTableRow::Partial(partial_row),
+                                        },
+                                    ));
+                                }
+                            }
                         }
                         let stats = table_id_to_stats.entry(table_id).or_default();
                         stats.approx_bytes = stats.approx_bytes.saturating_add(upsert_bytes);
                         stats.inserted_rows = stats.inserted_rows.saturating_add(1);
                     }
                     Event::Delete(delete) => {
-                        let Some((_, old_row)) = delete.old_table_row else {
+                        let Some(old_row) = delete.old_table_row else {
                             debug!("delete event has no old row, skipping");
                             continue;
                         };

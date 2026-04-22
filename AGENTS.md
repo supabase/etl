@@ -72,6 +72,7 @@
 - Use typed errors and `Result` for recoverable failures.
 - Prefer propagating errors with context instead of flattening to strings.
 - Reserve panics for programmer errors or violated invariants.
+- Use `debug_assert!` and `unreachable!` where they make internal invariants explicit, but prefer typed errors for runtime failures that can be triggered by external input or system state.
 - Only document `# Panics` when a function can actually panic.
 
 ## Unsafe And Concurrency
@@ -104,6 +105,13 @@
 - When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
 - Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
 - Do not prefix `#[test]` functions with `test_`. Name them after what they verify — e.g. `fn parses_empty_input()` not `fn test_parses_empty_input()`.
+- Register `NotifyingStore::notify_on_*` and `TestDestinationWrapper::wait_for_*` handles before the producer can fire. These helpers only arm on updates that arrive *after* registration, so register the notifier first, then start the producer.
+
+  ```rust
+  let ready = store.notify_on_table_state_type(id, Ready).await;
+  pipeline.start().await.unwrap();
+  ready.notified().await;
+  ```
 
 ## Review Checklist
 - Code compiles for the changed target or workspace as appropriate.
